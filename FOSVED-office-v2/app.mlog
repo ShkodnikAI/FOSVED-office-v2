@@ -1,10 +1,11 @@
 // ============================================================
 // FOSVED Office v2 — app.mlog
-// Включает: NARAD #9 — Контекст-менеджер
+// Включает: NARAD #9 — Контекст-менеджер, NARAD #10 — Составные запросы (chain)
 // ============================================================
 
-// --- Импорт модуля контекст-менеджера ---
+// --- Импорт модулей ---
 import ./dept/context
+import ./dept/chain
 
 // --- Конфигурация базы данных ---
 db {
@@ -103,6 +104,59 @@ pattern WebhookHandler() {
     }
     respond("200 OK")
     return
+  }
+
+  // --- /chain явная команда ---
+  if starts_with(text, "/chain ") {
+    let args = substring(text, 7.0, len(text))
+    let space_pos = index_of(args, " ")
+    if space_pos > 0.0 {
+      let chain = substring(args, 0.0, space_pos)
+      let chain_query = substring(args, space_pos + 1.0, len(args))
+      RecordMessage(chat_id, "user", "chain", text)
+      let chain_result = ExecuteChain(chain, chain_query, chat_id)
+      let summary = YanaSummarizeChain(chain_result, chain_query, chat_id)
+      send_message(chat_id, summary)
+    } else {
+      send_message(chat_id, "Format: /chain dept1+dept2 zapros. Primer: /chain osp+legal oceni riski")
+    }
+    respond("200 OK")
+    return
+  }
+
+  // --- Автоопределение цепочки (только для сообщений без /команды) ---
+  let first_char = substring(text, 0.0, 1.0)
+  let tl = lower(text)
+  if first_char != "/" {
+    let has_chain_marker = 0.0
+    // Слова-связки, указывающие на составной запрос
+    if contains(tl, " с учётом") == 1.0 or contains(tl, "с учетом") == 1.0 or contains(tl, "и потом") == 1.0 or contains(tl, "а также") == 1.0 or contains(tl, "плюс") == 1.0 or contains(tl, " и ") == 1.0 {
+      has_chain_marker = 1.0
+    }
+    // Комбинации двух+ областей (юридические + маркетинг, налоги + бюджет и т.д.)
+    let area_count = 0.0
+    if contains(tl, "юридич") == 1.0 or contains(tl, "правов") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "маркетинг") == 1.0 or contains(tl, "реклам") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "финанс") == 1.0 or contains(tl, "налог") == 1.0 or contains(tl, "бюджет") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "технолог") == 1.0 or contains(tl, "инженер") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "стратег") == 1.0 or contains(tl, "прогноз") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "дизайн") == 1.0 or contains(tl, "интерфейс") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "найм") == 1.0 or contains(tl, "собесед") == 1.0 { area_count = area_count + 1.0 }
+    if area_count >= 2.0 {
+      has_chain_marker = 1.0
+    }
+    // LLM-определение только при наличии маркеров (экономия токенов)
+    if has_chain_marker == 1.0 {
+      let detected = DetectChain(text)
+      if contains(detected, "+") == 1.0 {
+        RecordMessage(chat_id, "user", "chain", text)
+        let chain_result = ExecuteChain(detected, text, chat_id)
+        let summary = YanaSummarizeChain(chain_result, text, chat_id)
+        send_message(chat_id, summary)
+        respond("200 OK")
+        return
+      }
+    }
   }
 
   // --- Определяем отдел ---
