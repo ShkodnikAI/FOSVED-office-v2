@@ -1,0 +1,293 @@
+// ============================================================
+// FOSVED Office v2 — app.mlog
+// Включает: NARAD #9 Контекст-менеджер, NARAD #10 Chain + MiniApp глубина
+// ============================================================
+
+// --- Импорт модулей ---
+import ./dept/context
+import ./dept/chain
+import ./dept/miniapp
+
+// --- Конфигурация базы данных ---
+db {
+  url: "sqlite:data/fosved.db"
+}
+
+// --- Память (для recall / semantic search) ---
+memory { persist: "data/memory.db" }
+
+// --- Конфигурация сервера ---
+server {
+  port: 10000
+  route "/webhook/telegram" method=POST {
+    WebhookHandler()
+  }
+  route "/health" method=GET {
+    respond("200 OK")
+  }
+  route "/miniapp" method=GET {
+    let doc_id_param = query_param("id")
+    let html = kv_get("miniapp_html_" + doc_id_param)
+    if len(html) > 0.0 {
+      respond_html(html)
+    } else {
+      respond("404 Not Found")
+    }
+  }
+  route "/reset-webhook" method=GET {
+    let token = env("TELEGRAM_BOT_TOKEN")
+    let _ = http_get("https://api.telegram.org/bot" + token + "/setWebhook?url=" + query_param("url"))
+    respond("200 OK")
+  }
+}
+
+// --- Инициализация таблиц при старте ---
+InitContextTables()
+InitMiniAppTables()
+
+// ============================================================
+// Основной обработчик вебхука
+// ============================================================
+pattern WebhookHandler() {
+  let data = json_body()
+
+  // Проверяем, есть ли сообщение
+  if has_field(data, "message") == 0.0 {
+    respond("200 OK")
+    return
+  }
+
+  let msg = json_get(data, "message")
+  let from = json_get(msg, "from")
+  let chat_id = to_string(json_get(from, "id", 0.0))
+
+  // --- web_app_data: callback от Mini App ---
+  if has_field(msg, "web_app_data") == 1.0 {
+    let webapp = json_get(msg, "web_app_data")
+    let payload = json_get(webapp, "data", "")
+    let action = ExtractJsonString(payload, "action")
+    let doc_id = ExtractJsonString(payload, "doc_id")
+    HandleMiniAppAction(action, doc_id, chat_id, payload)
+    respond("200 OK")
+    return
+  }
+
+  let text = json_get(msg, "text", "")
+
+  // Голосовые сообщения
+  if has_field(msg, "voice") == 1.0 {
+    let voice = json_get(msg, "voice")
+    let file_id = json_get(voice, "file_id", "")
+    if type_of(file_id) != "Unit" {
+      let token = env("TELEGRAM_BOT_TOKEN")
+      let whisper_key = env("GROQ_KEY")
+      let transcript = whisper_transcribe(file_id, token, whisper_key, "groq")
+      if len(transcript) > 0.0 {
+        text = transcript
+      }
+    }
+  }
+
+  // Пустой текст — игнорируем
+  if len(trim(text)) == 0.0 {
+    respond("200 OK")
+    return
+  }
+
+  // --- /fix ---
+  if starts_with(text, "/fix ") {
+    let reply = HandleFix(chat_id, text)
+    send_message(chat_id, reply)
+    respond("200 OK")
+    return
+  }
+
+  // --- /remember ---
+  if starts_with(text, "/remember ") {
+    let reply = HandleRemember(text)
+    send_message(chat_id, reply)
+    respond("200 OK")
+    return
+  }
+
+  // --- /model ---
+  if text == "/model" {
+    let cur_model = read_file("config/priority_model.txt")
+    let cur_provider = read_file("config/priority_provider.txt")
+    send_message(chat_id, "Текущая модель: " + cur_model + " (" + trim(cur_provider) + ")")
+    respond("200 OK")
+    return
+  }
+
+  if starts_with(text, "/model ") {
+    let new_model = trim(substring(text, 7.0, len(text)))
+    if len(new_model) > 0.0 {
+      write_file("config/priority_model.txt", new_model)
+      send_message(chat_id, "Модель изменена на: " + new_model)
+    }
+    respond("200 OK")
+    return
+  }
+
+  // --- /chain явная команда ---
+  if starts_with(text, "/chain ") {
+    let args = substring(text, 7.0, len(text))
+    let space_pos = index_of(args, " ")
+    if space_pos > 0.0 {
+      let chain = substring(args, 0.0, space_pos)
+      let chain_query = substring(args, space_pos + 1.0, len(args))
+      RecordMessage(chat_id, "user", "chain", text)
+      let chain_result = ExecuteChain(chain, chain_query, chat_id)
+      let summary = YanaSummarizeChain(chain_result, chain_query, chat_id)
+      send_message(chat_id, summary)
+    } else {
+      send_message(chat_id, "Format: /chain dept1+dept2 zapros. Primer: /chain osp+legal oceni riski")
+    }
+    respond("200 OK")
+    return
+  }
+
+  // --- Автоопределение цепочки (только для сообщений без /команды) ---
+  let first_char = substring(text, 0.0, 1.0)
+  let tl = lower(text)
+  if first_char != "/" {
+    let has_chain_marker = 0.0
+    // Слова-связки, указывающие на составной запрос
+    if contains(tl, " с учётом") == 1.0 or contains(tl, "с учетом") == 1.0 or contains(tl, "и потом") == 1.0 or contains(tl, "а также") == 1.0 or contains(tl, "плюс") == 1.0 or contains(tl, " и ") == 1.0 {
+      has_chain_marker = 1.0
+    }
+    // Комбинации двух+ областей (юридические + маркетинг, налоги + бюджет и т.д.)
+    let area_count = 0.0
+    if contains(tl, "юридич") == 1.0 or contains(tl, "правов") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "маркетинг") == 1.0 or contains(tl, "реклам") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "финанс") == 1.0 or contains(tl, "налог") == 1.0 or contains(tl, "бюджет") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "технолог") == 1.0 or contains(tl, "инженер") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "стратег") == 1.0 or contains(tl, "прогноз") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "дизайн") == 1.0 or contains(tl, "интерфейс") == 1.0 { area_count = area_count + 1.0 }
+    if contains(tl, "найм") == 1.0 or contains(tl, "собесед") == 1.0 { area_count = area_count + 1.0 }
+    if area_count >= 2.0 {
+      has_chain_marker = 1.0
+    }
+    // LLM-определение только при наличии маркеров (экономия токенов)
+    if has_chain_marker == 1.0 {
+      let detected = DetectChain(text)
+      if contains(detected, "+") == 1.0 {
+        RecordMessage(chat_id, "user", "chain", text)
+        let chain_result = ExecuteChain(detected, text, chat_id)
+        let summary = YanaSummarizeChain(chain_result, text, chat_id)
+        send_message(chat_id, summary)
+        respond("200 OK")
+        return
+      }
+    }
+  }
+
+  // --- Определяем отдел ---
+  let dept = DetectDepartment(text)
+  let actual_query = text
+
+  // Убираем /команду из запроса
+  if starts_with(text, "/") {
+    let parts = split(text, " ")
+    if len(parts) > 1.0 {
+      actual_query = substring(text, len(get(parts, 0.0)) + 1.0, len(text))
+    } else {
+      actual_query = ""
+    }
+  }
+
+  if len(trim(actual_query)) == 0.0 and len(dept) > 0.0 {
+    send_message(chat_id, "Укажите запрос после команды. Пример: /" + dept + " сделай прогноз")
+    respond("200 OK")
+    return
+  }
+
+  // --- Записываем входящее сообщение ---
+  RecordMessage(chat_id, "user", dept, text)
+
+  // --- Парсим модификатор глубины (deep/full) ---
+  let depth = 2.0
+  let effective_query = actual_query
+  if starts_with(actual_query, "deep ") {
+    depth = 3.0
+    effective_query = substring(actual_query, 5.0, len(actual_query))
+  }
+  if starts_with(actual_query, "full ") {
+    depth = 4.0
+    effective_query = substring(actual_query, 5.0, len(actual_query))
+  }
+
+  // --- Формируем контекст через BuildContext + depth instruction ---
+  let context = BuildContext(dept, effective_query, chat_id)
+  if depth > 2.0 {
+    let depth_instr = GetDepthInstruction(depth)
+    context = context + "\n\nINSTRUKCIYA PO GLUBINE: " + depth_instr
+  }
+
+  // --- Вызываем LLM ---
+  let provider = read_file("config/priority_provider.txt")
+  let model = read_file("config/priority_model.txt")
+  let override_path = "config/override_" + dept + ".txt"
+  let override_content = read_file(override_path)
+  if len(trim(override_content)) > 2.0 {
+    let ov_parts = split(trim(override_content), " ")
+    if len(ov_parts) > 1.0 {
+      provider = get(ov_parts, 0.0)
+      model = get(ov_parts, 1.0)
+    }
+  }
+
+  let api_key = GetApiKey(provider)
+  let reply = call_claude(api_key, model, context, effective_query)
+
+  // --- Отправляем ответ (Mini App если depth >= 2, иначе текст) ---
+  if depth >= 2.0 {
+    let title = effective_query
+    if len(title) > 60.0 {
+      title = substring(title, 0.0, 60.0) + "..."
+    }
+    let doc_id = SaveAndSendMiniApp(chat_id, dept, title, reply, depth, "")
+  } else {
+    send_message(chat_id, reply)
+  }
+
+  // --- Записываем ответ и проверяем сжатие ---
+  RecordAndRespond(chat_id, dept, effective_query, reply)
+
+  respond("200 OK")
+}
+
+
+// ============================================================
+// Определение отдела по тексту
+// ============================================================
+pattern DetectDepartment(text: String) -> String {
+  let t = lower(trim(text))
+
+  // Явные команды
+  if starts_with(text, "/osp ") or text == "/osp" { return "osp" }
+  if starts_with(text, "/expert ") or text == "/expert" { return "expert" }
+  if starts_with(text, "/marketing ") or text == "/marketing" { return "marketing" }
+  if starts_with(text, "/finance ") or text == "/finance" { return "finance" }
+  if starts_with(text, "/legal ") or text == "/legal" { return "legal" }
+  if starts_with(text, "/hr ") or text == "/hr" { return "hr" }
+  if starts_with(text, "/operations ") or text == "/operations" { return "operations" }
+  if starts_with(text, "/product ") or text == "/product" { return "product" }
+  if starts_with(text, "/design ") or text == "/design" { return "design" }
+  if starts_with(text, "/engineering ") or text == "/engineering" { return "engineering" }
+  if starts_with(text, "/kuznitsa ") or text == "/kuznitsa" { return "kuznitsa" }
+  if starts_with(text, "/admin ") or text == "/admin" { return "admin" }
+
+  // Ключевые слова для Яны-маршрутизатора
+  if contains(t, "прогноз") == 1.0 or contains(t, "стратег") == 1.0 or contains(t, "актор") == 1.0 or contains(t, "декомпозиц") == 1.0 or contains(t, "нарратив") == 1.0 { return "osp" }
+  if contains(t, "cashflow") == 1.0 or contains(t, "налог") == 1.0 or contains(t, "бюджет") == 1.0 or contains(t, "юнит-эконом") == 1.0 { return "finance" }
+  if contains(t, "договор") == 1.0 or contains(t, "gdpr") == 1.0 or contains(t, "лицензи") == 1.0 or contains(t, "суд") == 1.0 { return "legal" }
+  if contains(t, "аудитори") == 1.0 or contains(t, "воронк") == 1.0 or contains(t, "бренд") == 1.0 or contains(t, "реклам") == 1.0 { return "marketing" }
+  if contains(t, "найм") == 1.0 or contains(t, "собесед") == 1.0 or contains(t, "зарплат") == 1.0 or contains(t, "команд") == 1.0 { return "hr" }
+  if contains(t, "архитектур") == 1.0 or contains(t, "депло") == 1.0 or contains(t, "рефактор") == 1.0 or contains(t, "api") == 1.0 { return "engineering" }
+  if contains(t, "дизайн") == 1.0 or contains(t, "ui") == 1.0 or contains(t, "ux") == 1.0 or contains(t, "интерфейс") == 1.0 { return "design" }
+  if contains(t, "продукт") == 1.0 or contains(t, "фич") == 1.0 or contains(t, "роадмап") == 1.0 or contains(t, "бэклог") == 1.0 { return "product" }
+  if contains(t, "процесс") == 1.0 or contains(t, "операци") == 1.0 or contains(t, "логист") == 1.0 { return "operations" }
+
+  return "osp"
+}

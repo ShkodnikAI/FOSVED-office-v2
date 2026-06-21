@@ -1,11 +1,12 @@
 // ============================================================
 // FOSVED Office v2 — app.mlog
-// Включает: NARAD #9 — Контекст-менеджер, NARAD #10 — Составные запросы (chain)
+// Включает: NARAD #9 Контекст-менеджер, NARAD #10 Chain + MiniApp глубина
 // ============================================================
 
 // --- Импорт модулей ---
 import ./dept/context
 import ./dept/chain
+import ./dept/miniapp
 
 // --- Конфигурация базы данных ---
 db {
@@ -24,6 +25,15 @@ server {
   route "/health" method=GET {
     respond("200 OK")
   }
+  route "/miniapp" method=GET {
+    let doc_id_param = query_param("id")
+    let html = kv_get("miniapp_html_" + doc_id_param)
+    if len(html) > 0.0 {
+      respond_html(html)
+    } else {
+      respond("404 Not Found")
+    }
+  }
   route "/reset-webhook" method=GET {
     let token = env("TELEGRAM_BOT_TOKEN")
     let _ = http_get("https://api.telegram.org/bot" + token + "/setWebhook?url=" + query_param("url"))
@@ -33,6 +43,7 @@ server {
 
 // --- Инициализация таблиц при старте ---
 InitContextTables()
+InitMiniAppTables()
 
 // ============================================================
 // Основной обработчик вебхука
@@ -47,9 +58,21 @@ pattern WebhookHandler() {
   }
 
   let msg = json_get(data, "message")
-  let text = json_get(msg, "text", "")
   let from = json_get(msg, "from")
   let chat_id = to_string(json_get(from, "id", 0.0))
+
+  // --- web_app_data: callback от Mini App ---
+  if has_field(msg, "web_app_data") == 1.0 {
+    let webapp = json_get(msg, "web_app_data")
+    let payload = json_get(webapp, "data", "")
+    let action = ExtractJsonString(payload, "action")
+    let doc_id = ExtractJsonString(payload, "doc_id")
+    HandleMiniAppAction(action, doc_id, chat_id, payload)
+    respond("200 OK")
+    return
+  }
+
+  let text = json_get(msg, "text", "")
 
   // Голосовые сообщения
   if has_field(msg, "voice") == 1.0 {
@@ -182,32 +205,54 @@ pattern WebhookHandler() {
   // --- Записываем входящее сообщение ---
   RecordMessage(chat_id, "user", dept, text)
 
-  // --- Формируем контекст через BuildContext ---
-  let context = BuildContext(dept, actual_query, chat_id)
+  // --- Парсим модификатор глубины (deep/full) ---
+  let depth = 2.0
+  let effective_query = actual_query
+  if starts_with(actual_query, "deep ") {
+    depth = 3.0
+    effective_query = substring(actual_query, 5.0, len(actual_query))
+  }
+  if starts_with(actual_query, "full ") {
+    depth = 4.0
+    effective_query = substring(actual_query, 5.0, len(actual_query))
+  }
+
+  // --- Формируем контекст через BuildContext + depth instruction ---
+  let context = BuildContext(dept, effective_query, chat_id)
+  if depth > 2.0 {
+    let depth_instr = GetDepthInstruction(depth)
+    context = context + "\n\nINSTRUKCIYA PO GLUBINE: " + depth_instr
+  }
 
   // --- Вызываем LLM ---
   let provider = read_file("config/priority_provider.txt")
   let model = read_file("config/priority_model.txt")
-  let override_osp = read_file("config/override_osp.txt")
-
-  // Override для ОСП
-  if dept == "osp" and len(trim(override_osp)) > 0.0 {
-    provider = trim(override_osp)
-    let osp_parts = split(provider, " ")
-    if len(osp_parts) > 1.0 {
-      provider = get(osp_parts, 0.0)
-      model = get(osp_parts, 1.0)
+  let override_path = "config/override_" + dept + ".txt"
+  let override_content = read_file(override_path)
+  if len(trim(override_content)) > 2.0 {
+    let ov_parts = split(trim(override_content), " ")
+    if len(ov_parts) > 1.0 {
+      provider = get(ov_parts, 0.0)
+      model = get(ov_parts, 1.0)
     }
   }
 
   let api_key = GetApiKey(provider)
-  let reply = call_claude(api_key, model, context, actual_query)
+  let reply = call_claude(api_key, model, context, effective_query)
 
-  // --- Отправляем ответ ---
-  send_message(chat_id, reply)
+  // --- Отправляем ответ (Mini App если depth >= 2, иначе текст) ---
+  if depth >= 2.0 {
+    let title = effective_query
+    if len(title) > 60.0 {
+      title = substring(title, 0.0, 60.0) + "..."
+    }
+    let doc_id = SaveAndSendMiniApp(chat_id, dept, title, reply, depth, "")
+  } else {
+    send_message(chat_id, reply)
+  }
 
   // --- Записываем ответ и проверяем сжатие ---
-  RecordAndRespond(chat_id, dept, actual_query, reply)
+  RecordAndRespond(chat_id, dept, effective_query, reply)
 
   respond("200 OK")
 }
