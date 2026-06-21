@@ -1,0 +1,532 @@
+// ============================================================================
+// ddq-schema.prisma — Dev + Design + QA Departments Schema Additions
+// ============================================================================
+//
+// APPEND these models to existing prisma/schema.prisma (do not replace).
+// Adds 11 new models across three departments:
+//
+// Dev (4):     DevTask, ArchitectureDecision, TechRadarEntry, CodeRepository
+// Design (3):  DesignArtifact, DesignDecision, UserResearchSession
+// QA (4):      TestRun, DefectRecord, SecurityAudit, AIEvalRun
+//
+// Does NOT modify any existing models.
+// ============================================================================
+
+// ─── DEV DEPARTMENT MODELS ───────────────────────────────────────────────────
+
+model DevTask {
+  id                Int      @id @default(autoincrement())
+  userId            Int      @default(2044005421) @map("user_id")
+
+  // Task definition
+  title             String
+  description       String?  @db.Text
+  taskType          String   @map("task_type")  // web_app | site | ai_office | local_ai | infrastructure | refactor | hotfix
+  priority          String   @default("medium")  // critical | high | medium | low
+
+  // Source linking
+  sourceType        String?  @map("source_type")  // "yana" | "design" | "qa_defect" | "expert_request" | "owner"
+  sourceId          Int?     @map("source_id")
+  designArtifactId  Int?     @map("design_artifact_id")
+  defectId          Int?     @map("defect_id")  // for hotfix tasks
+
+  // Estimation (always range, never point)
+  estimateLowMin    Int?     @map("estimate_low_min")    // minutes
+  estimateExpectedMin Int?   @map("estimate_expected_min")
+  estimateHighMin   Int?     @map("estimate_high_min")
+  estimateConfidence String? @map("estimate_confidence")  // low | medium | high
+  estimateRationale String?  @db.Text @map("estimate_rationale")
+
+  // Implementation tracking
+  actualMin         Int?     @map("actual_min")
+  startedAt         DateTime? @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+
+  // Status lifecycle
+  status            String   @default("drafted")
+  // drafted | estimated | architecting | implementing | testing | review | deployed | archived | abandoned
+
+  // Repository link
+  repositoryId      Int?     @map("repository_id")
+  branchName        String?  @map("branch_name")
+  prUrl             String?  @map("pr_url")
+  commitsCount      Int      @default(0) @map("commits_count")
+
+  // Tech used (links to TechRadarEntry by names)
+  techStack         String   @default("[]") @map("tech_stack")  // JSON array of tech names
+
+  // Quality
+  hasTests          Boolean  @default(false) @map("has_tests")
+  reviewPassed      Boolean? @map("review_passed")
+  defectsFound      Int      @default(0) @map("defects_found")
+  deploymentSuccess Boolean? @map("deployment_success")
+
+  // Archive
+  archiveSnapshotMessageId Int? @map("archive_snapshot_message_id")  // Telegram message id
+  archiveZipSha            String? @map("archive_zip_sha")
+
+  // Cross-references
+  parentTaskId      Int?     @map("parent_task_id")
+  parentTask        DevTask? @relation("DevTaskParent", fields: [parentTaskId], references: [id])
+  subtasks          DevTask[] @relation("DevTaskParent")
+
+  // Relations
+  architectureDecisions ArchitectureDecision[]
+  testRuns              TestRun[]
+  repository            CodeRepository? @relation(fields: [repositoryId], references: [id])
+
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([status])
+  @@index([taskType])
+  @@index([priority])
+  @@index([repositoryId])
+  @@index([designArtifactId])
+  @@index([createdAt(sort: Desc)])
+  @@map("dev_tasks")
+}
+
+model ArchitectureDecision {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  taskId          Int      @map("task_id")
+  task            DevTask  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  // ADR format
+  title           String
+  context         String   @db.Text
+  decision        String   @db.Text
+  alternativesConsidered String @db.Text @map("alternatives_considered")
+  // JSON: [{ alternative, pros, cons, why_rejected }]
+  consequences    String   @db.Text  // accepted trade-offs
+  status          String   @default("accepted")  // proposed | accepted | deprecated | superseded
+  supersededById  Int?     @map("superseded_by_id")
+  supersededBy    ArchitectureDecision? @relation("ADRSupersedes", fields: [supersededById], references: [id])
+  supersedes      ArchitectureDecision[] @relation("ADRSupersedes")
+
+  // Retrospective (filled in later)
+  retrospectiveDate DateTime? @map("retrospective_date")
+  retrospectiveNote String?   @db.Text @map("retrospective_note")
+  wasRightCall      Boolean?  @map("was_right_call")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([taskId])
+  @@index([status])
+  @@map("architecture_decisions")
+}
+
+model TechRadarEntry {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  techName        String   @map("tech_name")
+  category        String   // language | framework | library | tool | service | pattern | model
+  state           String   // adopt | trial | assess | hold
+  rationale       String   @db.Text
+
+  // Usage tracking
+  usageCount      Int      @default(0) @map("usage_count")  // # of DevTasks using it
+  lastUsedAt      DateTime? @map("last_used_at")
+
+  // Evidence
+  externalReferences String @default("[]") @db.Text @map("external_references")
+  // JSON: [{ url, title, why_relevant }]
+
+  // History
+  previousStates  String   @default("[]") @db.Text @map("previous_states")
+  // JSON: [{ state, since, until, reason_for_change }]
+
+  // Review
+  lastReviewedAt  DateTime? @map("last_reviewed_at")
+  nextReviewAt    DateTime? @map("next_review_at")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, techName])
+  @@index([userId])
+  @@index([state])
+  @@index([category])
+  @@map("tech_radar_entries")
+}
+
+model CodeRepository {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // GitHub identifiers
+  fullName        String   @unique @map("full_name")  // "ShkodnikAI/repo-name"
+  url             String
+  defaultBranch   String   @default("main") @map("default_branch")
+
+  // Metadata
+  name            String
+  description     String?  @db.Text
+  projectType     String?  @map("project_type")  // web_app | site | ai_office | local_ai | library | other
+  primaryLanguage String?  @map("primary_language")
+  framework       String?  // Next.js | Express | FastAPI | etc.
+
+  // State
+  status          String   @default("active")  // active | maintained | archived | private
+  isPublic        Boolean  @default(false) @map("is_public")
+
+  // Statistics (refreshed periodically)
+  starsCount      Int      @default(0) @map("stars_count")
+  commitsCount    Int      @default(0) @map("commits_count")
+  contributorsCount Int    @default(1) @map("contributors_count")
+  lastCommitAt    DateTime? @map("last_commit_at")
+
+  // Deployment
+  deploymentUrl   String?  @map("deployment_url")
+  deploymentPlatform String? @map("deployment_platform")  // render | vercel | cloudflare | self_hosted
+
+  // Local sync (deferred until local server available)
+  localSyncEnabled Boolean @default(false) @map("local_sync_enabled")
+  localPath        String? @map("local_path")
+  lastSyncedAt     DateTime? @map("last_synced_at")
+
+  // Quality metrics
+  testCoverage    Float?   @map("test_coverage")
+  ciStatus        String?  @map("ci_status")  // passing | failing | pending
+
+  // Cross-references
+  devTasks        DevTask[]
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([status])
+  @@index([projectType])
+  @@map("code_repositories")
+}
+
+// ─── DESIGN DEPARTMENT MODELS ────────────────────────────────────────────────
+
+model DesignArtifact {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // Artifact identity
+  title           String
+  artifactType    String   @map("artifact_type")
+  // wireframe | mockup | design_system | component_spec | user_flow | prototype | design_token_set
+
+  projectName     String   @map("project_name")
+  projectType     String?  @map("project_type")  // web_app | site | ai_office | mobile
+
+  // Brief
+  brief           String   @db.Text
+  userTasks       String   @default("[]") @db.Text @map("user_tasks")  // JSON array
+
+  // Content
+  format          String   // svg | html | json | figma_url | description
+  content         String?  @db.Text
+
+  // States specifications (for components)
+  stateSpecs      String?  @db.Text @map("state_specs")
+  // JSON: { default: {...}, hover: {...}, focus: {...}, active: {...}, disabled: {...}, loading: {...}, error: {...} }
+
+  // Responsive variants
+  hasResponsiveVariants Boolean @default(false) @map("has_responsive_variants")
+  mobileVariant   String?  @db.Text @map("mobile_variant")
+  tabletVariant   String?  @db.Text @map("tablet_variant")
+  desktopVariant  String?  @db.Text @map("desktop_variant")
+
+  // Accessibility
+  wcagLevel       String?  @map("wcag_level")  // A | AA | AAA
+  accessibilityNotes String? @db.Text @map("accessibility_notes")
+
+  // Design system reference
+  designSystemId  Int?     @map("design_system_id")
+  designTokensUsed String  @default("[]") @db.Text @map("design_tokens_used")
+  componentsUsed  String   @default("[]") @db.Text @map("components_used")
+
+  // Lifecycle
+  status          String   @default("draft")
+  // draft | iteration | review | approved | handed_off | implemented | retired
+  iterationCount  Int      @default(0) @map("iteration_count")
+  feedbackLog     String   @default("[]") @db.Text @map("feedback_log")
+  // JSON: [{ iteration, date, feedback, who }]
+  approvedAt      DateTime? @map("approved_at")
+
+  // Dev handoff
+  handedOffToDevTaskId Int? @map("handed_off_to_dev_task_id")
+  implementationDrift  Float? @map("implementation_drift")  // 0-1, measured 2 weeks post-implementation
+
+  // Relations
+  designDecisions DesignDecision[]
+  researchSessions UserResearchSession[]
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([projectName])
+  @@index([artifactType])
+  @@index([status])
+  @@map("design_artifacts")
+}
+
+model DesignDecision {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  artifactId      Int      @map("artifact_id")
+  artifact        DesignArtifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+
+  decision        String   @db.Text
+  rationale       String   @db.Text
+  userImpact      String?  @db.Text @map("user_impact")
+  alternativesConsidered String? @db.Text @map("alternatives_considered")
+
+  // Validation
+  validationMethod String? @map("validation_method")
+  // user_test | heuristic_eval | a_b_test | data_analysis | expert_review
+  validationResult String? @db.Text @map("validation_result")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([artifactId])
+  @@map("design_decisions")
+}
+
+model UserResearchSession {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  artifactId      Int?     @map("artifact_id")
+  artifact        DesignArtifact? @relation(fields: [artifactId], references: [id])
+
+  sessionType     String   @map("session_type")
+  // heuristic_eval | usability_test | competitive_analysis | survey | interview | accessibility_audit
+
+  topic           String
+  methodology     String   @db.Text
+  participants    String?  @db.Text  // anonymized descriptions
+  findings        String   @db.Text
+  recommendations String   @db.Text
+
+  conductedAt     DateTime @map("conducted_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([sessionType])
+  @@index([artifactId])
+  @@map("user_research_sessions")
+}
+
+// ─── QA DEPARTMENT MODELS ────────────────────────────────────────────────────
+
+model TestRun {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // What was tested
+  target          String   // project name or repository
+  targetRepositoryId Int?  @map("target_repository_id")
+  targetTaskId    Int?     @map("target_task_id")
+  task            DevTask? @relation(fields: [targetTaskId], references: [id])
+
+  testType        String   @map("test_type")
+  // unit | integration | e2e | security | performance | accessibility | ai_eval | smoke | regression
+
+  // Configuration
+  testFramework   String?  @map("test_framework")  // vitest | playwright | promptfoo | k6 | etc.
+  scopeDescription String? @db.Text @map("scope_description")
+
+  // Execution
+  startedAt       DateTime @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  durationSec     Int?     @map("duration_sec")
+  triggerType     String   @default("manual") @map("trigger_type")  // manual | auto_post_implement | scheduled | webhook
+
+  // Results
+  totalTests      Int      @default(0) @map("total_tests")
+  passedTests     Int      @default(0) @map("passed_tests")
+  failedTests     Int      @default(0) @map("failed_tests")
+  skippedTests    Int      @default(0) @map("skipped_tests")
+  passRate        Float?   @map("pass_rate")
+
+  // Coverage (if applicable)
+  coverage        Float?
+  coverageDetails String?  @db.Text @map("coverage_details")  // JSON breakdown
+
+  // Output
+  output          String?  @db.Text  // truncated test output
+  rawResultsUrl   String?  @map("raw_results_url")  // link to full results
+
+  // Verdict
+  verdict         String   @default("pending")  // pending | passed | failed | partial | error
+  gateDecision    String?  @map("gate_decision")  // go | no_go | conditional
+
+  // Defects
+  defectsCreated  Int      @default(0) @map("defects_created")
+  defects         DefectRecord[]
+
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([target])
+  @@index([testType])
+  @@index([verdict])
+  @@index([startedAt(sort: Desc)])
+  @@map("test_runs")
+}
+
+model DefectRecord {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  testRunId       Int?     @map("test_run_id")
+  testRun         TestRun? @relation(fields: [testRunId], references: [id])
+
+  // Identification
+  title           String
+  description     String   @db.Text
+  severity        String   // critical | high | medium | low | trivial
+  category        String   // functional | security | performance | accessibility | ai_quality | ui | data
+
+  // Reproduction
+  stepsToReproduce String   @db.Text @map("steps_to_reproduce")
+  expectedBehavior String   @db.Text @map("expected_behavior")
+  actualBehavior   String   @db.Text @map("actual_behavior")
+  environment     String?  @db.Text  // browser, OS, etc.
+
+  // Root cause (filled when known)
+  rootCause       String?  @db.Text @map("root_cause")
+  rootCauseCategory String? @map("root_cause_category")
+  // bug | spec_mismatch | test_gap | dependency | config | infrastructure
+
+  // Status
+  status          String   @default("open")  // open | acknowledged | in_progress | fixed | verified | wontfix | duplicate
+  assignedToTaskId Int?    @map("assigned_to_task_id")
+  fixedAt         DateTime? @map("fixed_at")
+  verifiedAt      DateTime? @map("verified_at")
+
+  // Regression test
+  regressionTestAdded Boolean @default(false) @map("regression_test_added")
+  regressionTestRef   String? @map("regression_test_ref")
+
+  // Escape
+  reachedProduction Boolean @default(false) @map("reached_production")
+  detectedInProduction Boolean @default(false) @map("detected_in_production")
+  productionImpact String? @db.Text @map("production_impact")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([severity])
+  @@index([status])
+  @@index([category])
+  @@index([reachedProduction])
+  @@index([createdAt(sort: Desc)])
+  @@map("defect_records")
+}
+
+model SecurityAudit {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  target          String   // project / repository
+  targetRepositoryId Int?  @map("target_repository_id")
+
+  auditType       String   @map("audit_type")
+  // dependency_audit | owasp_scan | manual_review | penetration_test | secrets_scan
+
+  scope           String   @db.Text
+  methodology     String?  @db.Text
+
+  // Findings
+  findings        String   @db.Text  // JSON array
+  // [{ id, severity, title, description, location, cve, recommendation, fixed }]
+
+  totalFindings   Int      @default(0) @map("total_findings")
+  criticalCount   Int      @default(0) @map("critical_count")
+  highCount       Int      @default(0) @map("high_count")
+  mediumCount     Int      @default(0) @map("medium_count")
+  lowCount        Int      @default(0) @map("low_count")
+
+  // Result
+  passedAudit     Boolean  @default(false) @map("passed_audit")
+  blockedRelease  Boolean  @default(false) @map("blocked_release")
+
+  // Follow-up
+  remediationTasksCreated Int @default(0) @map("remediation_tasks_created")
+
+  conductedAt     DateTime @map("conducted_at")
+  nextAuditDue    DateTime? @map("next_audit_due")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([target])
+  @@index([auditType])
+  @@index([passedAudit])
+  @@map("security_audits")
+}
+
+model AIEvalRun {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // What was evaluated
+  aiSystem        String   @map("ai_system")  // identifier of LLM app/feature
+  systemDescription String? @db.Text @map("system_description")
+  llmProvider     String?  @map("llm_provider")  // anthropic | openai | grok | local_ollama | etc.
+  llmModel        String?  @map("llm_model")
+
+  // Configuration
+  evalFramework   String   @default("promptfoo") @map("eval_framework")
+  goldenDatasetSize Int    @map("golden_dataset_size")
+  goldenDatasetVersion String? @map("golden_dataset_version")
+
+  // Metrics measured
+  metricsEvaluated String  @default("[]") @db.Text @map("metrics_evaluated")
+  // JSON: ["groundedness", "relevance", "faithfulness", "coherence", "task_completion", "safety"]
+
+  // Results
+  metricScores    String   @db.Text @map("metric_scores")
+  // JSON: { groundedness: 0.92, relevance: 0.88, ... }
+  overallScore    Float?   @map("overall_score")
+
+  // Specific tests
+  promptInjectionTested Boolean @default(false) @map("prompt_injection_tested")
+  promptInjectionResistanceScore Float? @map("prompt_injection_resistance_score")
+  hallucinationDetected Int @default(0) @map("hallucination_detected")
+  biasFlagsCount  Int      @default(0) @map("bias_flags_count")
+
+  // Cost tracking
+  totalTokensUsed Int?     @map("total_tokens_used")
+  estimatedCostUsd Float?  @map("estimated_cost_usd")
+
+  // Regression
+  comparedToPreviousRunId Int? @map("compared_to_previous_run_id")
+  regressionDetected      Boolean @default(false) @map("regression_detected")
+  regressionDetails       String? @db.Text @map("regression_details")
+
+  // Verdict
+  verdict         String   @default("pending")  // pending | passed | failed | needs_review
+  recommendations String?  @db.Text
+
+  conductedAt     DateTime @map("conducted_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([aiSystem])
+  @@index([verdict])
+  @@index([conductedAt(sort: Desc)])
+  @@map("ai_eval_runs")
+}
+
+// ============================================================================
+// END OF DDQ SCHEMA ADDITIONS
+// 11 new models added.
+// ============================================================================

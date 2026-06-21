@@ -1,0 +1,244 @@
+// ============================================================================
+// marketing-schema.prisma — Marketing Department schema additions
+// ============================================================================
+//
+// APPEND these models to existing prisma/schema.prisma (do not replace).
+// Adds 5 new models for the Marketing (Продвижение) department:
+//
+//   MarketResearch       — market / audience research with sources + confidence
+//   AudienceSegment      — described target-audience segments (reusable)
+//   MarketingCampaign    — campaigns with forecast + actual reconciliation
+//   CampaignVerification — per-campaign forecast-vs-actual results
+//   MarketingMonthlyReview — aggregated monthly performance review
+//
+// Does NOT modify any existing models.
+// Follows the same conventions as the DDQ schema (snake_case @@map,
+// userId default 2044005421, append-only).
+// ============================================================================
+
+// ─── MarketResearch ──────────────────────────────────────────────────────────
+
+model MarketResearch {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // Research definition
+  title           String
+  researchType    String   @map("research_type")
+  // market_sizing | audience_study | competitive | channel_analysis | trend_scan
+  researchQuestion String  @db.Text @map("research_question")
+  productContext  String?  @map("product_context")  // which Fosved product / external client
+
+  // Method + data quality
+  methodology     String   @db.Text
+  dataSources     String   @default("[]") @db.Text @map("data_sources")
+  // JSON: [{ source, type: "behavioral|survey|expert|assumption", reliability: "high|medium|low" }]
+  overallConfidence String @map("overall_confidence")  // high | medium | low
+
+  // Findings
+  findings        String   @db.Text
+  // Numeric forecasts the research produced (verifiable later)
+  forecasts       String   @default("[]") @db.Text
+  // JSON: [{ metric, predictedValue, unit, basis }]
+  recommendations String   @db.Text
+
+  // Lifecycle
+  status          String   @default("drafted")
+  // drafted | published | verified | superseded
+  verificationDate DateTime? @map("verification_date")
+  verifiedNote    String?  @db.Text @map("verified_note")
+  forecastsHeld   Boolean? @map("forecasts_held")  // did the numeric forecasts hold up?
+
+  // Relations
+  segments        AudienceSegment[]
+  campaigns       MarketingCampaign[]
+
+  // Archive
+  archiveMessageId Int?    @map("archive_message_id")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([researchType])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+  @@map("market_research")
+}
+
+// ─── AudienceSegment ─────────────────────────────────────────────────────────
+
+model AudienceSegment {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // Segment identity — must be concrete (hard rule 3)
+  name            String
+  description     String   @db.Text  // who they are
+  painPoint       String   @db.Text @map("pain_point")  // what problem they have
+  whereToReach    String   @db.Text @map("where_to_reach")  // channels they're on
+  currentAlternative String? @db.Text @map("current_alternative")  // what they use now
+
+  // Sizing
+  estimatedSize   Int?     @map("estimated_size")  // people in segment
+  sizeBasis       String?  @db.Text @map("size_basis")  // how the size was estimated
+
+  // Validation
+  status          String   @default("hypothesized")
+  // hypothesized | validated | disproven
+  validationMethod String? @map("validation_method")  // data | test | survey
+  validationNote  String?  @db.Text @map("validation_note")
+
+  // Source research
+  researchId      Int?     @map("research_id")
+  research        MarketResearch? @relation(fields: [researchId], references: [id])
+
+  // Reusable across campaigns
+  campaigns       MarketingCampaign[]
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([status])
+  @@map("audience_segments")
+}
+
+// ─── MarketingCampaign ───────────────────────────────────────────────────────
+
+model MarketingCampaign {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // Campaign identity
+  title           String
+  productPromoted String   @map("product_promoted")  // Fosved bot/miniapp or external
+  campaignType    String   @map("campaign_type")
+  // launch | growth | retention | reactivation | brand
+
+  // Targeting
+  segmentId       Int?     @map("segment_id")
+  segment         AudienceSegment? @relation(fields: [segmentId], references: [id])
+  researchId      Int?     @map("research_id")
+  research        MarketResearch? @relation(fields: [researchId], references: [id])
+
+  // Positioning + message
+  positioning     String   @db.Text  // how the product is framed for this segment
+  coreMessage     String   @db.Text @map("core_message")
+  messageVariants String   @default("[]") @db.Text @map("message_variants")
+  // JSON array of A/B variants
+  channels        String   @default("[]") @db.Text  // JSON array of channels
+
+  // Honest-claims check (hard rule 2)
+  claimsVerified  Boolean  @default(false) @map("claims_verified")
+  claimsNote      String?  @db.Text @map("claims_note")
+
+  // ── FORECAST (mandatory before launch — hard rule 1) ──
+  forecastConversionRate Float?  @map("forecast_conversion_rate")  // predicted, 0..1
+  forecastCac            Float?  @map("forecast_cac")              // predicted CAC
+  forecastReach          Int?    @map("forecast_reach")            // predicted people reached
+  forecastBudget         Float?  @map("forecast_budget")
+  forecastBasis          String? @db.Text @map("forecast_basis")
+  forecastConfidence     String? @map("forecast_confidence")       // high | medium | low
+
+  // ── ACTUAL (filled after campaign) ──
+  actualConversionRate   Float?  @map("actual_conversion_rate")
+  actualCac              Float?  @map("actual_cac")
+  actualReach            Int?    @map("actual_reach")
+  actualSpend            Float?  @map("actual_spend")
+
+  // Lifecycle
+  status          String   @default("drafted")
+  // drafted | forecasted | launched | running | completed | verified | aborted
+  launchedAt      DateTime? @map("launched_at")
+  completedAt     DateTime? @map("completed_at")
+
+  // Archive
+  archiveMessageId Int?    @map("archive_message_id")
+
+  // Relations
+  verification    CampaignVerification?
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([status])
+  @@index([campaignType])
+  @@index([productPromoted])
+  @@index([createdAt(sort: Desc)])
+  @@map("marketing_campaigns")
+}
+
+// ─── CampaignVerification ────────────────────────────────────────────────────
+
+model CampaignVerification {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  campaignId      Int      @unique @map("campaign_id")
+  campaign        MarketingCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  // Forecast-vs-actual deltas
+  conversionAccuracy Float?  @map("conversion_accuracy")
+  // |actual - forecast| / forecast — lower is better
+  cacAccuracy        Float?  @map("cac_accuracy")
+  reachAccuracy      Float?  @map("reach_accuracy")
+
+  // Verdicts
+  conversionWithinTarget Boolean? @map("conversion_within_target")  // within ±25%
+  cacWithinTarget        Boolean? @map("cac_within_target")         // within ±30%
+  wasOveroptimistic      Boolean  @default(false) @map("was_overoptimistic")
+  // true if forecast exceeded actual by 50%+
+  segmentRespondedAsPredicted Boolean? @map("segment_responded_as_predicted")
+
+  // Diagnosis (hard rule 9 — learn from misses)
+  missSource      String?  @map("miss_source")
+  // overoptimism | wrong_segment | wrong_channel | wrong_message | external_factor | none
+  diagnosis       String?  @db.Text
+  lessonLearned   String?  @db.Text @map("lesson_learned")
+
+  verifiedAt      DateTime @default(now()) @map("verified_at")
+
+  @@index([userId])
+  @@index([missSource])
+  @@map("campaign_verifications")
+}
+
+// ─── MarketingMonthlyReview ──────────────────────────────────────────────────
+
+model MarketingMonthlyReview {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  periodStart     DateTime @map("period_start")
+  periodEnd       DateTime @map("period_end")
+
+  // Aggregated metrics
+  campaignsVerified      Int     @default(0) @map("campaigns_verified")
+  avgConversionAccuracy  Float?  @map("avg_conversion_accuracy")
+  avgCacAccuracy         Float?  @map("avg_cac_accuracy")
+  overoptimismRate       Float?  @map("overoptimism_rate")  // share of campaigns over-forecast
+  segmentHitRate         Float?  @map("segment_hit_rate")
+  experimentHitRate      Float?  @map("experiment_hit_rate")  // share above median result
+
+  // Trend vs previous month
+  trendNote       String?  @db.Text @map("trend_note")
+
+  // Error clustering + chosen improvements
+  errorClusters   String   @default("[]") @db.Text @map("error_clusters")
+  // JSON: [{ cluster, count }]
+  improvementsChosen String @default("[]") @db.Text @map("improvements_chosen")
+  // JSON array — 1-2 improvements for next month
+
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([periodStart(sort: Desc)])
+  @@map("marketing_monthly_reviews")
+}
+
+// ============================================================================
+// END OF MARKETING SCHEMA ADDITIONS
+// 5 new models added.
+// ============================================================================

@@ -1,0 +1,131 @@
+// ============================================================================
+// kk-schema.prisma — Kuznitsa (Veteran department) schema additions
+// ============================================================================
+//
+// APPEND these models to existing prisma/schema.prisma (do not replace).
+// Adds 2 new models for the Kuznitsa (Кузница кадров) department:
+//
+//   TrainingSession        — every recruit / train / polygon / debrief /
+//                            assess / recalibrate operation
+//   KuznitsaMonthlyReview  — aggregated monthly review across all departments
+//
+// Per METHODOLOGY.md Part III. Does NOT modify any existing models.
+// Append-only, snake_case @@map, userId default 2044005421 — same conventions
+// as the other department schemas.
+// ============================================================================
+
+// ─── TrainingSession ─────────────────────────────────────────────────────────
+//
+// One record per Kuznitsa operation. The Kuznitsa is recursive — it is built
+// by the methodology it teaches — so its own operations are recorded and
+// verified like any other department's work.
+
+model TrainingSession {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // Operation type — one of the 7 Kuznitsa commands
+  operationType   String   @map("operation_type")
+  // recruit | train | polygon | debrief | assess | recalibrate | forge_status
+
+  // Target — which department / specialist this operation concerns
+  targetDepartment String  @map("target_department")
+  targetDescription String? @db.Text @map("target_description")
+
+  // ── recruit: the 10-stage checklist (METHODOLOGY.md I.4) ──
+  // JSON: [{ stage, name, done: bool, note }]  — 10 stages
+  checklistStages String  @default("[]") @db.Text @map("checklist_stages")
+  checklistComplete Boolean @default(false) @map("checklist_complete")
+
+  // ── psychotype (Part II) ──
+  psychotypeAssigned String? @map("psychotype_assigned")
+  psychotypeRationale String? @db.Text @map("psychotype_rationale")
+  psychotypeFitsFunction Boolean? @map("psychotype_fits_function")
+
+  // ── polygon results ──
+  polygonTasksTotal  Int?   @map("polygon_tasks_total")
+  polygonTasksPassed Int?   @map("polygon_tasks_passed")
+  polygonPassRate    Float? @map("polygon_pass_rate")  // 0..1
+  polygonPassed      Boolean? @map("polygon_passed")   // pass-rate >= 0.70
+  // systematic errors found on the polygon — JSON array of strings
+  systematicErrors   String @default("[]") @db.Text @map("systematic_errors")
+
+  // ── debrief / improvement ──
+  // structural diagnosis (hard rule 6 — not accusatory)
+  debriefDiagnosis   String? @db.Text @map("debrief_diagnosis")
+  errorNature        String? @map("error_nature")  // psychotype_mismatch | training_gap
+  improvementPlan    String  @default("[]") @db.Text @map("improvement_plan")  // JSON array
+
+  // ── recalibrate gating (hard rule 8 — owner approval required) ──
+  ownerApproved      Boolean @default(false) @map("owner_approved")
+  ownerApprovedAt    DateTime? @map("owner_approved_at")
+
+  // ── metric improvement (recalibrate / train verification) ──
+  metricBefore       Float? @map("metric_before")
+  metricAfter        Float? @map("metric_after")
+  improvementRate    Float? @map("improvement_rate")  // (after-before)/before
+
+  // Lifecycle
+  status          String   @default("in_progress")
+  // in_progress | completed | rolled_back
+  outcomeSummary  String?  @db.Text @map("outcome_summary")
+
+  // Archive
+  archiveMessageId Int?    @map("archive_message_id")
+
+  startedAt       DateTime @default(now()) @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([operationType])
+  @@index([targetDepartment])
+  @@index([status])
+  @@index([startedAt(sort: Desc)])
+  @@map("training_sessions")
+}
+
+// ─── KuznitsaMonthlyReview ───────────────────────────────────────────────────
+//
+// Aggregated monthly review across ALL departments — the Kuznitsa's
+// department-of-departments view. Surfaces which departments need the
+// Veteran's intervention.
+
+model KuznitsaMonthlyReview {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  periodStart     DateTime @map("period_start")
+  periodEnd       DateTime @map("period_end")
+
+  // Kuznitsa's own operation metrics this month
+  operationsTotal Int      @default(0) @map("operations_total")
+  departmentsRecruited Int @default(0) @map("departments_recruited")
+  departmentsRecalibrated Int @default(0) @map("departments_recalibrated")
+
+  // Kuznitsa's own metrics (METHODOLOGY.md II.3.9)
+  newSpecialistPassRate Float? @map("new_specialist_pass_rate")  // target >= 0.70
+  avgImprovementRate    Float? @map("avg_improvement_rate")      // target >= 0.15/quarter
+  reworkRate            Float? @map("rework_rate")               // target < 0.20
+
+  // Cross-department health: which departments need attention
+  // JSON: [{ department, consecutiveSubTargetMonths, recommendedAction }]
+  departmentsNeedingAttention String @default("[]") @db.Text @map("departments_needing_attention")
+
+  // Methodology bloat check (anti-pattern III.9.4)
+  methodologyLineCount Int?   @map("methodology_line_count")
+  methodologyGrew      Boolean? @map("methodology_grew")  // true = warning
+
+  trendNote       String?  @db.Text @map("trend_note")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([periodStart(sort: Desc)])
+  @@map("kuznitsa_monthly_reviews")
+}
+
+// ============================================================================
+// END OF KUZNITSA SCHEMA ADDITIONS
+// 2 new models added.
+// ============================================================================
