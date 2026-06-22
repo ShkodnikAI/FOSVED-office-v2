@@ -45,3 +45,28 @@ Stage Summary:
 - Key deliverables: Admin agent with 12 commands and 5-phase night cycle, LZ 9-source deep scan, Apodex as 7th provider with verified research, LZ compare side-by-side, channel monitoring, evidence graph badges in reports
 - Commit: c056bf2 MEGA-4: Admin agent, factory, LZ deep scan, Apodex
 - Push: successful to main
+---
+Task ID: stress-test-85
+Agent: Super Z (main)
+Task: Stress test 85 checks + bug fixes + Narad 29 Mini App SPA
+
+Work Log:
+- Ran stress test 85 checks (static code analysis) — initial result: 164/167, 3 failures
+- Found and fixed real bugs: HandleOsp→HandleOSP, HandleQa→HandleQA in dept files; HandleOsp/HandleLz/HandleQa→HandleOSP/HandleLZ/HandleQA in chain.mlog (case mismatch causing runtime failures)
+- Created data/.gitkeep (missing file)
+- Re-ran stress test: 167/167 PASSED (100%)
+- Added 11 API endpoints to llm_proxy.py for Mini App SPA (/api/dashboard, /api/dept, /api/models, /api/economics, /api/narads, /api/narads/:id/approve, /api/narads/:id/reject, /api/archive, /api/admin/status)
+- Added Mini App SPA static file serving (/miniapp-spa/) to llm_proxy.py
+- Added /miniapp-spa/ and /api/ routes to reverse_proxy.py
+- Created miniapp/ directory with full SPA structure: index.html + 4 CSS files + 2 JS core files + 9 screen modules
+- 9 screens: Dashboard (phone 3-col KPI + dept grid + admin), Dept (gradient header + tasks + skills + corrections), Chat (dept chips + bubbles + input), Report (fetches from /miniapp/:id), Models (status cards + overrides), Economics (period cards + horizontal bar charts), Settings (profile + voice + notifications + integrations + security), Narads (approve/reject), Archive (search + filter chips + dept-colored items)
+- Design system: Cormorant Garamond headings, DM Sans body, DM Mono badges; gold #C9A84C accent, warm white #F8F7F4 background
+- Responsive: phone bottom nav (5 tabs) + tablet sidebar (190px) + desktop 3-column grid
+- Hash-based SPA routing with Telegram WebApp integration
+- Git commit: 0e73091 pushed to main
+
+Stage Summary:
+- Stress test: 167/167 passed (up from 48/85)
+- 3 critical bugs fixed (case mismatch in handler names)
+- Narad 29: 9 screens, phone+tablet responsive, SPA routing, 11 API endpoints
+- All changes pushed to GitHub
