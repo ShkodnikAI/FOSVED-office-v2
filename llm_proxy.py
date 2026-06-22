@@ -1,0 +1,1395 @@
+#!/usr/bin/env python3
+"""llm_proxy.py — Fosved Office v2 LLM Proxy Server
+Flask server on port 4000 with 7-provider failover, dept routing, dashboards, SQLite,
+TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
+
+import json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from flask import Flask, request, jsonify, Response
+import requests as http_requests
+
+# ──────────────────────────── APP & CONFIG ────────────────────────────
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("llm_proxy")
+
+PORT = int(os.environ.get("PORT_PROXY", 4000))
+DB_PATH = os.environ.get("DATABASE_PATH", "./data")
+Path(DB_PATH).mkdir(parents=True, exist_ok=True)
+DB_FILE = os.path.join(DB_PATH, "fosved.db")
+
+BASE_DIR = Path(__file__).parent
+LIB_DIR = BASE_DIR / "library"
+CFG_DIR = BASE_DIR / "config"
+
+db_lock = threading.Lock()
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_ARCHIVE_CHANNEL_ID = os.environ.get("TELEGRAM_ARCHIVE_CHANNEL_ID", "")
+WHISPER_API_KEY = os.environ.get("WHISPER_API_KEY", "")
+WHISPER_PROVIDER = os.environ.get("WHISPER_PROVIDER", "groq")
+
+# ──────────────────────────── PROVIDERS ────────────────────────────
+PROVIDERS = {
+    "zai": {"url": "https://api.zai.chat/v1/chat/completions", "env_key": "ZAI_API_KEY", "format": "openai", "timeout": 120},
+    "deepseek": {"url": "https://api.deepseek.com/v1/chat/completions", "env_key": "DEEPSEEK_API_KEY", "format": "openai", "timeout": 120},
+    "groq": {"url": "https://api.groq.com/openai/v1/chat/completions", "env_key": "GROQ_API_KEY", "format": "openai", "timeout": 120},
+    "grok": {"url": "https://api.x.ai/v1/chat/completions", "env_key": "GROK_API_KEY", "format": "openai", "timeout": 120},
+    "anthropic": {"url": "https://api.anthropic.com/v1/messages", "env_key": "ANTHROPIC_API_KEY", "format": "anthropic", "timeout": 120},
+    "openai": {"url": "https://api.openai.com/v1/chat/completions", "env_key": "OPENAI_API_KEY", "format": "openai", "timeout": 120},
+    "apodex": {"url": "https://api.apodex.ai/v1/chat/completions", "env_key": "APODEX_API_KEY", "format": "openai", "timeout": 300},
+}
+
+TOKEN_COSTS = {
+    "zai": {"input": 0.5, "output": 1.5}, "deepseek": {"input": 0.14, "output": 0.28},
+    "groq": {"input": 0.0, "output": 0.0}, "grok": {"input": 3.0, "output": 15.0},
+    "anthropic": {"input": 3.0, "output": 15.0}, "openai": {"input": 2.5, "output": 10.0},
+    "apodex": {"input": 2.0, "output": 8.0},
+}
+
+# ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
+DEPT_COLORS = {
+    'yana': {'start': '#293133', 'end': '#1a2024', 'accent': '#3d4a4d'},
+    'osp': {'start': '#b91c1c', 'end': '#7f1d1d', 'accent': '#dc2626'},
+    'lz': {'start': '#0e7490', 'end': '#164e63', 'accent': '#0891b2'},
+    'expert': {'start': '#3730a3', 'end': '#1e1b4b', 'accent': '#4f46e5'},
+    'marketing': {'start': '#c2410c', 'end': '#7c2d12', 'accent': '#ea580c'},
+    'finance': {'start': '#15803d', 'end': '#14532d', 'accent': '#16a34a'},
+    'legal': {'start': '#475569', 'end': '#1e293b', 'accent': '#64748b'},
+    'dev': {'start': '#1d4ed8', 'end': '#1e3a8a', 'accent': '#2563eb'},
+    'design': {'start': '#be185d', 'end': '#831843', 'accent': '#ec4899'},
+    'qa': {'start': '#4d7c0f', 'end': '#365314', 'accent': '#65a30d'},
+    'visual': {'start': '#7e22ce', 'end': '#581c87', 'accent': '#a855f7'},
+    'engineering': {'start': '#44403c', 'end': '#292524', 'accent': '#78716c'},
+    'kavalnya': {'start': '#b45309', 'end': '#78350f', 'accent': '#d97706'},
+    'admin': {'start': '#1e40af', 'end': '#1e3a5f', 'accent': '#3b82f6'},
+}
+
+DEPT_NAMES = {
+    'yana': 'Yana — Shef de kabinet', 'osp': 'OSP — Strategicheskiy analiz',
+    'lz': 'LZ — Laboratoriya znanii', 'expert': 'Ekspert — Tekhnicheskiy preparator',
+    'marketing': 'Marketing', 'finance': 'Finansy', 'legal': 'Yurist',
+    'dev': 'Dev — Razrabotka', 'design': 'Design — UI/UX', 'qa': 'QA — Testirovanie',
+    'visual': 'Visual — Vizualizatsiya', 'engineering': 'Engineering — Inzhenernyi',
+    'kavalnya': 'Kavalnya — Metodologiya', 'admin': 'Admin — Sistemnyi agent',
+}
+
+DEPT_HASHTAGS = {
+    'osp': '#OSP #analytics #strategy',
+    'lz': '#LZ #technology #research',
+    'expert': '#Expert #briefing',
+    'marketing': '#Marketing #audience',
+    'finance': '#Finance #cashflow',
+    'legal': '#Legal #contracts',
+    'dev': '#Dev #code #architecture',
+    'design': '#Design #UX',
+    'qa': '#QA #testing',
+    'visual': '#Visual #infographic',
+    'engineering': '#Engineering #calculations',
+    'kavalnya': '#Kavalnya #methodology',
+    'yana': '#Yana #cabinet',
+    'admin': '#Admin #system',
+}
+
+# ──────────────────────────── DEPT DETECTION ────────────────────────────
+COMMAND_DEPT = {
+    '/yana': 'yana', '/osp': 'osp', '/lz': 'lz', '/expert': 'expert',
+    '/marketing': 'marketing', '/finance': 'finance', '/legal': 'legal',
+    '/dev': 'dev', '/design': 'design', '/qa': 'qa', '/visual': 'visual',
+    '/engineering': 'engineering', '/forge': 'kavalnya',
+    '/analyze': 'osp', '/scan': 'lz', '/deep': 'osp',
+    '/quickanalyze': 'osp', '/wargame': 'osp',
+    '/market-research': 'marketing', '/segment': 'marketing',
+    '/competitors': 'marketing', '/campaign': 'marketing',
+    '/calc': 'engineering', '/simulate': 'engineering',
+}
+
+RUSSIAN_KEYWORDS = {
+    'osp': ['proanalizirui', 'prognoz', 'strategiya', 'geopolitik', 'analiz'],
+    'lz': ['tekhnolog', 'monitory', 'trend', 'proryv', 'nauka', 'issledovan'],
+    'expert': ['vstrech', 'brifing', 'podgotov k', 'ekspert', 'preparirui'],
+    'marketing': ['reklam', 'auditoriya', 'konversiya', 'marketing', 'pozitsionir'],
+    'finance': ['byudzhet', 'cashflow', 'nalog', 'finans', 'raskhod', 'dokhod'],
+    'legal': ['dogovor', 'isk', 'gdpr', 'yuridichesk', 'nda', 'pravo'],
+    'dev': ['kod', 'arkhitektur', 'api', 'programm', 'deploi', 'server'],
+    'design': ['dizain', 'wireframe', 'maket', 'ui', 'ux', 'interfeis'],
+    'qa': ['test', 'bag', 'kachestv', 'proverk'],
+    'visual': ['infografik', 'vizualizats', 'grafik', 'prezentats'],
+    'engineering': ['rasyot', 'nagruz', 'konstruktsi', 'inzhener', 'snip'],
+    'kavalnya': ['novyi otdel', 'poligon', 'metodolog', 'sozdat otdel'],
+}
+
+def detect_dept(text):
+    text_lower = text.lower().strip()
+    for cmd, dept in sorted(COMMAND_DEPT.items(), key=lambda x: -len(x[0])):
+        if text_lower.startswith(cmd) and (len(text_lower) == len(cmd) or text_lower[len(cmd)] in ' \n/'):
+            return dept
+    for dept, kws in RUSSIAN_KEYWORDS.items():
+        for kw in kws:
+            if kw in text_lower:
+                return dept
+    return 'yana'
+
+# ──────────────────────────── CONDENSED PROMPTS ────────────────────────────
+CONDENSED_PROMPTS = {
+    'yana': "You are Yana, Chief of Cabinet. Route tasks to departments. Be empathetic, concise. Default language: Russian.",
+    'osp': "You are OSP, Strategic Analysis Dept. Use 5-level topology (Leaves/Branches/Stem/Roots/Fruits). Mark claims [FACT]/[INTERPRETATION]/[SPECULATION]. Sherman Kent scale. Language: Russian.",
+    'lz': "You are LZ, Knowledge Lab. Monitor tech trends, breakthrough research. Structure: Signal->Impact->Opportunity. Cite sources. Language: Russian.",
+    'expert': "You are Expert, Technical Preparator. Brief prep, deep dives, meeting agendas. Extract key facts, risks, decisions. Concise bullets. Language: Russian.",
+    'marketing': "You are Marketing. Audience analysis, positioning, campaigns, conversion. Segment personas, A/B logic. ROI-focused. Language: Russian.",
+    'finance': "You are Finance. Budgets, cashflow, taxes, P&L. Precise numbers, scenarios, risk buffers. Tables preferred. Language: Russian.",
+    'legal': "You are Legal. Contracts, compliance, GDPR, NDA, IP. Flag risks, cite articles. Practical actionable advice. Language: Russian.",
+    'dev': "You are Dev. Architecture, APIs, deployment, code review. Modern stack, clean code principles. Code blocks with explanations. Language: Russian.",
+    'design': "You are Design. UI/UX, wireframes, design systems, user flows. Accessibility, mobile-first, consistency. Language: Russian.",
+    'qa': "You are QA. Testing strategies, bug triage, quality metrics. Test cases, regression plans, coverage. Language: Russian.",
+    'visual': "You are Visual. Infographics, data visualization, charts, presentations. Color theory, layout, clarity. Language: Russian.",
+    'engineering': "You are Engineering. Structural calculations, load analysis, SNiP compliance. Safety factors, materials, drawings. Language: Russian.",
+    'kavalnya': "You are Kavalnya. Methodology, department creation, polygon exercises. Frameworks, KPIs, org design. Language: Russian.",
+    'admin': "You are Admin, System Agent. Health checks, config management, system diagnostics. Technical, precise, actionable. Language: Russian.",
+}
+
+def get_dept_prompt(dept):
+    try:
+        f = LIB_DIR / f"{dept}.md"
+        if f.exists():
+            return f.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana'])
+
+# ──────────────────────────── CONFIG LOADING ────────────────────────────
+_cfg_cache = {"priority_provider": "zai", "priority_model": None, "overrides": {}}
+
+def _load_cfg():
+    try:
+        p = CFG_DIR / "priority_provider.txt"
+        if p.exists(): _cfg_cache["priority_provider"] = p.read_text().strip().split()[0]
+    except Exception: pass
+    try:
+        p = CFG_DIR / "priority_model.txt"
+        if p.exists(): _cfg_cache["priority_model"] = p.read_text().strip()
+    except Exception: pass
+    for dept in DEPT_NAMES:
+        try:
+            p = CFG_DIR / f"override_{dept}.txt"
+            if p.exists(): _cfg_cache["overrides"][dept] = p.read_text().strip()
+        except Exception: pass
+
+_load_cfg()
+
+# ──────────────────────────── SQLITE SETUP ────────────────────────────
+def _db():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+def init_db():
+    with db_lock:
+        c = _db()
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, html TEXT, created TEXT, title TEXT, raw_text TEXT DEFAULT '');
+        CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created TEXT);
+        CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, rating INT, created TEXT);
+        CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, model TEXT, tokens_in INT, tokens_out INT, cost REAL, dept TEXT, created TEXT);
+        CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, details TEXT, created TEXT);
+        CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, chat_id TEXT, role TEXT, content TEXT, created TEXT);
+        CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original TEXT, corrected TEXT, created TEXT, corr_type TEXT DEFAULT '');
+        CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, context TEXT, created TEXT);
+        CREATE TABLE IF NOT EXISTS system_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, value TEXT, updated TEXT);
+        CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT);
+        """)
+        c.commit(); c.close()
+
+init_db()
+
+def _query(sql, params=(), fetch=False):
+    with db_lock:
+        c = _db()
+        cur = c.execute(sql, params)
+        if fetch:
+            rows = cur.fetchall(); c.close(); return rows
+        c.commit(); c.close()
+
+def _log_audit(action, details_dict):
+    now = datetime.utcnow().isoformat()
+    _query("INSERT INTO audit_log (action,details,created) VALUES (?,?,?)",
+           (action, json.dumps(details_dict, ensure_ascii=False), now))
+
+# ──────────────────────────── HTML STRIP FOR ARCHIVE ────────────────────────────
+def strip_html_for_archive(html_content):
+    """Convert HTML badges to text markers and strip all tags for Telegram."""
+    text = html_content
+    # Convert badge spans with known classes to text markers
+    badge_map = {
+        'badge-fact': '[FACT]',
+        'badge-int': '[INTERPRETATION]',
+        'badge-spec': '[SPECULATION]',
+    }
+    for cls, marker in badge_map.items():
+        # Match <span class="badge badge-xxx">content</span>
+        pattern = r'<span[^>]*class="[^"]*\b' + re.escape(cls) + r'\b[^"]*"[^>]*>(.*?)</span>'
+        text = re.sub(pattern, marker + r' \1 ', text, flags=re.IGNORECASE | re.DOTALL)
+    # Also match class="badge badge-xxx" without space (single class)
+    for cls, marker in badge_map.items():
+        pattern2 = r'<span[^>]*class="' + re.escape(cls) + r'"[^>]*>(.*?)</span>'
+        text = re.sub(pattern2, marker + r' \1 ', text, flags=re.IGNORECASE | re.DOTALL)
+    # Remove all remaining HTML tags
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</p>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</div>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</li>', '\n- ', text, flags=re.IGNORECASE)
+    text = re.sub(r'<li[^>]*>', '- ', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    # Collapse whitespace
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n[ \t]+', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+# ──────────────────────────── LLM CALL ────────────────────────────
+def call_llm(dept, messages, model_override=None):
+    priority = _cfg_cache["priority_provider"]
+    model = model_override or _cfg_cache["overrides"].get(dept) or _cfg_cache["priority_model"] or "glm-4.6"
+    order = [p for p in [priority] + [k for k in PROVIDERS if k != priority] if p in PROVIDERS]
+    last_err = None
+    for prov_name in order:
+        prov = PROVIDERS[prov_name]
+        api_key = os.environ.get(prov["env_key"])
+        if not api_key:
+            continue
+        try:
+            use_model = model
+            if prov_name == "anthropic" and use_model.startswith("gpt"):
+                use_model = "claude-sonnet-4-20250514"
+            elif prov_name == "deepseek" and not use_model.startswith("deepseek"):
+                use_model = "deepseek-chat"
+            elif prov_name == "groq" and not any(m in use_model for m in ("llama", "mixtral", "gemma")):
+                use_model = "llama-3.3-70b-versatile"
+
+            if prov["format"] == "openai":
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                body = {"model": use_model, "messages": messages, "temperature": 0.7}
+            else:
+                sys_msg = ""
+                user_msgs = []
+                for m in messages:
+                    if m["role"] == "system": sys_msg = m["content"]
+                    else: user_msgs.append(m)
+                headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+                body = {"model": use_model, "max_tokens": 4096, "system": sys_msg, "messages": user_msgs}
+
+            resp = http_requests.post(prov["url"], headers=headers, json=body, timeout=prov["timeout"])
+            resp.raise_for_status()
+            data = resp.json()
+
+            if prov["format"] == "openai":
+                reply = data["choices"][0]["message"]["content"]
+                t_in = data.get("usage", {}).get("prompt_tokens", 0)
+                t_out = data.get("usage", {}).get("completion_tokens", 0)
+            else:
+                reply = data["content"][0]["text"]
+                t_in = data.get("usage", {}).get("input_tokens", 0)
+                t_out = data.get("usage", {}).get("output_tokens", 0)
+
+            costs = TOKEN_COSTS.get(prov_name, {"input": 1, "output": 1})
+            cost = t_in * costs["input"] / 1_000_000 + t_out * costs["output"] / 1_000_000
+            now = datetime.utcnow().isoformat()
+            _query("INSERT INTO token_usage (provider,model,tokens_in,tokens_out,cost,dept,created) VALUES (?,?,?,?,?,?,?)",
+                   (prov_name, use_model, t_in, t_out, round(cost, 6), dept, now))
+            _query("INSERT INTO audit_log (action,details,created) VALUES (?,?,?)",
+                   ("llm_call", json.dumps({"dept": dept, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out}), now))
+            log.info(f"LLM ok: provider={prov_name} model={use_model} dept={dept} t_in={t_in} t_out={t_out}")
+            return {"reply": reply, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out}
+        except Exception as e:
+            last_err = str(e)
+            log.warning(f"LLM fail: provider={prov_name} err={last_err}")
+    return {"reply": f"[Oshibka] Vse providery nedostupny: {last_err}", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}
+
+# ──────────────────────────── TELEGRAM HELPERS ────────────────────────────
+def _tg_send_message(chat_id, text, parse_mode=None):
+    """Send a text message via Telegram Bot API."""
+    if not TELEGRAM_BOT_TOKEN:
+        log.warning("TELEGRAM_BOT_TOKEN not set, cannot send message")
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        resp = http_requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            return data["result"].get("message_id")
+    except Exception as e:
+        log.error(f"Telegram sendMessage failed: {e}")
+    return None
+
+def _tg_send_voice(chat_id, voice_path):
+    """Send a voice file via Telegram Bot API using multipart upload."""
+    if not TELEGRAM_BOT_TOKEN:
+        log.warning("TELEGRAM_BOT_TOKEN not set, cannot send voice")
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice"
+    try:
+        with open(voice_path, "rb") as f:
+            resp = http_requests.post(url, data={"chat_id": chat_id}, files={"voice": f}, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            return data["result"].get("message_id")
+    except Exception as e:
+        log.error(f"Telegram sendVoice failed: {e}")
+    return None
+
+def _tg_send_report_with_button(chat_id, text, button_text="Otkryt otchet", button_url=None):
+    """Send text with an inline button via Telegram Bot API."""
+    if not TELEGRAM_BOT_TOKEN:
+        log.warning("TELEGRAM_BOT_TOKEN not set, cannot send report")
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    reply_markup = {
+        "inline_keyboard": [[{"text": button_text, "url": button_url or "https://t.me/FosvedMiniApp"}]]
+    }
+    payload = {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
+    try:
+        resp = http_requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            return data["result"].get("message_id")
+    except Exception as e:
+        log.error(f"Telegram sendReport failed: {e}")
+    return None
+
+def _tg_get_file(file_id):
+    """Get file path from Telegram Bot API given a file_id."""
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
+    try:
+        resp = http_requests.get(url, params={"file_id": file_id}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok") and data.get("result", {}).get("file_path"):
+            return data["result"]["file_path"]
+    except Exception as e:
+        log.error(f"Telegram getFile failed: {e}")
+    return None
+
+def _tg_download_file(file_path):
+    """Download a file from Telegram Bot API given its file_path."""
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+    try:
+        resp = http_requests.get(url, timeout=60)
+        resp.raise_for_status()
+        return resp.content
+    except Exception as e:
+        log.error(f"Telegram file download failed: {e}")
+    return None
+
+# ──────────────────────────── MEMORIZE HELPER ────────────────────────────
+def _memorize(dept, topic, content):
+    """Save a finding to dialog_history as a system memorization entry."""
+    now = datetime.utcnow().isoformat()
+    entry = f"[MEMORY] {topic}: {content}"
+    _query("INSERT INTO dialog_history (dept, chat_id, role, content, created) VALUES (?, '0', 'system', ?, ?)",
+           (dept, entry, now))
+
+# ──────────────────────────── HTML HELPERS ────────────────────────────
+def _html_base(title, bg="#0F0F0F"):
+    return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<title>{title}</title><style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'DM Sans',system-ui,sans-serif;background:{bg};color:#F8F7F4;min-height:100vh}}
+h1,h2,h3{{font-family:'Cormorant Garamond',serif;font-weight:700}}
+.badge{{font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;border-radius:4px;display:inline-block}}
+.badge-fact{{background:#16a34a22;color:#16a34a}} .badge-int{{background:#2563eb22;color:#2563eb}}
+.badge-spec{{background:#ca8a0422;color:#ca8a04}}
+.card{{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;padding:20px}}
+.kpi{{text-align:center;padding:16px}} .kpi .num{{font-size:2rem;font-weight:700;font-family:'DM Mono',monospace}}
+.kpi .lbl{{font-size:0.75rem;color:#999;margin-top:4px;text-transform:uppercase;letter-spacing:1px}}
+.gold{{color:#C9A84C}} .status-red{{color:#E24B4A}} .status-yellow{{color:#EF9F27}} .status-green{{color:#639922}} .status-blue{{color:#185FA5}}
+table{{width:100%;border-collapse:collapse;margin:12px 0}} th,td{{text-align:left;padding:8px 12px;border-bottom:1px solid #2a2a2a;font-size:0.85rem}}
+th{{color:#999;font-weight:500;text-transform:uppercase;font-size:0.7rem;letter-spacing:1px}}
+a{{color:#C9A84C;text-decoration:none}} a:hover{{text-decoration:underline}}
+.grid{{display:grid;gap:16px}} .grid-3{{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}}
+.grid-4{{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}}
+.header-grad{{padding:32px 40px;border-radius:16px;margin:20px 24px;color:#fff}}
+.section{{padding:0 24px;margin-top:24px}} .section h2{{margin-bottom:16px;font-size:1.4rem}}
+.mono{{font-family:'DM Mono',monospace}}
+</style></head><body>"""
+
+def _dept_header(dept, title_extra=""):
+    c = DEPT_COLORS.get(dept, DEPT_COLORS['admin'])
+    name = DEPT_NAMES.get(dept, dept)
+    return f'<div class="header-grad" style="background:linear-gradient(135deg,{c["start"]},{c["end"]})">' \
+           f'<h1>{name} {title_extra}</h1><p style="color:{c["accent"]};font-size:0.9rem;margin-top:8px">Department Dashboard</p></div>'
+
+def _status_icon(level):
+    colors = {"high": "#639922", "medium": "#EF9F27", "low": "#E24B4A"}
+    return f'<span style="color:{colors.get(level,"#999")};font-size:1.5rem">{"&#x1F7E2;" if level=="high" else "&#x1F7E1;" if level=="medium" else "&#x1F534;"}</span>'
+
+def _dept_kpis(dept):
+    now = datetime.utcnow()
+    week_ago = (now - timedelta(days=7)).isoformat()
+    rows_m = _query("SELECT COUNT(*) as c, COALESCE(AVG(rating),0) as avg_r FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+    rows_t = _query("SELECT COALESCE(SUM(tokens_in),0) as ti, COALESCE(SUM(tokens_out),0) as to2 FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+    rows_d = _query("SELECT COUNT(*) as c FROM dialog_history WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+    m = rows_m[0] if rows_m else {"c": 0, "avg_r": 0}
+    t = rows_t[0] if rows_t else {"ti": 0, "to2": 0}
+    d = rows_d[0] if rows_d else {"c": 0}
+    return f"""<div class="grid grid-4" style="margin:20px 24px">
+<div class="card kpi"><div class="num gold">{m['c']}</div><div class="lbl">Reiting / ned</div></div>
+<div class="card kpi"><div class="num" style="color:#16a34a">{m['avg_r']:.1f}</div><div class="lbl">Sr. otsenka</div></div>
+<div class="card kpi"><div class="num status-blue">{(t['ti']+t['to2']):,}</div><div class="lbl">Tokeny / ned</div></div>
+<div class="card kpi"><div class="num">{d['c']}</div><div class="lbl">Dialogi / ned</div></div></div>"""
+
+# ══════════════════════════════════════════════════════════════════════
+#  ROUTES — ORIGINAL ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════
+
+@app.get("/health")
+def health():
+    return "ok"
+
+@app.post("/detect-dept")
+def detect_dept_endpoint():
+    d = request.get_json(force=True)
+    text = d.get("text", "")
+    dept = detect_dept(text)
+    return jsonify({"dept": dept})
+
+@app.post("/ask")
+def ask():
+    d = request.get_json(force=True)
+    dept = d.get("dept", "yana")
+    messages = d.get("messages", [])
+    model_ov = d.get("model")
+    if not messages:
+        return jsonify({"reply": "[Oshibka] Net soobshenii", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 400
+    result = call_llm(dept, messages, model_ov)
+    return jsonify(result)
+
+@app.post("/rate_cmd")
+def rate_cmd():
+    d = request.get_json(force=True)
+    dept, rating = d.get("dept", "yana"), d.get("rating", 0)
+    _query("INSERT INTO dept_metrics (dept,rating,created) VALUES (?,?,?)", (dept, rating, datetime.utcnow().isoformat()))
+    return jsonify({"status": "ok"})
+
+@app.post("/context_cmd")
+def context_cmd():
+    d = request.get_json(force=True)
+    dept, chat_id = d.get("dept", "yana"), d.get("chat_id", "0")
+    rows = _query("SELECT role,content,created FROM dialog_history WHERE dept=? AND chat_id=? ORDER BY id DESC LIMIT 20", (dept, chat_id), fetch=True)
+    corrs = _query("SELECT original,corrected,created FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 10", (dept,), fetch=True)
+    ctx = {"dialog": [{"role": r["role"], "content": r["content"], "ts": r["created"]} for r in reversed(rows)]}
+    ctx["corrections"] = [{"original": r["original"], "corrected": r["corrected"], "ts": r["created"]} for r in corrs]
+    return jsonify(ctx)
+
+@app.post("/voice-set")
+def voice_set():
+    d = request.get_json(force=True)
+    _log_audit("voice_set", d)
+    return jsonify({"status": "ok"})
+
+@app.post("/archive/digest")
+def archive_digest():
+    d = request.get_json(force=True)
+    _log_audit("digest", d)
+    return jsonify({"status": "ok", "digest_id": hashlib.md5(json.dumps(d).encode()).hexdigest()[:8]})
+
+@app.get("/miniapp/<doc_id>")
+def miniapp_get(doc_id):
+    rows = _query("SELECT html,title,created FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
+    if not rows:
+        return "<h1>Not found</h1>", 404
+    r = rows[0]
+    return Response(r["html"], mimetype="text/html")
+
+@app.post("/miniapp/note")
+def miniapp_note():
+    d = request.get_json(force=True)
+    _query("INSERT INTO miniapp_notes (doc_id,note_text,created) VALUES (?,?,?)",
+           (d.get("doc_id", ""), d.get("note_text", ""), datetime.utcnow().isoformat()))
+    return jsonify({"status": "ok"})
+
+@app.get("/dept-dashboard/<slug>")
+def dept_dashboard(slug):
+    dept = slug.lower()
+    if dept not in DEPT_NAMES:
+        return "<h1>Unknown department</h1>", 404
+    rows_corr = _query("SELECT original,corrected,created FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
+    override = _cfg_cache["overrides"].get(dept, "default")
+    html = _html_base(f"Dashboard — {DEPT_NAMES[dept]}")
+    html += _dept_header(dept)
+    html += _dept_kpis(dept)
+    html += '<div class="section"><h2>Poslednie korrektirovki</h2>'
+    if rows_corr:
+        html += '<table><tr><th>Original</th><th>Korrektirovka</th><th>Data</th></tr>'
+        for r in rows_corr:
+            html += f'<tr><td>{r["original"][:80]}</td><td>{r["corrected"][:80]}</td><td class="mono">{r["created"][:16]}</td></tr>'
+        html += '</table>'
+    else:
+        html += '<p style="color:#666">Net korrektirovok</p>'
+    html += '</div>'
+    html += '<div class="section"><h2>Konfiguratsiya</h2>'
+    html += f'<div class="card"><p>Model: <span class="mono gold">{override}</span></p>'
+    html += f'<p>Provider: <span class="mono gold">{_cfg_cache["priority_provider"]}</span></p></div></div>'
+    html += '</body></html>'
+    return Response(html, mimetype="text/html")
+
+@app.get("/office-dashboard")
+def office_dashboard():
+    now = datetime.utcnow()
+    today = now.isoformat()[:10]
+    week_ago = (now - timedelta(days=7)).isoformat()
+    month_ago = (now - timedelta(days=30)).isoformat()
+    r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (today,), fetch=True)
+    r_week = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (week_ago,), fetch=True)
+    r_month = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (month_ago,), fetch=True)
+    r_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (month_ago,), fetch=True)
+    n_today = r_today[0]["c"] if r_today else 0
+    n_week = r_week[0]["c"] if r_week else 0
+    n_month = r_month[0]["c"] if r_month else 0
+    cost_month = r_cost[0]["t"] if r_cost else 0
+
+    html = _html_base("Fosved Office — Panel upravleniya")
+    html += '<div class="header-grad" style="background:linear-gradient(135deg,#1a1a2e,#16213e)"><h1>Fosved Office v2</h1>'
+    html += f'<p style="color:#C9A84C;margin-top:8px">Obzor za {today} &nbsp;|&nbsp; Provider: <span class="mono">{_cfg_cache["priority_provider"]}</span> &nbsp;|&nbsp; Model: <span class="mono">{_cfg_cache["priority_model"] or "auto"}</span></p></div>'
+    html += f"""<div class="grid grid-4" style="margin:20px 24px">
+<div class="card kpi"><div class="num gold">{n_today}</div><div class="lbl">Vyzovov segodnya</div></div>
+<div class="card kpi"><div class="num status-blue">{n_week}</div><div class="lbl">Za nedelyu</div></div>
+<div class="card kpi"><div class="num">{n_month}</div><div class="lbl">Za mesyats</div></div>
+<div class="card kpi"><div class="num status-green">${cost_month:.2f}</div><div class="lbl">Stoimost / mes</div></div></div>"""
+
+    html += '<div class="section"><h2>Departamenty</h2><div class="grid grid-3">'
+    depts = [d for d in DEPT_NAMES if d != "admin"]
+    for dept in depts:
+        c = DEPT_COLORS[dept]
+        r_d = _query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+        r_m = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+        calls = r_d[0]["c"] if r_d else 0
+        rating = r_m[0]["a"] if r_m else 0
+        level = "high" if calls > 10 else "medium" if calls > 0 else "low"
+        ov = _cfg_cache["overrides"].get(dept)
+        html += f"""<div class="card" style="border-left:4px solid {c['accent']}">
+<h3 style="font-size:1rem">{_status_icon(level)} {DEPT_NAMES[dept]}</h3>
+<p class="mono" style="margin-top:8px;font-size:0.8rem;color:#999">Vyzovy: {calls} &nbsp; Otsenka: {rating:.1f}/5</p>
+<p class="mono" style="font-size:0.7rem;color:#666;margin-top:4px">Model: {ov or 'default'}</p>
+<a href="/dept-dashboard/{dept}" style="font-size:0.75rem;display:inline-block;margin-top:8px">Otkryt -&gt;</a></div>"""
+    html += '</div></div>'
+
+    audit_rows = _query("SELECT action,details,created FROM audit_log ORDER BY id DESC LIMIT 10", fetch=True)
+    html += '<div class="section"><h2>Zhurnal</h2><table><tr><th>Deistvie</th><th>Detali</th><th>Vremya</th></tr>'
+    for r in audit_rows:
+        det = r["details"][:100] if r["details"] else ""
+        html += f'<tr><td class="mono">{r["action"]}</td><td style="color:#999;font-size:0.8rem">{det}</td><td class="mono" style="font-size:0.8rem">{r["created"][:19]}</td></tr>'
+    html += '</table></div>'
+
+    prov_rows = _query("SELECT provider,COUNT(*) as c,COALESCE(SUM(cost),0) as cost FROM token_usage WHERE created>=? GROUP BY provider", (month_ago,), fetch=True)
+    html += '<div class="section"><h2>Providery (mesyats)</h2><table><tr><th>Provider</th><th>Vyzovy</th><th>Stoimost</th></tr>'
+    for r in prov_rows:
+        html += f'<tr><td class="mono gold">{r["provider"]}</td><td>{r["c"]}</td><td class="mono">${r["cost"]:.2f}</td></tr>'
+    html += '</table></div></body></html>'
+    return Response(html, mimetype="text/html")
+
+# ══════════════════════════════════════════════════════════════════════
+#  MEGA-3: TTS ENDPOINT
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/tts")
+def tts_endpoint():
+    """Text-to-speech via edge-tts, send voice to Telegram."""
+    d = request.get_json(force=True)
+    text = d.get("text", "")
+    voice = d.get("voice", "ru-RU-DmitryNeural")
+    chat_id = d.get("chat_id", "")
+
+    if not text:
+        return jsonify({"status": "error", "message": "text is required"}), 400
+    if not chat_id:
+        return jsonify({"status": "error", "message": "chat_id is required"}), 400
+
+    timestamp = int(time.time())
+    tmp_path = f"/tmp/tts_{timestamp}_{uuid.uuid4().hex[:6]}.mp3"
+
+    try:
+        # Run edge-tts subprocess
+        cmd = [
+            "edge-tts",
+            "--voice", voice,
+            "--text", text,
+            "--write-media", tmp_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            log.error(f"edge-tts failed: {result.stderr}")
+            _log_audit("tts_error", {"voice": voice, "error": result.stderr[:500]})
+            return jsonify({"status": "error", "message": "edge-tts synthesis failed", "detail": result.stderr[:500]}), 500
+
+        # Send voice to Telegram
+        msg_id = _tg_send_voice(chat_id, tmp_path)
+
+        _log_audit("tts", {"chat_id": chat_id, "voice": voice, "text_len": len(text), "tg_msg_id": msg_id})
+
+        return jsonify({"status": "ok", "msg_id": msg_id})
+
+    except FileNotFoundError:
+        _log_audit("tts_error", {"error": "edge-tts not installed"})
+        return jsonify({"status": "error", "message": "edge-tts binary not found"}), 500
+    except subprocess.TimeoutExpired:
+        _log_audit("tts_error", {"error": "timeout"})
+        return jsonify({"status": "error", "message": "TTS synthesis timeout"}), 500
+    except Exception as e:
+        log.error(f"TTS error: {e}")
+        _log_audit("tts_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        # Clean up temp file
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+# ══════════════════════════════════════════════════════════════════════
+#  MEGA-3: STT (WHISPER) ENDPOINT
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/stt")
+def stt_endpoint():
+    """Speech-to-text via Whisper (Groq preferred, OpenAI fallback)."""
+    d = request.get_json(force=True)
+    file_id = d.get("file_id", "")
+
+    if not file_id:
+        return jsonify({"status": "error", "message": "file_id is required"}), 400
+
+    provider = WHISPER_PROVIDER
+    audio_data = None
+
+    try:
+        # Step 1: Get file path from Telegram
+        file_path = _tg_get_file(file_id)
+        if not file_path:
+            _log_audit("stt_error", {"error": "could not get file path from Telegram", "file_id": file_id})
+            return jsonify({"status": "error", "message": "Failed to get file from Telegram"}), 400
+
+        # Step 2: Download audio from Telegram
+        audio_data = _tg_download_file(file_path)
+        if not audio_data:
+            _log_audit("stt_error", {"error": "could not download file from Telegram", "file_path": file_path})
+            return jsonify({"status": "error", "message": "Failed to download audio from Telegram"}), 400
+
+        # Step 3: Transcribe via Whisper
+        if provider == "groq":
+            api_key = os.environ.get("GROQ_API_KEY", WHISPER_API_KEY)
+            url = "https://api.groq.com/openai/v1/audio/transcriptions"
+            model = "whisper-large-v3"
+        else:
+            api_key = os.environ.get("OPENAI_API_KEY", WHISPER_API_KEY)
+            url = "https://api.openai.com/v1/audio/transcriptions"
+            model = "whisper-1"
+
+        # Prepare multipart form
+        files = {
+            "file": ("audio.ogg", bytes(audio_data), "audio/ogg"),
+        }
+        data = {"model": model}
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+        resp = http_requests.post(url, headers=headers, files=files, data=data, timeout=60)
+        resp.raise_for_status()
+        resp_data = resp.json()
+        transcribed_text = resp_data.get("text", "")
+
+        _log_audit("stt", {"file_id": file_id, "provider": provider, "model": model, "text_len": len(transcribed_text)})
+
+        return jsonify({"status": "ok", "text": transcribed_text, "provider": provider})
+
+    except Exception as e:
+        log.error(f"STT error (provider={provider}): {e}")
+        # Try fallback provider if primary failed
+        if provider == "groq" and audio_data:
+            try:
+                fallback_key = os.environ.get("OPENAI_API_KEY", "")
+                if not fallback_key:
+                    raise ValueError("No OpenAI API key for fallback")
+                files = {"file": ("audio.ogg", bytes(audio_data), "audio/ogg")}
+                data = {"model": "whisper-1"}
+                headers = {"Authorization": f"Bearer {fallback_key}"}
+                resp = http_requests.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=60)
+                resp.raise_for_status()
+                resp_data = resp.json()
+                transcribed_text = resp_data.get("text", "")
+                _log_audit("stt", {"file_id": file_id, "provider": "openai", "model": "whisper-1", "text_len": len(transcribed_text), "fallback": True})
+                return jsonify({"status": "ok", "text": transcribed_text, "provider": "openai"})
+            except Exception as fallback_err:
+                log.error(f"STT fallback also failed: {fallback_err}")
+
+        _log_audit("stt_error", {"error": str(e)[:500], "file_id": file_id})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ══════════════════════════════════════════════════════════════════════
+#  MEGA-3: ARCHIVE ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/archive/publish")
+def archive_publish():
+    """Publish a document to the Telegram archive channel."""
+    d = request.get_json(force=True)
+    doc_id = d.get("doc_id", "")
+    dept = d.get("dept", "")
+    title = d.get("title", "")
+    content = d.get("content", "")
+
+    if not content:
+        return jsonify({"status": "error", "message": "content is required"}), 400
+    if not TELEGRAM_ARCHIVE_CHANNEL_ID:
+        return jsonify({"status": "error", "message": "TELEGRAM_ARCHIVE_CHANNEL_ID not set"}), 500
+
+    try:
+        # Strip HTML, convert badges to text markers
+        plain = strip_html_for_archive(content)
+
+        # Add dept hashtags
+        hashtags = DEPT_HASHTAGS.get(dept, "")
+        if hashtags:
+            plain = plain + "\n\n" + hashtags
+
+        # Truncate to 3800 chars for Telegram limit
+        if len(plain) > 3800:
+            plain = plain[:3790] + "..."
+
+        # Send to archive channel
+        msg_id = _tg_send_message(TELEGRAM_ARCHIVE_CHANNEL_ID, plain)
+
+        # Record in channel_archive table
+        now = datetime.utcnow().isoformat()
+        _query("INSERT INTO channel_archive (doc_id, dept, title, channel_message_id, archived_at) VALUES (?,?,?,?,?)",
+               (doc_id, dept, title, str(msg_id) if msg_id else "", now))
+
+        _log_audit("archive_publish", {"doc_id": doc_id, "dept": dept, "title": title, "msg_id": msg_id, "chars": len(plain)})
+
+        return jsonify({"status": "ok", "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"archive_publish error: {e}")
+        _log_audit("archive_publish_error", {"error": str(e)[:500], "doc_id": doc_id})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/archive/daily-digest")
+def archive_daily_digest():
+    """Collect today's stats and send a digest to the archive channel."""
+    try:
+        if not TELEGRAM_ARCHIVE_CHANNEL_ID:
+            return jsonify({"status": "error", "message": "TELEGRAM_ARCHIVE_CHANNEL_ID not set"}), 500
+
+        now = datetime.utcnow()
+        today = now.isoformat()[:10]
+        today_start = today + "T00:00:00"
+
+        # Collect today's stats
+        tasks_rows = _query("SELECT dept, COUNT(*) as c FROM dialog_history WHERE created>=? AND role='user' GROUP BY dept", (today_start,), fetch=True)
+        reports_rows = _query("SELECT dept, COUNT(*) as c FROM miniapp_responses WHERE created>=? GROUP BY dept", (today_start,), fetch=True)
+        corrections_rows = _query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created>=? GROUP BY dept", (today_start,), fetch=True)
+
+        # Build digest text
+        lines = []
+        lines.append(f"DAILY DIGEST - {today}")
+        lines.append("=" * 40)
+        lines.append("")
+
+        # Task breakdown
+        total_tasks = sum(r["c"] for r in tasks_rows)
+        lines.append(f"TASKS: {total_tasks} total")
+        for r in sorted(tasks_rows, key=lambda x: -x["c"]):
+            dept_name = DEPT_NAMES.get(r["dept"], r["dept"])
+            lines.append(f"  {dept_name}: {r['c']}")
+        lines.append("")
+
+        # Reports
+        total_reports = sum(r["c"] for r in reports_rows)
+        lines.append(f"REPORTS: {total_reports} total")
+        for r in sorted(reports_rows, key=lambda x: -x["c"]):
+            dept_name = DEPT_NAMES.get(r["dept"], r["dept"])
+            lines.append(f"  {dept_name}: {r['c']}")
+        lines.append("")
+
+        # Corrections
+        total_corrections = sum(r["c"] for r in corrections_rows)
+        lines.append(f"CORRECTIONS: {total_corrections} total")
+        for r in sorted(corrections_rows, key=lambda x: -x["c"]):
+            dept_name = DEPT_NAMES.get(r["dept"], r["dept"])
+            lines.append(f"  {dept_name}: {r['c']}")
+
+        digest_text = "\n".join(lines)
+
+        msg_id = _tg_send_message(TELEGRAM_ARCHIVE_CHANNEL_ID, digest_text)
+        _log_audit("archive_daily_digest", {"date": today, "tasks": total_tasks, "reports": total_reports, "corrections": total_corrections, "msg_id": msg_id})
+
+        return jsonify({"status": "ok", "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"archive_daily_digest error: {e}")
+        _log_audit("archive_daily_digest_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ══════════════════════════════════════════════════════════════════════
+#  MEGA-3: SCHEDULER ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════
+
+def _collect_metrics_for_period(start_iso, end_iso=None):
+    """Collect metrics for a given time period."""
+    conditions = "created >= ?"
+    params = [start_iso]
+    if end_iso:
+        conditions += " AND created < ?"
+        params.append(end_iso)
+
+    tasks = _query(f"SELECT dept, COUNT(*) as c FROM dialog_history WHERE {conditions} AND role='user' GROUP BY dept", params, fetch=True)
+    reports = _query(f"SELECT dept, COUNT(*) as c FROM miniapp_responses WHERE {conditions} GROUP BY dept", params, fetch=True)
+    corrections = _query(f"SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE {conditions} GROUP BY dept", params, fetch=True)
+    ratings = _query(f"SELECT dept, COALESCE(AVG(rating),0) as avg_r, COUNT(*) as c FROM dept_metrics WHERE {conditions} GROUP BY dept", params, fetch=True)
+    tokens = _query(f"SELECT dept, COALESCE(SUM(tokens_in),0) as ti, COALESCE(SUM(tokens_out),0) as to2, COALESCE(SUM(cost),0) as cost FROM token_usage WHERE {conditions} GROUP BY dept", params, fetch=True)
+
+    return {
+        "tasks": {r["dept"]: r["c"] for r in tasks},
+        "reports": {r["dept"]: r["c"] for r in reports},
+        "corrections": {r["dept"]: r["c"] for r in corrections},
+        "ratings": {r["dept"]: {"avg": r["avg_r"], "count": r["c"]} for r in ratings},
+        "tokens": {r["dept"]: {"in": r["ti"], "out": r["to2"], "cost": r["cost"]} for r in tokens},
+    }
+
+def _format_metrics_text(metrics):
+    """Format metrics dict as readable text for LLM prompt."""
+    lines = []
+    lines.append("METRICS:")
+    all_depts = set(list(metrics["tasks"].keys()) + list(metrics["reports"].keys()) + list(metrics["corrections"].keys()) + list(metrics["ratings"].keys()))
+    for dept in sorted(all_depts):
+        name = DEPT_NAMES.get(dept, dept)
+        parts = [f"{name}:"]
+        if dept in metrics["tasks"]:
+            parts.append(f"tasks={metrics['tasks'][dept]}")
+        if dept in metrics["reports"]:
+            parts.append(f"reports={metrics['reports'][dept]}")
+        if dept in metrics["corrections"]:
+            parts.append(f"corrections={metrics['corrections'][dept]}")
+        if dept in metrics["ratings"]:
+            r = metrics["ratings"][dept]
+            parts.append(f"avg_rating={r['avg']:.1f} (n={r['count']})")
+        if dept in metrics["tokens"]:
+            t = metrics["tokens"][dept]
+            parts.append(f"tokens={t['in']+t['out']} cost=${t['cost']:.2f}")
+        lines.append("  " + " ".join(parts))
+    return "\n".join(lines)
+
+@app.post("/scheduler/morning-brief")
+def scheduler_morning_brief():
+    """Generate and send a morning brief to the owner."""
+    d = request.get_json(force=True)
+    owner_id = d.get("owner_id", "")
+
+    if not owner_id:
+        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+
+    try:
+        now = datetime.utcnow()
+        yesterday = (now - timedelta(days=1)).isoformat()[:10] + "T00:00:00"
+        today = now.isoformat()[:10] + "T00:00:00"
+
+        metrics = _collect_metrics_for_period(yesterday, today)
+        metrics_text = _format_metrics_text(metrics)
+
+        dept_prompt = get_dept_prompt("yana")
+        messages = [
+            {"role": "system", "content": dept_prompt + "\n\nYou are generating a morning brief for the office owner. Be concise, highlight key events overnight, flag issues. Format in Russian."},
+            {"role": "user", "content": f"Sformirui utrennii brief za proshlou noch' i rannoe utro.\n\n{metrics_text}\n\nOzhidai: korotkii brief na 3-5 punktov."},
+        ]
+
+        result = call_llm("yana", messages)
+        brief = result["reply"]
+
+        msg_id = _tg_send_message(owner_id, brief)
+        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+
+        return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"morning_brief error: {e}")
+        _log_audit("scheduler_morning_brief_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/scheduler/evening-summary")
+def scheduler_evening_summary():
+    """Generate and send an evening summary, plus publish daily digest to archive."""
+    d = request.get_json(force=True)
+    owner_id = d.get("owner_id", "")
+
+    if not owner_id:
+        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+
+    try:
+        now = datetime.utcnow()
+        today = now.isoformat()[:10] + "T00:00:00"
+
+        metrics = _collect_metrics_for_period(today)
+        metrics_text = _format_metrics_text(metrics)
+
+        dept_prompt = get_dept_prompt("yana")
+        messages = [
+            {"role": "system", "content": dept_prompt + "\n\nYou are generating an evening summary for the office owner. Review the day's performance, highlight achievements and issues. Format in Russian."},
+            {"role": "user", "content": f"Sformirui vechernii itog za segodnyashnii den'.\n\n{metrics_text}\n\nOzhidai: korotkii itog na 5-8 punktov s rekomendatsiyami."},
+        ]
+
+        result = call_llm("yana", messages)
+        summary = result["reply"]
+
+        # Send to owner
+        msg_id = _tg_send_message(owner_id, summary)
+
+        # Publish daily digest to archive channel
+        if TELEGRAM_ARCHIVE_CHANNEL_ID:
+            tasks_total = sum(metrics["tasks"].values())
+            reports_total = sum(metrics["reports"].values())
+            corrections_total = sum(metrics["corrections"].values())
+            digest_lines = [
+                f"DAILY DIGEST - {now.isoformat()[:10]}",
+                "=" * 40,
+                f"Tasks: {tasks_total}",
+                f"Reports: {reports_total}",
+                f"Corrections: {corrections_total}",
+            ]
+            digest_text = "\n".join(digest_lines)
+            _tg_send_message(TELEGRAM_ARCHIVE_CHANNEL_ID, digest_text)
+
+        _log_audit("scheduler_evening_summary", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+
+        return jsonify({"status": "ok", "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"evening_summary error: {e}")
+        _log_audit("scheduler_evening_summary_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/scheduler/weekly-digest")
+def scheduler_weekly_digest():
+    """Generate a weekly digest per department and send via Telegram."""
+    d = request.get_json(force=True)
+    owner_id = d.get("owner_id", "")
+
+    if not owner_id:
+        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+
+    try:
+        now = datetime.utcnow()
+        week_ago = (now - timedelta(days=7)).isoformat()
+
+        metrics = _collect_metrics_for_period(week_ago)
+        metrics_text = _format_metrics_text(metrics)
+
+        dept_prompt = get_dept_prompt("yana")
+        messages = [
+            {"role": "system", "content": dept_prompt + "\n\nYou are generating a weekly digest for the office owner. Summarize per-department performance, trends, and recommendations. Format in Russian."},
+            {"role": "user", "content": f"Sformirui ezhenedelnyi digest za proshlou nedelyu.\n\n{metrics_text}\n\nOzhidai: detalnyi digest po departamentam s rekomendatsiyami."},
+        ]
+
+        result = call_llm("yana", messages)
+        digest = result["reply"]
+
+        # Send via SendReport (if > 800 chars, use Mini App button)
+        if len(digest) > 800:
+            msg_id = _tg_send_report_with_button(owner_id, digest)
+        else:
+            msg_id = _tg_send_message(owner_id, digest)
+
+        _log_audit("scheduler_weekly_digest", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id, "chars": len(digest)})
+
+        return jsonify({"status": "ok", "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"weekly_digest error: {e}")
+        _log_audit("scheduler_weekly_digest_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/scheduler/monthly-review")
+def scheduler_monthly_review():
+    """Generate a monthly review per department."""
+    d = request.get_json(force=True)
+    owner_id = d.get("owner_id", "")
+
+    if not owner_id:
+        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+
+    try:
+        now = datetime.utcnow()
+        month_ago = (now - timedelta(days=30)).isoformat()
+
+        metrics = _collect_metrics_for_period(month_ago)
+        metrics_text = _format_metrics_text(metrics)
+
+        dept_prompt = get_dept_prompt("yana")
+        messages = [
+            {"role": "system", "content": dept_prompt + "\n\nYou are generating a monthly review for the office owner. Analyze per-department performance: tasks completed, average ratings, correction frequency. Identify trends and action items. Format in Russian."},
+            {"role": "user", "content": f"Sformirui ezhemesyachnyi obzor za proshlyi mesyats.\n\n{metrics_text}\n\nOzhidai: analiz po departamentam s planom deistvii."},
+        ]
+
+        result = call_llm("yana", messages)
+        review = result["reply"]
+
+        msg_id = _tg_send_report_with_button(owner_id, review)
+
+        _log_audit("scheduler_monthly_review", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+
+        return jsonify({"status": "ok", "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"monthly_review error: {e}")
+        _log_audit("scheduler_monthly_review_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/scheduler/control-check")
+def scheduler_control_check():
+    """Check control predictions against current reality."""
+    d = request.get_json(force=True)
+    owner_id = d.get("owner_id", "")
+
+    if not owner_id:
+        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+
+    try:
+        # Get all control_* keys from system_settings
+        controls = _query("SELECT key, value FROM system_settings WHERE key LIKE 'control_%'", fetch=True)
+
+        if not controls:
+            _tg_send_message(owner_id, "No control predictions found in system_settings.")
+            _log_audit("scheduler_control_check", {"owner_id": owner_id, "found": 0})
+            return jsonify({"status": "ok", "checked": 0})
+
+        results = []
+        osp_prompt = get_dept_prompt("osp")
+
+        for ctrl in controls:
+            key = ctrl["key"]
+            value = ctrl["value"]
+            try:
+                ctrl_data = json.loads(value) if isinstance(value, str) else value
+            except (json.JSONDecodeError, TypeError):
+                ctrl_data = {"raw": value}
+
+            frequency = ctrl_data.get("frequency", "daily")
+            topic = ctrl_data.get("topic", key)
+            original_prediction = ctrl_data.get("prediction", ctrl_data.get("original", str(value)))
+
+            # For daily controls, compare prediction with current reality via LLM
+            if frequency == "daily":
+                messages = [
+                    {"role": "system", "content": osp_prompt + "\n\nYou are performing a control check. Compare the original prediction with the current situation. Be brief, 2-3 sentences. Format in Russian."},
+                    {"role": "user", "content": f"Control check: {topic}\n\nOriginal prediction: {original_prediction}\n\nAnalyze: did the prediction match reality? What changed?\n\nOzhidai: korotkii analiz 2-3 predlozheniya."},
+                ]
+                check_result = call_llm("osp", messages)
+                analysis = check_result["reply"]
+                results.append({"key": key, "topic": topic, "frequency": frequency, "analysis": analysis})
+
+        # Format and send results
+        if results:
+            lines = [f"CONTROL CHECK - {datetime.utcnow().isoformat()[:10]}", "=" * 40, ""]
+            for r in results:
+                lines.append(f"[{r['topic']}]")
+                lines.append(f"  {r['analysis']}")
+                lines.append("")
+            check_text = "\n".join(lines)
+        else:
+            check_text = "No daily control predictions to check."
+
+        msg_id = _tg_send_message(owner_id, check_text)
+        _log_audit("scheduler_control_check", {"owner_id": owner_id, "checked": len(controls), "daily": len(results), "msg_id": msg_id})
+
+        return jsonify({"status": "ok", "checked": len(controls), "daily": len(results), "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"control_check error: {e}")
+        _log_audit("scheduler_control_check_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/scheduler/self-learn")
+def scheduler_self_learn():
+    """Self-learning: call LLM to identify improvement areas and memorize findings."""
+    try:
+        # Get recent corrections and error patterns for context
+        corrs = _query("SELECT dept, original, corrected, created FROM adapt_corrections ORDER BY id DESC LIMIT 20", fetch=True)
+        patterns = _query("SELECT dept, error_type, context, created FROM error_patterns ORDER BY id DESC LIMIT 20", fetch=True)
+
+        context_parts = []
+        if corrs:
+            context_parts.append("Recent corrections:")
+            for c in corrs[-10:]:
+                context_parts.append(f"  [{c['dept']}] {c['original'][:100]} -> {c['corrected'][:100]}")
+        if patterns:
+            context_parts.append("\nRecent error patterns:")
+            for p in patterns[-10:]:
+                context_parts.append(f"  [{p['dept']}] {p['error_type']}: {p['context'][:100]}")
+
+        context = "\n".join(context_parts) if context_parts else "No recent data available."
+
+        yana_prompt = get_dept_prompt("yana")
+        messages = [
+            {"role": "system", "content": yana_prompt + "\n\nYou are performing self-learning analysis. Based on recent corrections and error patterns, identify ONE specific improvement topic that would reduce errors. Be practical and specific. Output format: TOPIC: <topic> | INSIGHT: <insight> | ACTION: <action>. Format in Russian."},
+            {"role": "user", "content": f"Proanalizirui nedavnie oshibki i predlozhi odnu konkretnuyu temu dlya samousovershenstvovaniya.\n\n{context}\n\nFormat: TOPIC: <tema> | INSIGHT: <vyvod> | ACTION: <deistvie>"},
+        ]
+
+        result = call_llm("yana", messages)
+        finding = result["reply"]
+
+        # Memorize finding
+        _memorize("yana", "self_learn", finding)
+
+        _log_audit("scheduler_self_learn", {"provider": result["provider"], "finding": finding[:200]})
+
+        return jsonify({"status": "ok", "finding": finding})
+
+    except Exception as e:
+        log.error(f"self_learn error: {e}")
+        _log_audit("scheduler_self_learn_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ══════════════════════════════════════════════════════════════════════
+#  MEGA-3: LEARNING ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/learning/fix")
+def learning_fix():
+    """Process a user correction: classify error type and save to learning tables."""
+    d = request.get_json(force=True)
+    text = d.get("text", "")
+    dept = d.get("dept", "yana")
+
+    if not text:
+        return jsonify({"status": "error", "message": "text is required"}), 400
+
+    try:
+        # Call LLM to classify the error type
+        dept_prompt = get_dept_prompt(dept)
+        messages = [
+            {"role": "system", "content": dept_prompt + "\n\nYou are a quality control classifier. Analyze the user's correction text and classify the error type. Also suggest how to fix it going forward. Output JSON only: {\"error_type\": \"TOO_GENERAL|WRONG_FACTS|WRONG_DEPT|BAD_FORMAT|MISSING_CONTEXT|OTHER\", \"suggestion\": \"your suggestion\"}. Language: Russian."},
+            {"role": "user", "content": f"Klassifitsirui etu korrektsiyu:\n\n{text}\n\nVerni tolko JSON."},
+        ]
+
+        result = call_llm(dept, messages)
+        reply = result["reply"]
+
+        # Parse JSON from LLM response
+        try:
+            # Try to extract JSON from the response (may be wrapped in markdown code block)
+            json_match = re.search(r'\{[^}]+\}', reply, re.DOTALL)
+            if json_match:
+                classification = json.loads(json_match.group())
+            else:
+                classification = {"error_type": "OTHER", "suggestion": reply}
+        except json.JSONDecodeError:
+            classification = {"error_type": "OTHER", "suggestion": reply}
+
+        error_type = classification.get("error_type", "OTHER")
+        suggestion = classification.get("suggestion", "")
+
+        now = datetime.utcnow().isoformat()
+
+        # Save to error_patterns table
+        _query("INSERT INTO error_patterns (dept, error_type, context, created) VALUES (?,?,?,?)",
+               (dept, error_type, text[:2000], now))
+
+        # Save to adapt_corrections table
+        _query("INSERT INTO adapt_corrections (dept, original, corrected, created, corr_type) VALUES (?,?,?,?,?)",
+               (dept, text[:2000], suggestion[:2000], now, error_type))
+
+        _log_audit("learning_fix", {"dept": dept, "error_type": error_type, "text_len": len(text)})
+
+        return jsonify({"status": "ok", "error_type": error_type, "suggestion": suggestion})
+
+    except Exception as e:
+        log.error(f"learning_fix error: {e}")
+        _log_audit("learning_fix_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/learning/good")
+def learning_good():
+    """Save a positive example for learning."""
+    d = request.get_json(force=True)
+    dept = d.get("dept", "yana")
+    query = d.get("query", "")
+    response = d.get("response", "")
+
+    if not query or not response:
+        return jsonify({"status": "error", "message": "query and response are required"}), 400
+
+    now = datetime.utcnow().isoformat()
+    _query("INSERT INTO adapt_corrections (dept, original, corrected, created, corr_type) VALUES (?,?,?,?,?)",
+           (dept, query[:2000], response[:2000], now, "positive"))
+
+    _log_audit("learning_good", {"dept": dept, "query_len": len(query), "response_len": len(response)})
+
+    return jsonify({"status": "ok"})
+
+@app.post("/learning/stats")
+def learning_stats():
+    """Return learning statistics."""
+    try:
+        now = datetime.utcnow()
+        week_ago = (now - timedelta(days=7)).isoformat()
+
+        # Corrections count (7d)
+        corr_rows = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created>=? AND corr_type != 'positive'", (week_ago,), fetch=True)
+        corrections_7d = corr_rows[0]["c"] if corr_rows else 0
+
+        # Positive examples count
+        pos_rows = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE corr_type = 'positive'", fetch=True)
+        positive_total = pos_rows[0]["c"] if pos_rows else 0
+
+        # Error pattern breakdown
+        pattern_rows = _query("SELECT error_type, COUNT(*) as c FROM error_patterns GROUP BY error_type ORDER BY c DESC", fetch=True)
+        error_breakdown = {}
+        for r in pattern_rows:
+            error_breakdown[r["error_type"]] = r["c"]
+
+        # Per-dept corrections (7d)
+        dept_rows = _query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created>=? AND corr_type != 'positive' GROUP BY dept ORDER BY c DESC", (week_ago,), fetch=True)
+        dept_corrections = {}
+        for r in dept_rows:
+            dept_corrections[r["dept"]] = r["c"]
+
+        return jsonify({
+            "status": "ok",
+            "corrections_7d": corrections_7d,
+            "positive_examples": positive_total,
+            "error_breakdown": error_breakdown,
+            "dept_corrections": dept_corrections,
+        })
+
+    except Exception as e:
+        log.error(f"learning_stats error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/learning/debrief")
+def learning_debrief():
+    """Analyze error patterns for a specific department."""
+    d = request.get_json(force=True)
+    dept = d.get("dept", "yana")
+
+    try:
+        # Get recent corrections for department
+        corrs = _query("SELECT original, corrected, corr_type, created FROM adapt_corrections WHERE dept=? AND corr_type != 'positive' ORDER BY id DESC LIMIT 20", (dept,), fetch=True)
+
+        if not corrs:
+            return jsonify({"status": "ok", "analysis": "No corrections found for this department."})
+
+        # Format corrections for LLM analysis
+        corr_text_parts = []
+        for c in corrs:
+            corr_text_parts.append(f"[{c['corr_type']}] {c['original'][:200]} -> {c['corrected'][:200]} ({c['created'][:10]})")
+        corr_text = "\n".join(corr_text_parts)
+
+        dept_prompt = get_dept_prompt(dept)
+        messages = [
+            {"role": "system", "content": dept_prompt + "\n\nYou are analyzing error patterns for department quality improvement. Identify recurring themes, root causes, and propose 3 actionable improvements. Format in Russian."},
+            {"role": "user", "content": f"Proanalizirui patterny oshibok departamenta {DEPT_NAMES.get(dept, dept)}:\n\n{corr_text}\n\nSformirui analiz s vyvodami i 3 konkretnymi predlozheniyami po uluchsheniyu."},
+        ]
+
+        result = call_llm(dept, messages)
+        analysis = result["reply"]
+
+        _log_audit("learning_debrief", {"dept": dept, "corrections_analyzed": len(corrs), "provider": result["provider"]})
+
+        return jsonify({"status": "ok", "analysis": analysis})
+
+    except Exception as e:
+        log.error(f"learning_debrief error: {e}")
+        _log_audit("learning_debrief_error", {"error": str(e)[:500], "dept": dept})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ══════════════════════════════════════════════════════════════════════
+#  MEGA-3: AUDIT RECENT ENDPOINT
+# ══════════════════════════════════════════════════════════════════════
+
+@app.get("/audit/recent")
+def audit_recent():
+    """Return recent audit log entries."""
+    try:
+        limit = request.args.get("limit", 20, type=int)
+        limit = min(limit, 200)
+
+        rows = _query("SELECT id, action, details, created FROM audit_log ORDER BY id DESC LIMIT ?", (limit,), fetch=True)
+
+        entries = []
+        for r in rows:
+            entry = {
+                "id": r["id"],
+                "action": r["action"],
+                "created": r["created"],
+            }
+            try:
+                entry["details"] = json.loads(r["details"]) if r["details"] else {}
+            except (json.JSONDecodeError, TypeError):
+                entry["details"] = {"raw": r["details"]}
+            entries.append(entry)
+
+        return jsonify({"status": "ok", "entries": entries, "count": len(entries)})
+
+    except Exception as e:
+        log.error(f"audit_recent error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ══════════════════════════════════════════════════════════════════════
+#  MEGA-3: SEARCH ENDPOINT
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/search")
+def search_endpoint():
+    """Search miniapp_responses (raw_text and title) for query text."""
+    d = request.get_json(force=True)
+    query = d.get("query", "")
+
+    if not query:
+        return jsonify({"status": "error", "message": "query is required"}), 400
+
+    try:
+        search_term = f"%{query}%"
+        rows = _query(
+            "SELECT id, dept, title, created FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) ORDER BY id DESC LIMIT 50",
+            (search_term, search_term),
+            fetch=True
+        )
+
+        results = []
+        for r in rows:
+            results.append({
+                "id": r["id"],
+                "dept": r["dept"],
+                "title": r["title"],
+                "created": r["created"],
+            })
+
+        return jsonify({"status": "ok", "results": results, "count": len(results)})
+
+    except Exception as e:
+        log.error(f"search error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ══════════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
+    log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
+             f"archive/digest, archive/publish, archive/daily-digest, miniapp, dept-dashboard, office-dashboard, "
+             f"tts, stt, scheduler/*, learning/*, audit/recent, search")
+    app.run(host="0.0.0.0", port=PORT, threaded=True)

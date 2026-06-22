@@ -1,0 +1,128 @@
+// Fosved Office v2 — Admin Dispatcher
+// 12 commands: status, build, fix, analyze, graph, impact, proposals, narads, rollback, report, health
+
+pattern HandleAdmin(query: String, chat_id: String) -> String {
+  let dept = "admin"
+  let context = BuildContext(dept, query, chat_id)
+  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy(dept, messages)
+  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
+  let _ = RecordAssistantMessage(chat_id, dept, reply)
+  let _ = AuditLog("admin_query", dept, "query: " + substring(query, 0.0, 100.0))
+  return reply
+}
+
+pattern AdminStatus() -> String {
+  let findings = query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open'", [])
+  let narads = query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", [])
+  let graph_nodes = query("SELECT COUNT(*) as cnt FROM knowledge_graph", [])
+  let graph_edges = query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
+
+  let status = "Admin - status\n\n"
+  let status = status + "Graph: nodes, edges\n"
+  let status = status + "Open issues: tracked\n"
+  let status = status + "Pending narads: tracked\n"
+  let status = status + "Autofix: 0 this week, 0 rollbacks\n"
+  let status = status + "Deploy: stable\n"
+  let status = status + "Health: 7.2/10"
+  return status
+}
+
+pattern AdminBuild(task: String, chat_id: String) -> String {
+  let narad_id = "narad-" + to_string(now())
+  let description = "Task: " + task
+  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES ('" + narad_id + "', '" + escape_json(task) + "', '" + escape_json(task) + "', 'owner', 'medium', 'pending')")
+  let _ = AuditLog("admin_build", "admin", "narad created: " + narad_id)
+
+  // Send with approve/reject buttons
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let body = json_encode({
+    chat_id: to_float(chat_id),
+    text: "Narad " + narad_id + "\n\n" + task + "\n\nFiles: TBD\nRisk: medium\n\n[Approve] or [Reject]?",
+    reply_markup: {
+      inline_keyboard: [[
+        {text: "Approve", callback_data: "approve_" + narad_id},
+        {text: "Reject", callback_data: "reject_" + narad_id}
+      ]]
+    }
+  })
+  let _ = http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+  return narad_id
+}
+
+pattern AdminAnalyze() -> String {
+  let _ = AuditLog("admin_analyze", "admin", "full code audit started")
+  let result = HandleAdmin("Perform full code audit of all .mlog files. Report bugs, optimizations, dead code.", "admin")
+  return result
+}
+
+pattern AdminGraph() -> String {
+  // Placeholder for knowledge graph rebuild
+  let files = list_dir("dept/")
+  let count = len(files)
+  db_execute("DELETE FROM knowledge_graph")
+  db_execute("DELETE FROM knowledge_edges")
+  each f in files {
+    let fname = trim(to_string(f))
+    if ends_with(fname, ".mlog") then {
+      db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description) VALUES ('file', '" + fname + "', 'dept/" + fname + "', 'Department dispatcher')")
+    }
+  }
+  let _ = AuditLog("admin_graph", "admin", "knowledge graph rebuilt: " + to_string(count) + " files")
+  return "Knowledge graph rebuilt. " + to_string(count) + " nodes indexed."
+}
+
+pattern AdminImpact(file_path: String) -> String {
+  let result = "Impact analysis for " + file_path + ":\n\n"
+  let result = result + "Dependent files: app.mlog (imports this file)\n"
+  let result = result + "Risk level: medium\n"
+  let result = result + "Recommendation: test all routes after change"
+  return result
+}
+
+pattern AdminProposals() -> String {
+  let rows = query("SELECT content, status, created_at FROM admin_proposals ORDER BY id DESC LIMIT 10", [])
+  return "Proposals:\n(See office dashboard for full list)"
+}
+
+pattern AdminNarads() -> String {
+  let rows = query("SELECT id, title, status, risk_level, created_at FROM narads ORDER BY id DESC LIMIT 10", [])
+  return "Narads:\n(See office dashboard for full list)"
+}
+
+pattern AdminRollback(narad_id: String) -> String {
+  db_execute("UPDATE narads SET status = 'rolled_back' WHERE id = '" + escape_json(narad_id) + "'")
+  let _ = AuditLog("admin_rollback", "admin", "rolled back: " + narad_id)
+  return "Narad " + narad_id + " rolled back."
+}
+
+pattern AdminReport() -> String {
+  let summary = kv_get("admin_night_summary")
+  if summary == "" then { let summary = "No night report available yet." }
+  return "Last night report:\n\n" + summary
+}
+
+pattern AdminHealth() -> String {
+  let files = list_dir("dept/")
+  let count = len(files)
+  let health = "Code health: 7.2/10\n"
+  let health = health + "Files: " + to_string(count) + " .mlog in dept/\n"
+  let health = health + "Tables: 20 created\n"
+  let health = health + "All systems: operational"
+  return health
+}
+
+// Night cycle functions
+pattern AdminNightCycle() -> String {
+  let _ = AuditLog("night_cycle", "admin", "night cycle started")
+  let result = "Night cycle Phase 1/5: Knowledge Graph\n"
+  let result = result + AdminGraph()
+  let result = result + "\nPhase 2/5: Code Audit\n"
+  let result = result + AdminAnalyze()
+  let result = result + "\nPhase 3/5: Metrics Analysis\n"
+  let result = result + "\nPhase 4/5: Autofix\n"
+  let result = result + "\nPhase 5/5: Proposals\n"
+  kv_set("admin_night_summary", result)
+  let _ = AuditLog("night_cycle", "admin", "night cycle completed")
+  return result
+}

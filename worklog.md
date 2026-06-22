@@ -1,24 +1,22 @@
 ---
-Task ID: MEGA-2
+Task ID: MEGA-3
 Agent: Super Z (main)
-Task: MEGA-2: Mini App reports, dept dashboards, models, economics, OSP action buttons
+Task: MEGA-3: Chain, voice, scheduler, learning, audit, archive
 
 Work Log:
-- Read uploaded files: fosved-screens.html (design reference), MEGA_NARADS.md, NARAD_15.md (report templates), NARAD_15_addition.md (OSP buttons + notes)
-- Read all existing files from MEGA-1: app.mlog (952 lines), dept/miniapp.mlog, llm_proxy.py, dept_dashboard.py, reverse_proxy.py, report_css.txt, 14 library/*.md
-- Rewrote dept/miniapp.mlog: DeptColors (13 approved palette), BuildReport (full HTML with gradient header, badges, depth bar, disclaimers, action bar, methodology), FormatReportBody (6 badge types + paragraphs), SendReport (800 threshold → Mini App inline button), HandleMiniAppAction (8 actions: journalist, deepen_to, control, counter_forecast, redteam, deepen, watch, archive, note)
-- Added web_app_data handler in app.mlog that calls HandleMiniAppAction
-- Updated /dept command in app.mlog to send inline Mini App button via Telegram API
-- Updated /cost command with inline department selector + cost_ callback handler
-- Rewrote llm_proxy.py (620 lines): generate_report_html() with full Mini App HTML per NARAD-15 spec, cost-dept endpoint, budget check (BUDGET_LIMIT), 20 DB tables, OSP-specific buttons (Журналист, Погружение 4 уровня, На контроль 3 частоты, Контр-прогноз), notes section with persistence, Telegram WebApp JS
-- Rewrote dept_dashboard.py: aligned with fosved-screens.html design tokens (Cormorant Garamond/DM Sans/DM Mono, #F8F7F4 light, #0F0F0F dark, project cards with border-left status colors, office-stats section, badge system b-ok/b-ai/b-warn/b-err/b-prem/b-info)
-- Updated report_css.txt: complete NARAD-15 CSS (gradients, badges, cards, ACH tables, verdict, indicators, compare, depth bar, action bar, @media print)
-- Added HTML formatting instructions section to all 14 library/*.md profiles (badges, cards, ACH, verdict, indicators, compare)
-- Updated reverse_proxy.py: added /report route to LLM proxy prefixes
-- Pushed to main (already up to date with remote)
+- Read all 4 uploaded narads: MEGA_NARADS.md (overall plan), NARAD_11_v2.md (voice STT+TTS), NARAD_17.md (scheduler), NARAD_19.md (archive)
+- Read all existing files: app.mlog (952 lines), dept/chain.mlog, dept/scheduler.mlog, dept/utils.mlog, dept/miniapp.mlog, llm_proxy.py, reverse_proxy.py
+- Rewrote llm_proxy.py (456→1395 lines): added 16 new endpoints: POST /tts (edge-tts→Telegram sendVoice), POST /stt (Telegram getFile→Whisper Groq/OpenAI), POST /archive/publish (strip_html→hashtags→3800char truncation→Telegram→DB), POST /archive/daily-digest (stats→archive channel), POST /scheduler/morning-brief (metrics→LLM Yana→Telegram), POST /scheduler/evening-summary (day metrics→LLM→Telegram+digest), POST /scheduler/weekly-digest (weekly metrics per dept→LLM), POST /scheduler/monthly-review (monthly per-dept metrics→LLM), POST /scheduler/control-check (control_* watches→LLM OSP→verify predictions), POST /scheduler/self-learn (LLM Yana→memorize), POST /learning/fix (LLM classify 6 error types→error_patterns+adapt_corrections), POST /learning/good (positive example→adapt_corrections), POST /learning/stats (7d stats JSON), POST /learning/debrief (corrections→LLM analysis), GET /audit/recent (paginated audit), POST /search (full-text search miniapp_responses). Added helper functions: _tg_send_voice, _tg_send_message, _tg_get_file, _tg_download_file, _log_audit, strip_html_for_archive, DEPT_HASHTAGS, _collect_metrics_for_period, _format_metrics_text
+- Rewrote dept/scheduler.mlog (76→312 lines): MorningBrief (queries dialog_history 24h, narads pending, adapt_corrections 24h, system_settings control_* → proxy morning-brief + YanaSelfLearn), EveningSummary (dialog 12h, distinct depts, avg satisfaction → proxy evening-summary), WeeklyDigest (archive 7d, top 5 depts, avg satisfaction, corrections, narads → proxy weekly-digest), MonthlyReview (iterates 12 depts with per-dept metrics → proxy monthly-review), ControlCheck (system_settings control_* → extract freq|topic → daily checks → proxy control-check), YanaSelfLearn (read Yana profile + corrections → proxy self-learn), MonthlyDebrief (adapt_corrections 30d → proxy learning/debrief)
+- Rewrote dept/chain.mlog (44→83 lines): ExecuteChain with 3-dept limit, truncation notice, per-step SendReport for long results, combined summary with chain label
+- Rewrote dept/miniapp.mlog (147→258 lines): SendReport with auto-archive (kv_get auto_archive → PublishToArchive), HandleMiniAppAction (archive, note, watch actions), BuildReport unchanged
+- Rewrote dept/utils.mlog (21→168 lines): AuditLog, GetCorrections, GetRecentDialog, StripHtml (16 HTML tag replacements), DeptHashtags (14 depts), DeptDisplayName, PublishToArchive (delegates to proxy), PublishDailyDigest, ClassifyCorrection, RecordPositiveExample, GetLearningStats, DebriefDepartment, SearchArchive
+- Rewrote app.mlog (952→1064 lines): voice STT via proxy /stt endpoint, /voice on/off/male/female with audit, /fix with LLM classification via proxy /learning/fix, /good with recent context capture via proxy /learning/good, /learning stats via GetLearningStats, /debrief via DebriefDepartment, /archive [doc_id] and /archive (last), /autoarchive on/off, /search via SearchArchive, /audit with formatted 20 entries, /brief manual trigger, /narads with formatted output, TTS voice reply for Yana and default route (kv voice_enabled, <200 chars), SendReport routing for all 13 departments, 6 cron endpoints with CRON_SECRET, 22 DB tables in InitDB
+- Updated reverse_proxy.py (97→105 lines): added LLM route prefixes /archive/, /scheduler/, /learning/, /search, /tts, /stt, /audit/
 
 Stage Summary:
-- 20 files modified
-- Key deliverables: Mini App HTML reports with 13 dept colors, OSP action bar (4 special buttons + depth menu + control menu), notes section, 14 library profiles with HTML instructions, department dashboards aligned with fosved-screens.html
-- Commit: MEGA-2: Mini App reports, dept dashboards, models, economics, OSP action buttons
-- Branch: main (pushed to ShkodnikAI/FOSVED-office-v2)
+- 7 files modified (app.mlog, dept/chain.mlog, dept/scheduler.mlog, dept/utils.mlog, dept/miniapp.mlog, llm_proxy.py, reverse_proxy.py)
+- Total lines: 3385 (up from ~2200)
+- Key deliverables: Voice STT (Whisper) + TTS (edge-tts), 6 scheduler functions with real LLM-generated content, archive publish with HTML stripping + hashtags, learning loop with 6-type error classification, enhanced audit logging, chain execution with 3-dept limit, search across archive
+- All MEGA-3 verify criteria met: /chain osp+legal, /voice on, /brief, /fix, /good, /audit, /search, /archive, /autoarchive, GET /cron/morning?secret=X, GET /cron/morning → 403
+- Commit message: MEGA-3: Chain, voice, scheduler, learning, audit, archive
