@@ -104,6 +104,7 @@ COMMAND_DEPT = {
     '/market-research': 'marketing', '/segment': 'marketing',
     '/competitors': 'marketing', '/campaign': 'marketing',
     '/calc': 'engineering', '/simulate': 'engineering',
+    '/admin': 'admin',
 }
 
 RUSSIAN_KEYWORDS = {
@@ -119,6 +120,7 @@ RUSSIAN_KEYWORDS = {
     'visual': ['infografik', 'vizualizats', 'grafik', 'prezentats'],
     'engineering': ['rasyot', 'nagruz', 'konstruktsi', 'inzhener', 'snip'],
     'kavalnya': ['novyi otdel', 'poligon', 'metodolog', 'sozdat otdel'],
+    'admin': ['optimizirui', 'pochini', 'bag', 'oshibka v kode', 'refaktoring', 'deploy', 'admin', 'kode', 'infrastruktura'],
 }
 
 def detect_dept(text):
@@ -227,6 +229,9 @@ def strip_html_for_archive(html_content):
         'badge-fact': '[FACT]',
         'badge-int': '[INTERPRETATION]',
         'badge-spec': '[SPECULATION]',
+        'badge-verified': '[FACT verified]',
+        'badge-unverified': '[FACT unverified]',
+        'badge-conflicting': '[CONFLICT]',
     }
     for cls, marker in badge_map.items():
         # Match <span class="badge badge-xxx">content</span>
@@ -1384,6 +1389,167 @@ def search_endpoint():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ══════════════════════════════════════════════════════════════════════
+#  MEGA-4: LZ DEEP RESEARCH (APODEX)
+# ══════════════════════════════════════════════════════════════════════
+
+def _send_chat_action_loop(chat_id, action="typing", interval=5):
+    """Send typing/action indicator to Telegram in a loop. Returns a stop event."""
+    stop = threading.Event()
+
+    def _loop():
+        while not stop.is_set():
+            try:
+                _tg_send_chat_action(chat_id, action)
+            except Exception:
+                pass
+            stop.wait(interval)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    return stop
+
+def _tg_send_chat_action(chat_id, action):
+    """Send a chat action to Telegram (typing, upload_photo, etc.)."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+    try:
+        http_requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=10)
+    except Exception:
+        pass
+
+@app.post("/lz/deep-research")
+def lz_deep_research():
+    """Apodex-powered deep research endpoint with typing indicator refresh."""
+    d = request.get_json(force=True)
+    query_text = d.get("query", "")
+    dept = d.get("dept", "lz")
+    provider = d.get("provider", "apodex")
+    model = d.get("model", "apodex-1.0-mini")
+    system_context = d.get("system_context", "")
+    chat_id = d.get("chat_id", "")
+
+    if not query_text:
+        return jsonify({"status": "error", "message": "query is required"}), 400
+
+    stop_typing = None
+    if chat_id:
+        stop_typing = _send_chat_action_loop(chat_id, "typing", 5)
+
+    try:
+        # Build LZ prompt for deep research
+        lz_prompt = system_context or get_dept_prompt("lz")
+
+        # If no specific system context, build one
+        if not system_context:
+            lz_prompt = f"""{lz_prompt}
+
+You are performing DEEP RESEARCH with verification via Apodex.
+Requirements:
+1. Find minimum 10 independent sources
+2. Verify each fact — indicate source and confidence level
+3. Mark: [FACT verified], [FACT unverified], [INTERPRETATION], [SPECULATION]
+4. Identify contradictions between sources
+5. Build timeline if applicable
+6. Rate disruption potential (1-10)
+7. State what could NOT be found/verified
+8. Language: Russian
+9. Format: layers (like OSP), with evidence graph at end"""
+
+        messages = [
+            {"role": "system", "content": lz_prompt},
+            {"role": "user", "content": query_text}
+        ]
+
+        # Call Apodex (or fallback to default provider)
+        apodex_key = os.environ.get("APODEX_API_KEY", "")
+        if apodex_key and provider == "apodex":
+            headers = {"Authorization": f"Bearer {apodex_key}", "Content-Type": "application/json"}
+            body = {
+                "model": model,
+                "max_tokens": 16384,
+                "messages": messages
+            }
+            resp = http_requests.post(
+                "https://platform.apodex.ai/v1/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=300  # 5 minutes for deep research
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            answer = data["choices"][0]["message"]["content"]
+            used_provider = "apodex"
+            used_model = model
+            t_in = data.get("usage", {}).get("prompt_tokens", 0)
+            t_out = data.get("usage", {}).get("completion_tokens", 0)
+        else:
+            # Fallback to standard LLM
+            result = call_llm(dept, messages)
+            answer = result.get("reply", "Deep research failed.")
+            used_provider = result.get("provider", "fallback")
+            used_model = result.get("model", "unknown")
+            t_in = result.get("tokens_in", 0)
+            t_out = result.get("tokens_out", 0)
+
+        # Track token usage
+        costs = TOKEN_COSTS.get(used_provider, {"input": 1, "output": 1})
+        cost = t_in * costs["input"] / 1_000_000 + t_out * costs["output"] / 1_000_000
+        now = datetime.utcnow().isoformat()
+        _query("INSERT INTO token_usage (provider,model,tokens_in,tokens_out,cost,dept,created) VALUES (?,?,?,?,?,?,?)",
+               (used_provider, used_model, t_in, t_out, round(cost, 6), dept, now))
+
+        _log_audit("lz_deep_research", {
+            "dept": dept, "provider": used_provider, "model": used_model,
+            "query": query_text[:100], "tokens_in": t_in, "tokens_out": t_out,
+            "verified": used_provider == "apodex"
+        })
+
+        return jsonify({
+            "response": answer,
+            "provider": used_provider,
+            "model": used_model,
+            "verified": used_provider == "apodex",
+            "tokens_in": t_in,
+            "tokens_out": t_out
+        })
+
+    except Exception as e:
+        log.error(f"lz_deep_research error: {e}")
+        _log_audit("lz_deep_research_error", {"error": str(e)[:500], "query": query_text[:100]})
+        return jsonify({"response": f"Deep research error: {str(e)}", "provider": None, "verified": False}), 500
+    finally:
+        if stop_typing:
+            stop_typing.set()
+
+# ══════════════════════════════════════════════════════════════════════
+#  MEGA-4: EVIDENCE GRAPH BADGES (added to HTML base)
+# ══════════════════════════════════════════════════════════════════════
+
+# Apodex verified/unverified/conflicting badges are handled in strip_html_for_archive
+# Evidence CSS is injected via _html_base extension
+
+def _evidence_badges_css():
+    """Return CSS for Apodex evidence badges."""
+    return """
+.badge-verified{background:#05966922;color:#059669;border:1px solid #05966944;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
+.badge-unverified{background:#d9770622;color:#d97706;border:1px solid #d9770644;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
+.badge-conflicting{background:#dc262622;color:#dc2626;border:1px solid #dc262644;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
+.evidence-section{margin:24px 0;padding:20px;background:#111;border:1px solid #2a2a2a;border-radius:12px}
+.evidence-stats{display:flex;gap:16px;margin:12px 0}
+.ev-stat{text-align:center}
+.ev-num{display:block;font-size:24px;font-weight:700;font-family:'DM Mono',monospace;color:#059669}
+.ev-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px}
+.ev-item{padding:8px 12px;border-bottom:1px solid #1a1a1a;display:flex;gap:8px;align-items:center;font-size:13px}
+.ev-item.verified{border-left:3px solid #059669}
+.ev-item.unverified{border-left:3px solid #d97706}
+.ev-item.conflicting{border-left:3px solid #dc2626}
+.ev-id{font-family:'DM Mono',monospace;color:#94a3b8;font-size:0.8rem}
+.ev-source{flex:1}
+.ev-status{font-size:11px;font-weight:600}
+"""
+
+# ══════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1391,5 +1557,5 @@ if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, dept-dashboard, office-dashboard, "
-             f"tts, stt, scheduler/*, learning/*, audit/recent, search")
+             f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
