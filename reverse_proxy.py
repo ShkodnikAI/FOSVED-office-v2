@@ -16,6 +16,9 @@ PORT = int(os.environ.get("PORT", 10000))
 LLM_ROUTES_PREFIXES = [
     "/miniapp/",
     "/miniapp",
+    "/miniapp-spa/",
+    "/miniapp-spa",
+    "/api/",
     "/dept-dashboard/",
     "/dept-dashboard",
     "/office-dashboard",

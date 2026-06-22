@@ -1550,6 +1550,334 @@ def _evidence_badges_css():
 """
 
 # ══════════════════════════════════════════════════════════════════════
+#  NARAD 29: MINI APP SPA — API ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════
+
+@app.get("/api/dashboard")
+def api_dashboard():
+    """Dashboard data: KPIs, alerts, dept cards, admin status."""
+    try:
+        now = datetime.utcnow()
+        today = now.isoformat()[:10]
+        week_ago = (now - timedelta(days=7)).isoformat()
+        month_ago = (now - timedelta(days=30)).isoformat()
+
+        r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (today,), fetch=True)
+        r_week = _query("SELECT COUNT(*) as c FROM dialog_history WHERE created>=?", (week_ago,), fetch=True)
+        r_cost_today = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (today,), fetch=True)
+        r_cost_month = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (month_ago,), fetch=True)
+        r_reports_today = _query("SELECT COUNT(*) as c FROM miniapp_responses WHERE created>=?", (today,), fetch=True)
+
+        tasks_today = r_today[0]["c"] if r_today else 0
+        tasks_week = r_week[0]["c"] if r_week else 0
+        cost_today = r_cost_today[0]["t"] if r_cost_today else 0
+        cost_month = r_cost_month[0]["t"] if r_cost_month else 0
+        reports_today = r_reports_today[0]["c"] if r_reports_today else 0
+
+        # Average rating
+        r_avg = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE created>=?", (week_ago,), fetch=True)
+        avg_rating = r_avg[0]["a"] if r_avg else 0
+
+        kpis = {
+            "tasks": tasks_today, "tasks_week": tasks_week,
+            "cost_today": round(cost_today, 2), "cost_month": round(cost_month, 2),
+            "rating": round(avg_rating, 1), "reports": reports_today,
+        }
+
+        # Dept cards
+        dept_cards = []
+        for dept in [d for d in DEPT_NAMES if d != "admin"]:
+            c = DEPT_COLORS.get(dept, DEPT_COLORS["admin"])
+            r_d = _query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+            r_m = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+            calls = r_d[0]["c"] if r_d else 0
+            rating = r_m[0]["a"] if r_m else 0
+            status = "active" if calls > 5 else "idle" if calls > 0 else "inactive"
+            dept_cards.append({
+                "slug": dept, "name": DEPT_NAMES.get(dept, dept),
+                "color": c, "calls": calls, "rating": round(rating, 1),
+                "status": status, "override": _cfg_cache["overrides"].get(dept) or None,
+            })
+
+        # Admin status
+        kg_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph", fetch=True)
+        kg_edges = _query("SELECT COUNT(*) as c FROM knowledge_edges", fetch=True)
+        issues = _query("SELECT COUNT(*) as c FROM admin_findings WHERE status='open'", fetch=True)
+        proposals = _query("SELECT COUNT(*) as c FROM admin_proposals WHERE status='pending'", fetch=True)
+
+        admin_status = {
+            "nodes": kg_nodes[0]["c"] if kg_nodes else 0,
+            "edges": kg_edges[0]["c"] if kg_edges else 0,
+            "issues": issues[0]["c"] if issues else 0,
+            "proposals": proposals[0]["c"] if proposals else 0,
+            "code_health": round(avg_rating, 1),
+        }
+
+        return jsonify({"status": "ok", "kpis": kpis, "depts": dept_cards, "admin": admin_status})
+    except Exception as e:
+        log.error(f"api_dashboard error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/dept/<slug>")
+def api_dept(slug):
+    """Department details: KPIs, recent tasks, skills, corrections, model config."""
+    dept = slug.lower()
+    if dept not in DEPT_NAMES:
+        return jsonify({"status": "error", "message": "Unknown department"}), 404
+    try:
+        now = datetime.utcnow()
+        week_ago = (now - timedelta(days=7)).isoformat()
+
+        r_tasks = _query("SELECT COUNT(*) as c FROM dialog_history WHERE dept=? AND created>=? AND role='user'", (dept, week_ago), fetch=True)
+        r_rating = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+        r_tokens = _query("SELECT COALESCE(SUM(tokens_in),0)+COALESCE(SUM(tokens_out),0) as t FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+        r_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+
+        kpis = {
+            "tasks": r_tasks[0]["c"] if r_tasks else 0,
+            "rating": round(r_rating[0]["a"], 1) if r_rating else 0,
+            "tokens": r_tokens[0]["t"] if r_tokens else 0,
+            "cost": round(r_cost[0]["t"], 2) if r_cost else 0,
+        }
+
+        # Recent tasks
+        recent = _query("SELECT content, created FROM dialog_history WHERE dept=? AND role='user' ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
+        tasks = [{"text": r["content"][:100], "created": r["created"][:16]} for r in recent]
+
+        # Corrections
+        corrs = _query("SELECT original, corrected, created FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
+        corrections = [{"original": r["original"][:80], "corrected": r["corrected"][:80], "created": r["created"][:10]} for r in corrs]
+
+        # Skills
+        skills_idx = CFG_DIR / f"../skills_index/{dept}.txt"
+        skills = []
+        if skills_idx.exists():
+            skills = [s.strip() for s in skills_idx.read_text().strip().split("\n") if s.strip()][:15]
+
+        # Model config
+        model = _cfg_cache["overrides"].get(dept) or _cfg_cache["priority_model"] or "glm-4.6"
+        provider = _cfg_cache["priority_provider"]
+
+        return jsonify({
+            "status": "ok", "slug": dept, "name": DEPT_NAMES[dept],
+            "color": DEPT_COLORS.get(dept, {}),
+            "kpis": kpis, "tasks": tasks, "corrections": corrections,
+            "skills": skills, "model": model, "provider": provider,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/models")
+def api_models():
+    """Model statuses with usage stats."""
+    try:
+        now = datetime.utcnow()
+        month_ago = (now - timedelta(days=30)).isoformat()
+        models = []
+
+        # Build model list from providers + overrides
+        seen = set()
+        model_info = {
+            "zai": {"name": "GLM 4.6", "provider": "zai", "label": "Z.ai", "tier": "priority"},
+            "deepseek": {"name": "DeepSeek Chat", "provider": "deepseek", "label": "DeepSeek", "tier": "cheap"},
+            "groq": {"name": "Llama 3.3 70B", "provider": "groq", "label": "Groq", "tier": "free"},
+            "grok": {"name": "Grok 3", "provider": "grok", "label": "xAI", "tier": "free_limit"},
+            "anthropic": {"name": "Claude Sonnet 4", "provider": "anthropic", "label": "Anthropic", "tier": "paid"},
+            "openai": {"name": "GPT-4o", "provider": "openai", "label": "OpenAI", "tier": "paid"},
+            "apodex": {"name": "Apodex 1.0", "provider": "apodex", "label": "Apodex", "tier": "special"},
+        }
+
+        for prov_key, info in model_info.items():
+            api_key = os.environ.get(PROVIDERS[prov_key]["env_key"])
+            if prov_key in seen:
+                continue
+            seen.add(prov_key)
+
+            r_calls = _query("SELECT COUNT(*) as c FROM token_usage WHERE provider=? AND created>=?", (prov_key, month_ago), fetch=True)
+            r_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE provider=? AND created>=?", (prov_key, month_ago), fetch=True)
+            calls = r_calls[0]["c"] if r_calls else 0
+            cost = r_cost[0]["t"] if r_cost else 0
+
+            # Check if it's the priority provider
+            is_priority = prov_key == _cfg_cache["priority_provider"]
+
+            status = "active" if api_key else "no_key"
+            if prov_key == "grok":
+                # Check if rate limited (mock: if calls > 500)
+                status = "limited" if calls > 500 else status
+
+            models.append({
+                "key": prov_key, "name": info["name"], "label": info["label"],
+                "tier": info["tier"], "status": status, "priority": is_priority,
+                "calls": calls, "cost": round(cost, 2),
+            })
+
+        # Overrides per dept
+        overrides = {d: v for d, v in _cfg_cache["overrides"].items() if v}
+
+        # Today analytics
+        today = now.isoformat()[:10]
+        r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (today,), fetch=True)
+        r_today_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (today,), fetch=True)
+        active_provs = _query("SELECT DISTINCT provider FROM token_usage WHERE created>=?", (today,), fetch=True)
+
+        analytics = {
+            "requests_today": r_today[0]["c"] if r_today else 0,
+            "cost_today": round(r_today_cost[0]["t"], 2) if r_today_cost else 0,
+            "active_providers": len(active_provs),
+        }
+
+        return jsonify({"status": "ok", "models": models, "overrides": overrides, "analytics": analytics})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/economics")
+def api_economics():
+    """Economics data: costs by dept, by model, by period."""
+    try:
+        now = datetime.utcnow()
+        today = now.isoformat()[:10]
+        week_ago = (now - timedelta(days=7)).isoformat()
+        month_ago = (now - timedelta(days=30)).isoformat()
+
+        # Period costs
+        periods = {}
+        for label, start in [("today", today), ("week", week_ago), ("month", month_ago)]:
+            r = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (start,), fetch=True)
+            periods[label] = round(r[0]["t"], 2) if r else 0
+
+        # By dept (month)
+        dept_costs = _query("SELECT dept, COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=? GROUP BY dept ORDER BY t DESC", (month_ago,), fetch=True)
+        by_dept = [{"dept": r["dept"], "name": DEPT_NAMES.get(r["dept"], r["dept"]), "cost": round(r["t"], 2)} for r in dept_costs]
+
+        # By provider (month)
+        prov_costs = _query("SELECT provider, COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=? GROUP BY provider ORDER BY t DESC", (month_ago,), fetch=True)
+        by_provider = [{"provider": r["provider"], "cost": round(r["t"], 2)} for r in prov_costs]
+
+        # Budget
+        budget_rows = _query("SELECT value FROM system_settings WHERE key='daily_budget'", fetch=True)
+        budget = budget_rows[0]["value"] if budget_rows else "10"
+
+        return jsonify({"status": "ok", "periods": periods, "by_dept": by_dept, "by_provider": by_provider, "budget": budget})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/narads")
+def api_narads():
+    """List narads."""
+    try:
+        rows = _query("SELECT id, title, description, risk_level, status, created_at, approved_at FROM narads ORDER BY id DESC LIMIT 20", fetch=True)
+        narads = []
+        for r in rows:
+            narads.append({
+                "id": r["id"], "title": r["title"], "description": r.get("description", ""),
+                "risk": r["risk_level"], "status": r["status"],
+                "created": r["created_at"][:16] if r["created_at"] else "",
+                "approved": r["approved_at"][:16] if r.get("approved_at") else "",
+            })
+        return jsonify({"status": "ok", "narads": narads})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/narads/<nid>/approve")
+def api_narad_approve(nid):
+    try:
+        _query("UPDATE narads SET status='approved', approved_at=datetime('now') WHERE id=?", (nid,))
+        _log_audit("narad_approve_miniapp", {"narad_id": nid})
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/narads/<nid>/reject")
+def api_narad_reject(nid):
+    try:
+        _query("UPDATE narads SET status='rejected' WHERE id=?", (nid,))
+        _log_audit("narad_reject_miniapp", {"narad_id": nid})
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/archive")
+def api_archive():
+    """Search archive. Accepts ?q= query param, optional ?dept= filter."""
+    try:
+        q = request.args.get("q", "")
+        dept_filter = request.args.get("dept", "")
+        if q:
+            search_term = f"%{q}%"
+            if dept_filter:
+                rows = _query("SELECT id, dept, title, created FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) AND dept=? ORDER BY created DESC LIMIT 50",
+                             (search_term, search_term, dept_filter), fetch=True)
+            else:
+                rows = _query("SELECT id, dept, title, created FROM miniapp_responses WHERE raw_text LIKE ? OR title LIKE ? ORDER BY created DESC LIMIT 50",
+                             (search_term, search_term), fetch=True)
+        else:
+            if dept_filter:
+                rows = _query("SELECT id, dept, title, created FROM miniapp_responses WHERE dept=? ORDER BY created DESC LIMIT 50", (dept_filter,), fetch=True)
+            else:
+                rows = _query("SELECT id, dept, title, created FROM miniapp_responses ORDER BY created DESC LIMIT 50", fetch=True)
+
+        results = [{"id": r["id"], "dept": r["dept"], "title": r["title"], "created": r["created"][:16] if r["created"] else ""} for r in rows]
+        return jsonify({"status": "ok", "results": results, "count": len(results)})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/admin/status")
+def api_admin_status():
+    """Admin stats: graph, issues, proposals."""
+    try:
+        kg_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph", fetch=True)
+        kg_edges = _query("SELECT COUNT(*) as c FROM knowledge_edges", fetch=True)
+        issues = _query("SELECT id, severity, file_path, issue, status FROM admin_findings WHERE status='open' ORDER BY id DESC LIMIT 10", fetch=True)
+        proposals = _query("SELECT id, content, status FROM admin_proposals WHERE status='pending' ORDER BY id DESC LIMIT 10", fetch=True)
+        reports = _query("SELECT COUNT(*) as c FROM admin_reports", fetch=True)
+
+        return jsonify({
+            "status": "ok",
+            "graph": {"nodes": kg_nodes[0]["c"] if kg_nodes else 0, "edges": kg_edges[0]["c"] if kg_edges else 0},
+            "issues": [{"id": r["id"], "severity": r["severity"], "file": r["file_path"], "issue": r["issue"]} for r in issues],
+            "proposals": [{"id": r["id"], "content": r["content"][:200], "status": r["status"]} for r in proposals],
+            "reports_count": reports[0]["c"] if reports else 0,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  MINI APP SPA — STATIC FILE SERVING
+# ══════════════════════════════════════════════════════════════════════
+
+MINIAPP_DIR = BASE_DIR / "miniapp"
+
+@app.get("/miniapp-spa")
+@app.get("/miniapp-spa/")
+def miniapp_spa_index():
+    """Serve the Mini App SPA index page."""
+    index_path = MINIAPP_DIR / "index.html"
+    if not index_path.exists():
+        return "<h1>Mini App not found</h1>", 404
+    return Response(index_path.read_text(encoding="utf-8"), mimetype="text/html")
+
+@app.get("/miniapp-spa/<path:filepath>")
+def miniapp_spa_static(filepath):
+    """Serve static files for the Mini App SPA."""
+    file_path = MINIAPP_DIR / filepath
+    if not file_path.exists() or not file_path.is_file():
+        return "<h1>Not found</h1>", 404
+    ext = file_path.suffix
+    mimes = {".html": "text/html", ".css": "text/css", ".js": "application/javascript",
+             ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json"}
+    return Response(file_path.read_bytes(), mimetype=mimes.get(ext, "application/octet-stream"))
+
+# ══════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════
 

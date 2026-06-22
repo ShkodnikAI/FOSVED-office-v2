@@ -1,0 +1,1562 @@
+     1→#!/usr/bin/env python3
+     2→"""llm_proxy.py — Fosved Office v2 LLM Proxy Server
+     3→Flask server on port 4000 with 7-provider failover, dept routing, dashboards, SQLite,
+     4→TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
+     5→
+     6→import json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
+     7→from datetime import datetime, timedelta
+     8→from pathlib import Path
+     9→
+    10→from flask import Flask, request, jsonify, Response
+    11→import requests as http_requests
+    12→
+    13→# ──────────────────────────── APP & CONFIG ────────────────────────────
+    14→app = Flask(__name__)
+    15→logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    16→log = logging.getLogger("llm_proxy")
+    17→
+    18→PORT = int(os.environ.get("PORT_PROXY", 4000))
+    19→DB_PATH = os.environ.get("DATABASE_PATH", "./data")
+    20→Path(DB_PATH).mkdir(parents=True, exist_ok=True)
+    21→DB_FILE = os.path.join(DB_PATH, "fosved.db")
+    22→
+    23→BASE_DIR = Path(__file__).parent
+    24→LIB_DIR = BASE_DIR / "library"
+    25→CFG_DIR = BASE_DIR / "config"
+    26→
+    27→db_lock = threading.Lock()
+    28→
+    29→TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    30→TELEGRAM_ARCHIVE_CHANNEL_ID = os.environ.get("TELEGRAM_ARCHIVE_CHANNEL_ID", "")
+    31→WHISPER_API_KEY = os.environ.get("WHISPER_API_KEY", "")
+    32→WHISPER_PROVIDER = os.environ.get("WHISPER_PROVIDER", "groq")
+    33→
+    34→# ──────────────────────────── PROVIDERS ────────────────────────────
+    35→PROVIDERS = {
+    36→    "zai": {"url": "https://api.zai.chat/v1/chat/completions", "env_key": "ZAI_API_KEY", "format": "openai", "timeout": 120},
+    37→    "deepseek": {"url": "https://api.deepseek.com/v1/chat/completions", "env_key": "DEEPSEEK_API_KEY", "format": "openai", "timeout": 120},
+    38→    "groq": {"url": "https://api.groq.com/openai/v1/chat/completions", "env_key": "GROQ_API_KEY", "format": "openai", "timeout": 120},
+    39→    "grok": {"url": "https://api.x.ai/v1/chat/completions", "env_key": "GROK_API_KEY", "format": "openai", "timeout": 120},
+    40→    "anthropic": {"url": "https://api.anthropic.com/v1/messages", "env_key": "ANTHROPIC_API_KEY", "format": "anthropic", "timeout": 120},
+    41→    "openai": {"url": "https://api.openai.com/v1/chat/completions", "env_key": "OPENAI_API_KEY", "format": "openai", "timeout": 120},
+    42→    "apodex": {"url": "https://api.apodex.ai/v1/chat/completions", "env_key": "APODEX_API_KEY", "format": "openai", "timeout": 300},
+    43→}
+    44→
+    45→TOKEN_COSTS = {
+    46→    "zai": {"input": 0.5, "output": 1.5}, "deepseek": {"input": 0.14, "output": 0.28},
+    47→    "groq": {"input": 0.0, "output": 0.0}, "grok": {"input": 3.0, "output": 15.0},
+    48→    "anthropic": {"input": 3.0, "output": 15.0}, "openai": {"input": 2.5, "output": 10.0},
+    49→    "apodex": {"input": 2.0, "output": 8.0},
+    50→}
+    51→
+    52→# ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
+    53→DEPT_COLORS = {
+    54→    'yana': {'start': '#293133', 'end': '#1a2024', 'accent': '#3d4a4d'},
+    55→    'osp': {'start': '#b91c1c', 'end': '#7f1d1d', 'accent': '#dc2626'},
+    56→    'lz': {'start': '#0e7490', 'end': '#164e63', 'accent': '#0891b2'},
+    57→    'expert': {'start': '#3730a3', 'end': '#1e1b4b', 'accent': '#4f46e5'},
+    58→    'marketing': {'start': '#c2410c', 'end': '#7c2d12', 'accent': '#ea580c'},
+    59→    'finance': {'start': '#15803d', 'end': '#14532d', 'accent': '#16a34a'},
+    60→    'legal': {'start': '#475569', 'end': '#1e293b', 'accent': '#64748b'},
+    61→    'dev': {'start': '#1d4ed8', 'end': '#1e3a8a', 'accent': '#2563eb'},
+    62→    'design': {'start': '#be185d', 'end': '#831843', 'accent': '#ec4899'},
+    63→    'qa': {'start': '#4d7c0f', 'end': '#365314', 'accent': '#65a30d'},
+    64→    'visual': {'start': '#7e22ce', 'end': '#581c87', 'accent': '#a855f7'},
+    65→    'engineering': {'start': '#44403c', 'end': '#292524', 'accent': '#78716c'},
+    66→    'kavalnya': {'start': '#b45309', 'end': '#78350f', 'accent': '#d97706'},
+    67→    'admin': {'start': '#1e40af', 'end': '#1e3a5f', 'accent': '#3b82f6'},
+    68→}
+    69→
+    70→DEPT_NAMES = {
+    71→    'yana': 'Yana — Shef de kabinet', 'osp': 'OSP — Strategicheskiy analiz',
+    72→    'lz': 'LZ — Laboratoriya znanii', 'expert': 'Ekspert — Tekhnicheskiy preparator',
+    73→    'marketing': 'Marketing', 'finance': 'Finansy', 'legal': 'Yurist',
+    74→    'dev': 'Dev — Razrabotka', 'design': 'Design — UI/UX', 'qa': 'QA — Testirovanie',
+    75→    'visual': 'Visual — Vizualizatsiya', 'engineering': 'Engineering — Inzhenernyi',
+    76→    'kavalnya': 'Kavalnya — Metodologiya', 'admin': 'Admin — Sistemnyi agent',
+    77→}
+    78→
+    79→DEPT_HASHTAGS = {
+    80→    'osp': '#OSP #analytics #strategy',
+    81→    'lz': '#LZ #technology #research',
+    82→    'expert': '#Expert #briefing',
+    83→    'marketing': '#Marketing #audience',
+    84→    'finance': '#Finance #cashflow',
+    85→    'legal': '#Legal #contracts',
+    86→    'dev': '#Dev #code #architecture',
+    87→    'design': '#Design #UX',
+    88→    'qa': '#QA #testing',
+    89→    'visual': '#Visual #infographic',
+    90→    'engineering': '#Engineering #calculations',
+    91→    'kavalnya': '#Kavalnya #methodology',
+    92→    'yana': '#Yana #cabinet',
+    93→    'admin': '#Admin #system',
+    94→}
+    95→
+    96→# ──────────────────────────── DEPT DETECTION ────────────────────────────
+    97→COMMAND_DEPT = {
+    98→    '/yana': 'yana', '/osp': 'osp', '/lz': 'lz', '/expert': 'expert',
+    99→    '/marketing': 'marketing', '/finance': 'finance', '/legal': 'legal',
+   100→    '/dev': 'dev', '/design': 'design', '/qa': 'qa', '/visual': 'visual',
+   101→    '/engineering': 'engineering', '/forge': 'kavalnya',
+   102→    '/analyze': 'osp', '/scan': 'lz', '/deep': 'osp',
+   103→    '/quickanalyze': 'osp', '/wargame': 'osp',
+   104→    '/market-research': 'marketing', '/segment': 'marketing',
+   105→    '/competitors': 'marketing', '/campaign': 'marketing',
+   106→    '/calc': 'engineering', '/simulate': 'engineering',
+   107→    '/admin': 'admin',
+   108→}
+   109→
+   110→RUSSIAN_KEYWORDS = {
+   111→    'osp': ['proanalizirui', 'prognoz', 'strategiya', 'geopolitik', 'analiz'],
+   112→    'lz': ['tekhnolog', 'monitory', 'trend', 'proryv', 'nauka', 'issledovan'],
+   113→    'expert': ['vstrech', 'brifing', 'podgotov k', 'ekspert', 'preparirui'],
+   114→    'marketing': ['reklam', 'auditoriya', 'konversiya', 'marketing', 'pozitsionir'],
+   115→    'finance': ['byudzhet', 'cashflow', 'nalog', 'finans', 'raskhod', 'dokhod'],
+   116→    'legal': ['dogovor', 'isk', 'gdpr', 'yuridichesk', 'nda', 'pravo'],
+   117→    'dev': ['kod', 'arkhitektur', 'api', 'programm', 'deploi', 'server'],
+   118→    'design': ['dizain', 'wireframe', 'maket', 'ui', 'ux', 'interfeis'],
+   119→    'qa': ['test', 'bag', 'kachestv', 'proverk'],
+   120→    'visual': ['infografik', 'vizualizats', 'grafik', 'prezentats'],
+   121→    'engineering': ['rasyot', 'nagruz', 'konstruktsi', 'inzhener', 'snip'],
+   122→    'kavalnya': ['novyi otdel', 'poligon', 'metodolog', 'sozdat otdel'],
+   123→    'admin': ['optimizirui', 'pochini', 'bag', 'oshibka v kode', 'refaktoring', 'deploy', 'admin', 'kode', 'infrastruktura'],
+   124→}
+   125→
+   126→def detect_dept(text):
+   127→    text_lower = text.lower().strip()
+   128→    for cmd, dept in sorted(COMMAND_DEPT.items(), key=lambda x: -len(x[0])):
+   129→        if text_lower.startswith(cmd) and (len(text_lower) == len(cmd) or text_lower[len(cmd)] in ' \n/'):
+   130→            return dept
+   131→    for dept, kws in RUSSIAN_KEYWORDS.items():
+   132→        for kw in kws:
+   133→            if kw in text_lower:
+   134→                return dept
+   135→    return 'yana'
+   136→
+   137→# ──────────────────────────── CONDENSED PROMPTS ────────────────────────────
+   138→CONDENSED_PROMPTS = {
+   139→    'yana': "You are Yana, Chief of Cabinet. Route tasks to departments. Be empathetic, concise. Default language: Russian.",
+   140→    'osp': "You are OSP, Strategic Analysis Dept. Use 5-level topology (Leaves/Branches/Stem/Roots/Fruits). Mark claims [FACT]/[INTERPRETATION]/[SPECULATION]. Sherman Kent scale. Language: Russian.",
+   141→    'lz': "You are LZ, Knowledge Lab. Monitor tech trends, breakthrough research. Structure: Signal->Impact->Opportunity. Cite sources. Language: Russian.",
+   142→    'expert': "You are Expert, Technical Preparator. Brief prep, deep dives, meeting agendas. Extract key facts, risks, decisions. Concise bullets. Language: Russian.",
+   143→    'marketing': "You are Marketing. Audience analysis, positioning, campaigns, conversion. Segment personas, A/B logic. ROI-focused. Language: Russian.",
+   144→    'finance': "You are Finance. Budgets, cashflow, taxes, P&L. Precise numbers, scenarios, risk buffers. Tables preferred. Language: Russian.",
+   145→    'legal': "You are Legal. Contracts, compliance, GDPR, NDA, IP. Flag risks, cite articles. Practical actionable advice. Language: Russian.",
+   146→    'dev': "You are Dev. Architecture, APIs, deployment, code review. Modern stack, clean code principles. Code blocks with explanations. Language: Russian.",
+   147→    'design': "You are Design. UI/UX, wireframes, design systems, user flows. Accessibility, mobile-first, consistency. Language: Russian.",
+   148→    'qa': "You are QA. Testing strategies, bug triage, quality metrics. Test cases, regression plans, coverage. Language: Russian.",
+   149→    'visual': "You are Visual. Infographics, data visualization, charts, presentations. Color theory, layout, clarity. Language: Russian.",
+   150→    'engineering': "You are Engineering. Structural calculations, load analysis, SNiP compliance. Safety factors, materials, drawings. Language: Russian.",
+   151→    'kavalnya': "You are Kavalnya. Methodology, department creation, polygon exercises. Frameworks, KPIs, org design. Language: Russian.",
+   152→    'admin': "You are Admin, System Agent. Health checks, config management, system diagnostics. Technical, precise, actionable. Language: Russian.",
+   153→}
+   154→
+   155→def get_dept_prompt(dept):
+   156→    try:
+   157→        f = LIB_DIR / f"{dept}.md"
+   158→        if f.exists():
+   159→            return f.read_text(encoding="utf-8")
+   160→    except Exception:
+   161→        pass
+   162→    return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana'])
+   163→
+   164→# ──────────────────────────── CONFIG LOADING ────────────────────────────
+   165→_cfg_cache = {"priority_provider": "zai", "priority_model": None, "overrides": {}}
+   166→
+   167→def _load_cfg():
+   168→    try:
+   169→        p = CFG_DIR / "priority_provider.txt"
+   170→        if p.exists(): _cfg_cache["priority_provider"] = p.read_text().strip().split()[0]
+   171→    except Exception: pass
+   172→    try:
+   173→        p = CFG_DIR / "priority_model.txt"
+   174→        if p.exists(): _cfg_cache["priority_model"] = p.read_text().strip()
+   175→    except Exception: pass
+   176→    for dept in DEPT_NAMES:
+   177→        try:
+   178→            p = CFG_DIR / f"override_{dept}.txt"
+   179→            if p.exists(): _cfg_cache["overrides"][dept] = p.read_text().strip()
+   180→        except Exception: pass
+   181→
+   182→_load_cfg()
+   183→
+   184→# ──────────────────────────── SQLITE SETUP ────────────────────────────
+   185→def _db():
+   186→    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+   187→    conn.row_factory = sqlite3.Row
+   188→    conn.execute("PRAGMA journal_mode=WAL")
+   189→    return conn
+   190→
+   191→def init_db():
+   192→    with db_lock:
+   193→        c = _db()
+   194→        c.executescript("""
+   195→        CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, html TEXT, created TEXT, title TEXT, raw_text TEXT DEFAULT '');
+   196→        CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created TEXT);
+   197→        CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, rating INT, created TEXT);
+   198→        CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, model TEXT, tokens_in INT, tokens_out INT, cost REAL, dept TEXT, created TEXT);
+   199→        CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, details TEXT, created TEXT);
+   200→        CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, chat_id TEXT, role TEXT, content TEXT, created TEXT);
+   201→        CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original TEXT, corrected TEXT, created TEXT, corr_type TEXT DEFAULT '');
+   202→        CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, context TEXT, created TEXT);
+   203→        CREATE TABLE IF NOT EXISTS system_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, value TEXT, updated TEXT);
+   204→        CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT);
+   205→        """)
+   206→        c.commit(); c.close()
+   207→
+   208→init_db()
+   209→
+   210→def _query(sql, params=(), fetch=False):
+   211→    with db_lock:
+   212→        c = _db()
+   213→        cur = c.execute(sql, params)
+   214→        if fetch:
+   215→            rows = cur.fetchall(); c.close(); return rows
+   216→        c.commit(); c.close()
+   217→
+   218→def _log_audit(action, details_dict):
+   219→    now = datetime.utcnow().isoformat()
+   220→    _query("INSERT INTO audit_log (action,details,created) VALUES (?,?,?)",
+   221→           (action, json.dumps(details_dict, ensure_ascii=False), now))
+   222→
+   223→# ──────────────────────────── HTML STRIP FOR ARCHIVE ────────────────────────────
+   224→def strip_html_for_archive(html_content):
+   225→    """Convert HTML badges to text markers and strip all tags for Telegram."""
+   226→    text = html_content
+   227→    # Convert badge spans with known classes to text markers
+   228→    badge_map = {
+   229→        'badge-fact': '[FACT]',
+   230→        'badge-int': '[INTERPRETATION]',
+   231→        'badge-spec': '[SPECULATION]',
+   232→        'badge-verified': '[FACT verified]',
+   233→        'badge-unverified': '[FACT unverified]',
+   234→        'badge-conflicting': '[CONFLICT]',
+   235→    }
+   236→    for cls, marker in badge_map.items():
+   237→        # Match <span class="badge badge-xxx">content</span>
+   238→        pattern = r'<span[^>]*class="[^"]*\b' + re.escape(cls) + r'\b[^"]*"[^>]*>(.*?)</span>'
+   239→        text = re.sub(pattern, marker + r' \1 ', text, flags=re.IGNORECASE | re.DOTALL)
+   240→    # Also match class="badge badge-xxx" without space (single class)
+   241→    for cls, marker in badge_map.items():
+   242→        pattern2 = r'<span[^>]*class="' + re.escape(cls) + r'"[^>]*>(.*?)</span>'
+   243→        text = re.sub(pattern2, marker + r' \1 ', text, flags=re.IGNORECASE | re.DOTALL)
+   244→    # Remove all remaining HTML tags
+   245→    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+   246→    text = re.sub(r'</p>', '\n', text, flags=re.IGNORECASE)
+   247→    text = re.sub(r'</div>', '\n', text, flags=re.IGNORECASE)
+   248→    text = re.sub(r'</li>', '\n- ', text, flags=re.IGNORECASE)
+   249→    text = re.sub(r'<li[^>]*>', '- ', text, flags=re.IGNORECASE)
+   250→    text = re.sub(r'<[^>]+>', ' ', text)
+   251→    # Collapse whitespace
+   252→    text = re.sub(r'[ \t]+', ' ', text)
+   253→    text = re.sub(r'\n[ \t]+', '\n', text)
+   254→    text = re.sub(r'\n{3,}', '\n\n', text)
+   255→    return text.strip()
+   256→
+   257→# ──────────────────────────── LLM CALL ────────────────────────────
+   258→def call_llm(dept, messages, model_override=None):
+   259→    priority = _cfg_cache["priority_provider"]
+   260→    model = model_override or _cfg_cache["overrides"].get(dept) or _cfg_cache["priority_model"] or "glm-4.6"
+   261→    order = [p for p in [priority] + [k for k in PROVIDERS if k != priority] if p in PROVIDERS]
+   262→    last_err = None
+   263→    for prov_name in order:
+   264→        prov = PROVIDERS[prov_name]
+   265→        api_key = os.environ.get(prov["env_key"])
+   266→        if not api_key:
+   267→            continue
+   268→        try:
+   269→            use_model = model
+   270→            if prov_name == "anthropic" and use_model.startswith("gpt"):
+   271→                use_model = "claude-sonnet-4-20250514"
+   272→            elif prov_name == "deepseek" and not use_model.startswith("deepseek"):
+   273→                use_model = "deepseek-chat"
+   274→            elif prov_name == "groq" and not any(m in use_model for m in ("llama", "mixtral", "gemma")):
+   275→                use_model = "llama-3.3-70b-versatile"
+   276→
+   277→            if prov["format"] == "openai":
+   278→                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+   279→                body = {"model": use_model, "messages": messages, "temperature": 0.7}
+   280→            else:
+   281→                sys_msg = ""
+   282→                user_msgs = []
+   283→                for m in messages:
+   284→                    if m["role"] == "system": sys_msg = m["content"]
+   285→                    else: user_msgs.append(m)
+   286→                headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+   287→                body = {"model": use_model, "max_tokens": 4096, "system": sys_msg, "messages": user_msgs}
+   288→
+   289→            resp = http_requests.post(prov["url"], headers=headers, json=body, timeout=prov["timeout"])
+   290→            resp.raise_for_status()
+   291→            data = resp.json()
+   292→
+   293→            if prov["format"] == "openai":
+   294→                reply = data["choices"][0]["message"]["content"]
+   295→                t_in = data.get("usage", {}).get("prompt_tokens", 0)
+   296→                t_out = data.get("usage", {}).get("completion_tokens", 0)
+   297→            else:
+   298→                reply = data["content"][0]["text"]
+   299→                t_in = data.get("usage", {}).get("input_tokens", 0)
+   300→                t_out = data.get("usage", {}).get("output_tokens", 0)
+   301→
+   302→            costs = TOKEN_COSTS.get(prov_name, {"input": 1, "output": 1})
+   303→            cost = t_in * costs["input"] / 1_000_000 + t_out * costs["output"] / 1_000_000
+   304→            now = datetime.utcnow().isoformat()
+   305→            _query("INSERT INTO token_usage (provider,model,tokens_in,tokens_out,cost,dept,created) VALUES (?,?,?,?,?,?,?)",
+   306→                   (prov_name, use_model, t_in, t_out, round(cost, 6), dept, now))
+   307→            _query("INSERT INTO audit_log (action,details,created) VALUES (?,?,?)",
+   308→                   ("llm_call", json.dumps({"dept": dept, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out}), now))
+   309→            log.info(f"LLM ok: provider={prov_name} model={use_model} dept={dept} t_in={t_in} t_out={t_out}")
+   310→            return {"reply": reply, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out}
+   311→        except Exception as e:
+   312→            last_err = str(e)
+   313→            log.warning(f"LLM fail: provider={prov_name} err={last_err}")
+   314→    return {"reply": f"[Oshibka] Vse providery nedostupny: {last_err}", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}
+   315→
+   316→# ──────────────────────────── TELEGRAM HELPERS ────────────────────────────
+   317→def _tg_send_message(chat_id, text, parse_mode=None):
+   318→    """Send a text message via Telegram Bot API."""
+   319→    if not TELEGRAM_BOT_TOKEN:
+   320→        log.warning("TELEGRAM_BOT_TOKEN not set, cannot send message")
+   321→        return None
+   322→    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+   323→    payload = {"chat_id": chat_id, "text": text}
+   324→    if parse_mode:
+   325→        payload["parse_mode"] = parse_mode
+   326→    try:
+   327→        resp = http_requests.post(url, json=payload, timeout=30)
+   328→        resp.raise_for_status()
+   329→        data = resp.json()
+   330→        if data.get("ok"):
+   331→            return data["result"].get("message_id")
+   332→    except Exception as e:
+   333→        log.error(f"Telegram sendMessage failed: {e}")
+   334→    return None
+   335→
+   336→def _tg_send_voice(chat_id, voice_path):
+   337→    """Send a voice file via Telegram Bot API using multipart upload."""
+   338→    if not TELEGRAM_BOT_TOKEN:
+   339→        log.warning("TELEGRAM_BOT_TOKEN not set, cannot send voice")
+   340→        return None
+   341→    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice"
+   342→    try:
+   343→        with open(voice_path, "rb") as f:
+   344→            resp = http_requests.post(url, data={"chat_id": chat_id}, files={"voice": f}, timeout=60)
+   345→        resp.raise_for_status()
+   346→        data = resp.json()
+   347→        if data.get("ok"):
+   348→            return data["result"].get("message_id")
+   349→    except Exception as e:
+   350→        log.error(f"Telegram sendVoice failed: {e}")
+   351→    return None
+   352→
+   353→def _tg_send_report_with_button(chat_id, text, button_text="Otkryt otchet", button_url=None):
+   354→    """Send text with an inline button via Telegram Bot API."""
+   355→    if not TELEGRAM_BOT_TOKEN:
+   356→        log.warning("TELEGRAM_BOT_TOKEN not set, cannot send report")
+   357→        return None
+   358→    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+   359→    reply_markup = {
+   360→        "inline_keyboard": [[{"text": button_text, "url": button_url or "https://t.me/FosvedMiniApp"}]]
+   361→    }
+   362→    payload = {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
+   363→    try:
+   364→        resp = http_requests.post(url, json=payload, timeout=30)
+   365→        resp.raise_for_status()
+   366→        data = resp.json()
+   367→        if data.get("ok"):
+   368→            return data["result"].get("message_id")
+   369→    except Exception as e:
+   370→        log.error(f"Telegram sendReport failed: {e}")
+   371→    return None
+   372→
+   373→def _tg_get_file(file_id):
+   374→    """Get file path from Telegram Bot API given a file_id."""
+   375→    if not TELEGRAM_BOT_TOKEN:
+   376→        return None
+   377→    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
+   378→    try:
+   379→        resp = http_requests.get(url, params={"file_id": file_id}, timeout=15)
+   380→        resp.raise_for_status()
+   381→        data = resp.json()
+   382→        if data.get("ok") and data.get("result", {}).get("file_path"):
+   383→            return data["result"]["file_path"]
+   384→    except Exception as e:
+   385→        log.error(f"Telegram getFile failed: {e}")
+   386→    return None
+   387→
+   388→def _tg_download_file(file_path):
+   389→    """Download a file from Telegram Bot API given its file_path."""
+   390→    if not TELEGRAM_BOT_TOKEN:
+   391→        return None
+   392→    url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+   393→    try:
+   394→        resp = http_requests.get(url, timeout=60)
+   395→        resp.raise_for_status()
+   396→        return resp.content
+   397→    except Exception as e:
+   398→        log.error(f"Telegram file download failed: {e}")
+   399→    return None
+   400→
+   401→# ──────────────────────────── MEMORIZE HELPER ────────────────────────────
+   402→def _memorize(dept, topic, content):
+   403→    """Save a finding to dialog_history as a system memorization entry."""
+   404→    now = datetime.utcnow().isoformat()
+   405→    entry = f"[MEMORY] {topic}: {content}"
+   406→    _query("INSERT INTO dialog_history (dept, chat_id, role, content, created) VALUES (?, '0', 'system', ?, ?)",
+   407→           (dept, entry, now))
+   408→
+   409→# ──────────────────────────── HTML HELPERS ────────────────────────────
+   410→def _html_base(title, bg="#0F0F0F"):
+   411→    return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
+   412→<meta name="viewport" content="width=device-width,initial-scale=1">
+   413→<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+   414→<title>{title}</title><style>
+   415→*{{margin:0;padding:0;box-sizing:border-box}}
+   416→body{{font-family:'DM Sans',system-ui,sans-serif;background:{bg};color:#F8F7F4;min-height:100vh}}
+   417→h1,h2,h3{{font-family:'Cormorant Garamond',serif;font-weight:700}}
+   418→.badge{{font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;border-radius:4px;display:inline-block}}
+   419→.badge-fact{{background:#16a34a22;color:#16a34a}} .badge-int{{background:#2563eb22;color:#2563eb}}
+   420→.badge-spec{{background:#ca8a0422;color:#ca8a04}}
+   421→.card{{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;padding:20px}}
+   422→.kpi{{text-align:center;padding:16px}} .kpi .num{{font-size:2rem;font-weight:700;font-family:'DM Mono',monospace}}
+   423→.kpi .lbl{{font-size:0.75rem;color:#999;margin-top:4px;text-transform:uppercase;letter-spacing:1px}}
+   424→.gold{{color:#C9A84C}} .status-red{{color:#E24B4A}} .status-yellow{{color:#EF9F27}} .status-green{{color:#639922}} .status-blue{{color:#185FA5}}
+   425→table{{width:100%;border-collapse:collapse;margin:12px 0}} th,td{{text-align:left;padding:8px 12px;border-bottom:1px solid #2a2a2a;font-size:0.85rem}}
+   426→th{{color:#999;font-weight:500;text-transform:uppercase;font-size:0.7rem;letter-spacing:1px}}
+   427→a{{color:#C9A84C;text-decoration:none}} a:hover{{text-decoration:underline}}
+   428→.grid{{display:grid;gap:16px}} .grid-3{{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}}
+   429→.grid-4{{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}}
+   430→.header-grad{{padding:32px 40px;border-radius:16px;margin:20px 24px;color:#fff}}
+   431→.section{{padding:0 24px;margin-top:24px}} .section h2{{margin-bottom:16px;font-size:1.4rem}}
+   432→.mono{{font-family:'DM Mono',monospace}}
+   433→</style></head><body>"""
+   434→
+   435→def _dept_header(dept, title_extra=""):
+   436→    c = DEPT_COLORS.get(dept, DEPT_COLORS['admin'])
+   437→    name = DEPT_NAMES.get(dept, dept)
+   438→    return f'<div class="header-grad" style="background:linear-gradient(135deg,{c["start"]},{c["end"]})">' \
+   439→           f'<h1>{name} {title_extra}</h1><p style="color:{c["accent"]};font-size:0.9rem;margin-top:8px">Department Dashboard</p></div>'
+   440→
+   441→def _status_icon(level):
+   442→    colors = {"high": "#639922", "medium": "#EF9F27", "low": "#E24B4A"}
+   443→    return f'<span style="color:{colors.get(level,"#999")};font-size:1.5rem">{"&#x1F7E2;" if level=="high" else "&#x1F7E1;" if level=="medium" else "&#x1F534;"}</span>'
+   444→
+   445→def _dept_kpis(dept):
+   446→    now = datetime.utcnow()
+   447→    week_ago = (now - timedelta(days=7)).isoformat()
+   448→    rows_m = _query("SELECT COUNT(*) as c, COALESCE(AVG(rating),0) as avg_r FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+   449→    rows_t = _query("SELECT COALESCE(SUM(tokens_in),0) as ti, COALESCE(SUM(tokens_out),0) as to2 FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+   450→    rows_d = _query("SELECT COUNT(*) as c FROM dialog_history WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+   451→    m = rows_m[0] if rows_m else {"c": 0, "avg_r": 0}
+   452→    t = rows_t[0] if rows_t else {"ti": 0, "to2": 0}
+   453→    d = rows_d[0] if rows_d else {"c": 0}
+   454→    return f"""<div class="grid grid-4" style="margin:20px 24px">
+   455→<div class="card kpi"><div class="num gold">{m['c']}</div><div class="lbl">Reiting / ned</div></div>
+   456→<div class="card kpi"><div class="num" style="color:#16a34a">{m['avg_r']:.1f}</div><div class="lbl">Sr. otsenka</div></div>
+   457→<div class="card kpi"><div class="num status-blue">{(t['ti']+t['to2']):,}</div><div class="lbl">Tokeny / ned</div></div>
+   458→<div class="card kpi"><div class="num">{d['c']}</div><div class="lbl">Dialogi / ned</div></div></div>"""
+   459→
+   460→# ══════════════════════════════════════════════════════════════════════
+   461→#  ROUTES — ORIGINAL ENDPOINTS
+   462→# ══════════════════════════════════════════════════════════════════════
+   463→
+   464→@app.get("/health")
+   465→def health():
+   466→    return "ok"
+   467→
+   468→@app.post("/detect-dept")
+   469→def detect_dept_endpoint():
+   470→    d = request.get_json(force=True)
+   471→    text = d.get("text", "")
+   472→    dept = detect_dept(text)
+   473→    return jsonify({"dept": dept})
+   474→
+   475→@app.post("/ask")
+   476→def ask():
+   477→    d = request.get_json(force=True)
+   478→    dept = d.get("dept", "yana")
+   479→    messages = d.get("messages", [])
+   480→    model_ov = d.get("model")
+   481→    if not messages:
+   482→        return jsonify({"reply": "[Oshibka] Net soobshenii", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 400
+   483→    result = call_llm(dept, messages, model_ov)
+   484→    return jsonify(result)
+   485→
+   486→@app.post("/rate_cmd")
+   487→def rate_cmd():
+   488→    d = request.get_json(force=True)
+   489→    dept, rating = d.get("dept", "yana"), d.get("rating", 0)
+   490→    _query("INSERT INTO dept_metrics (dept,rating,created) VALUES (?,?,?)", (dept, rating, datetime.utcnow().isoformat()))
+   491→    return jsonify({"status": "ok"})
+   492→
+   493→@app.post("/context_cmd")
+   494→def context_cmd():
+   495→    d = request.get_json(force=True)
+   496→    dept, chat_id = d.get("dept", "yana"), d.get("chat_id", "0")
+   497→    rows = _query("SELECT role,content,created FROM dialog_history WHERE dept=? AND chat_id=? ORDER BY id DESC LIMIT 20", (dept, chat_id), fetch=True)
+   498→    corrs = _query("SELECT original,corrected,created FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 10", (dept,), fetch=True)
+   499→    ctx = {"dialog": [{"role": r["role"], "content": r["content"], "ts": r["created"]} for r in reversed(rows)]}
+   500→    ctx["corrections"] = [{"original": r["original"], "corrected": r["corrected"], "ts": r["created"]} for r in corrs]
+   501→    return jsonify(ctx)
+   502→
+   503→@app.post("/voice-set")
+   504→def voice_set():
+   505→    d = request.get_json(force=True)
+   506→    _log_audit("voice_set", d)
+   507→    return jsonify({"status": "ok"})
+   508→
+   509→@app.post("/archive/digest")
+   510→def archive_digest():
+   511→    d = request.get_json(force=True)
+   512→    _log_audit("digest", d)
+   513→    return jsonify({"status": "ok", "digest_id": hashlib.md5(json.dumps(d).encode()).hexdigest()[:8]})
+   514→
+   515→@app.get("/miniapp/<doc_id>")
+   516→def miniapp_get(doc_id):
+   517→    rows = _query("SELECT html,title,created FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
+   518→    if not rows:
+   519→        return "<h1>Not found</h1>", 404
+   520→    r = rows[0]
+   521→    return Response(r["html"], mimetype="text/html")
+   522→
+   523→@app.post("/miniapp/note")
+   524→def miniapp_note():
+   525→    d = request.get_json(force=True)
+   526→    _query("INSERT INTO miniapp_notes (doc_id,note_text,created) VALUES (?,?,?)",
+   527→           (d.get("doc_id", ""), d.get("note_text", ""), datetime.utcnow().isoformat()))
+   528→    return jsonify({"status": "ok"})
+   529→
+   530→@app.get("/dept-dashboard/<slug>")
+   531→def dept_dashboard(slug):
+   532→    dept = slug.lower()
+   533→    if dept not in DEPT_NAMES:
+   534→        return "<h1>Unknown department</h1>", 404
+   535→    rows_corr = _query("SELECT original,corrected,created FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
+   536→    override = _cfg_cache["overrides"].get(dept, "default")
+   537→    html = _html_base(f"Dashboard — {DEPT_NAMES[dept]}")
+   538→    html += _dept_header(dept)
+   539→    html += _dept_kpis(dept)
+   540→    html += '<div class="section"><h2>Poslednie korrektirovki</h2>'
+   541→    if rows_corr:
+   542→        html += '<table><tr><th>Original</th><th>Korrektirovka</th><th>Data</th></tr>'
+   543→        for r in rows_corr:
+   544→            html += f'<tr><td>{r["original"][:80]}</td><td>{r["corrected"][:80]}</td><td class="mono">{r["created"][:16]}</td></tr>'
+   545→        html += '</table>'
+   546→    else:
+   547→        html += '<p style="color:#666">Net korrektirovok</p>'
+   548→    html += '</div>'
+   549→    html += '<div class="section"><h2>Konfiguratsiya</h2>'
+   550→    html += f'<div class="card"><p>Model: <span class="mono gold">{override}</span></p>'
+   551→    html += f'<p>Provider: <span class="mono gold">{_cfg_cache["priority_provider"]}</span></p></div></div>'
+   552→    html += '</body></html>'
+   553→    return Response(html, mimetype="text/html")
+   554→
+   555→@app.get("/office-dashboard")
+   556→def office_dashboard():
+   557→    now = datetime.utcnow()
+   558→    today = now.isoformat()[:10]
+   559→    week_ago = (now - timedelta(days=7)).isoformat()
+   560→    month_ago = (now - timedelta(days=30)).isoformat()
+   561→    r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (today,), fetch=True)
+   562→    r_week = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (week_ago,), fetch=True)
+   563→    r_month = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (month_ago,), fetch=True)
+   564→    r_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (month_ago,), fetch=True)
+   565→    n_today = r_today[0]["c"] if r_today else 0
+   566→    n_week = r_week[0]["c"] if r_week else 0
+   567→    n_month = r_month[0]["c"] if r_month else 0
+   568→    cost_month = r_cost[0]["t"] if r_cost else 0
+   569→
+   570→    html = _html_base("Fosved Office — Panel upravleniya")
+   571→    html += '<div class="header-grad" style="background:linear-gradient(135deg,#1a1a2e,#16213e)"><h1>Fosved Office v2</h1>'
+   572→    html += f'<p style="color:#C9A84C;margin-top:8px">Obzor za {today} &nbsp;|&nbsp; Provider: <span class="mono">{_cfg_cache["priority_provider"]}</span> &nbsp;|&nbsp; Model: <span class="mono">{_cfg_cache["priority_model"] or "auto"}</span></p></div>'
+   573→    html += f"""<div class="grid grid-4" style="margin:20px 24px">
+   574→<div class="card kpi"><div class="num gold">{n_today}</div><div class="lbl">Vyzovov segodnya</div></div>
+   575→<div class="card kpi"><div class="num status-blue">{n_week}</div><div class="lbl">Za nedelyu</div></div>
+   576→<div class="card kpi"><div class="num">{n_month}</div><div class="lbl">Za mesyats</div></div>
+   577→<div class="card kpi"><div class="num status-green">${cost_month:.2f}</div><div class="lbl">Stoimost / mes</div></div></div>"""
+   578→
+   579→    html += '<div class="section"><h2>Departamenty</h2><div class="grid grid-3">'
+   580→    depts = [d for d in DEPT_NAMES if d != "admin"]
+   581→    for dept in depts:
+   582→        c = DEPT_COLORS[dept]
+   583→        r_d = _query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+   584→        r_m = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+   585→        calls = r_d[0]["c"] if r_d else 0
+   586→        rating = r_m[0]["a"] if r_m else 0
+   587→        level = "high" if calls > 10 else "medium" if calls > 0 else "low"
+   588→        ov = _cfg_cache["overrides"].get(dept)
+   589→        html += f"""<div class="card" style="border-left:4px solid {c['accent']}">
+   590→<h3 style="font-size:1rem">{_status_icon(level)} {DEPT_NAMES[dept]}</h3>
+   591→<p class="mono" style="margin-top:8px;font-size:0.8rem;color:#999">Vyzovy: {calls} &nbsp; Otsenka: {rating:.1f}/5</p>
+   592→<p class="mono" style="font-size:0.7rem;color:#666;margin-top:4px">Model: {ov or 'default'}</p>
+   593→<a href="/dept-dashboard/{dept}" style="font-size:0.75rem;display:inline-block;margin-top:8px">Otkryt -&gt;</a></div>"""
+   594→    html += '</div></div>'
+   595→
+   596→    audit_rows = _query("SELECT action,details,created FROM audit_log ORDER BY id DESC LIMIT 10", fetch=True)
+   597→    html += '<div class="section"><h2>Zhurnal</h2><table><tr><th>Deistvie</th><th>Detali</th><th>Vremya</th></tr>'
+   598→    for r in audit_rows:
+   599→        det = r["details"][:100] if r["details"] else ""
+   600→        html += f'<tr><td class="mono">{r["action"]}</td><td style="color:#999;font-size:0.8rem">{det}</td><td class="mono" style="font-size:0.8rem">{r["created"][:19]}</td></tr>'
+   601→    html += '</table></div>'
+   602→
+   603→    prov_rows = _query("SELECT provider,COUNT(*) as c,COALESCE(SUM(cost),0) as cost FROM token_usage WHERE created>=? GROUP BY provider", (month_ago,), fetch=True)
+   604→    html += '<div class="section"><h2>Providery (mesyats)</h2><table><tr><th>Provider</th><th>Vyzovy</th><th>Stoimost</th></tr>'
+   605→    for r in prov_rows:
+   606→        html += f'<tr><td class="mono gold">{r["provider"]}</td><td>{r["c"]}</td><td class="mono">${r["cost"]:.2f}</td></tr>'
+   607→    html += '</table></div></body></html>'
+   608→    return Response(html, mimetype="text/html")
+   609→
+   610→# ══════════════════════════════════════════════════════════════════════
+   611→#  MEGA-3: TTS ENDPOINT
+   612→# ══════════════════════════════════════════════════════════════════════
+   613→
+   614→@app.post("/tts")
+   615→def tts_endpoint():
+   616→    """Text-to-speech via edge-tts, send voice to Telegram."""
+   617→    d = request.get_json(force=True)
+   618→    text = d.get("text", "")
+   619→    voice = d.get("voice", "ru-RU-DmitryNeural")
+   620→    chat_id = d.get("chat_id", "")
+   621→
+   622→    if not text:
+   623→        return jsonify({"status": "error", "message": "text is required"}), 400
+   624→    if not chat_id:
+   625→        return jsonify({"status": "error", "message": "chat_id is required"}), 400
+   626→
+   627→    timestamp = int(time.time())
+   628→    tmp_path = f"/tmp/tts_{timestamp}_{uuid.uuid4().hex[:6]}.mp3"
+   629→
+   630→    try:
+   631→        # Run edge-tts subprocess
+   632→        cmd = [
+   633→            "edge-tts",
+   634→            "--voice", voice,
+   635→            "--text", text,
+   636→            "--write-media", tmp_path
+   637→        ]
+   638→        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+   639→        if result.returncode != 0:
+   640→            log.error(f"edge-tts failed: {result.stderr}")
+   641→            _log_audit("tts_error", {"voice": voice, "error": result.stderr[:500]})
+   642→            return jsonify({"status": "error", "message": "edge-tts synthesis failed", "detail": result.stderr[:500]}), 500
+   643→
+   644→        # Send voice to Telegram
+   645→        msg_id = _tg_send_voice(chat_id, tmp_path)
+   646→
+   647→        _log_audit("tts", {"chat_id": chat_id, "voice": voice, "text_len": len(text), "tg_msg_id": msg_id})
+   648→
+   649→        return jsonify({"status": "ok", "msg_id": msg_id})
+   650→
+   651→    except FileNotFoundError:
+   652→        _log_audit("tts_error", {"error": "edge-tts not installed"})
+   653→        return jsonify({"status": "error", "message": "edge-tts binary not found"}), 500
+   654→    except subprocess.TimeoutExpired:
+   655→        _log_audit("tts_error", {"error": "timeout"})
+   656→        return jsonify({"status": "error", "message": "TTS synthesis timeout"}), 500
+   657→    except Exception as e:
+   658→        log.error(f"TTS error: {e}")
+   659→        _log_audit("tts_error", {"error": str(e)[:500]})
+   660→        return jsonify({"status": "error", "message": str(e)}), 500
+   661→    finally:
+   662→        # Clean up temp file
+   663→        try:
+   664→            if os.path.exists(tmp_path):
+   665→                os.remove(tmp_path)
+   666→        except Exception:
+   667→            pass
+   668→
+   669→# ══════════════════════════════════════════════════════════════════════
+   670→#  MEGA-3: STT (WHISPER) ENDPOINT
+   671→# ══════════════════════════════════════════════════════════════════════
+   672→
+   673→@app.post("/stt")
+   674→def stt_endpoint():
+   675→    """Speech-to-text via Whisper (Groq preferred, OpenAI fallback)."""
+   676→    d = request.get_json(force=True)
+   677→    file_id = d.get("file_id", "")
+   678→
+   679→    if not file_id:
+   680→        return jsonify({"status": "error", "message": "file_id is required"}), 400
+   681→
+   682→    provider = WHISPER_PROVIDER
+   683→    audio_data = None
+   684→
+   685→    try:
+   686→        # Step 1: Get file path from Telegram
+   687→        file_path = _tg_get_file(file_id)
+   688→        if not file_path:
+   689→            _log_audit("stt_error", {"error": "could not get file path from Telegram", "file_id": file_id})
+   690→            return jsonify({"status": "error", "message": "Failed to get file from Telegram"}), 400
+   691→
+   692→        # Step 2: Download audio from Telegram
+   693→        audio_data = _tg_download_file(file_path)
+   694→        if not audio_data:
+   695→            _log_audit("stt_error", {"error": "could not download file from Telegram", "file_path": file_path})
+   696→            return jsonify({"status": "error", "message": "Failed to download audio from Telegram"}), 400
+   697→
+   698→        # Step 3: Transcribe via Whisper
+   699→        if provider == "groq":
+   700→            api_key = os.environ.get("GROQ_API_KEY", WHISPER_API_KEY)
+   701→            url = "https://api.groq.com/openai/v1/audio/transcriptions"
+   702→            model = "whisper-large-v3"
+   703→        else:
+   704→            api_key = os.environ.get("OPENAI_API_KEY", WHISPER_API_KEY)
+   705→            url = "https://api.openai.com/v1/audio/transcriptions"
+   706→            model = "whisper-1"
+   707→
+   708→        # Prepare multipart form
+   709→        files = {
+   710→            "file": ("audio.ogg", bytes(audio_data), "audio/ogg"),
+   711→        }
+   712→        data = {"model": model}
+   713→        headers = {"Authorization": f"Bearer {api_key}"}
+   714→
+   715→        resp = http_requests.post(url, headers=headers, files=files, data=data, timeout=60)
+   716→        resp.raise_for_status()
+   717→        resp_data = resp.json()
+   718→        transcribed_text = resp_data.get("text", "")
+   719→
+   720→        _log_audit("stt", {"file_id": file_id, "provider": provider, "model": model, "text_len": len(transcribed_text)})
+   721→
+   722→        return jsonify({"status": "ok", "text": transcribed_text, "provider": provider})
+   723→
+   724→    except Exception as e:
+   725→        log.error(f"STT error (provider={provider}): {e}")
+   726→        # Try fallback provider if primary failed
+   727→        if provider == "groq" and audio_data:
+   728→            try:
+   729→                fallback_key = os.environ.get("OPENAI_API_KEY", "")
+   730→                if not fallback_key:
+   731→                    raise ValueError("No OpenAI API key for fallback")
+   732→                files = {"file": ("audio.ogg", bytes(audio_data), "audio/ogg")}
+   733→                data = {"model": "whisper-1"}
+   734→                headers = {"Authorization": f"Bearer {fallback_key}"}
+   735→                resp = http_requests.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=60)
+   736→                resp.raise_for_status()
+   737→                resp_data = resp.json()
+   738→                transcribed_text = resp_data.get("text", "")
+   739→                _log_audit("stt", {"file_id": file_id, "provider": "openai", "model": "whisper-1", "text_len": len(transcribed_text), "fallback": True})
+   740→                return jsonify({"status": "ok", "text": transcribed_text, "provider": "openai"})
+   741→            except Exception as fallback_err:
+   742→                log.error(f"STT fallback also failed: {fallback_err}")
+   743→
+   744→        _log_audit("stt_error", {"error": str(e)[:500], "file_id": file_id})
+   745→        return jsonify({"status": "error", "message": str(e)}), 500
+   746→
+   747→# ══════════════════════════════════════════════════════════════════════
+   748→#  MEGA-3: ARCHIVE ENDPOINTS
+   749→# ══════════════════════════════════════════════════════════════════════
+   750→
+   751→@app.post("/archive/publish")
+   752→def archive_publish():
+   753→    """Publish a document to the Telegram archive channel."""
+   754→    d = request.get_json(force=True)
+   755→    doc_id = d.get("doc_id", "")
+   756→    dept = d.get("dept", "")
+   757→    title = d.get("title", "")
+   758→    content = d.get("content", "")
+   759→
+   760→    if not content:
+   761→        return jsonify({"status": "error", "message": "content is required"}), 400
+   762→    if not TELEGRAM_ARCHIVE_CHANNEL_ID:
+   763→        return jsonify({"status": "error", "message": "TELEGRAM_ARCHIVE_CHANNEL_ID not set"}), 500
+   764→
+   765→    try:
+   766→        # Strip HTML, convert badges to text markers
+   767→        plain = strip_html_for_archive(content)
+   768→
+   769→        # Add dept hashtags
+   770→        hashtags = DEPT_HASHTAGS.get(dept, "")
+   771→        if hashtags:
+   772→            plain = plain + "\n\n" + hashtags
+   773→
+   774→        # Truncate to 3800 chars for Telegram limit
+   775→        if len(plain) > 3800:
+   776→            plain = plain[:3790] + "..."
+   777→
+   778→        # Send to archive channel
+   779→        msg_id = _tg_send_message(TELEGRAM_ARCHIVE_CHANNEL_ID, plain)
+   780→
+   781→        # Record in channel_archive table
+   782→        now = datetime.utcnow().isoformat()
+   783→        _query("INSERT INTO channel_archive (doc_id, dept, title, channel_message_id, archived_at) VALUES (?,?,?,?,?)",
+   784→               (doc_id, dept, title, str(msg_id) if msg_id else "", now))
+   785→
+   786→        _log_audit("archive_publish", {"doc_id": doc_id, "dept": dept, "title": title, "msg_id": msg_id, "chars": len(plain)})
+   787→
+   788→        return jsonify({"status": "ok", "msg_id": msg_id})
+   789→
+   790→    except Exception as e:
+   791→        log.error(f"archive_publish error: {e}")
+   792→        _log_audit("archive_publish_error", {"error": str(e)[:500], "doc_id": doc_id})
+   793→        return jsonify({"status": "error", "message": str(e)}), 500
+   794→
+   795→@app.post("/archive/daily-digest")
+   796→def archive_daily_digest():
+   797→    """Collect today's stats and send a digest to the archive channel."""
+   798→    try:
+   799→        if not TELEGRAM_ARCHIVE_CHANNEL_ID:
+   800→            return jsonify({"status": "error", "message": "TELEGRAM_ARCHIVE_CHANNEL_ID not set"}), 500
+   801→
+   802→        now = datetime.utcnow()
+   803→        today = now.isoformat()[:10]
+   804→        today_start = today + "T00:00:00"
+   805→
+   806→        # Collect today's stats
+   807→        tasks_rows = _query("SELECT dept, COUNT(*) as c FROM dialog_history WHERE created>=? AND role='user' GROUP BY dept", (today_start,), fetch=True)
+   808→        reports_rows = _query("SELECT dept, COUNT(*) as c FROM miniapp_responses WHERE created>=? GROUP BY dept", (today_start,), fetch=True)
+   809→        corrections_rows = _query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created>=? GROUP BY dept", (today_start,), fetch=True)
+   810→
+   811→        # Build digest text
+   812→        lines = []
+   813→        lines.append(f"DAILY DIGEST - {today}")
+   814→        lines.append("=" * 40)
+   815→        lines.append("")
+   816→
+   817→        # Task breakdown
+   818→        total_tasks = sum(r["c"] for r in tasks_rows)
+   819→        lines.append(f"TASKS: {total_tasks} total")
+   820→        for r in sorted(tasks_rows, key=lambda x: -x["c"]):
+   821→            dept_name = DEPT_NAMES.get(r["dept"], r["dept"])
+   822→            lines.append(f"  {dept_name}: {r['c']}")
+   823→        lines.append("")
+   824→
+   825→        # Reports
+   826→        total_reports = sum(r["c"] for r in reports_rows)
+   827→        lines.append(f"REPORTS: {total_reports} total")
+   828→        for r in sorted(reports_rows, key=lambda x: -x["c"]):
+   829→            dept_name = DEPT_NAMES.get(r["dept"], r["dept"])
+   830→            lines.append(f"  {dept_name}: {r['c']}")
+   831→        lines.append("")
+   832→
+   833→        # Corrections
+   834→        total_corrections = sum(r["c"] for r in corrections_rows)
+   835→        lines.append(f"CORRECTIONS: {total_corrections} total")
+   836→        for r in sorted(corrections_rows, key=lambda x: -x["c"]):
+   837→            dept_name = DEPT_NAMES.get(r["dept"], r["dept"])
+   838→            lines.append(f"  {dept_name}: {r['c']}")
+   839→
+   840→        digest_text = "\n".join(lines)
+   841→
+   842→        msg_id = _tg_send_message(TELEGRAM_ARCHIVE_CHANNEL_ID, digest_text)
+   843→        _log_audit("archive_daily_digest", {"date": today, "tasks": total_tasks, "reports": total_reports, "corrections": total_corrections, "msg_id": msg_id})
+   844→
+   845→        return jsonify({"status": "ok", "msg_id": msg_id})
+   846→
+   847→    except Exception as e:
+   848→        log.error(f"archive_daily_digest error: {e}")
+   849→        _log_audit("archive_daily_digest_error", {"error": str(e)[:500]})
+   850→        return jsonify({"status": "error", "message": str(e)}), 500
+   851→
+   852→# ══════════════════════════════════════════════════════════════════════
+   853→#  MEGA-3: SCHEDULER ENDPOINTS
+   854→# ══════════════════════════════════════════════════════════════════════
+   855→
+   856→def _collect_metrics_for_period(start_iso, end_iso=None):
+   857→    """Collect metrics for a given time period."""
+   858→    conditions = "created >= ?"
+   859→    params = [start_iso]
+   860→    if end_iso:
+   861→        conditions += " AND created < ?"
+   862→        params.append(end_iso)
+   863→
+   864→    tasks = _query(f"SELECT dept, COUNT(*) as c FROM dialog_history WHERE {conditions} AND role='user' GROUP BY dept", params, fetch=True)
+   865→    reports = _query(f"SELECT dept, COUNT(*) as c FROM miniapp_responses WHERE {conditions} GROUP BY dept", params, fetch=True)
+   866→    corrections = _query(f"SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE {conditions} GROUP BY dept", params, fetch=True)
+   867→    ratings = _query(f"SELECT dept, COALESCE(AVG(rating),0) as avg_r, COUNT(*) as c FROM dept_metrics WHERE {conditions} GROUP BY dept", params, fetch=True)
+   868→    tokens = _query(f"SELECT dept, COALESCE(SUM(tokens_in),0) as ti, COALESCE(SUM(tokens_out),0) as to2, COALESCE(SUM(cost),0) as cost FROM token_usage WHERE {conditions} GROUP BY dept", params, fetch=True)
+   869→
+   870→    return {
+   871→        "tasks": {r["dept"]: r["c"] for r in tasks},
+   872→        "reports": {r["dept"]: r["c"] for r in reports},
+   873→        "corrections": {r["dept"]: r["c"] for r in corrections},
+   874→        "ratings": {r["dept"]: {"avg": r["avg_r"], "count": r["c"]} for r in ratings},
+   875→        "tokens": {r["dept"]: {"in": r["ti"], "out": r["to2"], "cost": r["cost"]} for r in tokens},
+   876→    }
+   877→
+   878→def _format_metrics_text(metrics):
+   879→    """Format metrics dict as readable text for LLM prompt."""
+   880→    lines = []
+   881→    lines.append("METRICS:")
+   882→    all_depts = set(list(metrics["tasks"].keys()) + list(metrics["reports"].keys()) + list(metrics["corrections"].keys()) + list(metrics["ratings"].keys()))
+   883→    for dept in sorted(all_depts):
+   884→        name = DEPT_NAMES.get(dept, dept)
+   885→        parts = [f"{name}:"]
+   886→        if dept in metrics["tasks"]:
+   887→            parts.append(f"tasks={metrics['tasks'][dept]}")
+   888→        if dept in metrics["reports"]:
+   889→            parts.append(f"reports={metrics['reports'][dept]}")
+   890→        if dept in metrics["corrections"]:
+   891→            parts.append(f"corrections={metrics['corrections'][dept]}")
+   892→        if dept in metrics["ratings"]:
+   893→            r = metrics["ratings"][dept]
+   894→            parts.append(f"avg_rating={r['avg']:.1f} (n={r['count']})")
+   895→        if dept in metrics["tokens"]:
+   896→            t = metrics["tokens"][dept]
+   897→            parts.append(f"tokens={t['in']+t['out']} cost=${t['cost']:.2f}")
+   898→        lines.append("  " + " ".join(parts))
+   899→    return "\n".join(lines)
+   900→
+   901→@app.post("/scheduler/morning-brief")
+   902→def scheduler_morning_brief():
+   903→    """Generate and send a morning brief to the owner."""
+   904→    d = request.get_json(force=True)
+   905→    owner_id = d.get("owner_id", "")
+   906→
+   907→    if not owner_id:
+   908→        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+   909→
+   910→    try:
+   911→        now = datetime.utcnow()
+   912→        yesterday = (now - timedelta(days=1)).isoformat()[:10] + "T00:00:00"
+   913→        today = now.isoformat()[:10] + "T00:00:00"
+   914→
+   915→        metrics = _collect_metrics_for_period(yesterday, today)
+   916→        metrics_text = _format_metrics_text(metrics)
+   917→
+   918→        dept_prompt = get_dept_prompt("yana")
+   919→        messages = [
+   920→            {"role": "system", "content": dept_prompt + "\n\nYou are generating a morning brief for the office owner. Be concise, highlight key events overnight, flag issues. Format in Russian."},
+   921→            {"role": "user", "content": f"Sformirui utrennii brief za proshlou noch' i rannoe utro.\n\n{metrics_text}\n\nOzhidai: korotkii brief na 3-5 punktov."},
+   922→        ]
+   923→
+   924→        result = call_llm("yana", messages)
+   925→        brief = result["reply"]
+   926→
+   927→        msg_id = _tg_send_message(owner_id, brief)
+   928→        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+   929→
+   930→        return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
+   931→
+   932→    except Exception as e:
+   933→        log.error(f"morning_brief error: {e}")
+   934→        _log_audit("scheduler_morning_brief_error", {"error": str(e)[:500]})
+   935→        return jsonify({"status": "error", "message": str(e)}), 500
+   936→
+   937→@app.post("/scheduler/evening-summary")
+   938→def scheduler_evening_summary():
+   939→    """Generate and send an evening summary, plus publish daily digest to archive."""
+   940→    d = request.get_json(force=True)
+   941→    owner_id = d.get("owner_id", "")
+   942→
+   943→    if not owner_id:
+   944→        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+   945→
+   946→    try:
+   947→        now = datetime.utcnow()
+   948→        today = now.isoformat()[:10] + "T00:00:00"
+   949→
+   950→        metrics = _collect_metrics_for_period(today)
+   951→        metrics_text = _format_metrics_text(metrics)
+   952→
+   953→        dept_prompt = get_dept_prompt("yana")
+   954→        messages = [
+   955→            {"role": "system", "content": dept_prompt + "\n\nYou are generating an evening summary for the office owner. Review the day's performance, highlight achievements and issues. Format in Russian."},
+   956→            {"role": "user", "content": f"Sformirui vechernii itog za segodnyashnii den'.\n\n{metrics_text}\n\nOzhidai: korotkii itog na 5-8 punktov s rekomendatsiyami."},
+   957→        ]
+   958→
+   959→        result = call_llm("yana", messages)
+   960→        summary = result["reply"]
+   961→
+   962→        # Send to owner
+   963→        msg_id = _tg_send_message(owner_id, summary)
+   964→
+   965→        # Publish daily digest to archive channel
+   966→        if TELEGRAM_ARCHIVE_CHANNEL_ID:
+   967→            tasks_total = sum(metrics["tasks"].values())
+   968→            reports_total = sum(metrics["reports"].values())
+   969→            corrections_total = sum(metrics["corrections"].values())
+   970→            digest_lines = [
+   971→                f"DAILY DIGEST - {now.isoformat()[:10]}",
+   972→                "=" * 40,
+   973→                f"Tasks: {tasks_total}",
+   974→                f"Reports: {reports_total}",
+   975→                f"Corrections: {corrections_total}",
+   976→            ]
+   977→            digest_text = "\n".join(digest_lines)
+   978→            _tg_send_message(TELEGRAM_ARCHIVE_CHANNEL_ID, digest_text)
+   979→
+   980→        _log_audit("scheduler_evening_summary", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+   981→
+   982→        return jsonify({"status": "ok", "msg_id": msg_id})
+   983→
+   984→    except Exception as e:
+   985→        log.error(f"evening_summary error: {e}")
+   986→        _log_audit("scheduler_evening_summary_error", {"error": str(e)[:500]})
+   987→        return jsonify({"status": "error", "message": str(e)}), 500
+   988→
+   989→@app.post("/scheduler/weekly-digest")
+   990→def scheduler_weekly_digest():
+   991→    """Generate a weekly digest per department and send via Telegram."""
+   992→    d = request.get_json(force=True)
+   993→    owner_id = d.get("owner_id", "")
+   994→
+   995→    if not owner_id:
+   996→        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+   997→
+   998→    try:
+   999→        now = datetime.utcnow()
+  1000→        week_ago = (now - timedelta(days=7)).isoformat()
+  1001→
+  1002→        metrics = _collect_metrics_for_period(week_ago)
+  1003→        metrics_text = _format_metrics_text(metrics)
+  1004→
+  1005→        dept_prompt = get_dept_prompt("yana")
+  1006→        messages = [
+  1007→            {"role": "system", "content": dept_prompt + "\n\nYou are generating a weekly digest for the office owner. Summarize per-department performance, trends, and recommendations. Format in Russian."},
+  1008→            {"role": "user", "content": f"Sformirui ezhenedelnyi digest za proshlou nedelyu.\n\n{metrics_text}\n\nOzhidai: detalnyi digest po departamentam s rekomendatsiyami."},
+  1009→        ]
+  1010→
+  1011→        result = call_llm("yana", messages)
+  1012→        digest = result["reply"]
+  1013→
+  1014→        # Send via SendReport (if > 800 chars, use Mini App button)
+  1015→        if len(digest) > 800:
+  1016→            msg_id = _tg_send_report_with_button(owner_id, digest)
+  1017→        else:
+  1018→            msg_id = _tg_send_message(owner_id, digest)
+  1019→
+  1020→        _log_audit("scheduler_weekly_digest", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id, "chars": len(digest)})
+  1021→
+  1022→        return jsonify({"status": "ok", "msg_id": msg_id})
+  1023→
+  1024→    except Exception as e:
+  1025→        log.error(f"weekly_digest error: {e}")
+  1026→        _log_audit("scheduler_weekly_digest_error", {"error": str(e)[:500]})
+  1027→        return jsonify({"status": "error", "message": str(e)}), 500
+  1028→
+  1029→@app.post("/scheduler/monthly-review")
+  1030→def scheduler_monthly_review():
+  1031→    """Generate a monthly review per department."""
+  1032→    d = request.get_json(force=True)
+  1033→    owner_id = d.get("owner_id", "")
+  1034→
+  1035→    if not owner_id:
+  1036→        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+  1037→
+  1038→    try:
+  1039→        now = datetime.utcnow()
+  1040→        month_ago = (now - timedelta(days=30)).isoformat()
+  1041→
+  1042→        metrics = _collect_metrics_for_period(month_ago)
+  1043→        metrics_text = _format_metrics_text(metrics)
+  1044→
+  1045→        dept_prompt = get_dept_prompt("yana")
+  1046→        messages = [
+  1047→            {"role": "system", "content": dept_prompt + "\n\nYou are generating a monthly review for the office owner. Analyze per-department performance: tasks completed, average ratings, correction frequency. Identify trends and action items. Format in Russian."},
+  1048→            {"role": "user", "content": f"Sformirui ezhemesyachnyi obzor za proshlyi mesyats.\n\n{metrics_text}\n\nOzhidai: analiz po departamentam s planom deistvii."},
+  1049→        ]
+  1050→
+  1051→        result = call_llm("yana", messages)
+  1052→        review = result["reply"]
+  1053→
+  1054→        msg_id = _tg_send_report_with_button(owner_id, review)
+  1055→
+  1056→        _log_audit("scheduler_monthly_review", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+  1057→
+  1058→        return jsonify({"status": "ok", "msg_id": msg_id})
+  1059→
+  1060→    except Exception as e:
+  1061→        log.error(f"monthly_review error: {e}")
+  1062→        _log_audit("scheduler_monthly_review_error", {"error": str(e)[:500]})
+  1063→        return jsonify({"status": "error", "message": str(e)}), 500
+  1064→
+  1065→@app.post("/scheduler/control-check")
+  1066→def scheduler_control_check():
+  1067→    """Check control predictions against current reality."""
+  1068→    d = request.get_json(force=True)
+  1069→    owner_id = d.get("owner_id", "")
+  1070→
+  1071→    if not owner_id:
+  1072→        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+  1073→
+  1074→    try:
+  1075→        # Get all control_* keys from system_settings
+  1076→        controls = _query("SELECT key, value FROM system_settings WHERE key LIKE 'control_%'", fetch=True)
+  1077→
+  1078→        if not controls:
+  1079→            _tg_send_message(owner_id, "No control predictions found in system_settings.")
+  1080→            _log_audit("scheduler_control_check", {"owner_id": owner_id, "found": 0})
+  1081→            return jsonify({"status": "ok", "checked": 0})
+  1082→
+  1083→        results = []
+  1084→        osp_prompt = get_dept_prompt("osp")
+  1085→
+  1086→        for ctrl in controls:
+  1087→            key = ctrl["key"]
+  1088→            value = ctrl["value"]
+  1089→            try:
+  1090→                ctrl_data = json.loads(value) if isinstance(value, str) else value
+  1091→            except (json.JSONDecodeError, TypeError):
+  1092→                ctrl_data = {"raw": value}
+  1093→
+  1094→            frequency = ctrl_data.get("frequency", "daily")
+  1095→            topic = ctrl_data.get("topic", key)
+  1096→            original_prediction = ctrl_data.get("prediction", ctrl_data.get("original", str(value)))
+  1097→
+  1098→            # For daily controls, compare prediction with current reality via LLM
+  1099→            if frequency == "daily":
+  1100→                messages = [
+  1101→                    {"role": "system", "content": osp_prompt + "\n\nYou are performing a control check. Compare the original prediction with the current situation. Be brief, 2-3 sentences. Format in Russian."},
+  1102→                    {"role": "user", "content": f"Control check: {topic}\n\nOriginal prediction: {original_prediction}\n\nAnalyze: did the prediction match reality? What changed?\n\nOzhidai: korotkii analiz 2-3 predlozheniya."},
+  1103→                ]
+  1104→                check_result = call_llm("osp", messages)
+  1105→                analysis = check_result["reply"]
+  1106→                results.append({"key": key, "topic": topic, "frequency": frequency, "analysis": analysis})
+  1107→
+  1108→        # Format and send results
+  1109→        if results:
+  1110→            lines = [f"CONTROL CHECK - {datetime.utcnow().isoformat()[:10]}", "=" * 40, ""]
+  1111→            for r in results:
+  1112→                lines.append(f"[{r['topic']}]")
+  1113→                lines.append(f"  {r['analysis']}")
+  1114→                lines.append("")
+  1115→            check_text = "\n".join(lines)
+  1116→        else:
+  1117→            check_text = "No daily control predictions to check."
+  1118→
+  1119→        msg_id = _tg_send_message(owner_id, check_text)
+  1120→        _log_audit("scheduler_control_check", {"owner_id": owner_id, "checked": len(controls), "daily": len(results), "msg_id": msg_id})
+  1121→
+  1122→        return jsonify({"status": "ok", "checked": len(controls), "daily": len(results), "msg_id": msg_id})
+  1123→
+  1124→    except Exception as e:
+  1125→        log.error(f"control_check error: {e}")
+  1126→        _log_audit("scheduler_control_check_error", {"error": str(e)[:500]})
+  1127→        return jsonify({"status": "error", "message": str(e)}), 500
+  1128→
+  1129→@app.post("/scheduler/self-learn")
+  1130→def scheduler_self_learn():
+  1131→    """Self-learning: call LLM to identify improvement areas and memorize findings."""
+  1132→    try:
+  1133→        # Get recent corrections and error patterns for context
+  1134→        corrs = _query("SELECT dept, original, corrected, created FROM adapt_corrections ORDER BY id DESC LIMIT 20", fetch=True)
+  1135→        patterns = _query("SELECT dept, error_type, context, created FROM error_patterns ORDER BY id DESC LIMIT 20", fetch=True)
+  1136→
+  1137→        context_parts = []
+  1138→        if corrs:
+  1139→            context_parts.append("Recent corrections:")
+  1140→            for c in corrs[-10:]:
+  1141→                context_parts.append(f"  [{c['dept']}] {c['original'][:100]} -> {c['corrected'][:100]}")
+  1142→        if patterns:
+  1143→            context_parts.append("\nRecent error patterns:")
+  1144→            for p in patterns[-10:]:
+  1145→                context_parts.append(f"  [{p['dept']}] {p['error_type']}: {p['context'][:100]}")
+  1146→
+  1147→        context = "\n".join(context_parts) if context_parts else "No recent data available."
+  1148→
+  1149→        yana_prompt = get_dept_prompt("yana")
+  1150→        messages = [
+  1151→            {"role": "system", "content": yana_prompt + "\n\nYou are performing self-learning analysis. Based on recent corrections and error patterns, identify ONE specific improvement topic that would reduce errors. Be practical and specific. Output format: TOPIC: <topic> | INSIGHT: <insight> | ACTION: <action>. Format in Russian."},
+  1152→            {"role": "user", "content": f"Proanalizirui nedavnie oshibki i predlozhi odnu konkretnuyu temu dlya samousovershenstvovaniya.\n\n{context}\n\nFormat: TOPIC: <tema> | INSIGHT: <vyvod> | ACTION: <deistvie>"},
+  1153→        ]
+  1154→
+  1155→        result = call_llm("yana", messages)
+  1156→        finding = result["reply"]
+  1157→
+  1158→        # Memorize finding
+  1159→        _memorize("yana", "self_learn", finding)
+  1160→
+  1161→        _log_audit("scheduler_self_learn", {"provider": result["provider"], "finding": finding[:200]})
+  1162→
+  1163→        return jsonify({"status": "ok", "finding": finding})
+  1164→
+  1165→    except Exception as e:
+  1166→        log.error(f"self_learn error: {e}")
+  1167→        _log_audit("scheduler_self_learn_error", {"error": str(e)[:500]})
+  1168→        return jsonify({"status": "error", "message": str(e)}), 500
+  1169→
+  1170→# ══════════════════════════════════════════════════════════════════════
+  1171→#  MEGA-3: LEARNING ENDPOINTS
+  1172→# ══════════════════════════════════════════════════════════════════════
+  1173→
+  1174→@app.post("/learning/fix")
+  1175→def learning_fix():
+  1176→    """Process a user correction: classify error type and save to learning tables."""
+  1177→    d = request.get_json(force=True)
+  1178→    text = d.get("text", "")
+  1179→    dept = d.get("dept", "yana")
+  1180→
+  1181→    if not text:
+  1182→        return jsonify({"status": "error", "message": "text is required"}), 400
+  1183→
+  1184→    try:
+  1185→        # Call LLM to classify the error type
+  1186→        dept_prompt = get_dept_prompt(dept)
+  1187→        messages = [
+  1188→            {"role": "system", "content": dept_prompt + "\n\nYou are a quality control classifier. Analyze the user's correction text and classify the error type. Also suggest how to fix it going forward. Output JSON only: {\"error_type\": \"TOO_GENERAL|WRONG_FACTS|WRONG_DEPT|BAD_FORMAT|MISSING_CONTEXT|OTHER\", \"suggestion\": \"your suggestion\"}. Language: Russian."},
+  1189→            {"role": "user", "content": f"Klassifitsirui etu korrektsiyu:\n\n{text}\n\nVerni tolko JSON."},
+  1190→        ]
+  1191→
+  1192→        result = call_llm(dept, messages)
+  1193→        reply = result["reply"]
+  1194→
+  1195→        # Parse JSON from LLM response
+  1196→        try:
+  1197→            # Try to extract JSON from the response (may be wrapped in markdown code block)
+  1198→            json_match = re.search(r'\{[^}]+\}', reply, re.DOTALL)
+  1199→            if json_match:
+  1200→                classification = json.loads(json_match.group())
+  1201→            else:
+  1202→                classification = {"error_type": "OTHER", "suggestion": reply}
+  1203→        except json.JSONDecodeError:
+  1204→            classification = {"error_type": "OTHER", "suggestion": reply}
+  1205→
+  1206→        error_type = classification.get("error_type", "OTHER")
+  1207→        suggestion = classification.get("suggestion", "")
+  1208→
+  1209→        now = datetime.utcnow().isoformat()
+  1210→
+  1211→        # Save to error_patterns table
+  1212→        _query("INSERT INTO error_patterns (dept, error_type, context, created) VALUES (?,?,?,?)",
+  1213→               (dept, error_type, text[:2000], now))
+  1214→
+  1215→        # Save to adapt_corrections table
+  1216→        _query("INSERT INTO adapt_corrections (dept, original, corrected, created, corr_type) VALUES (?,?,?,?,?)",
+  1217→               (dept, text[:2000], suggestion[:2000], now, error_type))
+  1218→
+  1219→        _log_audit("learning_fix", {"dept": dept, "error_type": error_type, "text_len": len(text)})
+  1220→
+  1221→        return jsonify({"status": "ok", "error_type": error_type, "suggestion": suggestion})
+  1222→
+  1223→    except Exception as e:
+  1224→        log.error(f"learning_fix error: {e}")
+  1225→        _log_audit("learning_fix_error", {"error": str(e)[:500]})
+  1226→        return jsonify({"status": "error", "message": str(e)}), 500
+  1227→
+  1228→@app.post("/learning/good")
+  1229→def learning_good():
+  1230→    """Save a positive example for learning."""
+  1231→    d = request.get_json(force=True)
+  1232→    dept = d.get("dept", "yana")
+  1233→    query = d.get("query", "")
+  1234→    response = d.get("response", "")
+  1235→
+  1236→    if not query or not response:
+  1237→        return jsonify({"status": "error", "message": "query and response are required"}), 400
+  1238→
+  1239→    now = datetime.utcnow().isoformat()
+  1240→    _query("INSERT INTO adapt_corrections (dept, original, corrected, created, corr_type) VALUES (?,?,?,?,?)",
+  1241→           (dept, query[:2000], response[:2000], now, "positive"))
+  1242→
+  1243→    _log_audit("learning_good", {"dept": dept, "query_len": len(query), "response_len": len(response)})
+  1244→
+  1245→    return jsonify({"status": "ok"})
+  1246→
+  1247→@app.post("/learning/stats")
+  1248→def learning_stats():
+  1249→    """Return learning statistics."""
+  1250→    try:
+  1251→        now = datetime.utcnow()
+  1252→        week_ago = (now - timedelta(days=7)).isoformat()
+  1253→
+  1254→        # Corrections count (7d)
+  1255→        corr_rows = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created>=? AND corr_type != 'positive'", (week_ago,), fetch=True)
+  1256→        corrections_7d = corr_rows[0]["c"] if corr_rows else 0
+  1257→
+  1258→        # Positive examples count
+  1259→        pos_rows = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE corr_type = 'positive'", fetch=True)
+  1260→        positive_total = pos_rows[0]["c"] if pos_rows else 0
+  1261→
+  1262→        # Error pattern breakdown
+  1263→        pattern_rows = _query("SELECT error_type, COUNT(*) as c FROM error_patterns GROUP BY error_type ORDER BY c DESC", fetch=True)
+  1264→        error_breakdown = {}
+  1265→        for r in pattern_rows:
+  1266→            error_breakdown[r["error_type"]] = r["c"]
+  1267→
+  1268→        # Per-dept corrections (7d)
+  1269→        dept_rows = _query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created>=? AND corr_type != 'positive' GROUP BY dept ORDER BY c DESC", (week_ago,), fetch=True)
+  1270→        dept_corrections = {}
+  1271→        for r in dept_rows:
+  1272→            dept_corrections[r["dept"]] = r["c"]
+  1273→
+  1274→        return jsonify({
+  1275→            "status": "ok",
+  1276→            "corrections_7d": corrections_7d,
+  1277→            "positive_examples": positive_total,
+  1278→            "error_breakdown": error_breakdown,
+  1279→            "dept_corrections": dept_corrections,
+  1280→        })
+  1281→
+  1282→    except Exception as e:
+  1283→        log.error(f"learning_stats error: {e}")
+  1284→        return jsonify({"status": "error", "message": str(e)}), 500
+  1285→
+  1286→@app.post("/learning/debrief")
+  1287→def learning_debrief():
+  1288→    """Analyze error patterns for a specific department."""
+  1289→    d = request.get_json(force=True)
+  1290→    dept = d.get("dept", "yana")
+  1291→
+  1292→    try:
+  1293→        # Get recent corrections for department
+  1294→        corrs = _query("SELECT original, corrected, corr_type, created FROM adapt_corrections WHERE dept=? AND corr_type != 'positive' ORDER BY id DESC LIMIT 20", (dept,), fetch=True)
+  1295→
+  1296→        if not corrs:
+  1297→            return jsonify({"status": "ok", "analysis": "No corrections found for this department."})
+  1298→
+  1299→        # Format corrections for LLM analysis
+  1300→        corr_text_parts = []
+  1301→        for c in corrs:
+  1302→            corr_text_parts.append(f"[{c['corr_type']}] {c['original'][:200]} -> {c['corrected'][:200]} ({c['created'][:10]})")
+  1303→        corr_text = "\n".join(corr_text_parts)
+  1304→
+  1305→        dept_prompt = get_dept_prompt(dept)
+  1306→        messages = [
+  1307→            {"role": "system", "content": dept_prompt + "\n\nYou are analyzing error patterns for department quality improvement. Identify recurring themes, root causes, and propose 3 actionable improvements. Format in Russian."},
+  1308→            {"role": "user", "content": f"Proanalizirui patterny oshibok departamenta {DEPT_NAMES.get(dept, dept)}:\n\n{corr_text}\n\nSformirui analiz s vyvodami i 3 konkretnymi predlozheniyami po uluchsheniyu."},
+  1309→        ]
+  1310→
+  1311→        result = call_llm(dept, messages)
+  1312→        analysis = result["reply"]
+  1313→
+  1314→        _log_audit("learning_debrief", {"dept": dept, "corrections_analyzed": len(corrs), "provider": result["provider"]})
+  1315→
+  1316→        return jsonify({"status": "ok", "analysis": analysis})
+  1317→
+  1318→    except Exception as e:
+  1319→        log.error(f"learning_debrief error: {e}")
+  1320→        _log_audit("learning_debrief_error", {"error": str(e)[:500], "dept": dept})
+  1321→        return jsonify({"status": "error", "message": str(e)}), 500
+  1322→
+  1323→# ══════════════════════════════════════════════════════════════════════
+  1324→#  MEGA-3: AUDIT RECENT ENDPOINT
+  1325→# ══════════════════════════════════════════════════════════════════════
+  1326→
+  1327→@app.get("/audit/recent")
+  1328→def audit_recent():
+  1329→    """Return recent audit log entries."""
+  1330→    try:
+  1331→        limit = request.args.get("limit", 20, type=int)
+  1332→        limit = min(limit, 200)
+  1333→
+  1334→        rows = _query("SELECT id, action, details, created FROM audit_log ORDER BY id DESC LIMIT ?", (limit,), fetch=True)
+  1335→
+  1336→        entries = []
+  1337→        for r in rows:
+  1338→            entry = {
+  1339→                "id": r["id"],
+  1340→                "action": r["action"],
+  1341→                "created": r["created"],
+  1342→            }
+  1343→            try:
+  1344→                entry["details"] = json.loads(r["details"]) if r["details"] else {}
+  1345→            except (json.JSONDecodeError, TypeError):
+  1346→                entry["details"] = {"raw": r["details"]}
+  1347→            entries.append(entry)
+  1348→
+  1349→        return jsonify({"status": "ok", "entries": entries, "count": len(entries)})
+  1350→
+  1351→    except Exception as e:
+  1352→        log.error(f"audit_recent error: {e}")
+  1353→        return jsonify({"status": "error", "message": str(e)}), 500
+  1354→
+  1355→# ══════════════════════════════════════════════════════════════════════
+  1356→#  MEGA-3: SEARCH ENDPOINT
+  1357→# ══════════════════════════════════════════════════════════════════════
+  1358→
+  1359→@app.post("/search")
+  1360→def search_endpoint():
+  1361→    """Search miniapp_responses (raw_text and title) for query text."""
+  1362→    d = request.get_json(force=True)
+  1363→    query = d.get("query", "")
+  1364→
+  1365→    if not query:
+  1366→        return jsonify({"status": "error", "message": "query is required"}), 400
+  1367→
+  1368→    try:
+  1369→        search_term = f"%{query}%"
+  1370→        rows = _query(
+  1371→            "SELECT id, dept, title, created FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) ORDER BY id DESC LIMIT 50",
+  1372→            (search_term, search_term),
+  1373→            fetch=True
+  1374→        )
+  1375→
+  1376→        results = []
+  1377→        for r in rows:
+  1378→            results.append({
+  1379→                "id": r["id"],
+  1380→                "dept": r["dept"],
+  1381→                "title": r["title"],
+  1382→                "created": r["created"],
+  1383→            })
+  1384→
+  1385→        return jsonify({"status": "ok", "results": results, "count": len(results)})
+  1386→
+  1387→    except Exception as e:
+  1388→        log.error(f"search error: {e}")
+  1389→        return jsonify({"status": "error", "message": str(e)}), 500
+  1390→
+  1391→# ══════════════════════════════════════════════════════════════════════
+  1392→#  MEGA-4: LZ DEEP RESEARCH (APODEX)
+  1393→# ══════════════════════════════════════════════════════════════════════
+  1394→
+  1395→def _send_chat_action_loop(chat_id, action="typing", interval=5):
+  1396→    """Send typing/action indicator to Telegram in a loop. Returns a stop event."""
+  1397→    stop = threading.Event()
+  1398→
+  1399→    def _loop():
+  1400→        while not stop.is_set():
+  1401→            try:
+  1402→                _tg_send_chat_action(chat_id, action)
+  1403→            except Exception:
+  1404→                pass
+  1405→            stop.wait(interval)
+  1406→
+  1407→    t = threading.Thread(target=_loop, daemon=True)
+  1408→    t.start()
+  1409→    return stop
+  1410→
+  1411→def _tg_send_chat_action(chat_id, action):
+  1412→    """Send a chat action to Telegram (typing, upload_photo, etc.)."""
+  1413→    if not TELEGRAM_BOT_TOKEN:
+  1414→        return
+  1415→    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+  1416→    try:
+  1417→        http_requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=10)
+  1418→    except Exception:
+  1419→        pass
+  1420→
+  1421→@app.post("/lz/deep-research")
+  1422→def lz_deep_research():
+  1423→    """Apodex-powered deep research endpoint with typing indicator refresh."""
+  1424→    d = request.get_json(force=True)
+  1425→    query_text = d.get("query", "")
+  1426→    dept = d.get("dept", "lz")
+  1427→    provider = d.get("provider", "apodex")
+  1428→    model = d.get("model", "apodex-1.0-mini")
+  1429→    system_context = d.get("system_context", "")
+  1430→    chat_id = d.get("chat_id", "")
+  1431→
+  1432→    if not query_text:
+  1433→        return jsonify({"status": "error", "message": "query is required"}), 400
+  1434→
+  1435→    stop_typing = None
+  1436→    if chat_id:
+  1437→        stop_typing = _send_chat_action_loop(chat_id, "typing", 5)
+  1438→
+  1439→    try:
+  1440→        # Build LZ prompt for deep research
+  1441→        lz_prompt = system_context or get_dept_prompt("lz")
+  1442→
+  1443→        # If no specific system context, build one
+  1444→        if not system_context:
+  1445→            lz_prompt = f"""{lz_prompt}
+  1446→
+  1447→You are performing DEEP RESEARCH with verification via Apodex.
+  1448→Requirements:
+  1449→1. Find minimum 10 independent sources
+  1450→2. Verify each fact — indicate source and confidence level
+  1451→3. Mark: [FACT verified], [FACT unverified], [INTERPRETATION], [SPECULATION]
+  1452→4. Identify contradictions between sources
+  1453→5. Build timeline if applicable
+  1454→6. Rate disruption potential (1-10)
+  1455→7. State what could NOT be found/verified
+  1456→8. Language: Russian
+  1457→9. Format: layers (like OSP), with evidence graph at end"""
+  1458→
+  1459→        messages = [
+  1460→            {"role": "system", "content": lz_prompt},
+  1461→            {"role": "user", "content": query_text}
+  1462→        ]
+  1463→
+  1464→        # Call Apodex (or fallback to default provider)
+  1465→        apodex_key = os.environ.get("APODEX_API_KEY", "")
+  1466→        if apodex_key and provider == "apodex":
+  1467→            headers = {"Authorization": f"Bearer {apodex_key}", "Content-Type": "application/json"}
+  1468→            body = {
+  1469→                "model": model,
+  1470→                "max_tokens": 16384,
+  1471→                "messages": messages
+  1472→            }
+  1473→            resp = http_requests.post(
+  1474→                "https://platform.apodex.ai/v1/chat/completions",
+  1475→                headers=headers,
+  1476→                json=body,
+  1477→                timeout=300  # 5 minutes for deep research
+  1478→            )
+  1479→            resp.raise_for_status()
+  1480→            data = resp.json()
+  1481→            answer = data["choices"][0]["message"]["content"]
+  1482→            used_provider = "apodex"
+  1483→            used_model = model
+  1484→            t_in = data.get("usage", {}).get("prompt_tokens", 0)
+  1485→            t_out = data.get("usage", {}).get("completion_tokens", 0)
+  1486→        else:
+  1487→            # Fallback to standard LLM
+  1488→            result = call_llm(dept, messages)
+  1489→            answer = result.get("reply", "Deep research failed.")
+  1490→            used_provider = result.get("provider", "fallback")
+  1491→            used_model = result.get("model", "unknown")
+  1492→            t_in = result.get("tokens_in", 0)
+  1493→            t_out = result.get("tokens_out", 0)
+  1494→
+  1495→        # Track token usage
+  1496→        costs = TOKEN_COSTS.get(used_provider, {"input": 1, "output": 1})
+  1497→        cost = t_in * costs["input"] / 1_000_000 + t_out * costs["output"] / 1_000_000
+  1498→        now = datetime.utcnow().isoformat()
+  1499→        _query("INSERT INTO token_usage (provider,model,tokens_in,tokens_out,cost,dept,created) VALUES (?,?,?,?,?,?,?)",
+  1500→               (used_provider, used_model, t_in, t_out, round(cost, 6), dept, now))
+  1501→
+  1502→        _log_audit("lz_deep_research", {
+  1503→            "dept": dept, "provider": used_provider, "model": used_model,
+  1504→            "query": query_text[:100], "tokens_in": t_in, "tokens_out": t_out,
+  1505→            "verified": used_provider == "apodex"
+  1506→        })
+  1507→
+  1508→        return jsonify({
+  1509→            "response": answer,
+  1510→            "provider": used_provider,
+  1511→            "model": used_model,
+  1512→            "verified": used_provider == "apodex",
+  1513→            "tokens_in": t_in,
+  1514→            "tokens_out": t_out
+  1515→        })
+  1516→
+  1517→    except Exception as e:
+  1518→        log.error(f"lz_deep_research error: {e}")
+  1519→        _log_audit("lz_deep_research_error", {"error": str(e)[:500], "query": query_text[:100]})
+  1520→        return jsonify({"response": f"Deep research error: {str(e)}", "provider": None, "verified": False}), 500
+  1521→    finally:
+  1522→        if stop_typing:
+  1523→            stop_typing.set()
+  1524→
+  1525→# ══════════════════════════════════════════════════════════════════════
+  1526→#  MEGA-4: EVIDENCE GRAPH BADGES (added to HTML base)
+  1527→# ══════════════════════════════════════════════════════════════════════
+  1528→
+  1529→# Apodex verified/unverified/conflicting badges are handled in strip_html_for_archive
+  1530→# Evidence CSS is injected via _html_base extension
+  1531→
+  1532→def _evidence_badges_css():
+  1533→    """Return CSS for Apodex evidence badges."""
+  1534→    return """
+  1535→.badge-verified{background:#05966922;color:#059669;border:1px solid #05966944;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
+  1536→.badge-unverified{background:#d9770622;color:#d97706;border:1px solid #d9770644;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
+  1537→.badge-conflicting{background:#dc262622;color:#dc2626;border:1px solid #dc262644;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
+  1538→.evidence-section{margin:24px 0;padding:20px;background:#111;border:1px solid #2a2a2a;border-radius:12px}
+  1539→.evidence-stats{display:flex;gap:16px;margin:12px 0}
+  1540→.ev-stat{text-align:center}
+  1541→.ev-num{display:block;font-size:24px;font-weight:700;font-family:'DM Mono',monospace;color:#059669}
+  1542→.ev-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px}
+  1543→.ev-item{padding:8px 12px;border-bottom:1px solid #1a1a1a;display:flex;gap:8px;align-items:center;font-size:13px}
+  1544→.ev-item.verified{border-left:3px solid #059669}
+  1545→.ev-item.unverified{border-left:3px solid #d97706}
+  1546→.ev-item.conflicting{border-left:3px solid #dc2626}
+  1547→.ev-id{font-family:'DM Mono',monospace;color:#94a3b8;font-size:0.8rem}
+  1548→.ev-source{flex:1}
+  1549→.ev-status{font-size:11px;font-weight:600}
+  1550→"""
+  1551→
+  1552→# ══════════════════════════════════════════════════════════════════════
+  1553→#  MAIN
+  1554→# ══════════════════════════════════════════════════════════════════════
+  1555→
+  1556→if __name__ == "__main__":
+  1557→    log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
+  1558→    log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
+  1559→             f"archive/digest, archive/publish, archive/daily-digest, miniapp, dept-dashboard, office-dashboard, "
+  1560→             f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research")
+  1561→    app.run(host="0.0.0.0", port=PORT, threaded=True)
+  1562→
