@@ -1857,6 +1857,12 @@ def api_admin_status():
 
 MINIAPP_DIR = BASE_DIR / "miniapp"
 
+@app.get("/miniapp")
+def miniapp_redirect():
+    """Redirect /miniapp to /miniapp-spa."""
+    from flask import redirect
+    return redirect("/miniapp-spa", code=301)
+
 @app.get("/miniapp-spa")
 @app.get("/miniapp-spa/")
 def miniapp_spa_index():
