@@ -20,3 +20,28 @@ Stage Summary:
 - Key deliverables: Voice STT (Whisper) + TTS (edge-tts), 6 scheduler functions with real LLM-generated content, archive publish with HTML stripping + hashtags, learning loop with 6-type error classification, enhanced audit logging, chain execution with 3-dept limit, search across archive
 - All MEGA-3 verify criteria met: /chain osp+legal, /voice on, /brief, /fix, /good, /audit, /search, /archive, /autoarchive, GET /cron/morning?secret=X, GET /cron/morning → 403
 - Commit message: MEGA-3: Chain, voice, scheduler, learning, audit, archive
+
+---
+Task ID: MEGA-4
+Agent: Super Z (main)
+Task: MEGA-4: Admin agent, factory, LZ deep scan, Apodex
+
+Work Log:
+- Read all uploaded narads: MEGA_NARADS.md, NARAD_28_ADMIN.md, NARAD_30_APODEX.md, library_admin.md
+- Read all existing files to understand MEGA-3 state: app.mlog (1065 lines), dept/admin.mlog (stubs), dept/lz.mlog (stub), llm_proxy.py (1395 lines), dept/scheduler.mlog, dept/miniapp.mlog, dept/utils.mlog
+- Rewrote dept/admin.mlog (129→538 lines): BuildKnowledgeGraph (LLM analysis of all .mlog files, SaveGraphNodes for parsed nodes/edges), ImpactAnalysis (knowledge_edges queries), FindOrphans (orphaned files/patterns via LLM), AdminNightCycle (5 phases: graph→audit→metrics→autofix→proposals), AdminCodeAudit (LLM-powered file scanning), AdminMetricsAnalysis (real 24h metrics queries), AdminAutoFix (parse autofix plan, skip immutable/high-risk), AdminProposals (LLM-generated from issues+metrics), AdminBuild (LLM narad generation with approve/reject buttons), AdminFix (LLM bug analysis with narad), AdminStatus (real DB queries: graph nodes/edges, open findings, pending proposals/narads), SaveFindings (parse [SEVERITY:xxx] lines), SendAdminMessage, SendAdminButtons, SendAdminTyping helpers
+- Rewrote dept/lz.mlog (14→226 lines): LZDeepScan (9 sources via LLM: Web/YouTube/Reddit/Science/GitHub/Social/Telegram/Darknet/Academic), LZDeepResearch (via proxy /lz/deep-research with typing indicator), LZCompare (side-by-side LLM vs Apodex), LZAllScan (scan+deep full pipeline), ScanWeb/YouTube/Reddit/Science/GitHub/Social/Telegram/Darknet (8 individual source scanners), LZChannelAdd, LZChannels, LZMonitor, LZMonitorList
+- Updated llm_proxy.py (1395→1561 lines): POST /lz/deep-research endpoint (Apodex API with 300s timeout, fallback to default LLM), _send_chat_action_loop (5-second typing refresh via threading), _tg_send_chat_action helper, _evidence_badges_css (verified/unverified/conflicting + evidence-section CSS), strip_html_for_archive updated with 3 new badge types, admin added to COMMAND_DEPT and RUSSIAN_KEYWORDS
+- Updated report_css.txt (27→43 lines): .badge-unverified, .badge-conflicting, .evidence-section, .evidence-stats, .ev-stat, .ev-num, .ev-label, .ev-item (.verified/.unverified/.conflicting), .ev-id, .ev-source, .ev-status
+- Updated dept/miniapp.mlog FormatReportBody: 7 new Apodex badge replacements (verified/unverified/conflicting + Cyrillic variants)
+- Updated dept/utils.mlog StripHtml: 7 new Apodex badge replacements for archive stripping
+- Updated dept/scheduler.mlog MorningBrief: admin_night_summary section from kv_get (admin night cycle report)
+- Updated app.mlog (1065→1096 lines): /lz deep → LZDeepResearch (proxy Apodex), /lz scan → LZDeepScan (9 sources), /lz all → LZAllScan, /lz compare → LZCompare, /lz_channel add, /lz_channels, /lz_monitor commands, /help updated with all new commands
+- Factory already existed from MEGA-3 (HandleFactoryStep 7-step flow, /factory, /factory_review, /factory_deploy, /factory_deliver, /factory_list)
+
+Stage Summary:
+- 8 files modified (app.mlog, dept/admin.mlog, dept/lz.mlog, dept/miniapp.mlog, dept/scheduler.mlog, dept/utils.mlog, llm_proxy.py, report_css.txt)
+- Total lines: 4225 (up from ~3385)
+- Key deliverables: Admin agent with 12 commands and 5-phase night cycle, LZ 9-source deep scan, Apodex as 7th provider with verified research, LZ compare side-by-side, channel monitoring, evidence graph badges in reports
+- Commit: c056bf2 MEGA-4: Admin agent, factory, LZ deep scan, Apodex
+- Push: successful to main
