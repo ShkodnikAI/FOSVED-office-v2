@@ -1,29 +1,102 @@
+/**
+ * Fosved Office Mini App — Dashboard Screen (Screen 1)
+ * Shows KPIs, department cards, admin status, and alerts.
+ */
+
+import { createDeptCard, createKPICard, createAlertCard, createTopBar, createSectionTitle, esc } from '../components/card.js';
+
 export async function render(container) {
-  const data = await API.dashboard();
-  if (data.status !== 'ok') { container.innerHTML = '<p>Error loading dashboard</p>'; return; }
-  const {kpis, depts, admin} = data;
-  const sc = kpis.rating >= 4 ? '#639922' : kpis.rating >= 3 ? '#EF9F27' : '#E24B4A';
-  const st = kpis.rating >= 4 ? 'Active' : kpis.rating >= 3 ? 'Moderate' : 'Low';
-  let h = '<div class="top-bar"><div class="top-bar-title" style="color:#C9A84C">&#9678; Fosved</div></div>';
-  h += '<div class="dept-header" style="background:linear-gradient(135deg,#0F0F0F,#1a1a2e)"><h1>Fosved Office v2</h1><div class="dept-header-sub">' + st + ' &mdash; ' + kpis.rating + '/5 &nbsp;<span style="font-family:DM Mono;font-size:11px;color:rgba(255,255,255,0.6)">v0.7.10</span></div></div>';
-  h += '<div class="kpi-row">';
-  h += kc(kpis.tasks,'TASKS','#C9A84C') + kc('$'+kpis.cost_today,'COST','#185FA5') + kc(kpis.rating,'RATING',sc);
-  h += kc(kpis.reports,'REPORTS','#639922');
-  if (window.innerWidth>=481) h += kc(kpis.tasks_week,'WEEK','#888');
-  h += '</div>';
-  h += '<div style="padding:0 16px;margin:8px 0 4px;display:flex;justify-content:space-between;align-items:center"><div class="section-title" style="margin:0">Departments</div><span style="font-family:DM Mono;font-size:11px;color:#aaa">'+depts.length+'/13</span></div>';
-  h += '<div class="dept-grid">';
-  depts.forEach(d => {
-    const dc = d.status==='active'?'#639922':d.status==='idle'?'#EF9F27':'#ccc';
-    h += '<div class="card card-dept" style="border-left-color:'+d.color.accent+'" onclick="location.hash=\'/dept/'+d.slug+'\'">';
-    h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><span class="status-dot" style="background:'+dc+'"></span><span style="font-weight:600;font-size:14px">'+d.name.split(' — ')[0]+'</span><span style="margin-left:auto;font-family:DM Mono;font-size:12px;color:'+sc+'">'+d.rating+'</span></div>';
-    h += '<div style="font-size:12px;color:#888;margin-bottom:2px">'+(d.name.includes(' — ')?d.name.split(' — ')[1]:'')+' &middot; '+d.calls+' calls</div>';
-    if(d.override) h+='<div style="font-size:11px;color:#C9A84C;font-family:DM Mono">'+d.override+'</div>';
-    h += '</div>';
-  });
-  h += '</div>';
-  h += '<div style="padding:0 16px;margin:16px 0 8px;display:flex;justify-content:space-between;align-items:center"><div class="section-title" style="margin:0">Admin</div><span style="font-family:DM Mono;font-size:11px;color:#aaa">'+admin.code_health+'</span></div>';
-  h += '<div class="card" style="margin:0 16px 16px"><div style="font-family:DM Mono;font-size:13px;color:#555">'+admin.nodes+' nodes &middot; '+admin.edges+' edges</div><div style="font-size:12px;color:#888;margin-top:4px">'+admin.issues+' issues &middot; '+admin.proposals+' proposals</div></div>';
-  container.innerHTML = h;
+  let data;
+  try {
+    data = await API.dashboard();
+  } catch (e) {
+    container.innerHTML = `<div style="text-align:center;padding:60px;color:#E24B4A">Failed to load dashboard</div>`;
+    return;
+  }
+
+  if (data.status !== 'ok') {
+    container.innerHTML = `<div style="text-align:center;padding:60px;color:#E24B4A">${esc(data.error || 'Unknown error')}</div>`;
+    return;
+  }
+
+  const { kpis, depts, admin, alerts } = data;
+
+  // Determine overall system status
+  const ratingNum = parseFloat(kpis.rating) || 0;
+  const statusColor = ratingNum >= 4 ? '#639922' : ratingNum >= 3 ? '#EF9F27' : '#E24B4A';
+  const statusLabel = ratingNum >= 4 ? 'Active' : ratingNum >= 3 ? 'Moderate' : 'Low';
+
+  let html = '';
+
+  // ── Top Bar ──
+  html += `<div class="top-bar">
+    <div class="top-bar-title" style="color:#C9A84C">&#9678; Fosved</div>
+    <span style="margin-left:auto;font-family:'DM Mono',monospace;font-size:11px;color:#aaa">v0.7.10</span>
+  </div>`;
+
+  // ── Header Banner ──
+  html += `
+    <div class="dept-header" style="background:linear-gradient(135deg,#0F0F0F,#1a1a2e)">
+      <h1>Fosved Office v2</h1>
+      <div class="dept-header-sub">
+        <span class="status-dot" style="background:${statusColor}"></span>
+        ${statusLabel} &mdash; ${kpis.rating}/5
+      </div>
+    </div>`;
+
+  // ── Alert Banners ──
+  if (alerts && alerts.length) {
+    html += `<div style="padding:12px 16px 4px;display:flex;flex-direction:column;gap:6px">`;
+    for (const alert of alerts) {
+      html += createAlertCard(alert.type || 'orange', alert.title, alert.subtitle);
+    }
+    html += `</div>`;
+  }
+
+  // ── KPI Cards ──
+  html += `<div class="kpi-row">`;
+  html += createKPICard(kpis.tasks, 'TASKS', '#C9A84C');
+  html += createKPICard('$' + kpis.cost_today, 'COST TODAY', '#185FA5');
+  html += createKPICard(kpis.rating, 'RATING', statusColor);
+  html += createKPICard(kpis.reports, 'REPORTS', '#639922');
+  if (window.innerWidth >= 481) {
+    html += createKPICard(kpis.tasks_week ?? '—', 'WEEK', '#888');
+  }
+  html += `</div>`;
+
+  // ── Department Cards ──
+  html += createSectionTitle('ОТДЕЛЫ', `${depts.length}/13`);
+  html += `<div class="dept-grid">`;
+  for (const dept of depts) {
+    html += createDeptCard(dept);
+  }
+  html += `</div>`;
+
+  // ── Admin Section ──
+  if (admin) {
+    html += createSectionTitle('ADMIN', admin.code_health ?? '');
+    html += `
+      <div class="card" style="margin:0 16px 16px">
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <div class="card kpi" style="flex:1;min-width:80px">
+            <div class="kpi-value">${admin.nodes ?? 0}</div>
+            <div class="kpi-label">NODES</div>
+          </div>
+          <div class="card kpi" style="flex:1;min-width:80px">
+            <div class="kpi-value">${admin.edges ?? 0}</div>
+            <div class="kpi-label">EDGES</div>
+          </div>
+          <div class="card kpi" style="flex:1;min-width:80px">
+            <div class="kpi-value" style="color:${admin.issues > 0 ? '#E24B4A' : '#639922'}">${admin.issues ?? 0}</div>
+            <div class="kpi-label">ISSUES</div>
+          </div>
+          <div class="card kpi" style="flex:1;min-width:80px">
+            <div class="kpi-value" style="color:#C9A84C">${admin.proposals ?? 0}</div>
+            <div class="kpi-label">PROPOSALS</div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  container.innerHTML = html;
 }
-function kc(v,l,c){return '<div class="card kpi"><div class="kpi-value" style="color:'+c+'">'+v+'</div><div class="kpi-label">'+l+'</div></div>';}

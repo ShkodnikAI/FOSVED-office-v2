@@ -1,19 +1,139 @@
+/**
+ * Fosved Office Mini App — Narads Screen (Screen 8)
+ * Shows work orders with status badges and approve/reject actions.
+ */
+
+import { createTopBar, createNaradCard, createSectionTitle, esc } from '../components/card.js';
+
 export async function render(container) {
-  const data = await API.narads();
-  if (data.status !== 'ok') { container.innerHTML = '<p>Error</p>'; return; }
-  let h = '<div class="top-bar"><div class="top-bar-title">Narads</div></div>';
-  if (!data.narads.length) h += '<div class="empty-state">No narads yet</div>';
-  data.narads.forEach(n => {
-    const sc = n.status==='approved'?'#639922':n.status==='rejected'?'#E24B4A':n.status==='done'?'#639922':'#EF9F27';
-    const bg = n.status==='pending'?'#FFFBF0':n.status==='done'?'#EEF7EE':n.status==='rejected'?'#FFF0F0':'#EEF7EE';
-    h += '<div class="narad-card"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+sc+'"></span><span style="font-family:DM Mono;font-size:11px;color:#888">'+n.id.substring(0,20)+'</span><span style="margin-left:auto;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:'+bg+';color:'+sc+'">'+n.status.toUpperCase()+'</span></div>';
-    h += '<div style="font-size:14px;font-weight:500;margin-bottom:4px">'+(n.title||n.description||'Untitled')+'</div>';
-    if(n.risk) h += '<div style="font-size:11px;color:#888">Risk: '+n.risk+'</div>';
-    h += '<div style="font-size:11px;color:#aaa;margin-top:4px">'+n.created+'</div>';
-    if (n.status==='pending') h += '<div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-outline" style="flex:1;font-size:12px" onclick="window._approve(\''+n.id+'\')">&#10003; Approve</button><button class="btn" style="flex:1;font-size:12px;background:#f5f5f5;border:none" onclick="window._reject(\''+n.id+'\')">&#10007; Reject</button></div>';
-    h += '</div>';
+  let html = '';
+
+  // ── Top Bar ──
+  html += createTopBar('Наряды');
+
+  container.innerHTML = html + `<div style="text-align:center;padding:40px;color:#aaa">Loading narads...</div>`;
+
+  let data;
+  try {
+    data = await API.narads();
+  } catch (e) {
+    container.innerHTML = `
+      ${html}
+      <div style="text-align:center;padding:60px;color:#E24B4A">Failed to load narads</div>`;
+    return;
+  }
+
+  if (data.status !== 'ok') {
+    container.innerHTML = `
+      ${html}
+      <div style="text-align:center;padding:60px;color:#E24B4A">${esc(data.error || 'Unknown error')}</div>`;
+    return;
+  }
+
+  const narads = data.narads || [];
+
+  // ── Summary Stats ──
+  const pending = narads.filter(n => n.status === 'pending').length;
+  const approved = narads.filter(n => n.status === 'approved' || n.status === 'done').length;
+  const rejected = narads.filter(n => n.status === 'rejected' || n.status === 'failed').length;
+
+  html += `
+    <div style="padding:0 16px;margin:8px 0 12px;display:flex;gap:8px">
+      <div class="card kpi" style="flex:1">
+        <div class="kpi-value" style="color:#EF9F27">${pending}</div>
+        <div class="kpi-label">PENDING</div>
+      </div>
+      <div class="card kpi" style="flex:1">
+        <div class="kpi-value" style="color:#639922">${approved}</div>
+        <div class="kpi-label">DONE</div>
+      </div>
+      <div class="card kpi" style="flex:1">
+        <div class="kpi-value" style="color:#E24B4A">${rejected}</div>
+        <div class="kpi-label">FAILED</div>
+      </div>
+    </div>`;
+
+  // ── Narad List ──
+  if (!narads.length) {
+    html += `<div class="empty-state">
+      <div style="font-size:36px;margin-bottom:12px">&#128203;</div>
+      No narads yet
+    </div>`;
+  } else {
+    html += createSectionTitle('WORK ORDERS', `${narads.length} total`);
+    html += `<div style="padding:0 16px">`;
+    for (const narad of narads) {
+      html += createNaradCard(narad);
+    }
+    html += `</div>`;
+  }
+
+  container.innerHTML = html;
+
+  // ── Wire approve/reject buttons ──
+  wireActions(container);
+}
+
+/**
+ * Attach event handlers to approve/reject buttons.
+ */
+function wireActions(container) {
+  container.querySelectorAll('[data-action="approve"],[data-action="reject"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const action = btn.dataset.action;
+      if (!id) return;
+
+      // Disable buttons to prevent double-click
+      const card = btn.closest('.narad-card');
+      if (card) {
+        card.querySelectorAll('button').forEach(b => {
+          b.disabled = true;
+          b.style.opacity = '0.5';
+        });
+      }
+
+      try {
+        if (action === 'approve') {
+          await API.naradApprove(id);
+        } else {
+          await API.naradReject(id);
+        }
+
+        // Update the card visually without full reload
+        if (card) {
+          const statusEl = card.querySelector('[class*="badge"],[class*="PENDING"],[class*="APPROVED"]');
+          // Remove action buttons
+          const actionsDiv = card.querySelector('[style*="display:flex"][style*="gap:6px"]');
+          if (actionsDiv) actionsDiv.remove();
+
+          // Update status badge
+          const statusSpans = card.querySelectorAll('span');
+          for (const span of statusSpans) {
+            if (span.textContent.trim() === 'PENDING') {
+              span.textContent = action === 'approve' ? 'APPROVED' : 'REJECTED';
+              span.style.color = action === 'approve' ? '#639922' : '#E24B4A';
+              span.style.background = action === 'approve' ? '#EEF7EE' : '#FFF0F0';
+              break;
+            }
+          }
+
+          // Update status dot
+          const dot = card.querySelector('.status-dot');
+          if (dot) {
+            dot.style.background = action === 'approve' ? '#639922' : '#E24B4A';
+          }
+        }
+      } catch (e) {
+        console.error('[Narads] Action failed:', e);
+        // Re-enable buttons on error
+        if (card) {
+          card.querySelectorAll('button').forEach(b => {
+            b.disabled = false;
+            b.style.opacity = '1';
+          });
+        }
+      }
+    });
   });
-  container.innerHTML = h;
-  window._approve = async function(id){ await API.naradApprove(id); location.reload(); };
-  window._reject = async function(id){ await API.naradReject(id); location.reload(); };
 }
