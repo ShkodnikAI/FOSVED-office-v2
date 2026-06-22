@@ -1,0 +1,702 @@
+     1→     1→// Fosved Office v2 — Main Application
+     2→     2→// 14 departments + routing + memory + cron + lockdown
+     3→     3→
+     4→     4→import dept/utils
+     5→     5→import dept/context
+     6→     6→import dept/miniapp
+     7→     7→import dept/chain
+     8→     8→import dept/scheduler
+     9→     9→import dept/yana
+    10→    10→import dept/osp
+    11→    11→import dept/lz
+    12→    12→import dept/expert
+    13→    13→import dept/marketing
+    14→    14→import dept/finance
+    15→    15→import dept/legal
+    16→    16→import dept/dev
+    17→    17→import dept/design
+    18→    18→import dept/qa
+    19→    19→import dept/visual
+    20→    20→import dept/engineering
+    21→    21→import dept/kavalnya
+    22→    22→import dept/admin
+    23→    23→
+    24→    24→// ============================================================
+    25→    25→// MEMORY
+    26→    26→// ============================================================
+    27→    27→
+    28→    28→memory { persist: "./data/memory.db" }
+    29→    29→
+    30→    30→// ============================================================
+    31→    31→// INIT DATABASE — all tables
+    32→    32→// ============================================================
+    33→    33→
+    34→    34→pattern InitDB() -> String {
+    35→    35→  // Dialog & Memory
+    36→    36→  db_execute("CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    37→    37→  db_execute("CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original_query TEXT, original_response TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    38→    38→  db_execute("CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    39→    39→
+    40→    40→  // Reports
+    41→    41→  db_execute("CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, title TEXT, query TEXT, raw_text TEXT, html TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    42→    42→  db_execute("CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    43→    43→
+    44→    44→  // Metrics
+    45→    45→  db_execute("CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, period TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    46→    46→  db_execute("CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, provider TEXT, model TEXT, input_tokens TEXT, output_tokens TEXT, cost_usd TEXT, request_type TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    47→    47→
+    48→    48→  // Security
+    49→    49→  db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+    50→    50→
+    51→    51→  // DevOps
+    52→    52→  db_execute("CREATE TABLE IF NOT EXISTS narads (id TEXT PRIMARY KEY, title TEXT, description TEXT, requested_by TEXT, changed_files TEXT, risk_level TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, executed_at TEXT, result TEXT)")
+    53→    53→  db_execute("CREATE TABLE IF NOT EXISTS debriefs (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, period TEXT, content TEXT, actions_taken TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    54→    54→
+    55→    55→  // Admin
+    56→    56→  db_execute("CREATE TABLE IF NOT EXISTS admin_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, content TEXT, duration_sec TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    57→    57→  db_execute("CREATE TABLE IF NOT EXISTS admin_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, severity TEXT, file_path TEXT, issue TEXT, fix_suggestion TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    58→    58→  db_execute("CREATE TABLE IF NOT EXISTS admin_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, status TEXT, narad_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    59→    59→  db_execute("CREATE TABLE IF NOT EXISTS knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT, file_path TEXT, line_start TEXT, line_end TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+    60→    60→  db_execute("CREATE TABLE IF NOT EXISTS knowledge_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT, edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+    61→    61→
+    62→    62→  // Archive
+    63→    63→  db_execute("CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')))")
+    64→    64→
+    65→    65→  // Factory
+    66→    66→  db_execute("CREATE TABLE IF NOT EXISTS factory_orders (id TEXT PRIMARY KEY, client_name TEXT, status TEXT, requirements TEXT, departments TEXT, branding TEXT, llm_config TEXT, repo_url TEXT, render_url TEXT, created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)")
+    67→    67→
+    68→    68→  // LZ
+    69→    69→  db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, channel_name TEXT, category TEXT, added_at TEXT DEFAULT (datetime('now')))")
+    70→    70→  db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, channel_name TEXT, text TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')))")
+    71→    71→  db_execute("CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, sources TEXT, frequency TEXT, last_scan TEXT, created_at TEXT DEFAULT (datetime('now')))")
+    72→    72→
+    73→    73→  // System
+    74→    74→  db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)")
+    75→    75→
+    76→    76→  return "ok"
+    77→    77→}
+    78→    78→
+    79→    79→// ============================================================
+    80→    80→// HELPERS
+    81→    81→// ============================================================
+    82→    82→
+    83→    83→pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> String {
+    84→    84→  let step = kv_get("order_step_" + order_id)
+    85→    85→  let step_num = to_float(step)
+    86→    86→
+    87→    87→  if step_num == 1.0 then {
+    88→    88→    kv_set("order_step_" + order_id, "2")
+    89→    89→    kv_set("order_client_" + order_id, input)
+    90→    90→    db_execute("UPDATE factory_orders SET client_name = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+    91→    91→    return "Step 2/7: What tasks should the office handle?"
+    92→    92→  }
+    93→    93→  if step_num == 2.0 then {
+    94→    94→    kv_set("order_step_" + order_id, "3")
+    95→    95→    kv_set("order_tasks_" + order_id, input)
+    96→    96→    db_execute("UPDATE factory_orders SET requirements = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+    97→    97→    return "Step 3/7: Which departments? (yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya)"
+    98→    98→  }
+    99→    99→  if step_num == 3.0 then {
+   100→   100→    kv_set("order_step_" + order_id, "4")
+   101→   101→    kv_set("order_depts_" + order_id, input)
+   102→   102→    db_execute("UPDATE factory_orders SET departments = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+   103→   103→    return "Step 4/7: Branding? (name, language, style preferences)"
+   104→   104→  }
+   105→   105→  if step_num == 4.0 then {
+   106→   106→    kv_set("order_step_" + order_id, "5")
+   107→   107→    kv_set("order_branding_" + order_id, input)
+   108→   108→    db_execute("UPDATE factory_orders SET branding = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+   109→   109→    return "Step 5/7: Which LLM providers/keys are available?"
+   110→   110→  }
+   111→   111→  if step_num == 5.0 then {
+   112→   112→    kv_set("order_step_" + order_id, "6")
+   113→   113→    kv_set("order_llm_" + order_id, input)
+   114→   114→    db_execute("UPDATE factory_orders SET llm_config = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+   115→   115→    let summary = "Order summary:\n"
+   116→   116→    let summary = summary + "Client: " + kv_get("order_client_" + order_id) + "\n"
+   117→   117→    let summary = summary + "Tasks: " + kv_get("order_tasks_" + order_id) + "\n"
+   118→   118→    let summary = summary + "Departments: " + kv_get("order_depts_" + order_id) + "\n"
+   119→   119→    let summary = summary + "Branding: " + kv_get("order_branding_" + order_id) + "\n"
+   120→   120→    let summary = summary + "LLM: " + input + "\n\nConfirm? Send 'yes' or 'no'."
+   121→   121→    kv_set("order_summary_" + order_id, summary)
+   122→   122→    return summary
+   123→   123→  }
+   124→   124→  if step_num == 6.0 then {
+   125→   125→    if lower(input) == "yes" or lower(input) == "ok" then {
+   126→   126→      kv_set("order_step_" + order_id, "7")
+   127→   127→      db_execute("UPDATE factory_orders SET status = 'building' WHERE id = '" + order_id + "'")
+   128→   128→      let _ = AuditLog("factory_build", "factory", "building: " + order_id)
+   129→   129→      kv_set("active_order", "")
+   130→   130→      return "Order confirmed. Building office...\nStatus: building\nTrack: /factory_list"
+   131→   131→    } else {
+   132→   132→      kv_set("active_order", "")
+   133→   133→      db_execute("UPDATE factory_orders SET status = 'cancelled' WHERE id = '" + order_id + "'")
+   134→   134→      return "Order cancelled."
+   135→   135→    }
+   136→   136→  }
+   137→   137→  return "Factory flow completed."
+   138→   138→}
+   139→   139→
+   140→   140→pattern LZDeepScan(query: String, chat_id: String) -> String {
+   141→   141→  // 9-source deep research via Apodex
+   142→   142→  let _ = AuditLog("lz_deep_scan", "lz", "query: " + substring(query, 0.0, 100.0))
+   143→   143→  let context = BuildContext("lz", "Deep research: " + query, chat_id)
+   144→   144→  let messages = json_encode([{role: "system", content: context + "\n\nIMPORTANT: This is a DEEP SCAN request. Use all available sources. Structure findings with [FACT verified] badges."}, {role: "user", content: query}])
+   145→   145→  // Try Apodex first (timeout 300s), fall back to default
+   146→   146→  let proxy_result = CallLLMProxy("lz", messages)
+   147→   147→  let reply = json_get(parse_json(proxy_result), "reply", "Deep scan failed.")
+   148→   148→  let _ = RecordAssistantMessage(chat_id, "lz", reply)
+   149→   149→  return reply
+   150→   150→}
+   151→   151→
+   152→   152→pattern RecordUserMessage(chat_id: String, dept: String, text: String) -> String {
+   153→   153→  let escaped = escape_json(text)
+   154→   154→  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('" + chat_id + "', 'user', '" + dept + "', '" + escaped + "')")
+   155→   155→  return "ok"
+   156→   156→}
+   157→   157→
+   158→   158→pattern RecordAssistantMessage(chat_id: String, dept: String, text: String) -> String {
+   159→   159→  let escaped = escape_json(text)
+   160→   160→  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('" + chat_id + "', 'assistant', '" + dept + "', '" + escaped + "')")
+   161→   161→  return "ok"
+   162→   162→}
+   163→   163→
+   164→   164→pattern SendTelegramReply(chat_id: String, text: String) -> String {
+   165→   165→  let token = env("TELEGRAM_BOT_TOKEN")
+   166→   166→  let body = json_encode({chat_id: to_float(chat_id), text: text})
+   167→   167→  let result = http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+   168→   168→  return result
+   169→   169→}
+   170→   170→
+   171→   171→pattern SendTyping(chat_id: String) -> String {
+   172→   172→  let token = env("TELEGRAM_BOT_TOKEN")
+   173→   173→  let body = json_encode({chat_id: to_float(chat_id), action: "typing"})
+   174→   174→  let result = http_post("https://api.telegram.org/bot" + token + "/sendChatAction", body, "application/json")
+   175→   175→  return result
+   176→   176→}
+   177→   177→
+   178→   178→pattern CallLLMProxy(dept: String, messages: String) -> String {
+   179→   179→  let body = json_encode({dept: dept, messages: parse_json(messages)})
+   180→   180→  let result = http_post("http://127.0.0.1:4000/ask", body, "application/json")
+   181→   181→  return result
+   182→   182→}
+   183→   183→
+   184→   184→pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String {
+   185→   185→  let context = BuildContext(dept, query, chat_id)
+   186→   186→  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
+   187→   187→  let proxy_result = CallLLMProxy(dept, messages)
+   188→   188→  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
+   189→   189→  let _ = RecordAssistantMessage(chat_id, dept, reply)
+   190→   190→  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
+   191→   191→  return reply
+   192→   192→}
+   193→   193→
+   194→   194→pattern DetectDepartment(text: String) -> String {
+   195→   195→  // Check slash commands
+   196→   196→  if starts_with(text, "/yana") then { return "yana" }
+   197→   197→  if starts_with(text, "/osp") then { return "osp" }
+   198→   198→  if starts_with(text, "/lz") then { return "lz" }
+   199→   199→  if starts_with(text, "/expert") then { return "expert" }
+   200→   200→  if starts_with(text, "/marketing") then { return "marketing" }
+   201→   201→  if starts_with(text, "/finance") then { return "finance" }
+   202→   202→  if starts_with(text, "/legal") then { return "legal" }
+   203→   203→  if starts_with(text, "/dev") then { return "dev" }
+   204→   204→  if starts_with(text, "/design") then { return "design" }
+   205→   205→  if starts_with(text, "/qa") then { return "qa" }
+   206→   206→  if starts_with(text, "/visual") then { return "visual" }
+   207→   207→  if starts_with(text, "/engineering") then { return "engineering" }
+   208→   208→  if starts_with(text, "/forge") then { return "kavalnya" }
+   209→   209→  if starts_with(text, "/admin") then { return "admin" }
+   210→   210→
+   211→   211→  // Extended commands
+   212→   212→  if starts_with(text, "/analyze") then { return "osp" }
+   213→   213→  if starts_with(text, "/scan") then { return "lz" }
+   214→   214→  if starts_with(text, "/deep") then { return "osp" }
+   215→   215→  if starts_with(text, "/quickanalyze") then { return "osp" }
+   216→   216→  if starts_with(text, "/wargame") then { return "osp" }
+   217→   217→  if starts_with(text, "/market-research") then { return "marketing" }
+   218→   218→  if starts_with(text, "/segment") then { return "marketing" }
+   219→   219→  if starts_with(text, "/competitors") then { return "marketing" }
+   220→   220→  if starts_with(text, "/campaign") then { return "marketing" }
+   221→   221→  if starts_with(text, "/calc") then { return "engineering" }
+   222→   222→  if starts_with(text, "/simulate") then { return "engineering" }
+   223→   223→
+   224→   224→  // Russian keyword detection via proxy
+   225→   225→  let lower_text = lower(text)
+   226→   226→  let body = json_encode({text: lower_text})
+   227→   227→  let result = http_post("http://127.0.0.1:4000/detect-dept", body, "application/json")
+   228→   228→  let detected = json_get(parse_json(result), "dept", "")
+   229→   229→  if detected != "" then { return detected }
+   230→   230→
+   231→   231→  return ""
+   232→   232→}
+   233→   233→
+   234→   234→// ============================================================
+   235→   235→// SERVER
+   236→   236→// ============================================================
+   237→   237→
+   238→   238→mlogserver {
+   239→   239→  port: 10001
+   240→   240→
+   241→   241→  // Health
+   242→   242→  route "/" method=GET {
+   243→   243→    return respond("200 Fosved Office v2 alive")
+   244→   244→  }
+   245→   245→
+   246→   246→  route "/health" method=GET {
+   247→   247→    let _ = InitDB()
+   248→   248→    return respond("200 ok")
+   249→   249→  }
+   250→   250→
+   251→   251→  // ============================================================
+   252→   252→  // WEBHOOK — Telegram
+   253→   253→  // ============================================================
+   254→   254→
+   255→   255→  route "/webhook/telegram" method=POST {
+   256→   256→    let data = json_body()
+   257→   257→    let chat_id = to_string(json_get(data, "message.chat.id", "0"))
+   258→   258→    let user_id = to_string(json_get(data, "message.from.id", "0"))
+   259→   259→    let owner_id = env("OWNER_TELEGRAM_ID")
+   260→   260→
+   261→   261→    // Owner check — ignore non-owner
+   262→   262→    if user_id != owner_id then { return respond("200 ok") }
+   263→   263→
+   264→   264→    // Lockdown check
+   265→   265→    let locked = kv_get("system_lockdown")
+   266→   266→    if locked == "true" then {
+   267→   267→      let text = to_string(json_get(data, "message.text", ""))
+   268→   268→      if starts_with(text, "/unlock") then {
+   269→   269→        let parts = split(text, " ")
+   270→   270→        let password = ""
+   271→   271→        if len(parts) > 1.0 then { let password = get(parts, 1.0) }
+   272→   272→        let stored_pwd = kv_get("lockdown_password")
+   273→   273→        if password == stored_pwd or password == env("LOCKDOWN_PASSWORD") then {
+   274→   274→          kv_set("system_lockdown", "false")
+   275→   275→          let _ = SendTelegramReply(chat_id, "Lockdown disabled. Office is operational.")
+   276→   276→          let _ = AuditLog("unlock", "system", "owner unlocked office")
+   277→   277→          return respond("200 ok")
+   278→   278→        }
+   279→   279→      }
+   280→   280→      return respond("200 ok")
+   281→   281→    }
+   282→   282→
+   283→   283→    // Voice check
+   284→   284→    let has_voice = has_field(data, "message.voice")
+   285→   285→    let text = ""
+   286→   286→    if has_voice == 1.0 then {
+   287→   287→      let file_id = to_string(json_get(data, "message.voice.file_id", ""))
+   288→   288→      if file_id != "" then {
+   289→   289→        let transcribed = whisper_transcribe(file_id, env("TELEGRAM_BOT_TOKEN"), env("WHISPER_API_KEY"), env("WHISPER_PROVIDER"))
+   290→   290→        let _ = SendTelegramReply(chat_id, "Heard: " + transcribed)
+   291→   291→        let text = transcribed
+   292→   292→      }
+   293→   293→    } else {
+   294→   294→      let text = to_string(json_get(data, "message.text", ""))
+   295→   295→    }
+   296→   296→
+   297→   297→    if text == "" then { return respond("200 ok") }
+   298→   298→
+   299→   299→    // Callback query handler
+   300→   300→    if has_field(data, "callback_query") == 1.0 then {
+   301→   301→      let cb_data = to_string(json_get(data, "callback_query.data", ""))
+   302→   302→      let cb_id = to_string(json_get(data, "callback_query.id", ""))
+   303→   303→      let cb_chat_id = to_string(json_get(data, "callback_query.message.chat.id", "0"))
+   304→   304→      let token = env("TELEGRAM_BOT_TOKEN")
+   305→   305→      // Answer callback
+   306→   306→      let _ = http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id}), "application/json")
+   307→   307→      // Handle approve/reject narads
+   308→   308→      if starts_with(cb_data, "approve_") then {
+   309→   309→        let narad_id = substring(cb_data, 8.0, len(cb_data))
+   310→   310→        let _ = AuditLog("narad_approve", "admin", "approved narad: " + narad_id)
+   311→   311→        let _ = SendTelegramReply(cb_chat_id, "Narad " + narad_id + " approved.")
+   312→   312→      }
+   313→   313→      if starts_with(cb_data, "reject_") then {
+   314→   314→        let narad_id = substring(cb_data, 7.0, len(cb_data))
+   315→   315→        let _ = AuditLog("narad_reject", "admin", "rejected narad: " + narad_id)
+   316→   316→        let _ = SendTelegramReply(cb_chat_id, "Narad " + narad_id + " rejected.")
+   317→   317→      }
+   318→   318→      return respond("200 ok")
+   319→   319→    }
+   320→   320→
+   321→   321→    // web_app_data handler (Mini App actions)
+   322→   322→    if has_field(data, "message.web_app_data") == 1.0 then {
+   323→   323→      let payload_raw = to_string(json_get(data, "message.web_app_data.data", "{}"))
+   324→   324→      let _ = AuditLog("web_app_data", "miniapp", payload_raw)
+   325→   325→      return respond("200 ok")
+   326→   326→    }
+   327→   327→
+   328→   328→    // Forwarded messages to LZ index
+   329→   329→    if has_field(data, "message.forward_from_chat") == 1.0 then {
+   330→   330→      let fwd_text = to_string(json_get(data, "message.text", ""))
+   331→   331→      if fwd_text != "" then {
+   332→   332→        let _ = AuditLog("forward_received", "lz", "forward indexed")
+   333→   333→      }
+   334→   334→      return respond("200 ok")
+   335→   335→    }
+   336→   336→
+   337→   337→    // Send typing
+   338→   338→    let _ = SendTyping(chat_id)
+   339→   339→
+   340→   340→    // ============================================================
+   341→   341→    // COMMAND ROUTING
+   342→   342→    // ============================================================
+   343→   343→
+   344→   344→    // /start
+   345→   345→    if text == "/start" then {
+   346→   346→      let _ = SendTelegramReply(chat_id, "Fosved Office v2\n\n14 departments at your service.\nType /help for commands.")
+   347→   347→      return respond("200 ok")
+   348→   348→    }
+   349→   349→
+   350→   350→    // /help
+   351→   351→    if text == "/help" then {
+   352→   352→      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge\n\nGeneral: /status /office /lockdown /unlock\n\nLearning: /fix /good /rate /remember\n\nEconomy: /cost /budget /model\n\nOther: /chain /voice /dept /audit /archive /admin /factory\n\nSend any message and it will be routed automatically.")
+   353→   353→      return respond("200 ok")
+   354→   354→    }
+   355→   355→
+   356→   356→    // /status
+   357→   357→    if text == "/status" then {
+   358→   358→      let _ = SendTelegramReply(chat_id, "Fosved Office v2 — Status\n\nDepartments: yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya, admin\nAll 14 online.")
+   359→   359→      return respond("200 ok")
+   360→   360→    }
+   361→   361→
+   362→   362→    // /office
+   363→   363→    if text == "/office" or text == "/dept" then {
+   364→   364→      let render_url = env("RENDER_URL")
+   365→   365→      let _ = SendTelegramReply(chat_id, render_url + "/office-dashboard")
+   366→   366→      return respond("200 ok")
+   367→   367→    }
+   368→   368→
+   369→   369→    // /lockdown
+   370→   370→    if starts_with(text, "/lockdown") then {
+   371→   371→      let parts = split(text, " ")
+   372→   372→      let password = ""
+   373→   373→      if len(parts) > 1.0 then { let password = get(parts, 1.0) }
+   374→   374→      if password == env("LOCKDOWN_PASSWORD") or password == kv_get("lockdown_password") then {
+   375→   375→        kv_set("system_lockdown", "true")
+   376→   376→        let _ = AuditLog("lockdown", "system", "owner locked office")
+   377→   377→        let _ = SendTelegramReply(chat_id, "LOCKDOWN activated. Only /unlock available.")
+   378→   378→      } else {
+   379→   379→        let _ = SendTelegramReply(chat_id, "Wrong password.")
+   380→   380→      }
+   381→   381→      return respond("200 ok")
+   382→   382→    }
+   383→   383→
+   384→   384→    // /fix
+   385→   385→    if starts_with(text, "/fix") then {
+   386→   386→      let correction = substring(text, 5.0, len(text))
+   387→   387→      if correction != "" then {
+   388→   388→        db_execute("INSERT INTO adapt_corrections (dept, original_query, correction) VALUES ('global', '', '" + escape_json(correction) + "')")
+   389→   389→        let _ = AuditLog("correction", "global", correction)
+   390→   390→        let _ = SendTelegramReply(chat_id, "Correction saved. Thank you.")
+   391→   391→      }
+   392→   392→      return respond("200 ok")
+   393→   393→    }
+   394→   394→
+   395→   395→    // /learning
+   396→   396→    if text == "/learning" then {
+   397→   397→      let corr_rows = query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-7 days')", [])
+   398→   398→      let pos = kv_get("last_positive_example")
+   399→   399→      let _ = SendTelegramReply(chat_id, "Learning stats (7 days):\n- Corrections: recorded\n- Positive examples: tracked\n- Active depts: all")
+   400→   400→      return respond("200 ok")
+   401→   401→    }
+   402→   402→
+   403→   403→    // /debrief
+   404→   404→    if starts_with(text, "/debrief") then {
+   405→   405→      let parts = split(text, " ")
+   406→   406→      if len(parts) > 1.0 then {
+   407→   407→        let dept = trim(get(parts, 1.0))
+   408→   408→        let result = MonthlyDebrief(dept)
+   409→   409→        let _ = SendTelegramReply(chat_id, result)
+   410→   410→      }
+   411→   411→      return respond("200 ok")
+   412→   412→    }
+   413→   413→
+   414→   414→    // /digest
+   415→   415→    if text == "/digest" then {
+   416→   416→      let digest = EveningSummary()
+   417→   417→      let _ = SendTelegramReply(chat_id, digest)
+   418→   418→      return respond("200 ok")
+   419→   419→    }
+   420→   420→
+   421→   421→    // /review
+   422→   422→    if text == "/review" then {
+   423→   423→      let review = WeeklyDigest()
+   424→   424→      let _ = SendTelegramReply(chat_id, review)
+   425→   425→      return respond("200 ok")
+   426→   426→    }
+   427→   427→
+   428→   428→    // /good
+   429→   429→    if text == "/good" then {
+   430→   430→      kv_set("last_positive_example", to_string(now()))
+   431→   431→      let _ = SendTelegramReply(chat_id, "Positive feedback recorded.")
+   432→   432→      return respond("200 ok")
+   433→   433→    }
+   434→   434→
+   435→   435→    // /rate
+   436→   436→    if starts_with(text, "/rate") then {
+   437→   437→      let parts = split(text, " ")
+   438→   438→      if len(parts) > 1.0 then {
+   439→   439→        let rating = get(parts, 1.0)
+   440→   440→        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period) VALUES ('global', 'satisfaction', '" + rating + "', 'daily')")
+   441→   441→        let _ = SendTelegramReply(chat_id, "Rating " + rating + " recorded.")
+   442→   442→      }
+   443→   443→      return respond("200 ok")
+   444→   444→    }
+   445→   445→
+   446→   446→    // /remember
+   447→   447→    if starts_with(text, "/remember") then {
+   448→   448→      let fact = substring(text, 10.0, len(text))
+   449→   449→      if fact != "" then {
+   450→   450→        memorize fact with priority = 0.8
+   451→   451→        let _ = SendTelegramReply(chat_id, "Remembered.")
+   452→   452→      }
+   453→   453→      return respond("200 ok")
+   454→   454→    }
+   455→   455→
+   456→   456→    // /model
+   457→   457→    if text == "/model" or text == "/model list" then {
+   458→   458→      let provider = read_file("config/priority_provider.txt")
+   459→   459→      let model = read_file("config/priority_model.txt")
+   460→   460→      let _ = SendTelegramReply(chat_id, "Model config:\nProvider: " + trim(provider) + "\nModel: " + trim(model) + "\n\n/model set <provider> <model>\n/model <dept> <provider> <model>\n/model reset")
+   461→   461→      return respond("200 ok")
+   462→   462→    }
+   463→   463→
+   464→   464→    // /model set
+   465→   465→    if starts_with(text, "/model set") then {
+   466→   466→      let parts = split(text, " ")
+   467→   467→      if len(parts) > 2.0 then {
+   468→   468→        let p = get(parts, 2.0)
+   469→   469→        let m = get(parts, 3.0)
+   470→   470→        let _ = write_file("config/priority_provider.txt", trim(p))
+   471→   471→        let _ = write_file("config/priority_model.txt", trim(m))
+   472→   472→        let _ = AuditLog("model_set", "system", "provider=" + trim(p) + " model=" + trim(m))
+   473→   473→        let _ = SendTelegramReply(chat_id, "Model set: " + trim(p) + " / " + trim(m))
+   474→   474→      }
+   475→   475→      return respond("200 ok")
+   476→   476→    }
+   477→   477→
+   478→   478→    // /model reset
+   479→   479→    if text == "/model reset" then {
+   480→   480→      let _ = write_file("config/priority_provider.txt", "zai")
+   481→   481→      let _ = write_file("config/priority_model.txt", "glm-4.6")
+   482→   482→      let _ = SendTelegramReply(chat_id, "Model reset to defaults: zai / glm-4.6")
+   483→   483→      return respond("200 ok")
+   484→   484→    }
+   485→   485→
+   486→   486→    // /model <dept> override
+   487→   487→    if starts_with(text, "/model ") then {
+   488→   488→      let parts = split(text, " ")
+   489→   489→      if len(parts) > 2.0 then {
+   490→   490→        let dept_slug = trim(get(parts, 1.0))
+   491→   491→        if len(parts) > 3.0 then {
+   492→   492→          let p = get(parts, 2.0)
+   493→   493→          let m = get(parts, 3.0)
+   494→   494→          let _ = write_file("config/override_" + dept_slug + ".txt", trim(p) + " " + trim(m))
+   495→   495→          let _ = SendTelegramReply(chat_id, "Override " + dept_slug + ": " + trim(p) + " / " + trim(m))
+   496→   496→        }
+   497→   497→      }
+   498→   498→      return respond("200 ok")
+   499→   499→    }
+   500→   500→
+   501→   501→    // /cost
+   502→   502→    if text == "/cost" then {
+   503→   503→      let _ = SendTelegramReply(chat_id, "Cost tracking available at office dashboard.\nRender URL: " + env("RENDER_URL") + "/office-dashboard")
+   504→   504→      return respond("200 ok")
+   505→   505→    }
+   506→   506→
+   507→   507→    // /budget
+   508→   508→    if starts_with(text, "/budget") then {
+   509→   509→      let parts = split(text, " ")
+   510→   510→      if len(parts) > 1.0 then {
+   511→   511→        let amount = get(parts, 1.0)
+   512→   512→        kv_set("daily_budget", amount)
+   513→   513→        let _ = SendTelegramReply(chat_id, "Daily budget set: $" + amount)
+   514→   514→      } else {
+   515→   515→        let budget = kv_get("daily_budget")
+   516→   516→        if budget == "" then { let budget = "not set" }
+   517→   517→        let _ = SendTelegramReply(chat_id, "Daily budget: $" + budget)
+   518→   518→      }
+   519→   519→      return respond("200 ok")
+   520→   520→    }
+   521→   521→
+   522→   522→    // /voice commands
+   523→   523→    if starts_with(text, "/voice") then {
+   524→   524→      let parts = split(text, " ")
+   525→   525→      let cmd = text
+   526→   526→      if len(parts) > 1.0 then { let cmd = get(parts, 1.0) }
+   527→   527→      if cmd == "on" then { kv_set("voice_enabled", "true") }
+   528→   528→      if cmd == "off" then { kv_set("voice_enabled", "false") }
+   529→   529→      if cmd == "male" then { kv_set("tts_voice", "ru-RU-DmitryNeural") }
+   530→   530→      if cmd == "female" then { kv_set("tts_voice", "ru-RU-SvetlanaNeural") }
+   531→   531→      let _ = SendTelegramReply(chat_id, "Voice setting updated: " + cmd)
+   532→   532→      return respond("200 ok")
+   533→   533→    }
+   534→   534→
+   535→   535→    // /audit
+   536→   536→    if text == "/audit" then {
+   537→   537→      let rows = query("SELECT action, dept, details, status, created_at FROM audit_log ORDER BY id DESC LIMIT 20", [])
+   538→   538→      let _ = SendTelegramReply(chat_id, "Last 20 audit events:\n(See office dashboard for full list)")
+   539→   539→      return respond("200 ok")
+   540→   540→    }
+   541→   541→
+   542→   542→    // /narads
+   543→   543→    if text == "/narads" then {
+   544→   544→      let _ = SendTelegramReply(chat_id, "Open narads: see /admin narads")
+   545→   545→      return respond("200 ok")
+   546→   546→    }
+   547→   547→
+   548→   548→    // /dept <slug> — send Mini App button
+   549→   549→    if starts_with(text, "/dept ") then {
+   550→   550→      let slug = substring(text, 6.0, len(text))
+   551→   551→      let render_url = env("RENDER_URL")
+   552→   552→      let _ = SendTelegramReply(chat_id, render_url + "/dept-dashboard/" + trim(slug))
+   553→   553→      return respond("200 ok")
+   554→   554→    }
+   555→   555→
+   556→   556→    // /archive
+   557→   557→    if starts_with(text, "/archive") then {
+   558→   558→      let parts = split(text, " ")
+   559→   559→      if len(parts) > 1.0 then {
+   560→   560→        let doc_id = trim(get(parts, 1.0))
+   561→   561→        let rows = query("SELECT dept, title FROM miniapp_responses WHERE id = ?", [doc_id])
+   562→   562→        if rows != "" then {
+   563→   563→          let channel_id = env("TELEGRAM_ARCHIVE_CHANNEL_ID")
+   564→   564→          let _ = AuditLog("archive_publish", "archive", "doc: " + doc_id)
+   565→   565→          let _ = SendTelegramReply(chat_id, "Archived: " + doc_id)
+   566→   566→        }
+   567→   567→      } else {
+   568→   568→        let _ = SendTelegramReply(chat_id, "Usage: /archive <doc_id>\n/autoarchive on/off")
+   569→   569→      }
+   570→   570→      return respond("200 ok")
+   571→   571→    }
+   572→   572→
+   573→   573→    // /autoarchive
+   574→   574→    if starts_with(text, "/autoarchive") then {
+   575→   575→      let parts = split(text, " ")
+   576→   576→      if len(parts) > 1.0 then {
+   577→   577→        let mode = trim(get(parts, 1.0))
+   578→   578→        kv_set("autoarchive_enabled", mode)
+   579→   579→        let _ = SendTelegramReply(chat_id, "Autoarchive: " + mode)
+   580→   580→      }
+   581→   581→      return respond("200 ok")
+   582→   582→    }
+   583→   583→
+   584→   584→    // /search
+   585→   585→    if starts_with(text, "/search") then {
+   586→   586→      let query_text = substring(text, 8.0, len(text))
+   587→   587→      if query_text != "" then {
+   588→   588→        let _ = SendTelegramReply(chat_id, "Search: scanning archive for '" + query_text + "'...")
+   589→   589→      }
+   590→   590→      return respond("200 ok")
+   591→   591→    }
+   592→   592→
+   593→   593→    // /brief
+   594→   594→    if text == "/brief" then {
+   595→   595→      let reply = HandleDeptQuery("yana", "Morning brief", chat_id)
+   596→   596→      let _ = SendTelegramReply(chat_id, reply)
+   597→   597→      return respond("200 ok")
+   598→   598→    }
+   599→   599→
+   600→   600→    // /chain
+   601→   601→    if starts_with(text, "/chain") then {
+   602→   602→      let rest = substring(text, 7.0, len(text))
+   603→   603→      let parts = split(rest, " ")
+   604→   604→      if len(parts) > 1.0 then {
+   605→   605→        let dept_chain = trim(get(parts, 0.0))
+   606→   606→        let query = substring(rest, len(dept_chain) + 1.0, len(rest))
+   607→   607→        let _ = RecordUserMessage(chat_id, "chain", text)
+   608→   608→        let result = ExecuteChain(dept_chain, query, chat_id)
+   609→   609→        let _ = SendTelegramReply(chat_id, result)
+   610→   610→      } else {
+   611→   611→        let _ = SendTelegramReply(chat_id, "Usage: /chain dept1+dept2 <query>\nExample: /chain osp+legal test query")
+   612→   612→      }
+   613→   613→      return respond("200 ok")
+   614→   614→    }
+   615→   615→
+   616→   616→    // /factory
+   617→   617→    if starts_with(text, "/factory") then {
+   618→   618→      let query = substring(text, 9.0, len(text))
+   619→   619→
+   620→   620→      // Check active order
+   621→   621→      let active = kv_get("active_order")
+   622→   622→      if active != "" then {
+   623→   623→        // Continue factory flow
+   624→   624→        let step = kv_get("order_step_" + active)
+   625→   625→        let result = HandleFactoryStep(active, query, chat_id)
+   626→   626→        let _ = SendTelegramReply(chat_id, result)
+   627→   627→        return respond("200 ok")
+   628→   628→      }
+   629→   629→
+   630→   630→      // /factory_review
+   631→   631→      if starts_with(text, "/factory_review") then {
+   632→   632→        let id = substring(text, 16.0, len(text))
+   633→   633→        let _ = SendTelegramReply(chat_id, "Factory review for " + trim(id) + ": pending")
+   634→   634→        return respond("200 ok")
+   635→   635→      }
+   636→   636→
+   637→   637→      // /factory_deploy
+   638→   638→      if starts_with(text, "/factory_deploy") then {
+   639→   639→        let id = substring(text, 16.0, len(text))
+   640→   640→        db_execute("UPDATE factory_orders SET status = 'deployed' WHERE id = '" + escape_json(trim(id)) + "'")
+   641→   641→        let _ = AuditLog("factory_deploy", "factory", "deployed: " + trim(id))
+   642→   642→        let _ = SendTelegramReply(chat_id, "Factory order " + trim(id) + " deployed.")
+   643→   643→        return respond("200 ok")
+   644→   644→      }
+   645→   645→
+   646→   646→      // /factory_deliver
+   647→   647→      if starts_with(text, "/factory_deliver") then {
+   648→   648→        let id = substring(text, 17.0, len(text))
+   649→   649→        db_execute("UPDATE factory_orders SET status = 'delivered', completed_at = datetime('now') WHERE id = '" + escape_json(trim(id)) + "'")
+   650→   650→        let _ = SendTelegramReply(chat_id, "Factory order " + trim(id) + " delivered.")
+   651→   651→        return respond("200 ok")
+   652→   652→      }
+   653→   653→
+   654→   654→      // /factory_list
+   655→   655→      if text == "/factory_list" then {
+   656→   656→        let rows = query("SELECT id, client_name, status, created_at FROM factory_orders ORDER BY id DESC LIMIT 10", [])
+   657→   657→        let _ = SendTelegramReply(chat_id, "Factory orders:\n(See office dashboard)")
+   658→   658→        return respond("200 ok")
+   659→   659→      }
+   660→   660→
+   661→   661→      // Start new factory flow
+   662→   662→      let order_id = "fo-" + to_string(now())
+   663→   663→      kv_set("active_order", order_id)
+   664→   664→      kv_set("order_step_" + order_id, "1")
+   665→   665→      db_execute("INSERT INTO factory_orders (id, status) VALUES ('" + order_id + "', 'intake')")
+   666→   666→      let _ = SendTelegramReply(chat_id, "Factory: Creating new office.\n\nStep 1/7: What is the client's name or company?")
+   667→   667→      return respond("200 ok")
+   668→   668→    }
+   669→   669→
+   670→   670→    // /admin
+   671→   671→    if starts_with(text, "/admin") then {
+   672→   672→      let query = substring(text, 7.0, len(text))
+   673→   673→      let _ = AuditLog("admin_cmd", "admin", text)
+   674→   674→
+   675→   675→      if query == "" or query == " " then {
+   676→   676→        let _ = SendTelegramReply(chat_id, "Admin commands:\n/status /build <task> /fix <bug>\n/analyze /graph /impact <file>\n/proposals /narads /rollback <id>\n/report /health")
+   677→   677→        return respond("200 ok")
+   678→   678→      }
+   679→   679→      if query == "status" then {
+   680→   680→        let _ = SendTelegramReply(chat_id, AdminStatus())
+   681→   681→        return respond("200 ok")
+   682→   682→      }
+   683→   683→      if starts_with(query, "build ") then {
+   684→   684→        let task = substring(query, 6.0, len(query))
+   685→   685→        let narad_id = AdminBuild(task, chat_id)
+   686→   686→        return respond("200 ok")
+   687→   687→      }
+   688→   688→      if starts_with(query, "fix ") then {
+   689→   689→        let bug = substring(query, 4.0, len(query))
+   690→   690→        let reply = HandleAdmin("Fix bug: " + bug, chat_id)
+   691→   691→        let _ = SendTelegramReply(chat_id, reply)
+   692→   692→        return respond("200 ok")
+   693→   693→      }
+   694→   694→      if query == "analyze" then {
+   695→   695→        let _ = SendTelegramReply(chat_id, AdminAnalyze())
+   696→   696→        return respond("200 ok")
+   697→   697→      }
+   698→   698→      if query == "graph" then {
+   699→   699→        let _ = SendTelegramReply(chat_id, AdminGraph())
+   700→   700→        return respond("200 ok")
+
+[showing lines 1-700 of 953; use offset=701 with limit to continue reading]
