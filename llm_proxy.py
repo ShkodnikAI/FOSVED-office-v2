@@ -10,7 +10,24 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, Response
 import requests as http_requests
-from auto_enricher import auto_enrich
+try:
+    from auto_enricher import auto_enrich as _auto_enrich_fn
+    _has_enricher = True
+except Exception as _e:
+    log.warning(f"auto_enricher import failed, rich post-processor disabled: {_e}")
+    _auto_enrich_fn = None
+    _has_enricher = False
+
+
+def auto_enrich(text, dept='yana', accent_color='#6366f1'):
+    """Safe wrapper — returns raw text if enricher unavailable."""
+    if _auto_enrich_fn is None:
+        return text or ''
+    try:
+        return _auto_enrich_fn(text, dept=dept, accent_color=accent_color)
+    except Exception as e:
+        log.warning(f"auto_enrich error: {e}")
+        return text or ''
 
 # ──────────────────────────── APP & CONFIG ────────────────────────────
 app = Flask(__name__)
@@ -175,14 +192,18 @@ FORMAT_INSTRUCTION = """
 6. Не будь кратким. Препарируй тему глубоко.
 """
 
+# Departments that should NOT receive FORMAT_INSTRUCTION (conversational roles)
+_NO_FORMAT_DEPTS = {"yana", "admin"}
+
 def get_dept_prompt(dept):
+    fmt = "" if dept in _NO_FORMAT_DEPTS else FORMAT_INSTRUCTION
     try:
         f = LIB_DIR / f"{dept}.md"
         if f.exists():
-            return f.read_text(encoding="utf-8") + FORMAT_INSTRUCTION
+            return f.read_text(encoding="utf-8") + fmt
     except Exception:
         pass
-    return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + FORMAT_INSTRUCTION
+    return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + fmt
 
 # ──────────────────────────── CONFIG LOADING ────────────────────────────
 _cfg_cache = {"priority_provider": "zai", "priority_model": None, "overrides": {}}
@@ -547,9 +568,13 @@ def miniapp_get(doc_id):
     # Rich post-processor: if raw_text exists and has markdown structure, enrich it
     raw = r.get("raw_text", "")
     dept = r.get("dept", "admin")
-    if raw and ("## " in raw or "[ФАКТ]" in raw or "[" in raw):
+    if raw and ("## " in raw or "[ФАКТ]" in raw or "[" in raw) and _has_enricher:
         accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
-        enriched_body = auto_enrich(raw, dept=dept, accent_color=accent)
+        try:
+            enriched_body = auto_enrich(raw, dept=dept, accent_color=accent)
+        except Exception as e:
+            log.warning(f"miniapp enrich failed for {doc_id}: {e}")
+            enriched_body = None
         if enriched_body and len(enriched_body) > len(raw) * 0.5:
             # Rebuild full HTML with enriched body
             css_path = BASE_DIR / "report_css.txt"
@@ -598,6 +623,34 @@ def enrich_endpoint():
     accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
     enriched = auto_enrich(raw_text, dept=dept, accent_color=accent)
     return jsonify({"enriched": enriched, "has_metrics": "metric-card" in enriched})
+
+@app.post("/tg-send")
+def tg_send():
+    """Send Telegram message with auto-split for texts >4096 chars."""
+    d = request.get_json(force=True)
+    chat_id = d.get("chat_id", "")
+    text = d.get("text", "")
+    if not chat_id or not text:
+        return jsonify({"status": "error", "msg": "missing chat_id or text"})
+    TG_MAX = 4096
+    if len(text) <= TG_MAX:
+        msg_id = _tg_send_message(chat_id, text)
+        return jsonify({"status": "ok", "msg_id": msg_id, "parts": 1})
+    # Split at last newline before 4096
+    parts = []
+    while len(text) > TG_MAX:
+        cut = text.rfind("\n", 0, TG_MAX)
+        if cut < TG_MAX // 2:
+            cut = TG_MAX
+        parts.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    parts.append(text)
+    msg_ids = []
+    for i, part in enumerate(parts):
+        mid = _tg_send_message(chat_id, part)
+        if mid:
+            msg_ids.append(mid)
+    return jsonify({"status": "ok", "msg_ids": msg_ids, "parts": len(parts)})
 
 @app.get("/dept-dashboard/<slug>")
 def dept_dashboard(slug):
@@ -1962,6 +2015,6 @@ def miniapp_spa_static(filepath):
 if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
-             f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, dept-dashboard, office-dashboard, "
+             f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
              f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
