@@ -2,206 +2,206 @@
 
 # FOSVED Office V2
 
-**AI-native operational office system. 13 departments + Admin agent. Metalogos DSL, 7 LLM providers, Telegram-native, Mini App SPA.**
+**AI-офисная операционная система. 13 департаментов + Admin-агент. Metalogos DSL, 7 LLM-провайдеров, Telegram-native, Mini App SPA.**
 
 </div>
 
 ---
 
-## Overview
+## Обзор
 
-FOSVED Office is a self-optimizing business operating system built entirely on [Metalogos](https://github.com/ShkodnikAI/Metalogos-) — an AI-native Rust DSL. The system runs 13 specialized department agents and 1 system Admin agent, each with its own methodology, LLM-powered analysis, memory, skill index, and per-department metrics. Tasks arrive via Telegram, are routed to the correct department, processed with LLM reasoning, and returned as styled Mini App reports. The system learns from errors (6-type classification), runs scheduled digests, and performs autonomous night audits.
+FOSVED Office — самооптимизирующаяся бизнес-операционная система, полностью построенная на [Metalogos](https://github.com/ShkodnikAI/Metalogos-) — AI-ориентированном DSL на Rust. Система управляет 13 специализированными агентами-департаментами и 1 системным Admin-агентом, каждый со своей методологией, LLM-анализом, памятью, индексом скиллов и собственной метрикой. Задачи поступают через Telegram, маршрутизируются в нужный департамент, обрабатываются с помощью LLM и возвращаются в виде стилизованных Mini App-отчётов. Система учится на ошибках (6-типовая классификация), запускает запланированные дайджесты и выполняет автономные ночные аудиты.
 
-**~4900 lines of code** across Metalogos (.mlog) and Python, **126 patterns** (functions), **98 bot commands**, **21 database tables**, **167/167 stress-test checks passed**.
+**~4900 строк кода** на Metalogos (.mlog) и Python, **126 паттернов** (функций), **98 бот-команд**, **21 таблица БД**, **167/167 стресс-тестов пройдено**.
 
-## Architecture
+## Архитектура
 
 ```
 Telegram Bot API
-       |
-       v
+       │
+       ▼
 Reverse Proxy (Flask, :10000)
-       |
-       +---> Metalogos (mlog serve, :10001)
-       |       |
-       |       +-- app.mlog (1096 lines, routing + commands)
-       |       +-- dept/*.mlog (15 modules, 13 departments + utils)
-       |       +-- file_cache.mlog (profile caching)
-       |       +-- file_cache_skills.mlog (skill caching)
-       |       +-- SQLite (21 tables)
-       |
-       +---> LLM Proxy (Flask, :4000)
-               |
-               +-- 7 LLM providers (zai, DeepSeek, Groq, Grok, Anthropic, OpenAI, Apodex)
-               +-- Failover with priority model/provider config
-               +-- 11 API endpoints (dashboard, dept, models, economics, narads, archive, admin)
-               +-- TTS (edge-tts), STT (Whisper)
-               +-- Mini App SPA static serving (/miniapp-spa)
-               +-- Archive, scheduler, learning, audit, search
+       │
+       ├──▶ Metalogos (mlog serve, :10001)
+       │       │
+       │       ├── app.mlog (1096 строк, маршрутизация + команды)
+       │       ├── dept/*.mlog (15 модулей, 13 департаментов + утилиты)
+       │       ├── file_cache.mlog (кэш профилей)
+       │       ├── file_cache_skills.mlog (кэш скиллов)
+       │       └── SQLite (21 таблица)
+       │
+       └──▶ LLM Proxy (Flask, :4000)
+               │
+               ├── 7 LLM-провайдеров (zai, DeepSeek, Groq, Grok, Anthropic, OpenAI, Apodex)
+               ├── Фейловер с приоритетной конфигурацией модели/провайдера
+               ├── 11 API-эндпоинтов (dashboard, dept, models, economics, narads, archive, admin)
+               ├── TTS (edge-tts), STT (Whisper)
+               ├── Mini App SPA статика (/miniapp-spa)
+               └── Архив, планировщик, обучение, аудит, поиск
 ```
 
-**Startup order** (entrypoint.sh): `llm_proxy (:4000)` → `mlog serve (:10001)` → `reverse_proxy (:10000)`
+**Порядок запуска** (entrypoint.sh): `llm_proxy (:4000)` → `mlog serve (:10001)` → `reverse_proxy (:10000)`
 
-## 13 Departments + Admin
+## 13 Департаментов + Admin
 
-| Department | Role | Skills | File |
+| Департамент | Роль | Скиллы | Файл |
 |---|---|---|---|
-| **Yana** | Chief of Cabinet, routing, voice | 11 | `dept/yana.mlog` |
-| **OSP** | Strategic analysis, planning | 24 | `dept/osp.mlog` |
-| **LZ** | Knowledge lab, 9-source deep scan, Apodex research | 12 | `dept/lz.mlog` |
-| **Expert** | Technical preparation | 12 | `dept/expert.mlog` |
-| **Marketing** | Audience, channels, content | 11 | `dept/marketing.mlog` |
-| **Finance** | Cashflow, taxes, economics | 9 | `dept/finance.mlog` |
-| **Legal** | NDA, GDPR, risk assessment | 10 | `dept/legal.mlog` |
-| **Dev** | Architecture, code generation | 20 | `dept/dev.mlog` |
-| **Design** | UI/UX, wireframes, visuals | 12 | `dept/design.mlog` |
-| **QA** | Testing, chaos engineering | 11 | `dept/qa.mlog` |
-| **Visual** | Infographics, data visualization | 5 | `dept/visual.mlog` |
-| **Engineering** | Calculations, loads, technical | 12 | `dept/engineering.mlog` |
-| **Kavalnya** | Methodology, standards | 8 | `dept/kavalnya.mlog` |
-| **Admin** | System agent, night cycle, knowledge graph, autofix | 12 | `dept/admin.mlog` |
+| **Yana** | Руководитель кабинета, маршрутизация, голос | 11 | `dept/yana.mlog` |
+| **OSP** | Стратегический анализ, планирование | 24 | `dept/osp.mlog` |
+| **LZ** | Лаборатория знаний, глубокий скан 9 источников, Apodex-исследования | 12 | `dept/lz.mlog` |
+| **Expert** | Технический препаратор | 12 | `dept/expert.mlog` |
+| **Marketing** | Аудитория, каналы, контент | 11 | `dept/marketing.mlog` |
+| **Finance** | Денежные потоки, налоги, экономика | 9 | `dept/finance.mlog` |
+| **Legal** | NDA, GDPR, оценка рисков | 10 | `dept/legal.mlog` |
+| **Dev** | Архитектура, генерация кода | 20 | `dept/dev.mlog` |
+| **Design** | UI/UX, вайрфреймы, визуал | 12 | `dept/design.mlog` |
+| **QA** | Тестирование, хаос-инженерия | 11 | `dept/qa.mlog` |
+| **Visual** | Инфографика, визуализация данных | 5 | `dept/visual.mlog` |
+| **Engineering** | Расчёты, нагрузки, технические задачи | 12 | `dept/engineering.mlog` |
+| **Kavalnya** | Методология, стандарты | 8 | `dept/kavalnya.mlog` |
+| **Admin** | Системный агент, ночной цикл, граф знаний, автофикс | 12 | `dept/admin.mlog` |
 
-**Total: 173 indexed skills** across 14 agents.
+**Итого: 188 индексированных скиллов** по 14 агентам.
 
-## Key Features
+## Ключевые возможности
 
-### Multi-Provider LLM with Failover
-7 providers (zai, DeepSeek, Groq, Grok, Anthropic, OpenAI, Apodex) with configurable priority. Automatic failover on timeout/error. Per-department model and provider overrides via `config/override_*.txt`.
+### Мультипровайдерный LLM с фейловером
+7 провайдеров (zai, DeepSeek, Groq, Grok, Anthropic, OpenAI, Apodex) с настраиваемым приоритетом. Автоматический фейловер при таймауте/ошибке. Переопределение модели и провайдера на уровне департамента через `config/override_*.txt`.
 
-### Voice (STT/TTS)
-- **STT**: Telegram voice messages → Whisper (Groq/OpenAI) → text → department processing
-- **TTS**: Text responses → edge-tts → Telegram voice message (male/female, toggleable)
+### Голос (STT/TTS)
+- **STT**: Голосовые сообщения Telegram → Whisper (Groq/OpenAI) → текст → обработка департаментом
+- **TTS**: Текстовые ответы → edge-tts → голосовое сообщение в Telegram (мужской/женский голос, переключаемый)
 
-### Learning Loop
-- 6-type error classification (factual, methodological, incomplete, contextual, formatting, reasoning)
-- `/fix` command captures errors with context
-- `/good` records positive examples
-- `/debrief` generates LLM analysis of corrections
-- Scheduled self-learning integrates corrections into system behavior
+### Цикл обучения
+- 6-типовая классификация ошибок (фактические, методологические, неполные, контекстные, форматные, логические)
+- Команда `/fix` — захват ошибок с контекстом
+- Команда `/good` — запись положительных примеров
+- `/debrief` — LLM-анализ корректировок
+- Запланированное самообучение интегрирует корректировки в поведение системы
 
-### Scheduler (6 cron jobs)
-- Morning brief, evening summary, weekly digest, monthly review
-- Control check (verifies predictions from system_settings watches)
-- Admin night cycle (5-phase: graph → audit → metrics → autofix → proposals)
-- All protected by CRON_SECRET, triggered via GET endpoints
+### Планировщик (6 cron-задач)
+- Утренний бриф, вечерняя сводка, еженедельный дайджест, ежемесячный обзор
+- Контрольная проверка (верификация предсказаний из system_settings watches)
+- Ночной цикл Admin (5 фаз: граф → аудит → метрики → автофикс → предложения)
+- Все защищены CRON_SECRET, запускаются через GET-эндпоинты
 
-### Archive & Search
-- Reports auto-archived with HTML stripping and department hashtags
-- Daily digests to Telegram channel
-- Full-text search across all archived reports
+### Архив и поиск
+- Отчёты автоматически архивируются с удалением HTML-тегов и департаментными хештегами
+- Ежедневные дайджесты в Telegram-канал
+- Полнотекстовый поиск по всем архивным отчётам
 
-### Cross-Department Chains
-`/chain osp+legal` — sequential execution across departments (3-dept limit), with per-step reports and combined summary.
+### Кросс-департаментные цепочки
+`/chain osp+legal` — последовательное выполнение по нескольким департаментам (до 3), с отчётами по каждому шагу и итоговой сводкой.
 
-### LZ Deep Scan (9 sources)
-Web, YouTube, Reddit, Science, GitHub, Social, Telegram, Darknet, Academic — each scanned via LLM. Apodex provider for verified research with evidence badges (verified/unverified/conflicting). LZ Compare for side-by-side LLM vs Apodex analysis.
+### LZ Глубокий скан (9 источников)
+Web, YouTube, Reddit, Science, GitHub, Social, Telegram, Darknet, Academic — каждый источник сканируется через LLM. Провайдер Apodex для верифицированных исследований с бейджами доказательности (verified/unverified/conflicting). LZ Compare для сравнительного анализа LLM vs Apodex.
 
-### Admin Agent (Night Cycle)
-5-phase autonomous cycle: knowledge graph build → code audit → metrics analysis → auto-fix → proposals. Builds knowledge graph from all .mlog files, runs LLM-powered code scanning, generates autofix plans (skips immutable/high-risk), and creates improvement proposals with approve/reject.
+### Admin-агент (ночной цикл)
+5-фазовый автономный цикл: построение графа знаний → аудит кода → анализ метрик → автофикс → предложения. Строит граф знаний из всех .mlog файлов, запускает LLM-сканирование кода, генерирует планы автофикса (пропускает неизменяемые/высокорисковые) и создаёт предложения по улучшению с механизмами одобрения/отклонения.
 
 ### Mini App SPA
-9-screen responsive web application for Telegram WebApp integration:
-- Dashboard (KPI grid, department status, admin panel)
-- Department detail (tasks, skills, corrections)
-- Chat (department chips, message bubbles)
-- Report viewer, Model status, Economics
-- Settings (profile, voice, notifications, security)
-- Narads (approve/reject workflow), Archive (search + filter)
+9-экранное адаптивное веб-приложение для интеграции с Telegram WebApp:
+- Дашборд (KPI-сетка, статус департаментов, панель администратора)
+- Детали департамента (задачи, скиллы, корректировки)
+- Чат (чипы департаментов, пузыри сообщений)
+- Просмотр отчётов, статус моделей, экономика
+- Настройки (профиль, голос, уведомления, безопасность)
+- Наряды (workflow одобрения/отклонения), Архив (поиск + фильтры)
 
-Design: Cormorant Garamond + DM Sans + DM Mono, gold `#C9A84C` accent. Phone (bottom nav) + tablet (sidebar) + desktop (3-column). Hash-based SPA routing.
+Дизайн: Cormorant Garamond + DM Sans + DM Mono, золотой акцент `#C9A84C`. Телефон (нижняя навигация) + планшет (сайдбар) + десктоп (3 колонки). Hash-маршрутизация SPA.
 
-## Bot Commands
+## Команды бота
 
-| Command | Description |
+| Команда | Описание |
 |---|---|
-| `/start` | Initialize dialog |
-| `/help` | Command list |
-| `/status` | System status |
-| `/osp`, `/lz`, `/dev`, ... | Direct to department |
-| `/chain osp+legal` | Cross-department chain |
-| `/voice on/off/male/female` | Voice settings |
-| `/fix <text>` | Report error for learning |
-| `/good` | Record positive example |
-| `/learning stats` | Learning metrics |
-| `/debrief [dept]` | LLM analysis of corrections |
-| `/archive [id]` | View archived report |
-| `/search <query>` | Full-text search |
-| `/audit` | Recent audit log |
-| `/factory`, `/factory_review` | Narad factory pipeline |
-| `/admin status` | Admin agent status |
-| `/lockdown on/off` | Emergency lockdown |
-| `/remember key=value` | Persistent memory |
+| `/start` | Инициализация диалога |
+| `/help` | Список команд |
+| `/status` | Статус системы |
+| `/osp`, `/lz`, `/dev`, ... | Обращение к департаменту |
+| `/chain osp+legal` | Кросс-департаментная цепочка |
+| `/voice on/off/male/female` | Настройки голоса |
+| `/fix <текст>` | Сообщить об ошибке для обучения |
+| `/good` | Записать положительный пример |
+| `/learning stats` | Метрики обучения |
+| `/debrief [dept]` | LLM-анализ корректировок |
+| `/archive [id]` | Просмотр архивного отчёта |
+| `/search <запрос>` | Полнотекстовый поиск |
+| `/audit` | Журнал аудита |
+| `/factory`, `/factory_review` | Пайплайн нарядов |
+| `/admin status` | Статус Admin-агента |
+| `/lockdown on/off` | Экстренная блокировка |
+| `/remember key=value` | Постоянная память |
 
-## Project Structure
+## Структура проекта
 
 ```
 .
-├── app.mlog                  # Main router (1096 lines, 98 commands)
-├── bin/mlog                  # Metalogos v0.7.10 binary (x86-64, Rust)
-├── llm_proxy.py              # LLM proxy + API + SPA serving (1895 lines)
-├── reverse_proxy.py          # Request router (108 lines)
-├── entrypoint.sh             # Docker startup (3-process)
+├── app.mlog                  # Главный роутер (1096 строк, 98 команд)
+├── bin/mlog                  # Metalogos v0.7.10 бинарник (x86-64, Rust)
+├── llm_proxy.py              # LLM-прокси + API + SPA-сервер (1895 строк)
+├── reverse_proxy.py          # Маршрутизатор запросов (108 строк)
+├── entrypoint.sh             # Docker-запуск (3 процесса)
 ├── Dockerfile                # ubuntu:24.04
 ├── requirements.txt          # flask, requests, edge-tts
-├── report_css.txt            # Mini App report styles
-├── file_cache.mlog           # Profile caching (transliterated keys)
-├── file_cache_skills.mlog    # Skill caching
+├── report_css.txt            # CSS для Mini App отчётов
+├── file_cache.mlog           # Кэш профилей (транслитерированные ключи)
+├── file_cache_skills.mlog    # Кэш скиллов
 ├── dept/
-│   ├── yana.mlog             # Chief of Cabinet
-│   ├── osp.mlog              # Strategic Analysis
-│   ├── lz.mlog               # Knowledge Lab (9-source scan)
-│   ├── expert.mlog           # Technical Prep
-│   ├── marketing.mlog        # Marketing
-│   ├── finance.mlog          # Finance
-│   ├── legal.mlog            # Legal
-│   ├── dev.mlog              # Development
-│   ├── design.mlog           # Design
-│   ├── qa.mlog               # QA
-│   ├── visual.mlog           # Visual
-│   ├── engineering.mlog      # Engineering
-│   ├── kavalnya.mlog         # Methodology
-│   ├── admin.mlog            # System Agent (night cycle)
-│   ├── chain.mlog            # Cross-dept chains
-│   ├── scheduler.mlog        # 6 cron schedulers
-│   ├── miniapp.mlog          # Report formatting + dept colors
-│   ├── utils.mlog            # Shared utilities
-│   └── context.mlog          # Context management
-├── library/                  # 14 department profiles (.md)
-├── skills_index/             # 14 skill indexes (.txt)
+│   ├── yana.mlog             # Руководитель кабинета
+│   ├── osp.mlog              # Стратегический анализ
+│   ├── lz.mlog               # Лаборатория знаний (9-источник скан)
+│   ├── expert.mlog           # Технический препаратор
+│   ├── marketing.mlog        # Маркетинг
+│   ├── finance.mlog          # Финансы
+│   ├── legal.mlog            # Юрист
+│   ├── dev.mlog              # Разработка
+│   ├── design.mlog           # Дизайн
+│   ├── qa.mlog               # Тестирование
+│   ├── visual.mlog           # Визуализация
+│   ├── engineering.mlog      # Инженерия
+│   ├── kavalnya.mlog         # Методология
+│   ├── admin.mlog            # Системный агент (ночной цикл)
+│   ├── chain.mlog            # Кросс-департаментные цепочки
+│   ├── scheduler.mlog        # 6 cron-планировщиков
+│   ├── miniapp.mlog          # Форматирование отчётов + цвета
+│   ├── utils.mlog            # Общие утилиты
+│   └── context.mlog          # Управление контекстом
+├── library/                  # 14 профилей департаментов (.md)
+├── skills_index/             # 14 индексов скиллов (.txt)
 ├── config/
-│   ├── priority_model.txt    # Global model priority
-│   ├── priority_provider.txt # Global provider priority
-│   └── override_*.txt        # Per-department overrides (14 files)
+│   ├── priority_model.txt    # Глобальный приоритет модели
+│   ├── priority_provider.txt # Глобальный приоритет провайдера
+│   └── override_*.txt        # Переопределения по департаментам (14 файлов)
 ├── miniapp/                  # Telegram WebApp SPA
 │   ├── index.html
 │   ├── css/                  # vars, components, screens, responsive
 │   └── js/
-│       ├── app.js            # Router + init
-│       ├── api.js            # API client
-│       └── screens/          # 9 screen modules
-└── data/                     # SQLite DB, runtime data
+│       ├── app.js            # Роутер + инициализация
+│       ├── api.js            # API-клиент
+│       └── screens/          # 9 экранных модулей
+└── data/                     # SQLite БД, runtime-данные
 ```
 
-## Database (21 tables)
+## База данных (21 таблица)
 
 `dialog_history`, `adapt_corrections`, `error_patterns`, `miniapp_responses`, `miniapp_notes`, `dept_metrics`, `token_usage`, `audit_log`, `system_settings`, `narads`, `admin_findings`, `admin_proposals`, `knowledge_nodes`, `knowledge_edges`, `lz_channels`, `lz_monitor`, `learning_stats`, `control_watches`, `archive`, `factory_steps`, `factory_deliverables`
 
-## Quick Start
+## Быстрый старт
 
 ```bash
 git clone https://github.com/ShkodnikAI/FOSVED-office-v2.git
 cd FOSVED-office-v2
 ```
 
-Create `.env`:
+Создать `.env`:
 ```
-TELEGRAM_BOT_TOKEN=your_bot_token
-OWNER_TELEGRAM_ID=your_telegram_id
-LOCKDOWN_PASSWORD=your_password
-CRON_SECRET=your_cron_secret
-ZAI_API_KEY=your_key
-DEEPSEEK_API_KEY=your_key
-# ... other provider keys
+TELEGRAM_BOT_TOKEN=ваш_токен_бота
+OWNER_TELEGRAM_ID=ваш_telegram_id
+LOCKDOWN_PASSWORD=ваш_пароль
+CRON_SECRET=ваш_секрет
+ZAI_API_KEY=ваш_ключ
+DEEPSEEK_API_KEY=ваш_ключ
+# ... остальные ключи провайдеров
 ```
 
 Docker:
@@ -210,23 +210,23 @@ docker build -t fosved .
 docker run -p 10000:10000 --env-file .env fosved
 ```
 
-## Tech Stack
+## Технологический стек
 
-| Component | Technology |
+| Компонент | Технология |
 |---|---|
-| Core language | Metalogos v0.7.10 (Rust DSL, 113 builtins) |
-| Proxy layer | Python 3.12 + Flask |
-| Database | SQLite |
-| Voice STT | Whisper (Groq/OpenAI) |
-| Voice TTS | edge-tts |
-| LLM | 7 providers with automatic failover |
-| Container | Docker (ubuntu:24.04) |
-| Interface | Telegram Bot API + WebApp SPA |
+| Ядро | Metalogos v0.7.10 (Rust DSL, 113 встроенных функций) |
+| Прокси-слой | Python 3.12 + Flask |
+| База данных | SQLite |
+| Голос STT | Whisper (Groq/OpenAI) |
+| Голос TTS | edge-tts |
+| LLM | 7 провайдеров с автоматическим фейловером |
+| Контейнер | Docker (ubuntu:24.04) |
+| Интерфейс | Telegram Bot API + WebApp SPA |
 
-## Quality
+## Качество
 
-Stress test: **167/167 checks passed** (static code analysis across 17 groups: infrastructure, database, dispatchers, handlers, profiles, skills, configs, routing, commands, providers, cron, colors, audit, integrations, regressions, file cache, reverse proxy).
+Стресс-тест: **167/167 проверок пройдено** (статический анализ кода по 17 группам: инфраструктура, база данных, диспатчеры, обработчики, профили, скиллы, конфиги, маршрутизация, команды, провайдеры, cron, цвета, аудит, интеграции, регрессии, файловый кэш, обратный прокси).
 
-## License
+## Лицензия
 
 MIT
