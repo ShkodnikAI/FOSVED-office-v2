@@ -4,11 +4,13 @@ Flask server on port 4000 with 7-provider failover, dept routing, dashboards, SQ
 TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
 import json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
+import html as html_lib
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from flask import Flask, request, jsonify, Response
 import requests as http_requests
+from auto_enricher import auto_enrich
 
 # ──────────────────────────── APP & CONFIG ────────────────────────────
 app = Flask(__name__)
@@ -92,6 +94,10 @@ DEPT_HASHTAGS = {
     'yana': '#Yana #cabinet',
     'admin': '#Admin #system',
 }
+
+def html_lib_escape(s):
+    """Safe HTML escape for report templates."""
+    return html_lib.escape(str(s)) if s else ''
 
 # ──────────────────────────── DEPT DETECTION ────────────────────────────
 COMMAND_DEPT = {
@@ -534,10 +540,46 @@ def archive_digest():
 
 @app.get("/miniapp/<doc_id>")
 def miniapp_get(doc_id):
-    rows = _query("SELECT html,title,created FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
+    rows = _query("SELECT html,title,created,dept,raw_text FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
     if not rows:
         return "<h1>Not found</h1>", 404
     r = rows[0]
+    # Rich post-processor: if raw_text exists and has markdown structure, enrich it
+    raw = r.get("raw_text", "")
+    dept = r.get("dept", "admin")
+    if raw and ("## " in raw or "[ФАКТ]" in raw or "[" in raw):
+        accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
+        enriched_body = auto_enrich(raw, dept=dept, accent_color=accent)
+        if enriched_body and len(enriched_body) > len(raw) * 0.5:
+            # Rebuild full HTML with enriched body
+            css_path = BASE_DIR / "report_css.txt"
+            css = css_path.read_text() if css_path.exists() else ""
+            c = DEPT_COLORS.get(dept, DEPT_COLORS["admin"])
+            name = DEPT_NAMES.get(dept, dept)
+            title = r.get("title", "") or doc_id
+            created = r.get("created", "")
+            disclaimer = ""
+            if dept == "finance":
+                disclaimer = '<div class="disclaimer-rich">Не является финансовой консультацией. Обратитесь к лицензированному специалисту.</div>'
+            elif dept == "legal":
+                disclaimer = '<div class="disclaimer-rich">Не является юридической консультацией. Обратитесь к лицензированному юристу.</div>'
+            elif dept == "engineering":
+                disclaimer = '<div class="disclaimer-rich">Требует review лицензированного инженера. Не использовать для строительства без проверки.</div>'
+            html = f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>{css}
+body {{ font-family:'DM Sans',sans-serif; color:#1e293b; background:#F8F7F4; margin:0; }}
+</style></head><body>
+<div class="report-container">
+<div class="report-header" style="background:linear-gradient(135deg,{c['start']},{c['end']})">
+  <h1>{html_lib_escape(name)}</h1>
+  <div class="subtitle">{html_lib_escape(title)}</div>
+</div>
+<div class="report-meta"><span>ID: {html_lib_escape(doc_id)}</span><span>{html_lib_escape(created)}</span></div>
+<div class="report-body">{enriched_body}</div>
+{disclaimer}
+</div></body></html>'''
+            return Response(html, mimetype="text/html")
     return Response(r["html"], mimetype="text/html")
 
 @app.post("/miniapp/note")
@@ -546,6 +588,16 @@ def miniapp_note():
     _query("INSERT INTO miniapp_notes (doc_id,note_text,created) VALUES (?,?,?)",
            (d.get("doc_id", ""), d.get("note_text", ""), datetime.utcnow().isoformat()))
     return jsonify({"status": "ok"})
+
+@app.post("/enrich")
+def enrich_endpoint():
+    """Rich post-processor endpoint for Metalogos. Accepts raw markdown, returns enriched HTML."""
+    d = request.get_json(force=True)
+    raw_text = d.get("text", "")
+    dept = d.get("dept", "admin")
+    accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
+    enriched = auto_enrich(raw_text, dept=dept, accent_color=accent)
+    return jsonify({"enriched": enriched, "has_metrics": "metric-card" in enriched})
 
 @app.get("/dept-dashboard/<slug>")
 def dept_dashboard(slug):
@@ -1910,6 +1962,6 @@ def miniapp_spa_static(filepath):
 if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
-             f"archive/digest, archive/publish, archive/daily-digest, miniapp, dept-dashboard, office-dashboard, "
+             f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, dept-dashboard, office-dashboard, "
              f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
