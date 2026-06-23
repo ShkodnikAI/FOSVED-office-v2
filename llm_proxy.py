@@ -152,14 +152,31 @@ CONDENSED_PROMPTS = {
     'admin': "You are Admin, System Agent. Health checks, config management, system diagnostics. Technical, precise, actionable. Language: Russian.",
 }
 
+FORMAT_INSTRUCTION = """
+
+## ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)
+
+Отвечай РАЗВЁРНУТО (минимум 1000 символов). Структура:
+
+1. Используй секции: "Слой 1 — ...", "Слой 2 — ..." и т.д. (минимум 3 слоя)
+2. Маркируй каждое утверждение:
+   - [ФАКТ] — подтверждённые данные, цифры, даты
+   - [ИНТЕРПРЕТАЦИЯ] — твой анализ на основе фактов
+   - [СПЕКУЛЯЦИЯ] — гипотезы, предположения
+3. Завершай секцией "Вердикт" с ключевыми выводами
+4. Если применимо — добавь "Индикаторы для наблюдения"
+5. Язык: русский
+6. Не будь кратким. Препарируй тему глубоко.
+"""
+
 def get_dept_prompt(dept):
     try:
         f = LIB_DIR / f"{dept}.md"
         if f.exists():
-            return f.read_text(encoding="utf-8")
+            return f.read_text(encoding="utf-8") + FORMAT_INSTRUCTION
     except Exception:
         pass
-    return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana'])
+    return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + FORMAT_INSTRUCTION
 
 # ──────────────────────────── CONFIG LOADING ────────────────────────────
 _cfg_cache = {"priority_provider": "zai", "priority_model": None, "overrides": {}}
