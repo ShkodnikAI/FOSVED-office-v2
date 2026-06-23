@@ -159,10 +159,10 @@ FORMAT_INSTRUCTION = """
 Отвечай РАЗВЁРНУТО (минимум 1000 символов). Структура:
 
 1. Используй секции: "Слой 1 — ...", "Слой 2 — ..." и т.д. (минимум 3 слоя)
-2. Маркируй каждое утверждение:
-   - [ФАКТ] — подтверждённые данные, цифры, даты
-   - [ИНТЕРПРЕТАЦИЯ] — твой анализ на основе фактов
-   - [СПЕКУЛЯЦИЯ] — гипотезы, предположения
+2. Маркируй каждое утверждение значками:
+   - ✓ — подтверждённые данные, цифры, даты (факты)
+   - ◈ — твой анализ и интерпретация на основе фактов
+   - ⚡ — гипотезы, предположения, спекуляция
 3. Завершай секцией "Вердикт" с ключевыми выводами
 4. Если применимо — добавь "Индикаторы для наблюдения"
 5. Язык: русский
@@ -243,10 +243,10 @@ def strip_html_for_archive(html_content):
     text = html_content
     # Convert badge spans with known classes to text markers
     badge_map = {
-        'badge-fact': '[FACT]',
-        'badge-int': '[INTERPRETATION]',
-        'badge-interp': '[INTERPRETATION]',
-        'badge-spec': '[SPECULATION]',
+        'badge-fact': '✓',
+        'badge-int': '◈',
+        'badge-interp': '◈',
+        'badge-spec': '⚡',
         'badge-verified': '[FACT verified]',
         'badge-unverified': '[FACT unverified]',
         'badge-conflicting': '[CONFLICT]',
@@ -433,7 +433,7 @@ def _html_base(title, bg="#0F0F0F"):
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:'DM Sans',system-ui,sans-serif;background:{bg};color:#F8F7F4;min-height:100vh}}
 h1,h2,h3{{font-family:'Cormorant Garamond',serif;font-weight:700}}
-.badge{{font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;border-radius:4px;display:inline-block}}
+.badge{{font-family:'DM Mono',monospace;font-size:0.85rem;padding:1px 6px;border-radius:4px;display:inline-block;letter-spacing:-1px}}
 .badge-fact{{background:#dcfce7;color:#16a34a}} .badge-interp{{background:#dbeafe;color:#2563eb}}
 .badge-int{{background:#dbeafe;color:#2563eb}} .badge-spec{{background:#fef9c3;color:#ca8a04}}
 .badge-verified{{background:#d1fae5;color:#059669}} .badge-unverified{{background:#fef3c7;color:#d97706}}
