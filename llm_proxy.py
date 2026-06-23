@@ -245,6 +245,7 @@ def strip_html_for_archive(html_content):
     badge_map = {
         'badge-fact': '[FACT]',
         'badge-int': '[INTERPRETATION]',
+        'badge-interp': '[INTERPRETATION]',
         'badge-spec': '[SPECULATION]',
         'badge-verified': '[FACT verified]',
         'badge-unverified': '[FACT unverified]',
@@ -433,8 +434,10 @@ def _html_base(title, bg="#0F0F0F"):
 body{{font-family:'DM Sans',system-ui,sans-serif;background:{bg};color:#F8F7F4;min-height:100vh}}
 h1,h2,h3{{font-family:'Cormorant Garamond',serif;font-weight:700}}
 .badge{{font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;border-radius:4px;display:inline-block}}
-.badge-fact{{background:#16a34a22;color:#16a34a}} .badge-int{{background:#2563eb22;color:#2563eb}}
-.badge-spec{{background:#ca8a0422;color:#ca8a04}}
+.badge-fact{{background:#dcfce7;color:#16a34a}} .badge-interp{{background:#dbeafe;color:#2563eb}}
+.badge-int{{background:#dbeafe;color:#2563eb}} .badge-spec{{background:#fef9c3;color:#ca8a04}}
+.badge-verified{{background:#d1fae5;color:#059669}} .badge-unverified{{background:#fef3c7;color:#d97706}}
+.badge-conflicting{{background:#fee2e2;color:#dc2626}}
 .card{{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;padding:20px}}
 .kpi{{text-align:center;padding:16px}} .kpi .num{{font-size:2rem;font-weight:700;font-family:'DM Mono',monospace}}
 .kpi .lbl{{font-size:0.75rem;color:#999;margin-top:4px;text-transform:uppercase;letter-spacing:1px}}
