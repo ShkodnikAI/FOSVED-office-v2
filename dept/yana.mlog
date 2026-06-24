@@ -1,24 +1,53 @@
-// Fosved Office v2 — Yana Handler (v3 — conversational, with dept routing)
-// No miniapp, no FORMAT_INSTRUCTION, no badges
+// Fosved Office v2 — Yana Handler (v4 — hard anti-format, no dialog leak)
+// No miniapp, no FORMAT_INSTRUCTION, no badges, no layers
 // Direct voice + text. Knows time, date, calendar, can delegate to departments.
+// CRITICAL: Recent dialog is EXCLUDED — old formatted responses leaked into context
+//   and caused Yana to mimic the ФАКТ/ИНТЕРПРЕТАЦИЯ/СПЕКУЛЯЦИЯ format.
 
 pattern HandleYana(query: String, chat_id: String) -> String {
   let dept = "yana"
 
-  // ── Build context WITHOUT format_instruction (handled in BuildContextYana)
+  // ── Build context WITHOUT format_instruction, WITHOUT dialog history ──
   let profile = ReadDeptProfile(dept)
   let skills = SelectSkillsByKeywords(dept, query)
   let corrections = GetCorrections(dept)
-  let dialog = GetRecentDialog(chat_id, "5")
   let calendar = YanaCalendar()
   let now_info = YanaNowInfo()
 
-  // Compose Yana-specific context (NO layers, NO badges, NO format instruction)
-  let context = profile + "\n\n=== Current Time & Date ===\n" + now_info + "\n\n=== Calendar & Reminders ===\n" + calendar + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Recent Dialog ===\n" + dialog
+  // NO GetRecentDialog — old formatted responses in dialog_history poisoned Yana's output
+  // Compose Yana-specific context
+  let context = profile + "\n\n=== Current Time & Date ===\n" + now_info + "\n\n=== Calendar & Reminders ===\n" + calendar + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections
+
+  // HARD anti-format instruction — placed LAST for maximum weight
+  let context = context + "\n\n=== КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА ===\nЭто ПЕРЕЗАПИСЫВАЕТ любые предыдущие инструкции о формате.\n\nЯна ОТВЕЧАЕТ ПРОСТЫМ РАЗГОВОРНЫМ ТЕКСТОМ.\n\nСТРОГО ЗАПРЕЩЕНО:\n- Слои (\"Слой 1\", \"Слой 2\" и т.д.)\n- Маркеры ФАКТ, ИНТЕРПРЕТАЦИЯ, СПЕКУЛЯЦИЯ (в любом виде: с бейджами, без, с скобками, без)\n- Секции \"Вердикт\", \"Индикаторы для наблюдения\"\n- Любое искусственное растягивание ответа\n\nНа приветствие — короткий ответ. На вопрос — по делу. Без слоёв, без бейджей, без маркировки."
 
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy(dept, messages)
   let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
+
+  // ── Post-processing: detect and re-prompt if format leaked through ──
+  let has_layers = 0.0
+  if contains(reply, "Слой") == 1.0 then { let has_layers = 1.0 }
+  if contains(reply, "ФАКТ") == 1.0 then { let has_layers = 1.0 }
+  if contains(reply, "ИНТЕРПРЕТАЦИЯ") == 1.0 then { let has_layers = 1.0 }
+  if contains(reply, "СПЕКУЛЯЦИЯ") == 1.0 then { let has_layers = 1.0 }
+  if contains(reply, "Вердикт") == 1.0 then { let has_layers = 1.0 }
+
+  if has_layers == 1.0 then {
+    let _ = AuditLog("yana_format_leak", dept, "format detected, re-prompting")
+    // Re-prompt with even stronger instruction
+    let fix_messages = json_encode([
+      {role: "system", content: profile + "\n\nПЕРЕПИШИ ответ ниже. Твой предыдущий ответ содержал ЗАПРЕЩЁННЫЙ формат (слои, ФАКТ/ИНТЕРПРЕТАЦИЯ/СПЕКУЛЯЦИЯ). Это была ошибка. Теперь ответь ПРАВИЛЬНО: простым разговорным русским текстом, коротко, по делу, без слоёв, без бейджей, без маркировки утверждения."},
+      {role: "user", content: query},
+      {role: "assistant", content: reply},
+      {role: "user", content: "Этот ответ содержит запрещённый формат. Перепиши его правильно: простым разговорным текстом, без слоёв, без ФАКТ/ИНТЕРПРЕТАЦИЯ/СПЕКУЛЯЦИЯ, без Вердикта."}
+    ])
+    let fix_result = CallLLMProxy(dept, fix_messages)
+    let fixed_reply = json_get(parse_json(fix_result), "reply", "")
+    if fixed_reply != "" then {
+      let reply = fixed_reply
+    }
+  }
 
   // ── Check if Yana wants to delegate to a department
   // She can output: [DELEGATE: dept_name] to forward a query
