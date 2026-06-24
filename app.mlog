@@ -281,30 +281,29 @@ mlogserver {
     }
 
     // Voice check — STT via Python proxy
-    let has_voice = has_field(data, "message.voice")
+    // Detect voice via json_get (dot notation works reliably), not has_field
     let text = ""
-    if has_voice == 1.0 then {
-      let file_id = to_string(json_get(data, "message.voice.file_id", ""))
-      if file_id != "" then {
-        let _ = AuditLog("voice_received", "voice", "file_id: " + file_id)
-        let stt_body = json_encode({file_id: file_id})
-        let stt_result = http_post("http://127.0.0.1:4000/stt", stt_body, "application/json")
-        let _ = AuditLog("stt_raw_response", "voice", substring(stt_result, 0.0, 300.0))
-        let stt_status = json_get(parse_json(stt_result), "status", "error")
-        if stt_status == "ok" then {
-          let transcribed = json_get(parse_json(stt_result), "text", "")
-          if transcribed != "" then {
-            let _ = SendTelegramReply(chat_id, "Распознано: " + transcribed)
-            let text = transcribed
-          } else {
-            let _ = SendTelegramReply(chat_id, "Не удалось распознать голосовое сообщение. Пустой результат от STT.")
-            return respond("200 ok")
-          }
+    let voice_file_id = to_string(json_get(data, "message.voice.file_id", ""))
+    if voice_file_id != "" then {
+      let _ = AuditLog("voice_received", "voice", "file_id: " + voice_file_id)
+      let stt_body = json_encode({file_id: voice_file_id})
+      let stt_result = http_post("http://127.0.0.1:4000/stt", stt_body, "application/json")
+      let _ = AuditLog("stt_raw_response", "voice", substring(stt_result, 0.0, 300.0))
+      let stt_parsed = parse_json(stt_result)
+      let stt_status = json_get(stt_parsed, "status", "error")
+      if stt_status == "ok" then {
+        let transcribed = json_get(stt_parsed, "text", "")
+        if transcribed != "" then {
+          let _ = SendTelegramReply(chat_id, "Распознано: " + transcribed)
+          let text = transcribed
         } else {
-          let stt_err = json_get(parse_json(stt_result), "message", "неизвестная ошибка")
-          let _ = SendTelegramReply(chat_id, "Ошибка распознавания: " + stt_err)
+          let _ = SendTelegramReply(chat_id, "Не удалось распознать голосовое сообщение. Пустой результат от STT.")
           return respond("200 ok")
         }
+      } else {
+        let stt_err = json_get(stt_parsed, "message", "неизвестная ошибка")
+        let _ = SendTelegramReply(chat_id, "Ошибка распознавания: " + stt_err)
+        return respond("200 ok")
       }
     } else {
       let text = to_string(json_get(data, "message.text", ""))
@@ -342,16 +341,17 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // web_app_data handler (Mini App actions)
-    if has_field(data, "message.web_app_data") == 1.0 then {
-      let payload_raw = to_string(json_get(data, "message.web_app_data.data", "{}"))
+    // web_app_data handler (Mini App actions) — detect via json_get, not has_field
+    let payload_raw = to_string(json_get(data, "message.web_app_data.data", ""))
+    if payload_raw != "" then {
       let _ = HandleMiniAppAction(payload_raw, chat_id)
       let _ = AuditLog("web_app_data", "miniapp", payload_raw)
       return respond("200 ok")
     }
 
-    // Forwarded messages to LZ index
-    if has_field(data, "message.forward_from_chat") == 1.0 then {
+    // Forwarded messages to LZ index — detect via json_get, not has_field
+    let fwd_chat_id = to_string(json_get(data, "message.forward_from_chat.id", ""))
+    if fwd_chat_id != "" then {
       let fwd_text = to_string(json_get(data, "message.text", ""))
       if fwd_text != "" then {
         let _ = AuditLog("forward_received", "lz", "forward indexed, len=" + to_string(len(fwd_text)))
