@@ -760,7 +760,7 @@ def tts_endpoint():
             "--text", text,
             "--write-media", tmp_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
             log.error(f"edge-tts failed: {result.stderr}")
             _log_audit("tts_error", {"voice": voice, "error": result.stderr[:500]})
