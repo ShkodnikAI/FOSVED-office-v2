@@ -3,20 +3,9 @@
  * Static settings page with profile, toggles, integrations, and security.
  */
 
-import { createTopBar, createSectionTitle, esc } from '../components/card.js';
-import { createStatusDot } from '../components/badge.js';
-
-/**
- * Settings state (local toggle state, no persistence required for MVP).
- */
-const settingsState = {
-  voiceReplies: true,
-  morningBrief: true,
-  urgentAlerts: true,
-  marketScan: false,
-  weeklyDigest: true,
-  darkMode: false,
-};
+import { esc } from '../app.js';
+import { createTopBar, createSectionTitle } from '../components/card.js';
+import { createBadge } from '../components/badge.js';
 
 export function render(container) {
   let html = '';
@@ -24,137 +13,119 @@ export function render(container) {
   // ── Top Bar ──
   html += createTopBar('Настройки');
 
+  html += '<div class="screen-scroll">';
+
   // ── Profile Card ──
   html += `
-    <div class="card" style="margin:12px 16px;display:flex;align-items:center;gap:14px">
-      <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#0F0F0F,#1a1a2e);display:flex;align-items:center;justify-content:center;color:#C9A84C;font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:700;flex-shrink:0">&#9678;</div>
+    <div class="profile-card card" style="margin:12px 16px;display:flex;align-items:center;gap:14px">
+      <div class="profile-avatar" style="width:48px;height:48px;border-radius:50%;background:#0F0F0F;display:flex;align-items:center;justify-content:center;color:#C9A84C;font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:700;flex-shrink:0">&#9678;</div>
       <div style="flex:1;min-width:0">
-        <div style="font-weight:600;font-size:15px">Owner</div>
+        <div style="font-weight:600;font-size:15px">Основатель</div>
         <div style="font-size:12px;color:#888">Fosved &middot; Owner</div>
       </div>
-      <div style="font-size:11px;color:#aaa;font-family:'DM Mono',monospace">ID: —</div>
+      ${createBadge('premium', 'TAG')}
     </div>`;
 
-  // ── Morning Brief ──
-  html += createSectionTitle('MORNING BRIEF');
+  // ── УТРЕННИЙ БРИФИНГ ──
+  html += createSectionTitle('УТРЕННИЙ БРИФИНГ');
   html += `<div class="card" style="margin:0 16px 12px">`;
-  html += settingToggle('morningBrief', 'Morning Brief', 'Daily summary at 08:00 MSK', settingsState.morningBrief);
-  html += `</div>`;
-
-  // ── Voice Settings ──
-  html += createSectionTitle('VOICE');
-  html += `<div class="card" style="margin:0 16px 12px">`;
-  html += settingToggle('voiceReplies', 'Voice Replies', 'Short answers spoken aloud', settingsState.voiceReplies);
   html += `
     <div class="setting-row">
-      <div>
-        <div class="setting-label">Voice Profile</div>
-        <div class="setting-desc">ru-RU-DmitryNeural</div>
+      <span class="setting-icon">&#128336;</span>
+      <div class="setting-info">
+        <div class="setting-name">Время брифинга</div>
+        <div class="setting-desc">09:00 каждый день</div>
       </div>
-      <span style="font-size:12px;color:#C9A84C">Male</span>
     </div>`;
   html += `</div>`;
 
-  // ── Notifications ──
-  html += createSectionTitle('NOTIFICATIONS');
+  // ── ГОЛОС ──
+  html += createSectionTitle('ГОЛОС');
   html += `<div class="card" style="margin:0 16px 12px">`;
-  html += settingToggle('urgentAlerts', 'Urgent Alerts', 'Telegram + push for critical events', settingsState.urgentAlerts);
-  html += settingToggle('marketScan', 'Market Scan', 'Weekly on Friday', settingsState.marketScan);
-  html += settingToggle('weeklyDigest', 'Weekly Digest', 'Summary every Monday', settingsState.weeklyDigest);
+  html += settingRowToggle('&#128266;', 'Голосовое озвучивание', 'Брифинг прослушать вслух', true);
+  html += settingRowToggle('&#128483;', 'Голос ответов', 'ru-RU-DmitryNeural', true);
   html += `</div>`;
 
-  // ── Integrations ──
-  html += createSectionTitle('INTEGRATIONS');
+  // ── УВЕДОМЛЕНИЯ ──
+  html += createSectionTitle('УВЕДОМЛЕНИЯ');
   html += `<div class="card" style="margin:0 16px 12px">`;
-  html += integrationRow('Telegram Bot', true, 'Connected');
-  html += integrationRow('GitHub', true, 'Connected');
-  html += integrationRow('Archive Channel', true, 'Active');
-  html += integrationRow('Yandex Cloud', false, 'Not configured');
+  html += settingRowToggle('&#128276;', 'Срочные алерты', 'Telegram + push', true);
+  html += settingRowToggle('&#128202;', 'Market scan', 'Раз в неделю · Пятница', false);
   html += `</div>`;
 
-  // ── Appearance ──
-  html += createSectionTitle('APPEARANCE');
+  // ── ИНТЕГРАЦИИ ──
+  html += createSectionTitle('ИНТЕГРАЦИИ');
   html += `<div class="card" style="margin:0 16px 12px">`;
-  html += settingToggle('darkMode', 'Dark Mode', 'Follows system preference', settingsState.darkMode);
+  html += integrationItem('◼ Telegram', '@fosved_office_v2_bot', 'Подключён');
+  html += integrationItem('◼ GitHub', 'ShkodnikAI', 'Подключён');
+  html += integrationItem('◼ Архивный канал', '@FosvedArchive', 'Активен');
   html += `</div>`;
 
-  // ── Security ──
-  html += createSectionTitle('SECURITY');
+  // ── БЕЗОПАСНОСТЬ ──
+  html += createSectionTitle('БЕЗОПАСНОСТЬ');
   html += `
-    <div class="card" style="margin:0 16px 24px;display:flex;flex-direction:column;gap:10px">
-      <div class="setting-row" style="border:none;padding-top:0">
-        <div>
-          <div class="setting-label">Two-Factor Auth</div>
-          <div class="setting-desc">Enabled via Telegram</div>
-        </div>
-        <span style="font-size:12px;color:#639922">&#10003;</span>
-      </div>
-      <div class="setting-row" style="border:none">
-        <div>
-          <div class="setting-label">API Keys</div>
-          <div class="setting-desc">3 keys configured</div>
-        </div>
-        <span style="font-size:12px;color:#C9A84C">Manage</span>
-      </div>
-      <button class="btn"
-              style="width:100%;background:#fef2f2;color:#E24B4A;border:1px solid #fecaca;font-size:13px;margin-top:8px"
-              id="btn-lockdown">
-        &#128274; Emergency Lockdown
+    <div style="margin:0 16px 24px">
+      <button class="lockdown-btn card" style="width:100%;text-align:left;padding:14px 16px;border:1px solid #fecaca;background:#fef2f2;cursor:pointer">
+        <div style="font-size:14px;font-weight:500;color:#E24B4A">&#128274; Экстренная блокировка</div>
+        <div style="font-size:12px;color:#aaa;margin-top:2px">Заморозить все процессы</div>
       </button>
-      <div style="font-size:11px;color:#aaa;text-align:center">Freeze all processes immediately</div>
     </div>`;
+
+  html += '</div>'; // .screen-scroll
 
   container.innerHTML = html;
 
-  // ── Wire Toggle Events ──
+  // ── Wire toggle click events ──
   wireToggles(container);
+
+  // ── Wire lockdown button ──
   wireLockdown(container);
 }
 
 /**
- * Generate a toggle setting row.
+ * Generate a setting row with a toggle switch.
+ * @param {string} icon - Emoji icon
+ * @param {string} name - Setting name
+ * @param {string} desc - Setting description
+ * @param {boolean} isOn - Whether the toggle is ON initially
  */
-function settingToggle(key, label, desc, active) {
+function settingRowToggle(icon, name, desc, isOn) {
   return `
     <div class="setting-row">
-      <div>
-        <div class="setting-label">${esc(label)}</div>
+      <span class="setting-icon">${icon}</span>
+      <div class="setting-info">
+        <div class="setting-name">${esc(name)}</div>
         <div class="setting-desc">${esc(desc)}</div>
       </div>
-      <div class="toggle ${active ? 'active' : ''}" data-setting="${key}"></div>
+      <div class="toggle${isOn ? ' on' : ''}"></div>
     </div>`;
 }
 
 /**
- * Generate an integration row.
+ * Generate an integration item row.
+ * @param {string} name - Integration name
+ * @param {string} desc - Description / identifier
+ * @param {string} status - Status label (e.g. "Подключён")
  */
-function integrationRow(name, connected, statusText) {
-  const dot = connected ? createStatusDot('online') : createStatusDot('offline');
-  const color = connected ? '#639922' : '#888';
+function integrationItem(name, desc, status) {
   return `
-    <div class="setting-row">
-      <div>
-        <div class="setting-label">${esc(name)}</div>
-        <div style="display:flex;align-items:center;gap:4px;margin-top:2px">
-          ${dot}
-          <span style="font-size:12px;color:${color}">${esc(statusText)}</span>
-        </div>
+    <div class="integration-item">
+      <span class="integration-dot" style="background:#639922"></span>
+      <div style="flex:1;min-width:0">
+        <div class="integration-name">${esc(name)}</div>
+        <div class="integration-desc">${esc(desc)}</div>
       </div>
-      ${connected
-        ? '<span style="font-size:12px;color:#aaa">&#10003;</span>'
-        : '<span class="btn btn-outline" style="font-size:11px;padding:4px 10px">Connect</span>'}
+      <span style="font-size:12px;color:#639922;flex-shrink:0">${esc(status)}</span>
     </div>`;
 }
 
 /**
- * Wire up toggle click events.
+ * Wire up toggle click events — toggles the `.on` class.
  */
 function wireToggles(container) {
-  container.querySelectorAll('.toggle[data-setting]').forEach(toggle => {
+  container.querySelectorAll('.toggle').forEach(toggle => {
     toggle.addEventListener('click', () => {
-      const key = toggle.dataset.setting;
-      settingsState[key] = !settingsState[key];
-      toggle.classList.toggle('active', settingsState[key]);
+      toggle.classList.toggle('on');
     });
   });
 }
@@ -163,14 +134,14 @@ function wireToggles(container) {
  * Wire up the emergency lockdown button.
  */
 function wireLockdown(container) {
-  const btn = container.querySelector('#btn-lockdown');
+  const btn = container.querySelector('.lockdown-btn');
   if (!btn) return;
   btn.addEventListener('click', () => {
-    if (!confirm('Emergency Lockdown: Freeze all processes?')) return;
+    if (!confirm('Экстренная блокировка: Заморозить все процессы?')) return;
     if (window.tgSendData) {
       window.tgSendData({ action: 'lockdown' });
     }
-    btn.textContent = 'Lockdown initiated';
+    btn.textContent = 'Блокировка инициирована';
     btn.disabled = true;
     btn.style.opacity = '0.5';
   });

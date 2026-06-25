@@ -1,42 +1,31 @@
 /**
- * Fosved Office Mini App — Reusable Card Components
- * Pure HTML generators (no DOM manipulation, just string returns).
+ * Fosved Office Mini App — Reusable Card / UI Components
+ * Pure HTML generators (string returns, no DOM).
  */
+
+import { esc } from '../app.js';
 
 /**
- * Department card with colored left border, status dot, name, calls, and rating.
- * @param {Object} dept — { slug, name, description, status, color: { accent }, calls, rating, override? }
- * @returns {string} HTML
+ * Department card for dashboard grid.
  */
-export function createDeptCard(dept) {
-  const statusColor = dept.status === 'active' ? '#639922'
-                    : dept.status === 'idle'   ? '#EF9F27'
-                    : '#cccccc';
-  const shortName = dept.name.includes(' — ') ? dept.name.split(' — ')[0] : dept.name;
-  const description = dept.name.includes(' — ') ? dept.name.split(' — ')[1] : '';
-
+export function createDeptCard(d) {
+  const sc = d.status === 'active' ? '#639922' : d.status === 'idle' ? '#EF9F27' : '#ccc';
+  const name = d.name.includes(' — ') ? d.name.split(' — ')[0] : d.name;
+  const desc = d.name.includes(' — ') ? d.name.split(' — ')[1] : (d.description || '');
   return `
-    <div class="card card-dept"
-         style="border-left-color:${dept.color?.accent || '#888'}"
-         data-nav="/dept/${dept.slug}">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-        <span class="status-dot" style="background:${statusColor}"></span>
-        <span style="font-weight:600;font-size:14px">${esc(shortName)}</span>
-        <span style="margin-left:auto;font-family:'DM Mono',monospace;font-size:12px;color:${statusColor}">
-          ${dept.rating ?? '—'}
-        </span>
+    <div class="dept-card" style="border-left-color:${d.color?.accent || '#888'}" data-nav="/dept/${d.slug}">
+      <div class="dept-card-head">
+        <span class="status-dot ${d.status === 'active' ? 'green' : d.status === 'idle' ? 'orange' : ''}" ${!['active','idle'].includes(d.status) ? `style="background:${sc}"` : ''}></span>
+        <span class="dept-card-name">${esc(name)}</span>
+        <span class="dept-card-rating" style="color:${sc}">${d.rating ?? '—'}</span>
       </div>
-      ${description ? `<div style="font-size:12px;color:#888;margin-bottom:2px">${esc(description)} &middot; ${dept.calls ?? 0} calls</div>` : ''}
-      ${dept.override ? `<div style="font-size:11px;color:#C9A84C;font-family:'DM Mono',monospace">${esc(dept.override)}</div>` : ''}
+      <div class="dept-card-desc">${esc(desc)} · ${d.calls ?? 0}з</div>
+      ${d.override ? `<div style="font-size:11px;color:#C9A84C;font-family:var(--font-mono);margin-top:4px">${esc(d.override)}</div>` : ''}
     </div>`;
 }
 
 /**
- * KPI card — centered value with label.
- * @param {string|number} value — display value
- * @param {string} label — e.g. 'TASKS', 'COST', 'RATING'
- * @param {string} color — value text color
- * @returns {string} HTML
+ * KPI card.
  */
 export function createKPICard(value, label, color = '#0F0F0F') {
   return `
@@ -47,109 +36,84 @@ export function createKPICard(value, label, color = '#0F0F0F') {
 }
 
 /**
- * Alert card — color-coded banner.
- * @param {'red'|'orange'|'green'} type — alert severity
- * @param {string} title — alert headline
- * @param {string} [subtitle] — optional detail text
- * @returns {string} HTML
+ * Alert banner.
  */
 export function createAlertCard(type, title, subtitle = '') {
-  const cls = type === 'red' ? 'alert-red' : type === 'orange' ? 'alert-orange' : 'alert-green';
+  const cls = type === 'red' ? 'alert-red' : type === 'green' ? 'alert-green' : 'alert-orange';
+  const icon = type === 'red' ? '🔴' : type === 'green' ? '🟢' : '🟡';
   return `
     <div class="alert ${cls}">
-      <strong>${esc(title)}</strong>${subtitle ? ` — ${esc(subtitle)}` : ''}
+      <div class="alert-title">${icon} ${esc(title)}</div>
+      ${subtitle ? `<div class="alert-subtitle">${esc(subtitle)}</div>` : ''}
     </div>`;
 }
 
 /**
- * Narad card — work order with status badge and optional action buttons.
- * @param {Object} narad — { id, title, description, status, risk, created }
- * @returns {string} HTML
+ * Narad card.
  */
-export function createNaradCard(narad) {
-  const statusMap = {
-    pending:  { color: '#EF9F27', bg: '#FFFBF0', label: 'PENDING' },
-    approved: { color: '#639922', bg: '#EEF7EE', label: 'APPROVED' },
-    rejected: { color: '#E24B4A', bg: '#FFF0F0', label: 'REJECTED' },
-    done:     { color: '#639922', bg: '#EEF7EE', label: 'DONE' },
-    failed:   { color: '#E24B4A', bg: '#FFF0F0', label: 'FAILED' },
+export function createNaradCard(n) {
+  const sm = {
+    pending: { color:'#EF9F27', bg:'#FFFBF0', label:'PENDING' },
+    done:    { color:'#639922', bg:'#EEF7EE', label:'DONE' },
+    failed:  { color:'#E24B4A', bg:'#FFF0F0', label:'FAILED' },
+    approved:{ color:'#639922', bg:'#EEF7EE', label:'APPROVED' },
   };
-  const s = statusMap[narad.status] || statusMap.pending;
-  const title = narad.title || narad.description || 'Untitled';
-  const shortId = narad.id.length > 24 ? narad.id.substring(0, 24) + '…' : narad.id;
+  const s = sm[n.status] || sm.pending;
+  const title = n.title || n.description || 'Без названия';
+  const shortId = n.id.length > 22 ? n.id.substring(0, 22) + '…' : n.id;
 
   let actions = '';
-  if (narad.status === 'pending') {
+  if (n.status === 'pending') {
     actions = `
-      <div style="display:flex;gap:6px;margin-top:8px">
-        <button class="btn btn-outline"
-                style="flex:1;font-size:12px"
-                data-action="approve" data-id="${esc(narad.id)}">
-          &#10003; Approve
-        </button>
-        <button class="btn"
-                style="flex:1;font-size:12px;background:#f5f5f5"
-                data-action="reject" data-id="${esc(narad.id)}">
-          &#10007; Reject
-        </button>
+      <div class="narad-actions">
+        <button class="btn btn-sm btn-primary" style="flex:1" data-action="approve" data-id="${esc(n.id)}">✅ Подтвердить</button>
+        <button class="btn btn-sm" style="flex:1" data-action="reject" data-id="${esc(n.id)}">❌ Откл.</button>
+      </div>`;
+  }
+  if (n.status === 'failed') {
+    actions = `
+      <div class="narad-actions">
+        <button class="btn btn-sm btn-gold" style="flex:1" data-action="retry" data-id="${esc(n.id)}">🔄 Повторить</button>
+        <button class="btn btn-sm" style="flex:1" data-action="rollback" data-id="${esc(n.id)}">↩ Откатить</button>
       </div>`;
   }
 
   return `
-    <div class="narad-card">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-        <span class="status-dot" style="background:${s.color}"></span>
-        <span style="font-family:'DM Mono',monospace;font-size:11px;color:#888">${esc(shortId)}</span>
-        <span style="margin-left:auto;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:${s.bg};color:${s.color}">
-          ${s.label}
-        </span>
+    <div class="narad-card" style="border-left-color:${s.color}">
+      <div class="narad-header">
+        <div>
+          <div class="narad-id" style="color:${s.color}">${esc(shortId)}</div>
+          <div class="narad-title">${esc(title)}</div>
+        </div>
+        <span class="badge badge-${n.status === 'done' ? 'ok' : n.status === 'failed' ? 'err' : 'warn'}" style="margin-left:auto;flex-shrink:0">${s.label}</span>
       </div>
-      <div style="font-size:14px;font-weight:500;margin-bottom:4px">${esc(title)}</div>
-      ${narad.risk ? `<div style="font-size:11px;color:#888">Risk: ${esc(narad.risk)}</div>` : ''}
-      <div style="font-size:11px;color:#aaa;margin-top:4px">${esc(narad.created)}</div>
+      ${n.risk ? `<div class="narad-meta">Risk: ${esc(n.risk)}${n.files ? ' · ' + n.files + ' файл' : ''}</div>` : ''}
+      ${n.error ? `<div class="narad-meta" style="color:#E24B4A">Ошибка: ${esc(n.error)}</div>` : ''}
+      <div class="narad-meta">${esc(n.created)}</div>
       ${actions}
     </div>`;
 }
 
 /**
- * Simple top bar for screens.
- * @param {string} title — bar title text
- * @param {string} [subtitle] — optional right-aligned subtitle
- * @returns {string} HTML
+ * Top bar.
  */
 export function createTopBar(title, subtitle = '') {
   return `
-    <div class="top-bar">
-      <div class="top-bar-title">${esc(title)}${subtitle ? ` <span style="margin-left:auto;font-size:12px;color:#888;font-weight:400">${esc(subtitle)}</span>` : ''}</div>
+    <div class="topbar">
+      <div class="topbar-title">${esc(title)}</div>
+      ${subtitle ? `<span class="topbar-sub">${esc(subtitle)}</span>` : ''}
     </div>`;
 }
 
 /**
- * Generic section title.
- * @param {string} text — section heading
- * @param {string} [badge] — optional right-aligned badge text
- * @returns {string} HTML
+ * Section title with optional right badge.
  */
 export function createSectionTitle(text, badge = '') {
   return `
-    <div style="padding:0 16px;margin:12px 0 8px;display:flex;justify-content:space-between;align-items:center">
-      <div class="section-title" style="margin:0">${esc(text)}</div>
-      ${badge ? `<span style="font-family:'DM Mono',monospace;font-size:11px;color:#aaa">${esc(badge)}</span>` : ''}
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div class="section-title">${esc(text)}</div>
+      ${badge ? `<span class="topbar-sub">${esc(badge)}</span>` : ''}
     </div>`;
-}
-
-/**
- * HTML-escape a string for safe insertion.
- * @param {string} str
- * @returns {string}
- */
-function esc(str) {
-  if (str == null) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 export { esc };

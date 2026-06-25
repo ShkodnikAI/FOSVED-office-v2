@@ -1,53 +1,50 @@
 /**
  * Fosved Office Mini App — Report Viewer Screen (Screen 4)
- * Fetches and displays a full HTML report with an action bar.
+ * Fetches and displays a full HTML report with action bar and inline toasts.
  */
 
-import { esc } from '../components/card.js';
+import { esc } from '../app.js';
 
 export async function render(container, id) {
   if (!id) {
-    container.innerHTML = `<div class="empty-state">Report ID required</div>`;
+    container.innerHTML = `<div class="empty-state">ID отчёта не указан</div>`;
     return;
   }
 
-  let html = '';
+  let topbarHtml = '';
 
   // ── Top Bar ──
-  html += `
+  topbarHtml = `
     <div class="top-bar">
-      <div class="top-bar-title">Report</div>
+      <div class="top-bar-title">Отчёт</div>
       <span style="margin-left:auto;font-family:'DM Mono',monospace;font-size:11px;color:#aaa">${esc(id)}</span>
     </div>`;
 
-  container.innerHTML = html + `<div style="text-align:center;padding:60px;color:#aaa">Loading report...</div>`;
+  container.innerHTML = topbarHtml + `<div class="screen-scroll"><div style="text-align:center;padding:60px;color:#aaa">Загрузка отчёта...</div></div>`;
 
   try {
-    const response = await fetch('/miniapp/' + encodeURIComponent(id));
-    if (!response.ok) {
-      container.innerHTML = `
-        ${html}
-        <div class="empty-state">
-          <div style="font-size:28px;margin-bottom:12px">&#128196;</div>
-          Report not found
-          <div style="font-size:12px;margin-top:8px;color:#ccc">${esc(id)}</div>
-        </div>`;
-      return;
-    }
+    const reportHtml = await API.reportHtml(id);
 
-    const reportHtml = await response.text();
-
-    // ── Report Content ──
-    let content = html;
+    let content = topbarHtml;
+    content += `<div class="screen-scroll">`;
     content += `<div class="report-body">${reportHtml}</div>`;
+    content += `</div>`;
 
     // ── Action Bar ──
     content += `
       <div class="action-bar">
-        <button class="action-btn action-btn-gold" data-action="deepen">&#128269; Углубить</button>
-        <button class="action-btn" data-action="control">&#9989; Контроль</button>
-        <button class="action-btn" data-action="copy">&#128203; Копировать</button>
-        <button class="action-btn" data-action="share">&#128279; Поделиться</button>
+        <button class="action-btn" data-action="deepen">Углубить</button>
+        <button class="action-btn" data-action="redteam">Red Team</button>
+        <button class="action-btn" data-action="control">Контроль</button>
+      </div>
+      <div class="action-bar">
+        <button class="action-btn" data-action="journalist">Журналист</button>
+        <button class="action-btn" data-action="counterforecast">Контр-прогноз</button>
+      </div>
+      <div class="action-bar">
+        <button class="action-btn" data-action="copy">Копировать</button>
+        <button class="action-btn" data-action="pdf">PDF</button>
+        <button class="action-btn" data-action="share">Поделиться</button>
       </div>`;
 
     container.innerHTML = content;
@@ -57,11 +54,14 @@ export async function render(container, id) {
 
   } catch (e) {
     container.innerHTML = `
-      ${html}
-      <div class="empty-state">
-        <div style="font-size:28px;margin-bottom:12px">&#9888;&#65039;</div>
-        Failed to load report
-        <button class="btn btn-primary" style="margin-top:16px" onclick="location.reload()">Retry</button>
+      ${topbarHtml}
+      <div class="screen-scroll">
+        <div class="empty-state">
+          <div style="font-size:28px;margin-bottom:12px">📄</div>
+          <div style="color:#E24B4A;font-size:15px;font-weight:500">Отчёт не найден</div>
+          <div style="color:#888;font-size:13px;margin-top:8px">${esc(id)}</div>
+          <button class="btn btn-primary" style="margin-top:20px" onclick="location.reload()">Повторить</button>
+        </div>
       </div>`;
   }
 }
@@ -75,31 +75,54 @@ function wireActions(container, id, reportHtml) {
       const action = btn.dataset.action;
       switch (action) {
         case 'deepen':
-          // Trigger a deeper report generation via bot command
           if (window.tgSendData) {
             window.tgSendData({ action: 'deepen', reportId: id });
-          } else {
-            location.hash = '#/chat/yana';
           }
+          showInlineToast(container, 'Углубление отправлено');
+          break;
+
+        case 'redteam':
+          if (window.tgSendData) {
+            window.tgSendData({ action: 'redteam', reportId: id });
+          }
+          showInlineToast(container, 'Red Team запущен');
           break;
 
         case 'control':
-          // Mark report for quality control
           if (window.tgSendData) {
             window.tgSendData({ action: 'control', reportId: id });
           }
           showInlineToast(container, 'Контроль отправлен');
           break;
 
+        case 'journalist':
+          if (window.tgSendData) {
+            window.tgSendData({ action: 'journalist', reportId: id });
+          }
+          showInlineToast(container, 'Журналист запущен');
+          break;
+
+        case 'counterforecast':
+          if (window.tgSendData) {
+            window.tgSendData({ action: 'counterforecast', reportId: id });
+          }
+          showInlineToast(container, 'Контр-прогноз запущен');
+          break;
+
         case 'copy':
-          // Copy report text to clipboard
           copyToClipboard(reportHtml)
             .then(() => showInlineToast(container, 'Скопировано'))
             .catch(() => showInlineToast(container, 'Ошибка копирования'));
           break;
 
+        case 'pdf':
+          if (window.tgSendData) {
+            window.tgSendData({ action: 'pdf', reportId: id });
+          }
+          showInlineToast(container, 'PDF запрошен');
+          break;
+
         case 'share':
-          // Share via Telegram
           if (window.tgSendData) {
             window.tgSendData({ action: 'share', reportId: id });
           }
@@ -111,15 +134,14 @@ function wireActions(container, id, reportHtml) {
 }
 
 /**
- * Copy text to clipboard.
+ * Copy text to clipboard. Strips HTML tags for plain-text copy.
  */
 async function copyToClipboard(text) {
-  // Strip HTML tags for plain text copy
   const plain = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   if (navigator.clipboard) {
     return navigator.clipboard.writeText(plain);
   }
-  // Fallback for older browsers / restricted contexts
+  // Fallback for restricted contexts
   const ta = document.createElement('textarea');
   ta.value = plain;
   ta.style.position = 'fixed';
@@ -132,6 +154,7 @@ async function copyToClipboard(text) {
 
 /**
  * Show a brief inline toast notification.
+ * Fixed position, black background, white text, fade in/out.
  */
 function showInlineToast(container, message) {
   const toast = document.createElement('div');
@@ -149,6 +172,7 @@ function showInlineToast(container, message) {
     zIndex: '999',
     opacity: '0',
     transition: 'opacity 0.3s ease',
+    whiteSpace: 'nowrap',
   });
   container.appendChild(toast);
   requestAnimationFrame(() => { toast.style.opacity = '1'; });
