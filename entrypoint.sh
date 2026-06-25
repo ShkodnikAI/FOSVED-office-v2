@@ -1,5 +1,19 @@
 #!/bin/bash
-echo "Starting Fosved Office v2..."
+echo "=== Fosved Office v2 Starting ==="
+
+# Log source file checksums to verify deploy picked up new code
+echo "--- Source checksums ---"
+echo "app.mlog:       $(md5sum app.mlog 2>/dev/null | cut -d' ' -f1)"
+echo "dept/yana.mlog: $(md5sum dept/yana.mlog 2>/dev/null | cut -d' ' -f1)"
+echo "llm_proxy.py:   $(md5sum llm_proxy.py 2>/dev/null | cut -d' ' -f1)"
+echo "miniapp.mlog:   $(md5sum dept/miniapp.mlog 2>/dev/null | cut -d' ' -f1)"
+
+# Verify yana.mlog does NOT contain anti-format code
+if grep -q "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА" dept/yana.mlog 2>/dev/null; then
+  echo "!!! WARNING: dept/yana.mlog still has anti-format code !!!"
+else
+  echo "dept/yana.mlog: clean (no anti-format)"
+fi
 
 # 1. LLM Proxy (port 4000)
 python3 llm_proxy.py &
@@ -26,6 +40,10 @@ for i in {1..10}; do
   echo "Waiting for Metalogos... ($i)"
   sleep 2
 done
+
+# Verify version endpoint
+echo "--- Version check ---"
+curl -sf http://127.0.0.1:10001/version 2>/dev/null || echo "version endpoint not available"
 
 # 3. Reverse Proxy (port $PORT, default 10000)
 python3 reverse_proxy.py &

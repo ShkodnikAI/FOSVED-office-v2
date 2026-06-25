@@ -6,7 +6,7 @@ import dept/context
 import dept/miniapp
 import dept/chain
 import dept/scheduler
-import dept/yana
+// import dept/yana — REMOVED: HandleYana inlined below to bypass binary import caching
 import dept/osp
 import dept/lz
 import dept/expert
@@ -228,6 +228,58 @@ pattern DetectDepartment(text: String) -> String {
   let detected = json_get(parse_json(result), "dept", "")
   if detected != "" then { return detected }
 
+  return ""
+}
+
+// ============================================================
+// YANA HANDLER — INLINED (v5 clean, no format restrictions)
+// ============================================================
+
+pattern HandleYana(query: String, chat_id: String) -> String {
+  let dept = "yana"
+  let profile = ReadDeptProfile(dept)
+  let skills = SelectSkillsByKeywords(dept, query)
+  let corrections = GetCorrections(dept)
+  let calendar = YanaCalendar()
+  let now_info = YanaNowInfo()
+  let context = profile + "\n\n=== Current Time & Date ===\n" + now_info + "\n\n=== Calendar & Reminders ===\n" + calendar + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections
+  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy(dept, messages)
+  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
+  let delegate_target = YanaCheckDelegate(reply)
+  if delegate_target != "" then {
+    let _ = AuditLog("yana_delegate", dept, "to=" + delegate_target + " query=" + substring(query, 0.0, 80.0))
+    return delegate_target
+  }
+  let _ = RecordAssistantMessage(chat_id, dept, reply)
+  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
+  return reply
+}
+
+pattern YanaNowInfo() -> String {
+  let ts = to_string(now())
+  return "Текущий Unix timestamp: " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
+}
+
+pattern YanaCalendar() -> String {
+  let rows = query("SELECT event_text, event_date, event_type FROM yana_events WHERE created_at IS NOT NULL ORDER BY event_date ASC LIMIT 20", [])
+  if rows == "[]" then { return "Нет запланированных событий." }
+  return to_string(rows)
+}
+
+pattern YanaCheckDelegate(reply: String) -> String {
+  if contains(reply, "[DELEGATE: osp]") == 1.0 then { return "osp" }
+  if contains(reply, "[DELEGATE: lz]") == 1.0 then { return "lz" }
+  if contains(reply, "[DELEGATE: expert]") == 1.0 then { return "expert" }
+  if contains(reply, "[DELEGATE: marketing]") == 1.0 then { return "marketing" }
+  if contains(reply, "[DELEGATE: finance]") == 1.0 then { return "finance" }
+  if contains(reply, "[DELEGATE: legal]") == 1.0 then { return "legal" }
+  if contains(reply, "[DELEGATE: dev]") == 1.0 then { return "dev" }
+  if contains(reply, "[DELEGATE: design]") == 1.0 then { return "design" }
+  if contains(reply, "[DELEGATE: qa]") == 1.0 then { return "qa" }
+  if contains(reply, "[DELEGATE: visual]") == 1.0 then { return "visual" }
+  if contains(reply, "[DELEGATE: engineering]") == 1.0 then { return "engineering" }
+  if contains(reply, "[DELEGATE: kavalnya]") == 1.0 then { return "kavalnya" }
   return ""
 }
 
