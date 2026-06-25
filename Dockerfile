@@ -5,7 +5,9 @@ COPY bin/mlog /usr/local/bin/mlog
 RUN chmod +x /usr/local/bin/mlog
 WORKDIR /office
 COPY . .
-RUN mkdir -p /office/data /tmp
+# Force cache invalidation on every deploy — touch a build marker with git SHA
+ARG GIT_SHA=unknown
+RUN echo "BUILD_SHA=${GIT_SHA}" > /office/.build_sha && mkdir -p /office/data /tmp
 RUN git config --global user.email "agent@fosved.office" && git config --global user.name "Fosved Agent"
 EXPOSE 10000
 CMD ["bash", "entrypoint.sh"]
