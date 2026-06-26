@@ -6,8 +6,6 @@ RUN chmod +x /usr/local/bin/mlog
 WORKDIR /office
 COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
-# Source code — .dockerignore excludes skills/ (250MB+) so context is small
-# Any file change here invalidates Docker cache
 COPY . .
 RUN mkdir -p /office/data /tmp
 RUN git config --global user.email "agent@fosved.office" && git config --global user.name "Fosved Agent"
