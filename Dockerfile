@@ -4,7 +4,7 @@ RUN pip3 install flask requests edge-tts --break-system-packages
 WORKDIR /office
 COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
-# Source code BEFORE binary — any code change invalidates all layers below
+ENV DEPLOY_SHA=964bbd9b9be2f41c39c8540c785f1d331073323d
 COPY . .
 RUN mkdir -p /office/data /tmp
 RUN git config --global user.email "agent@fosved.office" && git config --global user.name "Fosved Agent"
