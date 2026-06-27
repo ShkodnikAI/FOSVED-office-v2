@@ -2335,16 +2335,20 @@ def _build_github_queries():
     from datetime import timedelta
     # Get real date from GitHub API header, fallback to UTC
     try:
-        probe = http_requests.get("https://api.github.com", timeout=5, headers=GITHUB_HEADERS)
+        probe = http_requests.get("https://api.github.com", timeout=5,
+                                   headers={"Accept": "application/vnd.github.v3+json"})
         real_date_str = probe.headers.get("date", "")
         if real_date_str:
             # Parse RFC 1123 date: "Fri, 27 Jun 2026 07:00:00 GMT"
             from email.utils import parsedate_to_datetime
             real_now = parsedate_to_datetime(real_date_str)
+            log.info(f"GitHub probe OK, real date: {real_now.isoformat()[:10]}")
         else:
             real_now = datetime.utcnow()
-    except Exception:
+            log.warning("GitHub probe: no date header, using system clock")
+    except Exception as e:
         real_now = datetime.utcnow()
+        log.warning(f"GitHub probe failed: {e}, using system clock")
 
     since = (real_now - timedelta(days=14)).strftime("%Y-%m-%d")
     since_month = (real_now - timedelta(days=30)).strftime("%Y-%m-%d")
