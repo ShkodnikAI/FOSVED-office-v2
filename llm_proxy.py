@@ -2331,9 +2331,23 @@ if GITHUB_TOKEN:
 # Queries for GitHub scanning — tuned to Fosved's tech stack
 # Dates are dynamic: search repos updated/created in last 14 days
 def _build_github_queries():
+    """Build GitHub search queries. Uses real-world date (container clock may differ from GitHub)."""
     from datetime import timedelta
-    since = (datetime.utcnow() - timedelta(days=14)).strftime("%Y-%m-%d")
-    since_month = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+    # Get real date from GitHub API header, fallback to UTC
+    try:
+        probe = http_requests.get("https://api.github.com", timeout=5, headers=GITHUB_HEADERS)
+        real_date_str = probe.headers.get("date", "")
+        if real_date_str:
+            # Parse RFC 1123 date: "Fri, 27 Jun 2026 07:00:00 GMT"
+            from email.utils import parsedate_to_datetime
+            real_now = parsedate_to_datetime(real_date_str)
+        else:
+            real_now = datetime.utcnow()
+    except Exception:
+        real_now = datetime.utcnow()
+
+    since = (real_now - timedelta(days=14)).strftime("%Y-%m-%d")
+    since_month = (real_now - timedelta(days=30)).strftime("%Y-%m-%d")
     return [
         f"LLM agent framework language:python pushed:>{since} stars:>5",
         f"telegram bot AI assistant pushed:>{since} stars:>3",
@@ -2429,6 +2443,7 @@ def scheduler_lz_daily():
         seen = set()
         for q in _build_github_queries():
             repos = _github_search(q, per_page=3)
+            time.sleep(2)  # Rate limit: 10 req/min unauthenticated, 30 with token
             for r in repos:
                 if r["name"] not in seen:
                     seen.add(r["name"])
