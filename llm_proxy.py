@@ -2421,13 +2421,13 @@ def scheduler_lz_daily():
     dry_run = d.get("dry_run", False)
 
     try:
-        # ── Phase 1: GitHub Scan ──────────────────────────────
+        # ── Phase 1: GitHub Scan (direct API) ─────────────────
         log.info("LZ Daily: starting GitHub scan")
         all_repos = []
         seen = set()
         for q in _build_github_queries():
             repos = _github_search(q, per_page=3)
-            time.sleep(2)  # Rate limit: 10 req/min unauthenticated, 30 with token
+            time.sleep(1)
             for r in repos:
                 if r["name"] not in seen:
                     seen.add(r["name"])
@@ -2437,7 +2437,12 @@ def scheduler_lz_daily():
         all_releases = []
         for repo in GITHUB_WATCH_RELEASES:
             releases = _github_releases(repo)
+            time.sleep(1)
             all_releases.extend(releases)
+
+        github_ok = bool(all_repos or all_releases)
+        if not github_ok:
+            log.warning("LZ Daily: GitHub API returned 0 results, will use LLM fallback")
 
         # Also check lz_monitors table for custom topics
         monitor_topics = []
@@ -2451,47 +2456,67 @@ def scheduler_lz_daily():
             "repos_found": len(all_repos),
             "releases_found": len(all_releases),
             "monitors_active": len(monitor_topics),
+            "github_api_ok": github_ok,
         }
 
-        if not all_repos and not all_releases and not monitor_topics:
-            report = "LZ Daily Report — " + datetime.utcnow().isoformat()[:10] + "\n\n"
-            report += "No new findings. GitHub scan returned 0 repos, 0 releases.\n"
-            report += f"Active monitors: {len(monitor_topics)}"
-            return jsonify({"status": "ok", "report": report, "scan": scan_summary})
-
         # ── Phase 2: LLM Analysis ─────────────────────────────
-        # Build context for LLM
-        repos_text = ""
-        for i, r in enumerate(all_repos[:15], 1):
-            repos_text += f"{i}. {r['name']} ({r['stars']}★, {r['lang']}) — {r['desc']}\n   {r['url']}\n"
-
-        releases_text = ""
-        for r in all_releases:
-            releases_text += f"- {r['repo']} {r['tag']}: {r['name']} ({r['date']})\n  {r['body']}\n  {r['url']}\n"
-
-        monitors_text = ""
-        if monitor_topics:
-            monitors_text = "Custom monitors: " + ", ".join(monitor_topics)
-
         lz_prompt = get_dept_prompt("lz")
-        analysis_messages = [
-            {"role": "system", "content": lz_prompt + "\n\n"
-             "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub.\n\n"
-             "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ, которые Админ должен изучить для применения в офисе.\n\n"
-             "Структура отчёта:\n"
-             "1. 🔥 TOP-3 находки (с disrupting potential 1-10) — что полезно для Фосвед Офиса\n"
-             "2. 📦 Новые релизы — что обновилось в ключевых проектах\n"
-             "3. 💡 Рекомендации — что Админу стоит изучить и почему\n"
-             "4. 📊 Статистика скана\n\n"
-             "Фильтруй: только релевантное для AI-офиса, multi-agent систем, Telegram ботов, DSL, memory systems.\n"
-             "Язык: русский."},
-            {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
-             f"=== НОВЫЕ РЕПОЗИТОРИИ ({len(all_repos)} найдено) ===\n"
-             f"{repos_text}\n\n"
-             f"=== НОВЫЕ РЕЛИЗЫ ({len(all_releases)}) ===\n"
-             f"{releases_text}\n\n"
-             f"{monitors_text}"}
-        ]
+
+        if github_ok:
+            # Direct API worked — analyze the data we collected
+            repos_text = ""
+            for i, r in enumerate(all_repos[:15], 1):
+                repos_text += f"{i}. {r['name']} ({r['stars']}★, {r['lang']}) — {r['desc']}\n   {r['url']}\n"
+            releases_text = ""
+            for r in all_releases:
+                releases_text += f"- {r['repo']} {r['tag']}: {r['name']} ({r['date']})\n  {r['body']}\n  {r['url']}\n"
+            monitors_text = ""
+            if monitor_topics:
+                monitors_text = "Custom monitors: " + ", ".join(monitor_topics)
+
+            analysis_messages = [
+                {"role": "system", "content": lz_prompt + "\n\n"
+                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub.\n\n"
+                 "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ, которые Админ должен изучить для применения в офисе.\n\n"
+                 "Структура отчёта:\n"
+                 "1. 🔥 TOP-3 находки (с disrupting potential 1-10) — что полезно для Фосвед Офиса\n"
+                 "2. 📦 Новые релизы — что обновилось в ключевых проектах\n"
+                 "3. 💡 Рекомендации — что Админу стоит изучить и почему\n"
+                 "4. 📊 Статистика скана\n\n"
+                 "Фильтруй: только релевантное для AI-офиса, multi-agent систем, Telegram ботов, DSL, memory systems.\n"
+                 "Язык: русский."},
+                {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
+                 f"=== НОВЫЕ РЕПОЗИТОРИИ ({len(all_repos)} найдено) ===\n"
+                 f"{repos_text}\n\n"
+                 f"=== НОВЫЕ РЕЛИЗЫ ({len(all_releases)}) ===\n"
+                 f"{releases_text}\n\n"
+                 f"{monitors_text}"}
+            ]
+        else:
+            # GitHub API failed — LLM researches directly
+            log.info("LZ Daily: using LLM fallback for GitHub research")
+            analysis_messages = [
+                {"role": "system", "content": lz_prompt + "\n\n"
+                 "Ты — Лаборатория Загадок Фосвед Офиса. GitHub API недоступен, поэтому ты проводишь "
+                 "исследование САМОСТОЯТЕЛЬНО, используя свои знания.\n\n"
+                 "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: найти НОВИНКИ за последнюю неделю, которые Админ должен изучить.\n\n"
+                 "Ищи в областях:\n"
+                 "- LLM agent frameworks (Python): новые фреймворки, мажорные обновления\n"
+                 "- Telegram bot AI assistants\n"
+                 "- Multi-agent systems, MCP protocol\n"
+                 "- RAG, memory systems (mem0 и аналоги)\n"
+                 "- Rust DSL / интерпретаторы\n\n"
+                 "Структура отчёта:\n"
+                 "1. 🔥 TOP-3 находки (с disrupting potential 1-10)\n"
+                 "2. 📦 Ключевые обновления проектов\n"
+                 "3. 💡 Рекомендации Админу\n\n"
+                 "Если не знаешь конкретных новостей за последнюю неделю — так и скажи.\n"
+                 "Язык: русский."},
+                {"role": "user", "content": f"Сделай ежедневный обзор новинок на GitHub за последнюю неделю.\n"
+                 f"Дата: {datetime.utcnow().isoformat()[:10]}\n"
+                 f"Фокус: AI agents, LLM, Telegram bots, memory systems, MCP, RAG.\n\n"
+                 f"Для каждого проекта укажи: название, URL, что нового, почему релевантно Фосвед Офису."}
+            ]
 
         result = call_llm("lz", analysis_messages)
         analysis = result.get("reply", "Analysis failed.")
