@@ -2320,6 +2320,311 @@ def miniapp_spa_static(filepath):
     return Response(file_path.read_bytes(), mimetype=mimes.get(ext, "application/octet-stream"))
 
 # ══════════════════════════════════════════════════════════════════════
+#  LZ DAILY REPORT — GitHub scan + LLM analysis + Admin delivery
+# ══════════════════════════════════════════════════════════════════════
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN_METALOGOS", "")
+GITHUB_HEADERS = {"Accept": "application/vnd.github.v3+json"}
+if GITHUB_TOKEN:
+    GITHUB_HEADERS["Authorization"] = f"token {GITHUB_TOKEN}"
+
+# Queries for GitHub scanning — tuned to Fosved's tech stack
+GITHUB_SEARCH_QUERIES = [
+    "LLM agent framework language:python created:>2026-06-20",
+    "telegram bot AI assistant created:>2026-06-20",
+    "Rust DSL parser interpreter created:>2026-06-15",
+    "SQLite agent memory persistent created:>2026-06-15",
+    "Flask proxy LLM failover created:>2026-06-15",
+    "AI office automation multi-agent created:>2026-06-15",
+    "text-to-speech edge TTS python created:>2026-06-15",
+    "RAG retrieval augmented generation python created:>2026-06-20",
+]
+
+# Repos to watch for new releases
+GITHUB_WATCH_RELEASES = [
+    "moorcheh-ai/memanto",
+    "langchain-ai/langchain",
+    "openai/openai-python",
+    "anthropics/anthropic-sdk-python",
+]
+
+
+def _github_search(query, sort="updated", per_page=5):
+    """Search GitHub repos, return list of dicts."""
+    if not GITHUB_TOKEN:
+        log.warning("GITHUB_TOKEN_METALOGOS not set, skipping GitHub scan")
+        return []
+    try:
+        params = {"q": query, "sort": sort, "order": "desc", "per_page": per_page}
+        resp = http_requests.get(
+            "https://api.github.com/search/repositories",
+            headers=GITHUB_HEADERS, params=params, timeout=15
+        )
+        if resp.status_code == 200:
+            items = resp.json().get("items", [])
+            return [{
+                "name": r["full_name"],
+                "desc": (r.get("description") or "")[:120],
+                "stars": r.get("stargazers_count", 0),
+                "lang": r.get("language", ""),
+                "updated": r.get("updated_at", "")[:10],
+                "url": r.get("html_url", ""),
+                "created": r.get("created_at", "")[:10],
+            } for r in items]
+        else:
+            log.warning(f"GitHub search {resp.status_code}: {query[:50]}")
+            return []
+    except Exception as e:
+        log.error(f"GitHub search error: {e}")
+        return []
+
+
+def _github_releases(repo_full_name):
+    """Get latest 3 releases for a repo."""
+    if not GITHUB_TOKEN:
+        return []
+    try:
+        resp = http_requests.get(
+            f"https://api.github.com/repos/{repo_full_name}/releases?per_page=3",
+            headers=GITHUB_HEADERS, timeout=10
+        )
+        if resp.status_code == 200:
+            return [{
+                "repo": repo_full_name,
+                "tag": r.get("tag_name", ""),
+                "name": r.get("name", ""),
+                "body": (r.get("body") or "")[:200],
+                "date": r.get("published_at", "")[:10],
+                "url": r.get("html_url", ""),
+            } for r in resp.json() if not r.get("draft", False)]
+        return []
+    except Exception as e:
+        log.error(f"GitHub releases error for {repo_full_name}: {e}")
+        return []
+
+
+@app.post("/scheduler/lz-daily")
+def scheduler_lz_daily():
+    """
+    LZ Daily Report: scan GitHub → LLM analysis → save to memory → return report.
+    Called by /cron/lz-daily or manually.
+    """
+    d = request.get_json(force=True) or {}
+    owner_id = d.get("owner_id", os.environ.get("OWNER_TELEGRAM_ID", ""))
+    dry_run = d.get("dry_run", False)
+
+    try:
+        # ── Phase 1: GitHub Scan ──────────────────────────────
+        log.info("LZ Daily: starting GitHub scan")
+        all_repos = []
+        seen = set()
+        for q in GITHUB_SEARCH_QUERIES:
+            repos = _github_search(q, per_page=3)
+            for r in repos:
+                if r["name"] not in seen:
+                    seen.add(r["name"])
+                    all_repos.append(r)
+
+        # Check watched repos for new releases
+        all_releases = []
+        for repo in GITHUB_WATCH_RELEASES:
+            releases = _github_releases(repo)
+            all_releases.extend(releases)
+
+        # Also check lz_monitors table for custom topics
+        monitors = _query("SELECT query FROM lz_monitors WHERE frequency = 'daily'", fetch=True)
+        monitor_topics = [m["query"] for m in monitors] if monitors else []
+
+        scan_summary = {
+            "repos_found": len(all_repos),
+            "releases_found": len(all_releases),
+            "monitors_active": len(monitor_topics),
+        }
+
+        if not all_repos and not all_releases and not monitor_topics:
+            report = "LZ Daily Report — " + datetime.utcnow().isoformat()[:10] + "\n\n"
+            report += "No new findings. GitHub scan returned 0 repos, 0 releases.\n"
+            report += f"Active monitors: {len(monitor_topics)}"
+            return jsonify({"status": "ok", "report": report, "scan": scan_summary})
+
+        # ── Phase 2: LLM Analysis ─────────────────────────────
+        # Build context for LLM
+        repos_text = ""
+        for i, r in enumerate(all_repos[:15], 1):
+            repos_text += f"{i}. {r['name']} ({r['stars']}★, {r['lang']}) — {r['desc']}\n   {r['url']}\n"
+
+        releases_text = ""
+        for r in all_releases:
+            releases_text += f"- {r['repo']} {r['tag']}: {r['name']} ({r['date']})\n  {r['body']}\n  {r['url']}\n"
+
+        monitors_text = ""
+        if monitor_topics:
+            monitors_text = "Custom monitors: " + ", ".join(monitor_topics)
+
+        lz_prompt = get_dept_prompt("lz")
+        analysis_messages = [
+            {"role": "system", "content": lz_prompt + "\n\n"
+             "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub.\n\n"
+             "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ, которые Админ должен изучить для применения в офисе.\n\n"
+             "Структура отчёта:\n"
+             "1. 🔥 TOP-3 находки (с disrupting potential 1-10) — что полезно для Фосвед Офиса\n"
+             "2. 📦 Новые релизы — что обновилось в ключевых проектах\n"
+             "3. 💡 Рекомендации — что Админу стоит изучить и почему\n"
+             "4. 📊 Статистика скана\n\n"
+             "Фильтруй: только релевантное для AI-офиса, multi-agent систем, Telegram ботов, DSL, memory systems.\n"
+             "Язык: русский."},
+            {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
+             f"=== НОВЫЕ РЕПОЗИТОРИИ ({len(all_repos)} найдено) ===\n"
+             f"{repos_text}\n\n"
+             f"=== НОВЫЕ РЕЛИЗЫ ({len(all_releases)}) ===\n"
+             f"{releases_text}\n\n"
+             f"{monitors_text}"}
+        ]
+
+        result = call_llm("lz", analysis_messages)
+        analysis = result.get("reply", "Analysis failed.")
+
+        # ── Phase 3: Save to Memory ───────────────────────────
+        if not dry_run:
+            memory.remember(
+                f"LZ Daily {datetime.utcnow().isoformat()[:10]}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
+                "observation", 0.7, "lz_daily"
+            )
+            # Save top findings as individual memories
+            for line in analysis.split("\n"):
+                line = line.strip()
+                if line.startswith(("1.", "2.", "3.")) and len(line) > 20:
+                    memory.remember(
+                        f"LZ находка: {line[:200]}",
+                        "observation", 0.8, "lz_daily"
+                    )
+
+        # ── Phase 4: Build Report ─────────────────────────────
+        report = f"🔍 LZ DAILY REPORT — {datetime.utcnow().isoformat()[:10]}\n"
+        report += f"{'=' * 40}\n\n"
+        report += analysis
+        report += f"\n\n{'─' * 40}\n"
+        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {len(monitor_topics)} monitors\n"
+        report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
+
+        # ── Phase 5: Send to Owner (Admin) ────────────────────
+        msg_id = None
+        if owner_id and not dry_run:
+            if len(report) > 1500:
+                msg_id = _tg_send_report_with_button(owner_id, report)
+            else:
+                msg_id = _tg_send_message(owner_id, report)
+
+        _log_audit("lz_daily_report", {
+            "repos": len(all_repos), "releases": len(all_releases),
+            "monitors": len(monitor_topics), "provider": result.get("provider"),
+            "msg_id": msg_id, "dry_run": dry_run
+        })
+
+        return jsonify({
+            "status": "ok",
+            "report": report,
+            "scan": scan_summary,
+            "msg_id": msg_id,
+            "sent_to": owner_id if not dry_run else None,
+        })
+
+    except Exception as e:
+        log.error(f"lz_daily_report error: {e}")
+        _log_audit("lz_daily_report_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/scheduler/admin-daily")
+def scheduler_admin_daily():
+    """
+    Admin Daily Report: comprehensive report combining:
+    - Night cycle results (from kv)
+    - Memory maintenance summary
+    - LZ daily findings
+    - System health
+    Sent to owner.
+    """
+    d = request.get_json(force=True) or {}
+    owner_id = d.get("owner_id", os.environ.get("OWNER_TELEGRAM_ID", ""))
+
+    if not owner_id:
+        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+
+    try:
+        now = datetime.utcnow()
+        today = now.isoformat()[:10]
+        parts = []
+
+        # 1. Night cycle summary (if available)
+        night_summary = ""  # Would need to read from mlog kv — call mlog internal
+        parts.append(f"📅 АДМИН ДAILY REPORT — {today}")
+        parts.append("=" * 40)
+
+        # 2. Memory stats
+        mem_stats = memory.stats()
+        parts.append(f"\n🧠 ПАМЯТЬ: {mem_stats['total_active']} активных записей")
+        for t, info in sorted(mem_stats['by_type'].items(), key=lambda x: -x[1]['count'])[:5]:
+            parts.append(f"  {t}: {info['count']} (avg conf {info['avg_confidence']})")
+
+        # 3. Memory conflicts
+        conflicts = memory.detect_conflicts()
+        if conflicts:
+            parts.append(f"\n⚠️ КОНФЛИКТЫ: {len(conflicts)}")
+            for c in conflicts[:3]:
+                parts.append(f"  [{c['type']}] {c['memory_a']['content'][:50]} vs {c['memory_b']['content'][:50]}")
+
+        # 4. Memory maintenance
+        maint = memory.nightly_maintenance()
+        parts.append(f"\n🔧 MEMORY MAINTENANCE:\n{maint}")
+
+        # 5. LZ daily findings
+        lz_findings = memory.recall("LZ Daily", type_filter="observation", limit=3)
+        if lz_findings:
+            parts.append(f"\n🔍 LZ ПОСЛЕДНИЕ НАХОДКИ:")
+            for f in lz_findings:
+                ts = time.strftime('%m-%d', time.localtime(f['created_at']))
+                parts.append(f"  [{ts}] {f['content'][:100]}")
+
+        # 6. System metrics
+        yesterday = (now - timedelta(days=1)).isoformat()[:10] + "T00:00:00"
+        metrics = _collect_metrics_for_period(yesterday, today + "T00:00:00")
+        parts.append(f"\n📊 МЕТРИКИ (вчера):")
+        tasks_total = sum(metrics.get("tasks", {}).values())
+        reports_total = sum(metrics.get("reports", {}).values())
+        parts.append(f"  Tasks: {tasks_total} | Reports: {reports_total}")
+
+        # 7. Open issues from night cycle
+        findings = _query(
+            "SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open'", fetch=True
+        )
+        proposals = _query(
+            "SELECT COUNT(*) as cnt FROM admin_proposals WHERE status = 'pending'", fetch=True
+        )
+        if findings and proposals:
+            f_cnt = findings[0].get("cnt", 0) if isinstance(findings[0], dict) else 0
+            p_cnt = proposals[0].get("cnt", 0) if isinstance(proposals[0], dict) else 0
+            parts.append(f"\n📋 АДМИН: {f_cnt} open issues, {p_cnt} pending proposals")
+
+        report = "\n".join(parts)
+
+        # Send to owner
+        if len(report) > 2000:
+            msg_id = _tg_send_report_with_button(owner_id, report)
+        else:
+            msg_id = _tg_send_message(owner_id, report)
+
+        _log_audit("admin_daily_report", {"owner_id": owner_id, "msg_id": msg_id, "chars": len(report)})
+
+        return jsonify({"status": "ok", "report": report, "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"admin_daily_report error: {e}")
+        _log_audit("admin_daily_report_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  FOSVED MEMORY ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════
 
