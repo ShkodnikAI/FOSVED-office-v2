@@ -31,6 +31,8 @@ LLM_ROUTES_PREFIXES = [
     "/stt",
     "/audit/",
     "/voice-set",
+    "/memory/",
+    "/lz/",
 ]
 
 # Routes that go to Metalogos
