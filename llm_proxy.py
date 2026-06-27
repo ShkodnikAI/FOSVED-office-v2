@@ -2432,8 +2432,12 @@ def scheduler_lz_daily():
             all_releases.extend(releases)
 
         # Also check lz_monitors table for custom topics
-        monitors = _query("SELECT query FROM lz_monitors WHERE frequency = 'daily'", fetch=True)
-        monitor_topics = [m["query"] for m in monitors] if monitors else []
+        monitor_topics = []
+        try:
+            monitors = _query("SELECT query FROM lz_monitors WHERE frequency = 'daily'", fetch=True)
+            monitor_topics = [m["query"] for m in monitors] if monitors else []
+        except Exception:
+            pass  # Table may not exist yet (created by mlog InitDB)
 
         scan_summary = {
             "repos_found": len(all_repos),
@@ -2595,15 +2599,20 @@ def scheduler_admin_daily():
         parts.append(f"  Tasks: {tasks_total} | Reports: {reports_total}")
 
         # 7. Open issues from night cycle
-        findings = _query(
-            "SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open'", fetch=True
-        )
-        proposals = _query(
-            "SELECT COUNT(*) as cnt FROM admin_proposals WHERE status = 'pending'", fetch=True
-        )
-        if findings and proposals:
-            f_cnt = findings[0].get("cnt", 0) if isinstance(findings[0], dict) else 0
-            p_cnt = proposals[0].get("cnt", 0) if isinstance(proposals[0], dict) else 0
+        f_cnt, p_cnt = 0, 0
+        try:
+            findings = _query(
+                "SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open'", fetch=True
+            )
+            proposals = _query(
+                "SELECT COUNT(*) as cnt FROM admin_proposals WHERE status = 'pending'", fetch=True
+            )
+            if findings and proposals:
+                f_cnt = findings[0].get("cnt", 0) if isinstance(findings[0], dict) else 0
+                p_cnt = proposals[0].get("cnt", 0) if isinstance(proposals[0], dict) else 0
+        except Exception:
+            pass  # Tables may not exist yet (created by mlog InitDB)
+        if f_cnt or p_cnt:
             parts.append(f"\n📋 АДМИН: {f_cnt} open issues, {p_cnt} pending proposals")
 
         report = "\n".join(parts)
