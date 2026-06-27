@@ -2350,15 +2350,15 @@ GITHUB_WATCH_RELEASES = [
 
 
 def _github_search(query, sort="updated", per_page=5):
-    """Search GitHub repos, return list of dicts."""
-    if not GITHUB_TOKEN:
-        log.warning("GITHUB_TOKEN_METALOGOS not set, skipping GitHub scan")
-        return []
+    """Search GitHub repos, return list of dicts. Works without token (public API)."""
     try:
         params = {"q": query, "sort": sort, "order": "desc", "per_page": per_page}
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        if GITHUB_TOKEN and not GITHUB_TOKEN.startswith("["):
+            headers["Authorization"] = f"token {GITHUB_TOKEN}"
         resp = http_requests.get(
             "https://api.github.com/search/repositories",
-            headers=GITHUB_HEADERS, params=params, timeout=15
+            headers=headers, params=params, timeout=15
         )
         if resp.status_code == 200:
             items = resp.json().get("items", [])
@@ -2371,6 +2371,9 @@ def _github_search(query, sort="updated", per_page=5):
                 "url": r.get("html_url", ""),
                 "created": r.get("created_at", "")[:10],
             } for r in items]
+        elif resp.status_code == 403:
+            log.warning(f"GitHub API rate limited: {query[:50]}")
+            return []
         else:
             log.warning(f"GitHub search {resp.status_code}: {query[:50]}")
             return []
@@ -2380,13 +2383,14 @@ def _github_search(query, sort="updated", per_page=5):
 
 
 def _github_releases(repo_full_name):
-    """Get latest 3 releases for a repo."""
-    if not GITHUB_TOKEN:
-        return []
+    """Get latest 3 releases for a repo. Works without token."""
     try:
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        if GITHUB_TOKEN and not GITHUB_TOKEN.startswith("["):
+            headers["Authorization"] = f"token {GITHUB_TOKEN}"
         resp = http_requests.get(
             f"https://api.github.com/repos/{repo_full_name}/releases?per_page=3",
-            headers=GITHUB_HEADERS, timeout=10
+            headers=headers, timeout=10
         )
         if resp.status_code == 200:
             return [{
