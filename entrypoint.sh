@@ -15,6 +15,12 @@ else
   echo "dept/yana.mlog: clean (no anti-format)"
 fi
 
+# 0. Seed memory on first deploy
+if [ ! -f data/memory.db ]; then
+    echo "--- Seeding FosvedMemory ---"
+    python3 scripts/seed_memory.py data/memory.db
+fi
+
 # 1. LLM Proxy (port 4000)
 python3 llm_proxy.py &
 LLM_PID=$!

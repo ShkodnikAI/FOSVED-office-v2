@@ -3,10 +3,19 @@
 Flask server on port 4000 with 7-provider failover, dept routing, dashboards, SQLite,
 TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
-import json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
+import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
 import html as html_lib
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# ── FosvedMemory ──────────────────────────────────────────────
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
+from fosved_memory import FosvedMemory
+_MEMORY_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'memory.db')
+os.makedirs(os.path.dirname(_MEMORY_DB), exist_ok=True)
+memory = FosvedMemory(_MEMORY_DB)
+log_mem = logging.getLogger("fosved.memory")
+log_mem.info(f"FosvedMemory loaded: {len(memory.TYPES)} types, db={_MEMORY_DB}")
 
 from flask import Flask, request, jsonify, Response
 import requests as http_requests
@@ -2311,6 +2320,65 @@ def miniapp_spa_static(filepath):
     return Response(file_path.read_bytes(), mimetype=mimes.get(ext, "application/octet-stream"))
 
 # ══════════════════════════════════════════════════════════════════════
+#  FOSVED MEMORY ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/memory/recall', methods=['POST'])
+def memory_recall_endpoint():
+    """Recall memories by query."""
+    data = request.get_json(force=True) or {}
+    query = data.get('query', '')
+    mem_type = data.get('type')
+    limit = data.get('limit', 10)
+    if not query:
+        return jsonify({'error': 'query required'}), 400
+    results = memory.recall(query, type_filter=mem_type, limit=limit)
+    return jsonify({'results': results, 'count': len(results)})
+
+
+@app.route('/memory/remember', methods=['POST'])
+def memory_remember_endpoint():
+    """Save a new memory."""
+    data = request.get_json(force=True) or {}
+    if 'content' not in data:
+        return jsonify({'error': 'content required'}), 400
+    mem_id = memory.remember(
+        content=data['content'],
+        mem_type=data.get('type', 'fact'),
+        confidence=float(data.get('confidence', 0.8)),
+        source=data.get('source', 'manual')
+    )
+    return jsonify({'id': mem_id, 'status': 'remembered'})
+
+
+@app.route('/memory/stats', methods=['GET'])
+def memory_stats_endpoint():
+    """Memory statistics."""
+    return jsonify(memory.stats())
+
+
+@app.route('/memory/answer', methods=['POST'])
+def memory_answer_endpoint():
+    """RAG answer based on memory."""
+    data = request.get_json(force=True) or {}
+    answer_text = memory.answer(data.get('question', ''))
+    return jsonify({'answer': answer_text})
+
+
+@app.route('/memory/maintenance', methods=['POST'])
+def memory_maintenance_endpoint():
+    """Run nightly maintenance."""
+    result = memory.nightly_maintenance()
+    return jsonify({'result': result})
+
+
+@app.route('/memory/conflicts', methods=['GET'])
+def memory_conflicts_endpoint():
+    """Detect memory conflicts."""
+    conflicts = memory.detect_conflicts()
+    return jsonify({'conflicts': conflicts, 'count': len(conflicts)})
+
+# ══════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════
 
@@ -2318,5 +2386,5 @@ if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
-             f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research")
+             f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research, memory/*")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
