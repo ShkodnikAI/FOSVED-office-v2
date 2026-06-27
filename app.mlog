@@ -1272,8 +1272,31 @@ mlogserver {
     let cron_secret = env("CRON_SECRET")
     if secret != cron_secret then { return respond("403 Forbidden") }
     let _ = InitDB()
+    // Phase 6: LZ Daily Report (GitHub scan → Admin)
+    let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
+    let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+    let lz_result = http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json")
+    let lz_summary = json_get(parse_json(lz_result), "report", "LZ daily failed")
+
+    // Phase 7: Memory Maintenance
+    let mem_body = json_encode({})
+    let mem_result = http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
+    let mem_summary = json_get(parse_json(mem_result), "result", "Memory maintenance failed")
+
+    // Phase 1-5: Original night cycle
     let result = AdminNightCycle()
+    let result = result + "\n\n" + "Phase 6/7: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400)
     kv_set("admin_night_summary", result)
+    return respond("200 ok")
+  }
+
+  route "/cron/lz-daily" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by cron")
+    let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+    let result = http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json")
     return respond("200 ok")
   }
 }
