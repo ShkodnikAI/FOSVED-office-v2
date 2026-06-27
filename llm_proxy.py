@@ -2329,16 +2329,21 @@ if GITHUB_TOKEN:
     GITHUB_HEADERS["Authorization"] = f"token {GITHUB_TOKEN}"
 
 # Queries for GitHub scanning — tuned to Fosved's tech stack
-GITHUB_SEARCH_QUERIES = [
-    "LLM agent framework language:python created:>2026-06-20",
-    "telegram bot AI assistant created:>2026-06-20",
-    "Rust DSL parser interpreter created:>2026-06-15",
-    "SQLite agent memory persistent created:>2026-06-15",
-    "Flask proxy LLM failover created:>2026-06-15",
-    "AI office automation multi-agent created:>2026-06-15",
-    "text-to-speech edge TTS python created:>2026-06-15",
-    "RAG retrieval augmented generation python created:>2026-06-20",
-]
+# Dates are dynamic: search repos updated/created in last 14 days
+def _build_github_queries():
+    from datetime import timedelta
+    since = (datetime.utcnow() - timedelta(days=14)).strftime("%Y-%m-%d")
+    since_month = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+    return [
+        f"LLM agent framework language:python pushed:>{since} stars:>5",
+        f"telegram bot AI assistant pushed:>{since} stars:>3",
+        f"Rust DSL parser interpreter pushed:>{since} stars:>5",
+        f"SQLite agent memory persistent pushed:>{since_month} stars:>3",
+        f"multi-agent LLM office automation pushed:>{since} stars:>3",
+        f"RAG retrieval augmented python pushed:>{since} stars:>5",
+        f"mcp model context protocol tool pushed:>{since} stars:>5",
+        f"mem0 mem0ai agent memory pushed:>{since} stars:>10",
+    ]
 
 # Repos to watch for new releases
 GITHUB_WATCH_RELEASES = [
@@ -2422,7 +2427,7 @@ def scheduler_lz_daily():
         log.info("LZ Daily: starting GitHub scan")
         all_repos = []
         seen = set()
-        for q in GITHUB_SEARCH_QUERIES:
+        for q in _build_github_queries():
             repos = _github_search(q, per_page=3)
             for r in repos:
                 if r["name"] not in seen:
