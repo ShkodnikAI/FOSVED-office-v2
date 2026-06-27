@@ -1,7 +1,7 @@
 """
 Auto-enricher: превращает plain markdown от LLM в rich HTML.
 Не зависит от модели — работает с любым текстом.
-Если LLM уже использовал маркеры — пропускает.
+Если LLM уже использовал маркеры — пропускает дубликаты.
 """
 
 import re
@@ -151,11 +151,11 @@ def detect_comparison(text):
             left_text = match.group(1).strip()
             right_text = match.group(2).strip()
             compare_html = f'''<div class="compare-grid">
-  <div class="compare-box" style="background:{bg_left};border:1px solid #bbf7d0">
+  <div class="compare-box rich" style="background:{bg_left};border:1px solid #bbf7d0">
     <div class="compare-title">{title_left}</div>
     <div class="compare-body">{html_lib.escape(left_text)}</div>
   </div>
-  <div class="compare-box" style="background:{bg_right};border:1px solid #fecaca">
+  <div class="compare-box rich" style="background:{bg_right};border:1px solid #fecaca">
     <div class="compare-title">{title_right}</div>
     <div class="compare-body">{html_lib.escape(right_text)}</div>
   </div>
@@ -171,27 +171,26 @@ def detect_comparison(text):
 
 def format_badges(text):
     """Заменяет текстовые маркеры на HTML-бейджи"""
-    # Verified (Apodex) — must go first (longest match first)
     replacements = [
-        ('[ФАКТ ✓verified]', '<span class="badge badge-verified">✓ ВЕРИФИЦИРОВАНО</span>'),
-        ('[ФАКТ ⚠unverified]','<span class="badge badge-unverified">⚠ НЕ ПРОВЕРЕНО</span>'),
         # Русские
         ('[ФАКТ]',           '<span class="badge badge-fact">✓ ФАКТ</span>'),
         ('[ИНТЕРПРЕТАЦИЯ]',  '<span class="badge badge-interp">◆ АНАЛИЗ</span>'),
         ('[СПЕКУЛЯЦИЯ]',     '<span class="badge badge-spec">⚡ ГИПОТЕЗА</span>'),
+        # Иконки (если LLM использовал)
+        ('✓',               '<span class="badge badge-fact">✓ ФАКТ</span>'),
+        ('◆',               '<span class="badge badge-interp">◆ АНАЛИЗ</span>'),
+        ('⚡',               '<span class="badge badge-spec">⚡ ГИПОТЕЗА</span>'),
         # Английские
         ('[FACT]',           '<span class="badge badge-fact">✓ ФАКТ</span>'),
         ('[INTERPRETATION]', '<span class="badge badge-interp">◆ АНАЛИЗ</span>'),
         ('[SPECULATION]',    '<span class="badge badge-spec">⚡ ГИПОТЕЗА</span>'),
+        # Verified (Apodex)
+        ('[ФАКТ ✓verified]', '<span class="badge badge-verified">✓ ВЕРИФИЦИРОВАНО</span>'),
+        ('[ФАКТ ⚠unverified]','<span class="badge badge-unverified">⚠ НЕ ПРОВЕРЕНО</span>'),
     ]
     result = text
     for old, new in replacements:
         result = result.replace(old, new)
-    # Standalone icons only on lines without existing HTML badges (no double-wrapping)
-    if 'badge-fact' not in result and 'badge-interp' not in result and 'badge-spec' not in result:
-        icon_map = {'✓': ('badge-fact', 'ФАКТ'), '◆': ('badge-interp', 'АНАЛИЗ'), '⚡': ('badge-spec', 'ГИПОТЕЗА')}
-        for icon, (cls, label) in icon_map.items():
-            result = result.replace(icon, f'<span class="badge {cls}">{icon} {label}</span>')
     return result
 
 
@@ -226,13 +225,10 @@ def format_paragraphs(text):
 
 def wrap_verdict(text):
     """Последний абзац >50 символов → verdict блок"""
-    # Ищем уже существующий вердикт — two patterns:
-    # 1) "Вердикт:\n<content on next lines>"
-    # 2) "Вердикт: <content on same line>"
+    # Ищем уже существующий вердикт
     if 'verdict' in text.lower() or 'вердикт' in text.lower():
-        # Multi-line: keyword on its own line
-        pattern_ml = r'(?:##?\s*)?(?:Вердикт|Verdict|Итог|Итоговый вердикт)[:\s]*\n((?:.+\n?)+)'
-        match = re.search(pattern_ml, text, re.IGNORECASE)
+        pattern = r'(?:##?\s*)?(?:Вердикт|Verdict|Итог|Итоговый вердикт)[:\s]*\n((?:.+\n?)+)'
+        match = re.search(pattern, text, re.IGNORECASE)
         if match:
             verdict_text = match.group(1).strip()
             verdict_html = f'''<div class="verdict-block">
@@ -241,18 +237,7 @@ def wrap_verdict(text):
 </div>'''
             return text[:match.start()] + verdict_html + text[match.end():]
 
-        # Same-line: "Вердикт: content..."
-        pattern_sl = r'(?:##?\s*)?(Вердикт|Verdict|Итог|Итоговый вердикт)[:\s]+(.{20,})'
-        match = re.search(pattern_sl, text, re.IGNORECASE)
-        if match:
-            verdict_text = match.group(2).strip()
-            verdict_html = f'''<div class="verdict-block">
-  <div class="verdict-title">Вердикт</div>
-  <div class="verdict-body">{format_paragraphs(verdict_text)}</div>
-</div>'''
-            return text[:match.start()] + verdict_html + text[match.end():]
-
-    # Fallback: последний абзац >50 символов
+    # Иначе — последний абзац
     paragraphs = text.strip().split('\n\n')
     if len(paragraphs) < 2:
         return text
@@ -274,7 +259,6 @@ def wrap_verdict(text):
 
 def format_ach_table(text, accent_color):
     """Находит таблицу гипотез и стилизует"""
-    # Ищем markdown таблицу с колонкой "Гипотеза" или "P"
     pattern = r'\|[^|]*[Гг]ипотез[^|]*\|.+?\n\|[\s\-:|]+\n((?:\|.+\n)+)'
     match = re.search(pattern, text)
     if not match:
@@ -328,7 +312,8 @@ def format_indicators(text, accent_color):
 </div>\n'''
 
     grid_html = f'<div class="indicators-grid">{cards}</div>'
-    return text[:match.start()] + '<h2 class="section-title" style="border-bottom:2px solid {0}">Индикаторы для наблюдения</h2>\n'.format(accent_color) + grid_html + text[match.end():]
+    h2 = f'<h2 class="section-title" style="border-bottom:2px solid {accent_color}">Индикаторы для наблюдения</h2>\n'
+    return text[:match.start()] + h2 + grid_html + text[match.end():]
 
 
 # ═══════════════════════════════════════════
@@ -382,11 +367,11 @@ def auto_enrich(text, dept='yana', accent_color='#6366f1'):
     # 5. Сравнения
     result = detect_comparison(result)
 
-    # 6. Индикаторы наблюдения (BEFORE bullet→cards to avoid consuming indicator items)
-    result = format_indicators(result, accent_color)
-
-    # 7. Bullet-списки → карточки
+    # 6. Bullet-списки → карточки
     result = convert_bullet_to_cards(result)
+
+    # 7. Индикаторы наблюдения
+    result = format_indicators(result, accent_color)
 
     # 8. Вердикт
     result = wrap_verdict(result)

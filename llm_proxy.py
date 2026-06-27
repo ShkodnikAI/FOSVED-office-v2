@@ -1977,6 +1977,308 @@ def api_admin_status():
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  ADMIN UA — Understand Anything (6 sub-agents)
+# ══════════════════════════════════════════════════════════════════════
+
+SKIP_DIRS = {'data', '.git', 'node_modules', '__pycache__', 'отчёты', 'tool-results', 'scripts', 'upload'}
+KNOWN_BUILTINS = ['send_message', 'query', 'db_execute', 'kv_set', 'kv_get',
+    'http_post', 'http_get', 'read_file', 'write_file', 'call_llm',
+    'json_get', 'parse_json', 'json_encode', 'respond', 'respond_html',
+    'memorize', 'recall', 'whisper_transcribe', 'tts_send', 'git_push',
+    'web_search', 'env', 'now', 'len', 'replace', 'split', 'AuditLog',
+    'RecordUserMessage', 'RecordAssistantMessage', 'BuildContext',
+    'SendTelegramReply', 'SendReport', 'DetectDepartment', 'CallLLMProxy',
+    'InitDB', 'HandleAdmin', 'HandleYana', 'HandleOSP', 'HandleLZ',
+    'list_dir', 'escape_json', 'to_string', 'to_float', 'to_int',
+    'index_of', 'substring', 'trim', 'lower', 'upper', 'starts_with',
+    'ends_with', 'contains', 'json_body', 'query_param', 'http_get']
+
+
+@app.get("/admin-ua/scan")
+def admin_ua_scan():
+    """Scanner: inventory of all files in /office."""
+    inventory = {'files': [], 'total_lines': 0, 'total_files': 0, 'by_type': {}, 'by_dir': {}}
+    office_dir = Path('/office')
+
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            rel = str(fpath.relative_to(office_dir))
+            try:
+                lines = len(fpath.read_text(errors='ignore').splitlines())
+            except Exception:
+                lines = 0
+            ext = fpath.suffix
+            dir_name = rel.split('/')[0] if '/' in rel else 'root'
+            inventory['files'].append({
+                'path': rel, 'lines': lines, 'ext': ext, 'dir': dir_name,
+                'size_kb': round(fpath.stat().st_size / 1024, 1),
+            })
+            inventory['total_lines'] += lines
+            inventory['total_files'] += 1
+            inventory['by_type'][ext] = inventory['by_type'].get(ext, 0) + 1
+            inventory['by_dir'][dir_name] = inventory['by_dir'].get(dir_name, 0) + 1
+
+    inventory['files'].sort(key=lambda x: x['lines'], reverse=True)
+    summary = (f"SCAN COMPLETE\n  Files: {inventory['total_files']} | "
+               f"Lines: {inventory['total_lines']:,} | "
+               f"Dirs: {len(inventory['by_dir'])}\n")
+    for ext, cnt in sorted(inventory['by_type'].items(), key=lambda x: -x[1]):
+        summary += f"  {ext or '(none)'}: {cnt} files\n"
+    if inventory['files']:
+        summary += f"  Largest: {inventory['files'][0]['path']} ({inventory['files'][0]['lines']} lines)\n"
+    return jsonify({'summary': summary, 'inventory': inventory})
+
+
+@app.get("/admin-ua/analyze")
+def admin_ua_analyze():
+    """Analyzer: extract patterns, routes, imports, builtins from each file."""
+    office_dir = Path('/office')
+    analysis = []
+
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            ext = fpath.suffix
+            if ext not in ('.mlog', '.py'):
+                continue
+            rel = str(fpath.relative_to(office_dir))
+            try:
+                content = fpath.read_text(errors='ignore')
+            except Exception:
+                continue
+
+            fa = {'path': rel, 'patterns': [], 'routes': [], 'imports': [],
+                  'builtins_used': [], 'tables': []}
+
+            if ext == '.mlog':
+                for m in re.finditer(r'pattern\s+(\w+)\(([^)]*)\)\s*->\s*(\w+)', content):
+                    fa['patterns'].append({'name': m.group(1), 'args': m.group(2), 'returns': m.group(3)})
+                for m in re.finditer(r'route\s+"([^"]+)"\s+method=(\w+)', content):
+                    fa['routes'].append({'path': m.group(1), 'method': m.group(2)})
+                for m in re.finditer(r'import\s+([\w/]+)', content):
+                    fa['imports'].append(m.group(1))
+                for b in KNOWN_BUILTINS:
+                    if b + '(' in content:
+                        fa['builtins_used'].append(b)
+                for m in re.finditer(r'CREATE TABLE (?:IF NOT EXISTS )?(\w+)', content):
+                    fa['tables'].append(m.group(1))
+
+            elif ext == '.py':
+                for m in re.finditer(r'def\s+(\w+)\(', content):
+                    fa['patterns'].append({'name': m.group(1), 'args': '', 'returns': ''})
+                for m in re.finditer(r"@\w+\.route\(['\"]([^'\"]+)", content):
+                    fa['routes'].append({'path': m.group(1), 'method': 'GET/POST'})
+
+            analysis.append(fa)
+
+    total_patterns = sum(len(f['patterns']) for f in analysis)
+    total_routes = sum(len(f['routes']) for f in analysis)
+    total_imports = sum(len(f['imports']) for f in analysis)
+    summary = (f"ANALYZE COMPLETE\n  Files: {len(analysis)} | "
+               f"Patterns: {total_patterns} | Routes: {total_routes} | Imports: {total_imports}")
+
+    return jsonify({'summary': summary, 'analysis': analysis})
+
+
+@app.get("/admin-ua/review")
+def admin_ua_review():
+    """Reviewer: orphans, bugs, security, architecture checks."""
+    office_dir = Path('/office')
+    findings = []
+
+    all_mlog = {}
+    all_patterns = {}
+    called_patterns = set()
+    imported_files = set()
+
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            if fpath.suffix != '.mlog':
+                continue
+            rel = str(fpath.relative_to(office_dir))
+            try:
+                content = fpath.read_text(errors='ignore')
+            except Exception:
+                continue
+            all_mlog[rel] = content
+
+            for m in re.finditer(r'pattern\s+(\w+)\(', content):
+                all_patterns[m.group(1)] = rel
+
+            for m in re.finditer(r'import\s+([\w/]+)', content):
+                imported_files.add(m.group(1) + '.mlog')
+
+            for pname in all_patterns:
+                if pname + '(' in content:
+                    called_patterns.add(pname)
+
+            if rel.startswith('dept/') and 'AuditLog' not in content and rel not in ('dept/utils.mlog', 'dept/context.mlog'):
+                findings.append({'severity': 'medium', 'category': 'ARCHITECTURE',
+                                 'file': rel, 'issue': 'No AuditLog calls — actions not logged',
+                                 'fix': 'Add AuditLog() after LLM calls'})
+
+    for f in all_mlog:
+        if f != 'app.mlog' and f not in imported_files and f not in ('file_cache.mlog', 'file_cache_skills.mlog'):
+            findings.append({'severity': 'low', 'category': 'ORPHAN',
+                             'file': f, 'issue': f'File not imported — possible dead code',
+                             'fix': 'Import in app.mlog or delete'})
+
+    entry_points = {'InitDB', 'Main', 'mlogserver'}
+    for pname, pfile in all_patterns.items():
+        if pname not in called_patterns and pname not in entry_points:
+            findings.append({'severity': 'low', 'category': 'ORPHAN',
+                             'file': pfile, 'issue': f'Pattern {pname}() defined but never called',
+                             'fix': 'Call it or remove'})
+
+    for f, content in all_mlog.items():
+        for m in re.finditer(r'route\s+"(/cron/[^"]+)"', content):
+            route_block = content[m.end():m.end() + 500]
+            if 'CRON_SECRET' not in route_block and 'secret' not in route_block.lower():
+                findings.append({'severity': 'high', 'category': 'SECURITY',
+                                 'file': f, 'issue': f'Route {m.group(1)} has no CRON_SECRET check',
+                                 'fix': 'Add secret validation'})
+
+    for f, content in all_mlog.items():
+        for m in re.finditer(r'contains\([^)]+\)\s*==\s*1\.0', content):
+            findings.append({'severity': 'medium', 'category': 'BUGS',
+                             'file': f, 'issue': 'contains() returns Bool, == 1.0 is type mismatch',
+                             'fix': 'Use: if contains(...) then { }'})
+
+    high = len([f for f in findings if f['severity'] == 'high'])
+    medium = len([f for f in findings if f['severity'] == 'medium'])
+    low = len([f for f in findings if f['severity'] == 'low'])
+    score = max(1, round(10 - high * 2 - medium * 0.5 - low * 0.1, 1))
+    summary = f"REVIEW COMPLETE\n  Findings: {len(findings)} (high={high}, medium={medium}, low={low})\n  Health: {score}/10"
+
+    return jsonify({'summary': summary, 'findings': findings, 'health_score': score})
+
+
+@app.get("/admin-ua/impact")
+def admin_ua_impact():
+    """Differ: impact analysis for a file."""
+    file_path = request.args.get('file', '')
+    if not file_path:
+        return jsonify({'error': 'Missing ?file= parameter', 'dependents': [], 'risk': 'unknown'})
+
+    office_dir = Path('/office')
+    dependents = []
+    target_module = file_path.replace('.mlog', '').replace('/', '')
+
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            if fpath.suffix != '.mlog':
+                continue
+            rel = str(fpath.relative_to(office_dir))
+            if rel == file_path:
+                continue
+            try:
+                content = fpath.read_text(errors='ignore')
+            except Exception:
+                continue
+            if f'import {target_module}' in content or f'import dept/{target_module}' in content:
+                dependents.append({'file': rel, 'relation': 'imports'})
+
+    risk = 'low'
+    if len(dependents) > 5 or file_path == 'app.mlog':
+        risk = 'high'
+    elif len(dependents) > 2:
+        risk = 'medium'
+
+    summary = f"Impact Analysis: {file_path}\n  Risk: {risk} | Dependents: {len(dependents)}\n"
+    for d in dependents:
+        summary += f"  {d['file']} ({d['relation']})\n"
+
+    return jsonify({'summary': summary, 'file': file_path, 'dependents': dependents,
+                    'risk': risk, 'dependent_count': len(dependents)})
+
+
+@app.get("/admin-ua/docs")
+def admin_ua_docs():
+    """Documenter: auto-generate project structure and API reference."""
+    office_dir = Path('/office')
+    files_info = []
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            if fpath.suffix not in ('.mlog', '.py', '.txt', '.html'):
+                continue
+            rel = str(fpath.relative_to(office_dir))
+            try:
+                lines = len(fpath.read_text(errors='ignore').splitlines())
+            except Exception:
+                lines = 0
+            files_info.append({'path': rel, 'lines': lines})
+    files_info.sort(key=lambda x: x['path'])
+
+    structure = f"# Fosved Office v2 — Структура проекта\n\n**{len(files_info)} файлов**\n\n"
+    for f in files_info:
+        structure += f"- `{f['path']}` — {f['lines']} строк\n"
+
+    api = "# API Reference\n\n"
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            if fpath.suffix not in ('.mlog', '.py'):
+                continue
+            try:
+                content = fpath.read_text(errors='ignore')
+            except Exception:
+                continue
+            rel = str(fpath.relative_to(office_dir))
+            if fpath.suffix == '.mlog':
+                for m in re.finditer(r'route\s+"([^"]+)"\s+method=(\w+)', content):
+                    api += f"### `{m.group(2).upper()} {m.group(1)}`\nFile: `{rel}`\n\n"
+            elif fpath.suffix == '.py':
+                for m in re.finditer(r"@\w+\.route\(['\"]([^'\"]+)", content):
+                    api += f"### `{m.group(1)}`\nFile: `{rel}`\n\n"
+
+    return jsonify({'structure': structure, 'api': api})
+
+
+@app.get("/admin-ua/tour")
+def admin_ua_tour():
+    """Tour: guided architecture tour using all sub-agents."""
+    scan_data = admin_ua_scan().get_json(force=True)
+    review_data = admin_ua_review().get_json(force=True)
+
+    inv = scan_data.get('inventory', {})
+    findings = review_data.get('findings', [])
+    health = review_data.get('health_score', '?')
+
+    tour = f"Guided Tour по Fosved Office v2\n\n"
+    tour += f"Офис: {inv.get('total_files', 0)} файлов ({inv.get('total_lines', 0):,} строк)\n\n"
+
+    top_files = sorted(inv.get('files', []), key=lambda x: x['lines'], reverse=True)[:5]
+    tour += "Ключевые файлы:\n"
+    for f in top_files:
+        tour += f"  {f['path']} — {f['lines']} строк ({f['size_kb']} KB)\n"
+
+    tour += f"\nCode health: {health}/10\n"
+
+    high_f = [f for f in findings if f['severity'] == 'high'][:3]
+    med_f = [f for f in findings if f['severity'] == 'medium'][:3]
+    if high_f:
+        tour += f"\n🔴 High severity ({len(high_f)}):\n"
+        for f in high_f:
+            tour += f"  [{f['category']}] {f['file']}: {f['issue']}\n"
+    if med_f:
+        tour += f"\n🟡 Medium ({len(med_f)}):\n"
+        for f in med_f:
+            tour += f"  [{f['category']}] {f['file']}: {f['issue']}\n"
+
+    return jsonify({'tour': tour})
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  MINI APP SPA — STATIC FILE SERVING
 # ══════════════════════════════════════════════════════════════════════
 

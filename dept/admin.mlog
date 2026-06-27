@@ -446,11 +446,49 @@ pattern AdminFix(bug_description: String, chat_id: String) -> String {
   return narad_id
 }
 
-// ── /admin analyze ─────────────────────────────────────────────────
+// ── /admin analyze — full 6-subagent UA analysis ────────────────────
 pattern AdminAnalyze() -> String {
-  let _ = AuditLog("admin_analyze", "admin", "full code audit started")
-  let result = AdminCodeAudit()
+  let _ = AuditLog("admin_analyze", "admin", "UA full analysis started")
+
+  // Call Python endpoints via http_get to port 4000
+  let scan_result = http_get("http://127.0.0.1:4000/admin-ua/scan")
+  let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
+
+  let scan_summary = json_get(parse_json(scan_result), "summary", "Scan failed")
+  let review_summary = json_get(parse_json(review_result), "summary", "Review failed")
+  let health = json_get(parse_json(review_result), "health_score", "?")
+
+  let result = "UA Analysis Complete\n\n" + scan_summary + "\n" + review_summary + "\nHealth: " + to_string(health) + "/10"
+
+  let _ = AuditLog("admin_analyze", "admin", "UA analysis complete")
   return result
+}
+
+// ── /admin scan — quick file inventory ─────────────────────────────
+pattern AdminScan() -> String {
+  let _ = AuditLog("admin_scan", "admin", "UA scan started")
+  let result = http_get("http://127.0.0.1:4000/admin-ua/scan")
+  let summary = json_get(parse_json(result), "summary", "Scan failed")
+  let _ = AuditLog("admin_scan", "admin", "UA scan done")
+  return summary
+}
+
+// ── /admin tour — guided architecture tour ─────────────────────────
+pattern AdminTour() -> String {
+  let _ = AuditLog("admin_tour", "admin", "UA tour started")
+  let result = http_get("http://127.0.0.1:4000/admin-ua/tour")
+  let tour = json_get(parse_json(result), "tour", "Tour failed")
+  let _ = AuditLog("admin_tour", "admin", "UA tour done")
+  return tour
+}
+
+// ── /admin docs — auto-documentation ──────────────────────────────
+pattern AdminDocs() -> String {
+  let _ = AuditLog("admin_docs", "admin", "UA docs started")
+  let result = http_get("http://127.0.0.1:4000/admin-ua/docs")
+  let structure = json_get(parse_json(result), "structure", "Docs failed")
+  let _ = AuditLog("admin_docs", "admin", "UA docs done")
+  return substring(structure, 0.0, 3000.0)
 }
 
 // ── /admin graph ────────────────────────────────────────────────────
@@ -507,21 +545,15 @@ pattern AdminReport() -> String {
   return "Last night report:\n\n" + substring(summary, 0, 2000)
 }
 
-// ── /admin health ─────────────────────────────────────────────────
+// ── /admin health — real health score from UA ──────────────────────
 pattern AdminHealth() -> String {
-  let files = list_dir("dept/")
-  let count = len(files)
-  let findings_open = query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open'", [])
-  let f_open = json_get(to_string(findings_open), "[0].cnt", "0")
+  let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
+  let health = json_get(parse_json(review_result), "health_score", "?")
+  let review_summary = json_get(parse_json(review_result), "summary", "")
 
-  let health = "Code health: 7.2/10\n"
-  let health = health + "Files: " + to_string(count) + " .mlog in dept/\n"
-  let health = health + "Tables: 22 created\n"
-  let health = health + "Open issues: " + f_open + "\n"
-  let health = health + "All systems: operational"
-
-  let _ = AuditLog("admin_health", "admin", "health viewed")
-
+  let health = "Code health: " + to_string(health) + "/10\n"
+  let health = health + review_summary
+  let _ = AuditLog("admin_health", "admin", "health=" + to_string(health))
   return health
 }
 
