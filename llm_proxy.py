@@ -2331,36 +2331,16 @@ if GITHUB_TOKEN:
 # Queries for GitHub scanning — tuned to Fosved's tech stack
 # Dates are dynamic: search repos updated/created in last 14 days
 def _build_github_queries():
-    """Build GitHub search queries. Uses real-world date (container clock may differ from GitHub)."""
-    from datetime import timedelta
-    # Get real date from GitHub API header, fallback to UTC
-    try:
-        probe = http_requests.get("https://api.github.com", timeout=5,
-                                   headers={"Accept": "application/vnd.github.v3+json"})
-        real_date_str = probe.headers.get("date", "")
-        if real_date_str:
-            # Parse RFC 1123 date: "Fri, 27 Jun 2026 07:00:00 GMT"
-            from email.utils import parsedate_to_datetime
-            real_now = parsedate_to_datetime(real_date_str)
-            log.info(f"GitHub probe OK, real date: {real_now.isoformat()[:10]}")
-        else:
-            real_now = datetime.utcnow()
-            log.warning("GitHub probe: no date header, using system clock")
-    except Exception as e:
-        real_now = datetime.utcnow()
-        log.warning(f"GitHub probe failed: {e}, using system clock")
-
-    since = (real_now - timedelta(days=14)).strftime("%Y-%m-%d")
-    since_month = (real_now - timedelta(days=30)).strftime("%Y-%m-%d")
+    """Build GitHub search queries for Fosved's tech stack."""
     return [
-        f"LLM agent framework language:python pushed:>{since} stars:>5",
-        f"telegram bot AI assistant pushed:>{since} stars:>3",
-        f"Rust DSL parser interpreter pushed:>{since} stars:>5",
-        f"SQLite agent memory persistent pushed:>{since_month} stars:>3",
-        f"multi-agent LLM office automation pushed:>{since} stars:>3",
-        f"RAG retrieval augmented python pushed:>{since} stars:>5",
-        f"mcp model context protocol tool pushed:>{since} stars:>5",
-        f"mem0 mem0ai agent memory pushed:>{since} stars:>10",
+        "LLM agent framework language:python stars:>10",
+        "telegram bot AI assistant python stars:>5",
+        "Rust DSL parser interpreter stars:>5",
+        "multi-agent LLM office automation stars:>3",
+        "RAG retrieval augmented python stars:>10",
+        "mcp model context protocol tool stars:>5",
+        "mem0 mem0ai agent memory stars:>5",
+        "Flask LLM proxy failover stars:>3",
     ]
 
 # Repos to watch for new releases
