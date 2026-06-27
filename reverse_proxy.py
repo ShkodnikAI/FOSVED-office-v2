@@ -66,28 +66,6 @@ def root():
     return "Fosved Office v2 alive"
 
 
-@app.route("/debug/logs", methods=["GET"])
-def debug_logs():
-    """Return mlog stderr/stdout for debugging container startup."""
-    logs = ""
-    for f in ["/tmp/mlog_stderr.log", "/tmp/mlog_stdout.log"]:
-        try:
-            with open(f) as fh:
-                content = fh.read()
-                if content.strip():
-                    logs += f"=== {f} ===\n{content}\n"
-        except Exception:
-            logs += f"=== {f} === (not found)\n"
-    # Also check if mlog process is running
-    import subprocess
-    try:
-        result = subprocess.run(["pgrep", "-a", "mlog"], capture_output=True, text=True, timeout=5)
-        logs += f"=== mlog processes ===\n{result.stdout or 'none'}\n"
-    except Exception:
-        pass
-    return Response(logs or "No debug logs found", content_type="text/plain")
-
-
 @app.route("/<path:path>", methods=["GET", "POST", "PUT", "DELETE"])
 def proxy(path):
     full_path = "/" + path
