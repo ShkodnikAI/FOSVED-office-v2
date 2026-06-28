@@ -245,16 +245,16 @@ def init_db():
     with db_lock:
         c = _db()
         c.executescript("""
-        CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, html TEXT, created TEXT, title TEXT, raw_text TEXT DEFAULT '');
-        CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created TEXT);
-        CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, rating INT, created TEXT);
-        CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT, model TEXT, tokens_in INT, tokens_out INT, cost REAL, dept TEXT, created TEXT);
-        CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, details TEXT, created TEXT);
-        CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, chat_id TEXT, role TEXT, content TEXT, created TEXT);
-        CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original TEXT, corrected TEXT, created TEXT, corr_type TEXT DEFAULT '');
-        CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, context TEXT, created TEXT);
-        CREATE TABLE IF NOT EXISTS system_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, value TEXT, updated TEXT);
-        CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT);
+        CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, title TEXT, query TEXT, raw_text TEXT DEFAULT '', html TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, period TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, provider TEXT, model TEXT, input_tokens TEXT, output_tokens TEXT, cost_usd TEXT, request_type TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT);
+        CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original_query TEXT, original_response TEXT, correction TEXT, corr_type TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')));
         """)
         c.commit(); c.close()
 
@@ -268,10 +268,9 @@ def _query(sql, params=(), fetch=False):
             rows = cur.fetchall(); c.close(); return rows
         c.commit(); c.close()
 
-def _log_audit(action, details_dict):
-    now = datetime.utcnow().isoformat()
-    _query("INSERT INTO audit_log (action,details,created) VALUES (?,?,?)",
-           (action, json.dumps(details_dict, ensure_ascii=False), now))
+def _log_audit(action, details_dict, dept="system"):
+    _query("INSERT INTO audit_log (action,actor,dept,details,status) VALUES (?,'proxy',?,?,'ok')",
+           (action, dept, json.dumps(details_dict, ensure_ascii=False)))
 
 # ──────────────────────────── HTML STRIP FOR ARCHIVE ────────────────────────────
 def strip_html_for_archive(html_content):
@@ -356,10 +355,10 @@ def call_llm(dept, messages, model_override=None):
             costs = TOKEN_COSTS.get(prov_name, {"input": 1, "output": 1})
             cost = t_in * costs["input"] / 1_000_000 + t_out * costs["output"] / 1_000_000
             now = datetime.utcnow().isoformat()
-            _query("INSERT INTO token_usage (provider,model,tokens_in,tokens_out,cost,dept,created) VALUES (?,?,?,?,?,?,?)",
+            _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
                    (prov_name, use_model, t_in, t_out, round(cost, 6), dept, now))
-            _query("INSERT INTO audit_log (action,details,created) VALUES (?,?,?)",
-                   ("llm_call", json.dumps({"dept": dept, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out}), now))
+            _query("INSERT INTO audit_log (action,actor,dept,details,status) VALUES (?,'proxy',?,?,'ok')",
+                   ("llm_call", dept, json.dumps({"dept": dept, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out})))
             log.info(f"LLM ok: provider={prov_name} model={use_model} dept={dept} t_in={t_in} t_out={t_out}")
             return {"reply": reply, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out}
         except Exception as e:
@@ -457,7 +456,7 @@ def _memorize(dept, topic, content):
     """Save a finding to dialog_history as a system memorization entry."""
     now = datetime.utcnow().isoformat()
     entry = f"[MEMORY] {topic}: {content}"
-    _query("INSERT INTO dialog_history (dept, chat_id, role, content, created) VALUES (?, '0', 'system', ?, ?)",
+    _query("INSERT INTO dialog_history (dept, chat_id, role, content, created_at) VALUES (?, '0', 'system', ?, ?)",
            (dept, entry, now))
 
 # ──────────────────────────── HTML HELPERS ────────────────────────────
@@ -501,9 +500,9 @@ def _status_icon(level):
 def _dept_kpis(dept):
     now = datetime.utcnow()
     week_ago = (now - timedelta(days=7)).isoformat()
-    rows_m = _query("SELECT COUNT(*) as c, COALESCE(AVG(rating),0) as avg_r FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
-    rows_t = _query("SELECT COALESCE(SUM(tokens_in),0) as ti, COALESCE(SUM(tokens_out),0) as to2 FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
-    rows_d = _query("SELECT COUNT(*) as c FROM dialog_history WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+    rows_m = _query("SELECT COUNT(*) as c, COALESCE(AVG(CAST(metric_value AS REAL)),0) as avg_r FROM dept_metrics WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
+    rows_t = _query("SELECT COALESCE(SUM(input_tokens),0) as ti, COALESCE(SUM(output_tokens),0) as to2 FROM token_usage WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
+    rows_d = _query("SELECT COUNT(*) as c FROM dialog_history WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
     m = rows_m[0] if rows_m else {"c": 0, "avg_r": 0}
     t = rows_t[0] if rows_t else {"ti": 0, "to2": 0}
     d = rows_d[0] if rows_d else {"c": 0}
@@ -543,17 +542,17 @@ def ask():
 def rate_cmd():
     d = request.get_json(force=True)
     dept, rating = d.get("dept", "yana"), d.get("rating", 0)
-    _query("INSERT INTO dept_metrics (dept,rating,created) VALUES (?,?,?)", (dept, rating, datetime.utcnow().isoformat()))
+    _query("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES (?,'satisfaction',?,?,?)", (dept, str(rating), 'daily', datetime.utcnow().isoformat()))
     return jsonify({"status": "ok"})
 
 @app.post("/context_cmd")
 def context_cmd():
     d = request.get_json(force=True)
     dept, chat_id = d.get("dept", "yana"), d.get("chat_id", "0")
-    rows = _query("SELECT role,content,created FROM dialog_history WHERE dept=? AND chat_id=? ORDER BY id DESC LIMIT 20", (dept, chat_id), fetch=True)
-    corrs = _query("SELECT original,corrected,created FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 10", (dept,), fetch=True)
-    ctx = {"dialog": [{"role": r["role"], "content": r["content"], "ts": r["created"]} for r in reversed(rows)]}
-    ctx["corrections"] = [{"original": r["original"], "corrected": r["corrected"], "ts": r["created"]} for r in corrs]
+    rows = _query("SELECT role,content,created_at FROM dialog_history WHERE dept=? AND chat_id=? ORDER BY id DESC LIMIT 20", (dept, chat_id), fetch=True)
+    corrs = _query("SELECT original_query,correction,created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 10", (dept,), fetch=True)
+    ctx = {"dialog": [{"role": r["role"], "content": r["content"], "ts": r["created_at"]} for r in reversed(rows)]}
+    ctx["corrections"] = [{"original": r["original_query"], "corrected": r["correction"], "ts": r["created_at"]} for r in corrs]
     return jsonify(ctx)
 
 @app.post("/voice-set")
@@ -570,7 +569,7 @@ def archive_digest():
 
 @app.get("/miniapp/<doc_id>")
 def miniapp_get(doc_id):
-    rows = _query("SELECT html,title,created,dept,raw_text FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
+    rows = _query("SELECT html,title,created_at,dept,raw_text FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
     if not rows:
         return "<h1>Not found</h1>", 404
     r = rows[0]
@@ -591,7 +590,7 @@ def miniapp_get(doc_id):
             c = DEPT_COLORS.get(dept, DEPT_COLORS["admin"])
             name = DEPT_NAMES.get(dept, dept)
             title = r.get("title", "") or doc_id
-            created = r.get("created", "")
+            created = r.get("created_at", "")
             disclaimer = ""
             if dept == "finance":
                 disclaimer = '<div class="disclaimer-rich">Не является финансовой консультацией. Обратитесь к лицензированному специалисту.</div>'
@@ -619,7 +618,7 @@ body {{ font-family:'DM Sans',sans-serif; color:#1e293b; background:#F8F7F4; mar
 @app.post("/miniapp/note")
 def miniapp_note():
     d = request.get_json(force=True)
-    _query("INSERT INTO miniapp_notes (doc_id,note_text,created) VALUES (?,?,?)",
+    _query("INSERT INTO miniapp_notes (doc_id,note_text,created_at) VALUES (?,?,?)",
            (d.get("doc_id", ""), d.get("note_text", ""), datetime.utcnow().isoformat()))
     return jsonify({"status": "ok"})
 
@@ -666,7 +665,7 @@ def dept_dashboard(slug):
     dept = slug.lower()
     if dept not in DEPT_NAMES:
         return "<h1>Unknown department</h1>", 404
-    rows_corr = _query("SELECT original,corrected,created FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
+    rows_corr = _query("SELECT original_query,correction,created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
     override = _cfg_cache["overrides"].get(dept, "default")
     html = _html_base(f"Dashboard — {DEPT_NAMES[dept]}")
     html += _dept_header(dept)
@@ -675,7 +674,7 @@ def dept_dashboard(slug):
     if rows_corr:
         html += '<table><tr><th>Original</th><th>Korrektirovka</th><th>Data</th></tr>'
         for r in rows_corr:
-            html += f'<tr><td>{r["original"][:80]}</td><td>{r["corrected"][:80]}</td><td class="mono">{r["created"][:16]}</td></tr>'
+            html += f'<tr><td>{r["original_query"][:80]}</td><td>{r["correction"][:80]}</td><td class="mono">{r["created_at"][:16]}</td></tr>'
         html += '</table>'
     else:
         html += '<p style="color:#666">Net korrektirovok</p>'
@@ -692,10 +691,10 @@ def office_dashboard():
     today = now.isoformat()[:10]
     week_ago = (now - timedelta(days=7)).isoformat()
     month_ago = (now - timedelta(days=30)).isoformat()
-    r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (today,), fetch=True)
-    r_week = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (week_ago,), fetch=True)
-    r_month = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (month_ago,), fetch=True)
-    r_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (month_ago,), fetch=True)
+    r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created_at>=?", (today,), fetch=True)
+    r_week = _query("SELECT COUNT(*) as c FROM token_usage WHERE created_at>=?", (week_ago,), fetch=True)
+    r_month = _query("SELECT COUNT(*) as c FROM token_usage WHERE created_at>=?", (month_ago,), fetch=True)
+    r_cost = _query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=?", (month_ago,), fetch=True)
     n_today = r_today[0]["c"] if r_today else 0
     n_week = r_week[0]["c"] if r_week else 0
     n_month = r_month[0]["c"] if r_month else 0
@@ -714,8 +713,8 @@ def office_dashboard():
     depts = [d for d in DEPT_NAMES if d != "admin"]
     for dept in depts:
         c = DEPT_COLORS[dept]
-        r_d = _query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
-        r_m = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+        r_d = _query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
+        r_m = _query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
         calls = r_d[0]["c"] if r_d else 0
         rating = r_m[0]["a"] if r_m else 0
         level = "high" if calls > 10 else "medium" if calls > 0 else "low"
@@ -727,14 +726,14 @@ def office_dashboard():
 <a href="/dept-dashboard/{dept}" style="font-size:0.75rem;display:inline-block;margin-top:8px">Otkryt -&gt;</a></div>"""
     html += '</div></div>'
 
-    audit_rows = _query("SELECT action,details,created FROM audit_log ORDER BY id DESC LIMIT 10", fetch=True)
+    audit_rows = _query("SELECT action,details,timestamp FROM audit_log ORDER BY id DESC LIMIT 10", fetch=True)
     html += '<div class="section"><h2>Zhurnal</h2><table><tr><th>Deistvie</th><th>Detali</th><th>Vremya</th></tr>'
     for r in audit_rows:
         det = r["details"][:100] if r["details"] else ""
-        html += f'<tr><td class="mono">{r["action"]}</td><td style="color:#999;font-size:0.8rem">{det}</td><td class="mono" style="font-size:0.8rem">{r["created"][:19]}</td></tr>'
+        html += f'<tr><td class="mono">{r["action"]}</td><td style="color:#999;font-size:0.8rem">{det}</td><td class="mono" style="font-size:0.8rem">{r["timestamp"][:19]}</td></tr>'
     html += '</table></div>'
 
-    prov_rows = _query("SELECT provider,COUNT(*) as c,COALESCE(SUM(cost),0) as cost FROM token_usage WHERE created>=? GROUP BY provider", (month_ago,), fetch=True)
+    prov_rows = _query("SELECT provider,COUNT(*) as c,COALESCE(SUM(cost_usd),0) as cost FROM token_usage WHERE created_at>=? GROUP BY provider", (month_ago,), fetch=True)
     html += '<div class="section"><h2>Providery (mesyats)</h2><table><tr><th>Provider</th><th>Vyzovy</th><th>Stoimost</th></tr>'
     for r in prov_rows:
         html += f'<tr><td class="mono gold">{r["provider"]}</td><td>{r["c"]}</td><td class="mono">${r["cost"]:.2f}</td></tr>'
@@ -938,9 +937,9 @@ def archive_daily_digest():
         today_start = today + "T00:00:00"
 
         # Collect today's stats
-        tasks_rows = _query("SELECT dept, COUNT(*) as c FROM dialog_history WHERE created>=? AND role='user' GROUP BY dept", (today_start,), fetch=True)
-        reports_rows = _query("SELECT dept, COUNT(*) as c FROM miniapp_responses WHERE created>=? GROUP BY dept", (today_start,), fetch=True)
-        corrections_rows = _query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created>=? GROUP BY dept", (today_start,), fetch=True)
+        tasks_rows = _query("SELECT dept, COUNT(*) as c FROM dialog_history WHERE created_at>=? AND role='user' GROUP BY dept", (today_start,), fetch=True)
+        reports_rows = _query("SELECT dept, COUNT(*) as c FROM miniapp_responses WHERE created_at>=? GROUP BY dept", (today_start,), fetch=True)
+        corrections_rows = _query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created_at>=? GROUP BY dept", (today_start,), fetch=True)
 
         # Build digest text
         lines = []
@@ -989,17 +988,17 @@ def archive_daily_digest():
 
 def _collect_metrics_for_period(start_iso, end_iso=None):
     """Collect metrics for a given time period."""
-    conditions = "created >= ?"
+    conditions = "created_at >= ?"
     params = [start_iso]
     if end_iso:
-        conditions += " AND created < ?"
+        conditions += " AND created_at < ?"
         params.append(end_iso)
 
     tasks = _query(f"SELECT dept, COUNT(*) as c FROM dialog_history WHERE {conditions} AND role='user' GROUP BY dept", params, fetch=True)
     reports = _query(f"SELECT dept, COUNT(*) as c FROM miniapp_responses WHERE {conditions} GROUP BY dept", params, fetch=True)
     corrections = _query(f"SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE {conditions} GROUP BY dept", params, fetch=True)
-    ratings = _query(f"SELECT dept, COALESCE(AVG(rating),0) as avg_r, COUNT(*) as c FROM dept_metrics WHERE {conditions} GROUP BY dept", params, fetch=True)
-    tokens = _query(f"SELECT dept, COALESCE(SUM(tokens_in),0) as ti, COALESCE(SUM(tokens_out),0) as to2, COALESCE(SUM(cost),0) as cost FROM token_usage WHERE {conditions} GROUP BY dept", params, fetch=True)
+    ratings = _query(f"SELECT dept, COALESCE(AVG(CAST(metric_value AS REAL)),0) as avg_r, COUNT(*) as c FROM dept_metrics WHERE {conditions} GROUP BY dept", params, fetch=True)
+    tokens = _query(f"SELECT dept, COALESCE(SUM(input_tokens),0) as ti, COALESCE(SUM(output_tokens),0) as to2, COALESCE(SUM(cost_usd),0) as cost FROM token_usage WHERE {conditions} GROUP BY dept", params, fetch=True)
 
     return {
         "tasks": {r["dept"]: r["c"] for r in tasks},
@@ -1265,18 +1264,18 @@ def scheduler_self_learn():
     """Self-learning: call LLM to identify improvement areas and memorize findings."""
     try:
         # Get recent corrections and error patterns for context
-        corrs = _query("SELECT dept, original, corrected, created FROM adapt_corrections ORDER BY id DESC LIMIT 20", fetch=True)
-        patterns = _query("SELECT dept, error_type, context, created FROM error_patterns ORDER BY id DESC LIMIT 20", fetch=True)
+        corrs = _query("SELECT dept, original_query, correction, created_at FROM adapt_corrections ORDER BY id DESC LIMIT 20", fetch=True)
+        patterns = _query("SELECT dept, error_type, query_text, created_at FROM error_patterns ORDER BY id DESC LIMIT 20", fetch=True)
 
         context_parts = []
         if corrs:
             context_parts.append("Recent corrections:")
             for c in corrs[-10:]:
-                context_parts.append(f"  [{c['dept']}] {c['original'][:100]} -> {c['corrected'][:100]}")
+                context_parts.append(f"  [{c['dept']}] {c['original_query'][:100]} -> {c['correction'][:100]}")
         if patterns:
             context_parts.append("\nRecent error patterns:")
             for p in patterns[-10:]:
-                context_parts.append(f"  [{p['dept']}] {p['error_type']}: {p['context'][:100]}")
+                context_parts.append(f"  [{p['dept']}] {p['error_type']}: {p['query_text'][:100]}")
 
         context = "\n".join(context_parts) if context_parts else "No recent data available."
 
@@ -1343,11 +1342,11 @@ def learning_fix():
         now = datetime.utcnow().isoformat()
 
         # Save to error_patterns table
-        _query("INSERT INTO error_patterns (dept, error_type, context, created) VALUES (?,?,?,?)",
+        _query("INSERT INTO error_patterns (dept, error_type, query_text, created_at) VALUES (?,?,?,?)",
                (dept, error_type, text[:2000], now))
 
         # Save to adapt_corrections table
-        _query("INSERT INTO adapt_corrections (dept, original, corrected, created, corr_type) VALUES (?,?,?,?,?)",
+        _query("INSERT INTO adapt_corrections (dept, original_query, correction, created_at, corr_type) VALUES (?,?,?,?,?)",
                (dept, text[:2000], suggestion[:2000], now, error_type))
 
         _log_audit("learning_fix", {"dept": dept, "error_type": error_type, "text_len": len(text)})
@@ -1371,7 +1370,7 @@ def learning_good():
         return jsonify({"status": "error", "message": "query and response are required"}), 400
 
     now = datetime.utcnow().isoformat()
-    _query("INSERT INTO adapt_corrections (dept, original, corrected, created, corr_type) VALUES (?,?,?,?,?)",
+    _query("INSERT INTO adapt_corrections (dept, original_query, correction, created_at, corr_type) VALUES (?,?,?,?,?)",
            (dept, query[:2000], response[:2000], now, "positive"))
 
     _log_audit("learning_good", {"dept": dept, "query_len": len(query), "response_len": len(response)})
@@ -1386,7 +1385,7 @@ def learning_stats():
         week_ago = (now - timedelta(days=7)).isoformat()
 
         # Corrections count (7d)
-        corr_rows = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created>=? AND corr_type != 'positive'", (week_ago,), fetch=True)
+        corr_rows = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at>=? AND corr_type != 'positive'", (week_ago,), fetch=True)
         corrections_7d = corr_rows[0]["c"] if corr_rows else 0
 
         # Positive examples count
@@ -1400,7 +1399,7 @@ def learning_stats():
             error_breakdown[r["error_type"]] = r["c"]
 
         # Per-dept corrections (7d)
-        dept_rows = _query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created>=? AND corr_type != 'positive' GROUP BY dept ORDER BY c DESC", (week_ago,), fetch=True)
+        dept_rows = _query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created_at>=? AND corr_type != 'positive' GROUP BY dept ORDER BY c DESC", (week_ago,), fetch=True)
         dept_corrections = {}
         for r in dept_rows:
             dept_corrections[r["dept"]] = r["c"]
@@ -1425,7 +1424,7 @@ def learning_debrief():
 
     try:
         # Get recent corrections for department
-        corrs = _query("SELECT original, corrected, corr_type, created FROM adapt_corrections WHERE dept=? AND corr_type != 'positive' ORDER BY id DESC LIMIT 20", (dept,), fetch=True)
+        corrs = _query("SELECT original_query, correction, corr_type, created_at FROM adapt_corrections WHERE dept=? AND corr_type != 'positive' ORDER BY id DESC LIMIT 20", (dept,), fetch=True)
 
         if not corrs:
             return jsonify({"status": "ok", "analysis": "No corrections found for this department."})
@@ -1433,7 +1432,7 @@ def learning_debrief():
         # Format corrections for LLM analysis
         corr_text_parts = []
         for c in corrs:
-            corr_text_parts.append(f"[{c['corr_type']}] {c['original'][:200]} -> {c['corrected'][:200]} ({c['created'][:10]})")
+            corr_text_parts.append(f"[{c['corr_type']}] {c['original_query'][:200]} -> {c['correction'][:200]} ({c['created_at'][:10]})")
         corr_text = "\n".join(corr_text_parts)
 
         dept_prompt = get_dept_prompt(dept)
@@ -1465,14 +1464,14 @@ def audit_recent():
         limit = request.args.get("limit", 20, type=int)
         limit = min(limit, 200)
 
-        rows = _query("SELECT id, action, details, created FROM audit_log ORDER BY id DESC LIMIT ?", (limit,), fetch=True)
+        rows = _query("SELECT id, action, details, timestamp FROM audit_log ORDER BY id DESC LIMIT ?", (limit,), fetch=True)
 
         entries = []
         for r in rows:
             entry = {
                 "id": r["id"],
                 "action": r["action"],
-                "created": r["created"],
+                "created": r["timestamp"],
             }
             try:
                 entry["details"] = json.loads(r["details"]) if r["details"] else {}
@@ -1502,7 +1501,7 @@ def search_endpoint():
     try:
         search_term = f"%{query}%"
         rows = _query(
-            "SELECT id, dept, title, created FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) ORDER BY id DESC LIMIT 50",
+            "SELECT id, dept, title, created_at FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) ORDER BY id DESC LIMIT 50",
             (search_term, search_term),
             fetch=True
         )
@@ -1513,7 +1512,7 @@ def search_endpoint():
                 "id": r["id"],
                 "dept": r["dept"],
                 "title": r["title"],
-                "created": r["created"],
+                "created": r["created_at"],
             })
 
         return jsonify({"status": "ok", "results": results, "count": len(results)})
@@ -1630,7 +1629,7 @@ Requirements:
         costs = TOKEN_COSTS.get(used_provider, {"input": 1, "output": 1})
         cost = t_in * costs["input"] / 1_000_000 + t_out * costs["output"] / 1_000_000
         now = datetime.utcnow().isoformat()
-        _query("INSERT INTO token_usage (provider,model,tokens_in,tokens_out,cost,dept,created) VALUES (?,?,?,?,?,?,?)",
+        _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
                (used_provider, used_model, t_in, t_out, round(cost, 6), dept, now))
 
         _log_audit("lz_deep_research", {
@@ -1696,11 +1695,11 @@ def api_dashboard():
         week_ago = (now - timedelta(days=7)).isoformat()
         month_ago = (now - timedelta(days=30)).isoformat()
 
-        r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (today,), fetch=True)
-        r_week = _query("SELECT COUNT(*) as c FROM dialog_history WHERE created>=?", (week_ago,), fetch=True)
-        r_cost_today = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (today,), fetch=True)
-        r_cost_month = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (month_ago,), fetch=True)
-        r_reports_today = _query("SELECT COUNT(*) as c FROM miniapp_responses WHERE created>=?", (today,), fetch=True)
+        r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created_at>=?", (today,), fetch=True)
+        r_week = _query("SELECT COUNT(*) as c FROM dialog_history WHERE created_at>=?", (week_ago,), fetch=True)
+        r_cost_today = _query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=?", (today,), fetch=True)
+        r_cost_month = _query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=?", (month_ago,), fetch=True)
+        r_reports_today = _query("SELECT COUNT(*) as c FROM miniapp_responses WHERE created_at>=?", (today,), fetch=True)
 
         tasks_today = r_today[0]["c"] if r_today else 0
         tasks_week = r_week[0]["c"] if r_week else 0
@@ -1709,7 +1708,7 @@ def api_dashboard():
         reports_today = r_reports_today[0]["c"] if r_reports_today else 0
 
         # Average rating
-        r_avg = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE created>=?", (week_ago,), fetch=True)
+        r_avg = _query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE created_at>=?", (week_ago,), fetch=True)
         avg_rating = r_avg[0]["a"] if r_avg else 0
 
         kpis = {
@@ -1722,8 +1721,8 @@ def api_dashboard():
         dept_cards = []
         for dept in [d for d in DEPT_NAMES if d != "admin"]:
             c = DEPT_COLORS.get(dept, DEPT_COLORS["admin"])
-            r_d = _query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
-            r_m = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+            r_d = _query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
+            r_m = _query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
             calls = r_d[0]["c"] if r_d else 0
             rating = r_m[0]["a"] if r_m else 0
             status = "active" if calls > 5 else "idle" if calls > 0 else "inactive"
@@ -1763,10 +1762,10 @@ def api_dept(slug):
         now = datetime.utcnow()
         week_ago = (now - timedelta(days=7)).isoformat()
 
-        r_tasks = _query("SELECT COUNT(*) as c FROM dialog_history WHERE dept=? AND created>=? AND role='user'", (dept, week_ago), fetch=True)
-        r_rating = _query("SELECT COALESCE(AVG(rating),0) as a FROM dept_metrics WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
-        r_tokens = _query("SELECT COALESCE(SUM(tokens_in),0)+COALESCE(SUM(tokens_out),0) as t FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
-        r_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE dept=? AND created>=?", (dept, week_ago), fetch=True)
+        r_tasks = _query("SELECT COUNT(*) as c FROM dialog_history WHERE dept=? AND created_at>=? AND role='user'", (dept, week_ago), fetch=True)
+        r_rating = _query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
+        r_tokens = _query("SELECT COALESCE(SUM(input_tokens),0)+COALESCE(SUM(output_tokens),0) as t FROM token_usage WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
+        r_cost = _query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE dept=? AND created_at>=?", (dept, week_ago), fetch=True)
 
         kpis = {
             "tasks": r_tasks[0]["c"] if r_tasks else 0,
@@ -1776,12 +1775,12 @@ def api_dept(slug):
         }
 
         # Recent tasks
-        recent = _query("SELECT content, created FROM dialog_history WHERE dept=? AND role='user' ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
-        tasks = [{"text": r["content"][:100], "created": r["created"][:16]} for r in recent]
+        recent = _query("SELECT content, created_at FROM dialog_history WHERE dept=? AND role='user' ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
+        tasks = [{"text": r["content"][:100], "created": r["created_at"][:16]} for r in recent]
 
         # Corrections
-        corrs = _query("SELECT original, corrected, created FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
-        corrections = [{"original": r["original"][:80], "corrected": r["corrected"][:80], "created": r["created"][:10]} for r in corrs]
+        corrs = _query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", (dept,), fetch=True)
+        corrections = [{"original": r["original_query"][:80], "corrected": r["correction"][:80], "created": r["created_at"][:10]} for r in corrs]
 
         # Skills
         skills_idx = CFG_DIR / f"../skills_index/{dept}.txt"
@@ -1829,8 +1828,8 @@ def api_models():
                 continue
             seen.add(prov_key)
 
-            r_calls = _query("SELECT COUNT(*) as c FROM token_usage WHERE provider=? AND created>=?", (prov_key, month_ago), fetch=True)
-            r_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE provider=? AND created>=?", (prov_key, month_ago), fetch=True)
+            r_calls = _query("SELECT COUNT(*) as c FROM token_usage WHERE provider=? AND created_at>=?", (prov_key, month_ago), fetch=True)
+            r_cost = _query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE provider=? AND created_at>=?", (prov_key, month_ago), fetch=True)
             calls = r_calls[0]["c"] if r_calls else 0
             cost = r_cost[0]["t"] if r_cost else 0
 
@@ -1853,9 +1852,9 @@ def api_models():
 
         # Today analytics
         today = now.isoformat()[:10]
-        r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created>=?", (today,), fetch=True)
-        r_today_cost = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (today,), fetch=True)
-        active_provs = _query("SELECT DISTINCT provider FROM token_usage WHERE created>=?", (today,), fetch=True)
+        r_today = _query("SELECT COUNT(*) as c FROM token_usage WHERE created_at>=?", (today,), fetch=True)
+        r_today_cost = _query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=?", (today,), fetch=True)
+        active_provs = _query("SELECT DISTINCT provider FROM token_usage WHERE created_at>=?", (today,), fetch=True)
 
         analytics = {
             "requests_today": r_today[0]["c"] if r_today else 0,
@@ -1880,15 +1879,15 @@ def api_economics():
         # Period costs
         periods = {}
         for label, start in [("today", today), ("week", week_ago), ("month", month_ago)]:
-            r = _query("SELECT COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=?", (start,), fetch=True)
+            r = _query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=?", (start,), fetch=True)
             periods[label] = round(r[0]["t"], 2) if r else 0
 
         # By dept (month)
-        dept_costs = _query("SELECT dept, COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=? GROUP BY dept ORDER BY t DESC", (month_ago,), fetch=True)
+        dept_costs = _query("SELECT dept, COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=? GROUP BY dept ORDER BY t DESC", (month_ago,), fetch=True)
         by_dept = [{"dept": r["dept"], "name": DEPT_NAMES.get(r["dept"], r["dept"]), "cost": round(r["t"], 2)} for r in dept_costs]
 
         # By provider (month)
-        prov_costs = _query("SELECT provider, COALESCE(SUM(cost),0) as t FROM token_usage WHERE created>=? GROUP BY provider ORDER BY t DESC", (month_ago,), fetch=True)
+        prov_costs = _query("SELECT provider, COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=? GROUP BY provider ORDER BY t DESC", (month_ago,), fetch=True)
         by_provider = [{"provider": r["provider"], "cost": round(r["t"], 2)} for r in prov_costs]
 
         # Budget
@@ -1947,18 +1946,18 @@ def api_archive():
         if q:
             search_term = f"%{q}%"
             if dept_filter:
-                rows = _query("SELECT id, dept, title, created FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) AND dept=? ORDER BY created DESC LIMIT 50",
+                rows = _query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) AND dept=? ORDER BY created_at DESC LIMIT 50",
                              (search_term, search_term, dept_filter), fetch=True)
             else:
-                rows = _query("SELECT id, dept, title, created FROM miniapp_responses WHERE raw_text LIKE ? OR title LIKE ? ORDER BY created DESC LIMIT 50",
+                rows = _query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE raw_text LIKE ? OR title LIKE ? ORDER BY created_at DESC LIMIT 50",
                              (search_term, search_term), fetch=True)
         else:
             if dept_filter:
-                rows = _query("SELECT id, dept, title, created FROM miniapp_responses WHERE dept=? ORDER BY created DESC LIMIT 50", (dept_filter,), fetch=True)
+                rows = _query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE dept=? ORDER BY created_at DESC LIMIT 50", (dept_filter,), fetch=True)
             else:
-                rows = _query("SELECT id, dept, title, created FROM miniapp_responses ORDER BY created DESC LIMIT 50", fetch=True)
+                rows = _query("SELECT id, dept, title, created_at FROM miniapp_responses ORDER BY created_at DESC LIMIT 50", fetch=True)
 
-        results = [{"id": r["id"], "dept": r["dept"], "title": r["title"], "created": r["created"][:16] if r["created"] else ""} for r in rows]
+        results = [{"id": r["id"], "dept": r["dept"], "title": r["title"], "created": r["created_at"][:16] if r["created_at"] else ""} for r in rows]
         return jsonify({"status": "ok", "results": results, "count": len(results)})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
