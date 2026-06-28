@@ -2091,6 +2091,122 @@ def admin_ua_analyze():
     return jsonify({'summary': summary, 'analysis': analysis})
 
 
+@app.get("/admin-ua/graph")
+def admin_ua_graph():
+    """Grapher: build knowledge graph from analysis data, save to SQLite."""
+    db_path = BASE_DIR / "data" / "fosved.db"
+    if not db_path.exists():
+        return jsonify({'summary': 'ERROR: database not found', 'nodes': 0, 'edges': 0})
+    conn = sqlite3.connect(str(db_path))
+    c = conn.cursor()
+
+    # Clear old graph
+    c.execute("DELETE FROM knowledge_graph")
+    c.execute("DELETE FROM knowledge_edges")
+
+    # Run analyzer internally
+    analyze_data = admin_ua_analyze().get_json(force=True)
+    analysis = analyze_data.get('analysis', [])
+
+    nodes_saved = 0
+    edges_saved = 0
+    now_ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+    for fa in analysis:
+        rel = fa['path']
+        # Node: file
+        c.execute(
+            "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ('file', rel, rel, f"{len(fa.get('patterns', []))} patterns, {len(fa.get('routes', []))} routes", now_ts))
+        nodes_saved += 1
+
+        # Nodes + edges: patterns
+        for p in fa.get('patterns', []):
+            pname = p.get('name', '')
+            if not pname:
+                continue
+            c.execute(
+                "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ('pattern', pname, rel, f"args={p.get('args', '')} returns={p.get('returns', '')}", now_ts))
+            nodes_saved += 1
+            c.execute(
+                "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (rel, pname, 'defines', rel, now_ts))
+            edges_saved += 1
+
+        # Nodes + edges: routes
+        for r in fa.get('routes', []):
+            rname = r.get('path', '')
+            if not rname:
+                continue
+            c.execute(
+                "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ('route', rname, rel, r.get('method', ''), now_ts))
+            nodes_saved += 1
+            c.execute(
+                "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (rel, rname, 'exposes', rel, now_ts))
+            edges_saved += 1
+
+        # Nodes + edges: tables
+        for t in fa.get('tables', []):
+            c.execute(
+                "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ('table', t, rel, 'CREATE TABLE', now_ts))
+            nodes_saved += 1
+            c.execute(
+                "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (rel, t, 'creates', rel, now_ts))
+            edges_saved += 1
+
+        # Edges: imports
+        for imp in fa.get('imports', []):
+            c.execute(
+                "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (rel, imp + '.mlog', 'imports', rel, now_ts))
+            edges_saved += 1
+
+        # Edges: builtins used
+        for b in fa.get('builtins_used', []):
+            c.execute(
+                "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (rel, b, 'calls_builtin', rel, now_ts))
+            edges_saved += 1
+
+    # Cross-file pattern calls: find which files call patterns from other files
+    pattern_to_file = {}
+    for fa in analysis:
+        for p in fa.get('patterns', []):
+            pname = p.get('name', '')
+            if pname:
+                pattern_to_file[pname] = fa['path']
+
+    for fa in analysis:
+        rel = fa['path']
+        for pname in pattern_to_file:
+            if pname == 'Main' or pname == 'InitDB' or pname == 'mlogserver':
+                continue
+            if pattern_to_file[pname] != rel:
+                try:
+                    fpath = (BASE_DIR / rel)
+                    if fpath.exists():
+                        content = fpath.read_text(errors='ignore')
+                        if pname + '(' in content:
+                            c.execute(
+                                "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
+                                (rel, pname, 'calls', rel, now_ts))
+                            edges_saved += 1
+                except Exception:
+                    pass
+
+    conn.commit()
+    conn.close()
+
+    summary = (f"GRAPH COMPLETE\n  Nodes: {nodes_saved} | Edges: {edges_saved}\n  "
+               f"Files analyzed: {len(analysis)}")
+    return jsonify({'summary': summary, 'nodes': nodes_saved, 'edges': edges_saved})
+
+
 @app.get("/admin-ua/review")
 def admin_ua_review():
     """Reviewer: orphans, bugs, security, architecture checks."""
@@ -2254,32 +2370,42 @@ def admin_ua_docs():
 
 @app.get("/admin-ua/tour")
 def admin_ua_tour():
-    """Tour: guided architecture tour using all sub-agents."""
+    """Tour: guided architecture tour using all 6 sub-agents."""
     scan_data = admin_ua_scan().get_json(force=True)
+    graph_data = admin_ua_graph().get_json(force=True)
     review_data = admin_ua_review().get_json(force=True)
 
     inv = scan_data.get('inventory', {})
     findings = review_data.get('findings', [])
     health = review_data.get('health_score', '?')
+    g_nodes = graph_data.get('nodes', 0)
+    g_edges = graph_data.get('edges', 0)
 
     tour = f"Guided Tour по Fosved Office v2\n\n"
-    tour += f"Офис: {inv.get('total_files', 0)} файлов ({inv.get('total_lines', 0):,} строк)\n\n"
+    tour += f"Офис: {inv.get('total_files', 0)} файлов ({inv.get('total_lines', 0):,} строк)\n"
+    tour += f"Knowledge graph: {g_nodes} nodes, {g_edges} edges\n\n"
 
     top_files = sorted(inv.get('files', []), key=lambda x: x['lines'], reverse=True)[:5]
     tour += "Ключевые файлы:\n"
     for f in top_files:
         tour += f"  {f['path']} — {f['lines']} строк ({f['size_kb']} KB)\n"
 
+    # Top dirs
+    by_dir = inv.get('by_dir', {})
+    tour += f"\nСтруктура: {len(by_dir)} директорий\n"
+    for d, cnt in sorted(by_dir.items(), key=lambda x: -x[1])[:6]:
+        tour += f"  {d}/ — {cnt} файлов\n"
+
     tour += f"\nCode health: {health}/10\n"
 
     high_f = [f for f in findings if f['severity'] == 'high'][:3]
     med_f = [f for f in findings if f['severity'] == 'medium'][:3]
     if high_f:
-        tour += f"\n🔴 High severity ({len(high_f)}):\n"
+        tour += f"\nHIGH severity ({len(high_f)}):\n"
         for f in high_f:
             tour += f"  [{f['category']}] {f['file']}: {f['issue']}\n"
     if med_f:
-        tour += f"\n🟡 Medium ({len(med_f)}):\n"
+        tour += f"\nMEDIUM ({len(med_f)}):\n"
         for f in med_f:
             tour += f"  [{f['category']}] {f['file']}: {f['issue']}\n"
 

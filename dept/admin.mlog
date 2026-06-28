@@ -1,6 +1,7 @@
 // Fosved Office v2 — Admin Dispatcher (MEGA-4)
-// 12 commands: status, build, fix, analyze, graph, impact, proposals, narads, rollback, report, health
-// Night cycle: 5 phases (graph → audit → metrics → autofix → proposals)
+// 12 commands: status, build, fix, analyze, scan, tour, docs, graph, impact, proposals, narads, rollback, report, health
+// Night cycle: 7 phases (scan → analyze → graph → review → metrics → autofix → proposals → docs → health)
+// UA 6 sub-agents: Scanner, Analyzer, Grapher, Reviewer, Differ, Documenter
 // Knowledge graph, code audit, autofix engine, proposal generator
 
 // ── Helper: Send message with inline buttons ────────────────────────
@@ -321,32 +322,51 @@ pattern AdminProposals() -> String {
   return reply
 }
 
-// ── Admin Night Cycle (5 phases) ───────────────────────────────────
+// ── Admin Night Cycle — UA 6-subagent + LLM phases ────────────────────
 pattern AdminNightCycle() -> String {
   let start_time = now()
   let _ = AuditLog("night_cycle_start", "admin", "night cycle started")
 
   let report = "NIGHT CYCLE REPORT\n\n"
 
-  // Phase 1: Knowledge Graph
-  let graph_result = BuildKnowledgeGraph()
-  let report = report + "Phase 1/5: Knowledge Graph\n" + graph_result + "\n\n"
+  // Phase 1: Scanner + Analyzer + Grapher (Python UA)
+  let scan_result = http_get("http://127.0.0.1:4000/admin-ua/scan")
+  let scan_summary = json_get(parse_json(scan_result), "summary", "Scanner failed")
+  let report = report + "Phase 1a/7: Scanner\n" + scan_summary + "\n\n"
 
-  // Phase 2: Code Audit
-  let code_issues = AdminCodeAudit()
-  let report = report + "Phase 2/5: Code Audit\n" + substring(code_issues, 0, 500) + "\n\n"
+  let analyze_result = http_get("http://127.0.0.1:4000/admin-ua/analyze")
+  let analyze_summary = json_get(parse_json(analyze_result), "summary", "Analyzer failed")
+  let report = report + "Phase 1b/7: Analyzer\n" + analyze_summary + "\n\n"
 
-  // Phase 3: Metrics Analysis
+  let graph_result = http_get("http://127.0.0.1:4000/admin-ua/graph")
+  let graph_summary = json_get(parse_json(graph_result), "summary", "Grapher failed")
+  let report = report + "Phase 1c/7: Grapher\n" + graph_summary + "\n\n"
+
+  // Phase 2: Reviewer (Python UA — orphans, security, bugs)
+  let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
+  let review_summary = json_get(parse_json(review_result), "summary", "Reviewer failed")
+  let health = json_get(parse_json(review_result), "health_score", "?")
+  let report = report + "Phase 2/7: Reviewer\n" + review_summary + "\n\n"
+
+  // Phase 3: Metrics Analysis (LLM-based)
   let metrics_result = AdminMetricsAnalysis()
-  let report = report + "Phase 3/5: Metrics Analysis\n" + substring(metrics_result, 0, 500) + "\n\n"
+  let report = report + "Phase 3/7: Metrics Analysis\n" + substring(metrics_result, 0, 500) + "\n\n"
 
-  // Phase 4: Autofix
-  let autofixes = AdminAutoFix(code_issues)
-  let report = report + "Phase 4/5: Autofix\n" + autofixes + "\n\n"
+  // Phase 4: Autofix (LLM-based, from review findings)
+  let autofixes = AdminAutoFix(review_summary)
+  let report = report + "Phase 4/7: Autofix\n" + autofixes + "\n\n"
 
-  // Phase 5: Proposals
+  // Phase 5: Proposals (LLM-based)
   let proposals = AdminProposals()
-  let report = report + "Phase 5/5: Proposals\n" + substring(proposals, 0, 500)
+  let report = report + "Phase 5/7: Proposals\n" + substring(proposals, 0, 500) + "\n\n"
+
+  // Phase 6: Documenter (Python UA)
+  let docs_result = http_get("http://127.0.0.1:4000/admin-ua/docs")
+  let docs_count = json_get(parse_json(docs_result), "structure", "")
+  let report = report + "Phase 6/7: Documenter\n" + substring(docs_count, 0, 300) + "\n\n"
+
+  // Phase 7: Health summary
+  let report = report + "Phase 7/7: Health\nCode health: " + to_string(health) + "/10"
 
   // Save report
   let duration = to_string(to_int(now() - start_time))
@@ -355,7 +375,7 @@ pattern AdminNightCycle() -> String {
   // Save for morning brief
   kv_set("admin_night_summary", report)
 
-  let _ = AuditLog("night_cycle_done", "admin", "completed in " + duration + "s")
+  let _ = AuditLog("night_cycle_done", "admin", "completed in " + duration + "s, health=" + to_string(health))
 
   return report
 }
@@ -448,19 +468,39 @@ pattern AdminFix(bug_description: String, chat_id: String) -> String {
 
 // ── /admin analyze — full 6-subagent UA analysis ────────────────────
 pattern AdminAnalyze() -> String {
-  let _ = AuditLog("admin_analyze", "admin", "UA full analysis started")
+  let _ = AuditLog("admin_analyze", "admin", "UA 6-subagent analysis started")
 
-  // Call Python endpoints via http_get to port 4000
+  // Sub-agent 1: Scanner (file inventory)
   let scan_result = http_get("http://127.0.0.1:4000/admin-ua/scan")
-  let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
+  let scan_summary = json_get(parse_json(scan_result), "summary", "Scanner failed")
 
-  let scan_summary = json_get(parse_json(scan_result), "summary", "Scan failed")
-  let review_summary = json_get(parse_json(review_result), "summary", "Review failed")
+  // Sub-agent 2: Analyzer (patterns, routes, imports)
+  let analyze_result = http_get("http://127.0.0.1:4000/admin-ua/analyze")
+  let analyze_summary = json_get(parse_json(analyze_result), "summary", "Analyzer failed")
+
+  // Sub-agent 3: Grapher (knowledge graph → SQLite)
+  let graph_result = http_get("http://127.0.0.1:4000/admin-ua/graph")
+  let graph_summary = json_get(parse_json(graph_result), "summary", "Grapher failed")
+
+  // Sub-agent 4: Reviewer (orphans, security, bugs, architecture)
+  let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
+  let review_summary = json_get(parse_json(review_result), "summary", "Reviewer failed")
   let health = json_get(parse_json(review_result), "health_score", "?")
 
-  let result = "UA Analysis Complete\n\n" + scan_summary + "\n" + review_summary + "\nHealth: " + to_string(health) + "/10"
+  // Sub-agent 6: Documenter (auto-docs)
+  let docs_result = http_get("http://127.0.0.1:4000/admin-ua/docs")
+  let docs_structure = json_get(parse_json(docs_result), "structure", "")
 
-  let _ = AuditLog("admin_analyze", "admin", "UA analysis complete")
+  let result = "UA Analysis Complete (6 sub-agents)\n\n"
+  let result = result + "1. Scanner: " + scan_summary + "\n\n"
+  let result = result + "2. Analyzer: " + analyze_summary + "\n\n"
+  let result = result + "3. Grapher: " + graph_summary + "\n\n"
+  let result = result + "4. Reviewer: " + review_summary + "\n\n"
+  let result = result + "5. Differ: use /admin impact <file>\n\n"
+  let result = result + "6. Documenter: " + substring(docs_structure, 0, 300) + "\n\n"
+  let result = result + "Health: " + to_string(health) + "/10"
+
+  let _ = AuditLog("admin_analyze", "admin", "UA 6-subagent analysis complete, health=" + to_string(health))
   return result
 }
 
@@ -491,16 +531,26 @@ pattern AdminDocs() -> String {
   return substring(structure, 0.0, 3000.0)
 }
 
-// ── /admin graph ────────────────────────────────────────────────────
+// ── /admin graph — Python UA Grapher (Scanner→Analyzer→Graph→SQLite) ───
 pattern AdminGraph() -> String {
-  let result = BuildKnowledgeGraph()
-  return result
+  let _ = AuditLog("admin_graph", "admin", "UA graph build started")
+  let result = http_get("http://127.0.0.1:4000/admin-ua/graph")
+  let summary = json_get(parse_json(result), "summary", "Graph build failed")
+  let nodes = json_get(parse_json(result), "nodes", "0")
+  let edges = json_get(parse_json(result), "edges", "0")
+  let _ = AuditLog("admin_graph", "admin", "graph done: " + to_string(nodes) + " nodes, " + to_string(edges) + " edges")
+  return summary
 }
 
-// ── /admin impact <file> ──────────────────────────────────────────
+// ── /admin impact <file> — Python UA Differ ─────────────────────────
 pattern AdminImpact(file_path: String) -> String {
-  let result = ImpactAnalysis(file_path)
-  return result
+  let _ = AuditLog("admin_impact", "admin", "UA impact: " + file_path)
+  let encoded_path = replace(file_path, " ", "%20")
+  let result = http_get("http://127.0.0.1:4000/admin-ua/impact?file=" + encoded_path)
+  let summary = json_get(parse_json(result), "summary", "Impact analysis failed")
+  let risk = json_get(parse_json(result), "risk", "unknown")
+  let _ = AuditLog("admin_impact", "admin", "impact done: " + file_path + " risk=" + risk)
+  return summary
 }
 
 // ── /admin proposals ──────────────────────────────────────────────
