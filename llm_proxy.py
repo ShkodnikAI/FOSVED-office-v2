@@ -201,11 +201,11 @@ FORMAT_INSTRUCTION = """
 6. Не будь кратким. Препарируй тему глубоко.
 """
 
-# Departments that should NOT receive FORMAT_INSTRUCTION (conversational roles)
-_NO_FORMAT_DEPTS = {"yana", "admin"}
+# FORMAT_INSTRUCTION (layered analysis with ✓/◈/⚡) only for analytical departments
+_ANALYTICAL_DEPTS = {"osp", "expert"}
 
 def get_dept_prompt(dept):
-    fmt = "" if dept in _NO_FORMAT_DEPTS else FORMAT_INSTRUCTION
+    fmt = FORMAT_INSTRUCTION if dept in _ANALYTICAL_DEPTS else ""
     try:
         f = LIB_DIR / f"{dept}.md"
         if f.exists():
@@ -337,7 +337,7 @@ def call_llm(dept, messages, model_override=None):
                     if m["role"] == "system": sys_msg = m["content"]
                     else: user_msgs.append(m)
                 headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
-                body = {"model": use_model, "max_tokens": 4096, "system": sys_msg, "messages": user_msgs}
+                body = {"model": use_model, "max_tokens": 16384 if dept in {"yana", "admin"} else 4096, "system": sys_msg, "messages": user_msgs}
 
             resp = http_requests.post(prov["url"], headers=headers, json=body, timeout=prov["timeout"])
             resp.raise_for_status()

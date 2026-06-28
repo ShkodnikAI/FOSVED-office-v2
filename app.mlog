@@ -564,6 +564,38 @@ mlogserver {
       return respond("200 ok")
     }
 
+    // /rate-yana — owner feedback for Yana metrics
+    if starts_with(text, "/rate-yana") then {
+      let parts = split(text, " ")
+      let score = get(parts, 1.0)
+      let comment = join(slice(parts, 2.0, len(parts)), " ")
+      db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_feedback', '" + escape_json(score) + "', 'manual', datetime('now'))")
+      if len(comment) > 0.0 then {
+        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_comment', '" + escape_json(comment) + "', 'manual', datetime('now'))")
+      }
+      let _ = AuditLog("rate_yana", "owner", "score=" + score)
+      let _ = SendTelegramReply(chat_id, "Yana feedback recorded: " + score + "/10")
+      return ""
+    }
+
+    // /quarterly-review — methodology compliance review for a department
+    if starts_with(text, "/quarterly-review") then {
+      let parts = split(text, " ")
+      let target_dept = get(parts, 1.0)
+      if len(target_dept) < 2.0 then {
+        let _ = SendTelegramReply(chat_id, "Usage: /quarterly-review <dept>\nReviews methodology compliance for the department.")
+        return ""
+      }
+      let profile = read_file("library/" + target_dept + ".md")
+      let methodology = read_file("METHODOLOGY.md")
+      let metrics = query("SELECT metric_name, metric_value, created_at FROM dept_metrics WHERE dept = ? ORDER BY id DESC LIMIT 20", [target_dept])
+      let corrections = query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept = ? ORDER BY id DESC LIMIT 10", [target_dept])
+      let context = "QUARTERLY METHODOLOGY REVIEW for department: " + target_dept + "\n\nMETHODOLOGY.md (relevant sections):\n" + substring(methodology, 0.0, 3000.0) + "\n\nDepartment profile:\n" + profile + "\n\nRecent metrics:\n" + to_string(metrics) + "\n\nRecent corrections:\n" + to_string(corrections) + "\n\nTask: Review this department against the methodology. Check: (1) hard rules compliance, (2) metrics health, (3) anti-patterns, (4) skills coverage. Output a structured review."
+      let dept = "kavalnya"
+      let _ = HandleDeptQuery(chat_id, dept, context)
+      return ""
+    }
+
     // /calendar — show Yana events
     if text == "/calendar" then {
       let rows = query("SELECT event_text, event_date, event_type FROM yana_events ORDER BY event_date ASC LIMIT 20", [])
