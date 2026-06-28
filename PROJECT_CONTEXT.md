@@ -18,7 +18,7 @@ Telegram → reverse_proxy.py (:10000)
                 ├──→ mlog serve app.mlog (:10001)   ← Metalogos DSL
                 │       ├── dept/*.mlog (14 отделов)
                 │       ├── file_cache.mlog (профили)
-                │       └── SQLite (21 таблица)
+                │       └── SQLite (22 таблицы)
                 │
                 └──→ llm_proxy.py (:4000)            ← Flask
                         ├── 7 LLM провайдеров
@@ -33,9 +33,9 @@ Startup order (entrypoint.sh): llm_proxy → mlog serve → reverse_proxy
 ## KEY PRINCIPLES
 
 1. **Metalogos — ядро, Python — прослойка**
-   - app.mlog (1096 строк) — маршрутизация команд, cron, lockdown
+   - app.mlog (1302 строки) — маршрутизация команд, cron, lockdown
    - dept/*.mlog — логика каждого отдела (pattern-функции)
-   - llm_proxy.py (1895 строк) — HTTP-прокси к LLM, Mini App, API
+   - llm_proxy.py (2853 строк) — HTTP-прокси к LLM, Mini App, API
    - reverse_proxy.py (108 строк) — роутинг между mlog и llm_proxy
 
 2. **Кириллица в file_cache — ТОЛЬКО транслитерация**
@@ -88,7 +88,7 @@ dept/
   visual.mlog            # Визуализация
   engineering.mlog       # Инженерия
   kavalnya.mlog          # Методология
-  admin.mlog             # Системный агент, night cycle (538 строк)
+  admin.mlog             # Системный агент, night cycle (600 строк)
   chain.mlog             # Cross-dept цепочки (3 департамента макс)
   scheduler.mlog         # 6 cron функций (morning/evening/weekly/monthly/control/night)
   miniapp.mlog           # BuildReport, SendReport, FormatReportBody, dept цвета
@@ -239,6 +239,6 @@ mlog (:10001) обрабатывает:
 - Файлов: 101 | Папок: 17
 - Строк кода: ~13 200 (без библиотек/skills)
   - .mlog: 3 038 | .py: 2 599 | .js: 1 996 | .css: 1 414 | .html: 607 | .md: 3 565
-- 14 отделов | 198 скиллов | 67 команд | 11 cron-роутов
-- 7 LLM провайдеров | 21 DB таблица | 167/167 stress test
+- 14 отделов | 175 скиллов | 68 команд | 11 cron-роутов
+- 7 LLM провайдеров | 22 DB таблицы
 - Бинарник: Metalogos v0.7.10 (12MB, x86-64, 113 builtins)
