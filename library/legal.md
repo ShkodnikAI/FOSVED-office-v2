@@ -127,8 +127,6 @@ Legal assessment проходит:
 - `library/knowledge/legal/business-forms/<FORM>.md` — особенности договорных отношений для формы
 - `library/knowledge/legal/compatibility-matrix.md` — cross-формы и cross-юрисдикционные ситуации
 
-## Рекомендуемые скиллы
-
 ### Tier 1 — Methodological core (5 скиллов)
 
 - `risk-mapping-protocol` — построение карты рисков сделки

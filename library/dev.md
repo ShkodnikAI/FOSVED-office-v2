@@ -36,8 +36,6 @@
 
 ---
 
-## Архитектура отдела
-
 ### Источники задач (откуда приходят задачи в Dev)
 
 - Прямой запрос от Yana ("сделай X")
@@ -126,8 +124,6 @@ Adopt список (стартовый для 2026):
 
 ---
 
-## Скиллы (20 скиллов в 3 tier'ах)
-
 ### Tier 1 — Methodological core (5 скиллов, всегда загружается)
 
 ```
@@ -138,9 +134,6 @@ npx skills add fosved/dev/tech-radar-maintenance
 npx skills add fosved/dev/iterative-implementation
 ```
 
-### Tier 2 — Domain depth (12 скиллов, по типу задачи)
-
-```
 # Web Apps & Sites
 npx skills add fosved/dev/nextjs-architecture
 npx skills add fosved/dev/database-design
@@ -173,8 +166,6 @@ npx skills add fosved/dev/legacy-system-modernization
 ```
 
 ---
-
-## Команды (14 команд)
 
 ### Task management
 - `/dev <task description>` — создать DevTask с auto-estimation (low/expected/high diapazon)

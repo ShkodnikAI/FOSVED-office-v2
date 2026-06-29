@@ -163,9 +163,6 @@ P (potential) = A × R × S × L × E × E_modifier
 
 ---
 
-## Рекомендуемые Skills (24 скилла, 3 tier'а)
-
-```
 # Tier 1 — Methodological core (всегда загружаются)
 npx skills add fosved/spd/awareness-frame
 npx skills add fosved/spd/root-cause-mapping

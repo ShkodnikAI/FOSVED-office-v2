@@ -52,8 +52,6 @@
 
 ---
 
-## Триггеры маршрутизации в детали
-
 ### → ОСП V2 (Стратегический анализ)
 
 **Прямые:**
@@ -236,8 +234,6 @@ Time-sensitivity: <urgency>
 
 ---
 
-## Cross-departmental reports (Daily / Weekly / Monthly)
-
 ### Daily morning briefing (07:30, через `/standup`)
 
 - ОСП watchlist deltas
@@ -289,8 +285,6 @@ Time-sensitivity: <urgency>
 - Расширены cross-departmental reports
 
 ---
-
-## Триггеры маршрутизации DDQ (Разработка / Дизайн / QA)
 
 ### → Разработка (Dev)
 

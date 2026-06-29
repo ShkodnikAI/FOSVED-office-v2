@@ -145,9 +145,6 @@ Investment timing зависит от стадии. Peak — продавать 
 - **Daily inflection candidates** — короткий список технологий приближающихся к inflection
 - **Quarterly disruption probability re-scoring** — re-calibration всех tracked technologies
 
-## Рекомендуемые Skills (skills.sh)
-
-```
 # Tier 1 — Methodological core
 npx skills add fosved/lz/hype-cycle-mapping
 npx skills add fosved/lz/disruption-scoring

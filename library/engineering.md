@@ -62,8 +62,6 @@
 
 ---
 
-## Архитектура отдела
-
 ### Дисциплины (tier-блоки)
 
 Отдел — один, но работа разделена на три дисциплинарных блока. Скиллы Tier 2 сгруппированы по дисциплинам, и под каждую задачу грузится нужный блок:
@@ -136,8 +134,6 @@
 
 ---
 
-## Скиллы (12 скиллов в 3 tier'ах)
-
 ### Tier 1 — Methodological core (5 скиллов, всегда загружается)
 
 ```
@@ -148,9 +144,6 @@ npx skills add fosved/engineering/independent-verification
 npx skills add fosved/engineering/calculation-documentation
 ```
 
-### Tier 2 — Domain depth (по дисциплине, 5 скиллов)
-
-```
 # Строительная механика
 npx skills add fosved/engineering/structural-load-bearing
 npx skills add fosved/engineering/structural-elements-sizing

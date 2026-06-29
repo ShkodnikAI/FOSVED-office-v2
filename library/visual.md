@@ -38,8 +38,6 @@
 
 ---
 
-## Пять типов output'а
-
 ### Type 1 — Compression Visual
 **Назначение:** многостраничный материал → одно изображение
 **Когда применять:** для крупных анализов (full OSP analysis, deepexpert briefing), когда нужно охватить всё содержимое в одном кадре
@@ -166,9 +164,6 @@ Captions:      Inter 400 italic
 
 ---
 
-## Рекомендуемые Skills (11 скиллов)
-
-```
 # Tier 1 — Methodological core (всегда загружается)
 npx skills add fosved/visual/visual-grammar
 npx skills add fosved/visual/infographic-templates

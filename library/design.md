@@ -40,8 +40,6 @@
 
 ---
 
-## Архитектура отдела
-
 ### Источники задач
 
 - Прямой запрос от Yana
@@ -106,8 +104,6 @@
 - **Bi-annual paradigm review** — фундаментальные сдвиги (voice UI, AR, neural interfaces, AI-native patterns)
 
 ---
-
-## Скиллы (12 скиллов в 3 tier'ах)
 
 ### Tier 1 — Methodological core (5 скиллов, всегда загружается)
 

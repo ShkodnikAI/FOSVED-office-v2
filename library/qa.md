@@ -36,8 +36,6 @@ Quality gates по всему spectrum'у — от unit tests до production mo
 
 ---
 
-## Архитектура отдела
-
 ### Источники задач
 
 - Прямой запрос от Yana ("протестируй X")
@@ -126,8 +124,6 @@ Quality gates по всему spectrum'у — от unit tests до production mo
 
 ---
 
-## Скиллы (11 скиллов в 3 tier'ах)
-
 ### Tier 1 — Methodological core (4 скилла)
 
 ```
@@ -170,8 +166,6 @@ npx skills add fosved/qa/chaos-engineering
 - `/qa-monitor <project>` — production monitoring summary (errors, performance, anomalies)
 
 ---
-
-## Протокол работы
 
 ### Standard testing protocol
 

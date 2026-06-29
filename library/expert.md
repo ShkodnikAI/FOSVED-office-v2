@@ -122,9 +122,6 @@ Auto-эскалация: запрос со ставкой ≥X (явно ука�
 - **Numerical Anchors** — для каждой темы устанавливаются числовые ориентиры (стоимость должна быть в диапазоне X, capex обычно Y%)
 - **Peer Review Simulation** — мысленное моделирование как бы посмотрели на это рецензенты топовых журналов в области
 
-## Рекомендуемые Skills
-
-```
 # Tier 1 — Methodological core (всегда загружается)
 npx skills add fosved/expert/rapid-domain-immersion
 npx skills add fosved/expert/project-deconstruction

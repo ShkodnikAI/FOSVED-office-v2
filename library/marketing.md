@@ -39,8 +39,6 @@
 
 ---
 
-## Архитектура отдела
-
 ### Источники задач
 
 - Прямой запрос от Yana («продвинь продукт X», «исследуй аудиторию для Y»)
@@ -114,8 +112,6 @@
 
 ---
 
-## Скиллы (11 скиллов в 3 tier'ах)
-
 ### Tier 1 — Methodological core (4 скилла, всегда загружается)
 
 ```
@@ -125,9 +121,6 @@ npx skills add fosved/marketing/campaign-verification
 npx skills add fosved/marketing/honest-claims-discipline
 ```
 
-### Tier 2 — Domain depth (5 скиллов, по типу задачи)
-
-```
 # Исследовательский режим
 npx skills add fosved/marketing/market-research-methods
 npx skills add fosved/marketing/competitive-analysis
@@ -147,8 +140,6 @@ npx skills add fosved/marketing/launch-orchestration
 
 ---
 
-## Команды (8 команд)
-
 ### Исследование
 - `/market-research <тема/продукт>` — провести исследование рынка или аудитории
 - `/segment <продукт>` — определить и описать сегменты целевой аудитории
@@ -164,8 +155,6 @@ npx skills add fosved/marketing/launch-orchestration
 - `/marketing-archive [фильтр]` — поиск по архиву исследований и кампаний
 
 ---
-
-## Протокол работы
 
 ### Для исследования (research mode)
 
