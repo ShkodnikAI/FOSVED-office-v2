@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """llm_proxy.py — Fosved Office v2 LLM Proxy Server
-Flask server on port 4000 with 7-provider failover, dept routing, dashboards, SQLite,
+Flask server on port 4000 with OmniRoute integration (237 providers, auto-fallback, token compression),
+7-provider direct failover, dept routing, dashboards, SQLite,
 TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
 import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
@@ -76,6 +77,76 @@ TOKEN_COSTS = {
     "anthropic": {"input": 3.0, "output": 15.0}, "openai": {"input": 2.5, "output": 10.0},
     "apodex": {"input": 2.0, "output": 8.0},
 }
+
+# ──────────────────────────── OMNIROUTE INTEGRATION ────────────────────────────
+OMNIROUTE_URL = os.environ.get("OMNIROUTE_URL", "http://127.0.0.1:20128/v1/chat/completions")
+OMNIROUTE_HEALTH = os.environ.get("OMNIROUTE_HEALTH", "http://127.0.0.1:20128/health")
+
+TASK_COMBOS = {
+    'status': 'fosved-free', 'help': 'fosved-free', 'rate': 'fosved-free',
+    'good': 'fosved-free', 'fix': 'fosved-free', 'remember': 'fosved-free',
+    'learning': 'fosved-free', 'audit': 'fosved-free', 'voice_confirm': 'fosved-free',
+    'dept_standard': 'fosved-standard', 'chain': 'fosved-standard', 'debrief': 'fosved-standard',
+    'osp_deep': 'fosved-deep', 'osp_full': 'fosved-deep', 'lz_deep': 'fosved-deep',
+    'chain_heavy': 'fosved-deep', 'admin_analyze': 'fosved-deep',
+    'osp_fusion': 'fosved-fusion', 'redteam': 'fosved-fusion', 'counter_forecast': 'fosved-fusion',
+    'lz_apodex': 'apodex/apodex-1.0-mini',
+}
+
+
+def is_omniroute_alive():
+    try:
+        r = http_requests.get(OMNIROUTE_HEALTH, timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def get_combo_for_task(dept, command='', depth=2):
+    if command in TASK_COMBOS:
+        return TASK_COMBOS[command]
+    if depth >= 4:
+        return 'fosved-fusion'
+    elif depth >= 3:
+        return 'fosved-deep'
+    elif dept in ['osp', 'lz', 'expert']:
+        return 'fosved-standard'
+    else:
+        return 'fosved-free'
+
+
+def call_omniroute(messages, combo='fosved-standard', dept='yana', max_tokens=4096):
+    try:
+        response = http_requests.post(OMNIROUTE_URL, json={"model": combo, "messages": messages, "max_tokens": max_tokens, "temperature": 0.7}, headers={"Content-Type": "application/json"}, timeout=120)
+        data = response.json()
+        answer = data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+        meta = data.get("x_omniroute", {})
+        t_in = usage.get("prompt_tokens", 0)
+        t_out = usage.get("completion_tokens", 0)
+        provider = meta.get("provider", "omniroute")
+        model = meta.get("model", combo)
+        cost = meta.get("cost", 0)
+        compression_saved = meta.get("tokens_saved", 0)
+        now = datetime.utcnow().isoformat()
+        try:
+            _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at,compression_saved,combo) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (provider, model, t_in, t_out, round(cost, 6), dept, now, compression_saved, combo))
+        except Exception:
+            try:
+                _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
+                       (provider, model, t_in, t_out, round(cost, 6), dept, now))
+            except Exception as log_err:
+                log.warning(f"token_usage log failed: {log_err}")
+        _log_audit("llm_call_omniroute", {"dept": dept, "provider": provider, "model": model, "tokens_in": t_in, "tokens_out": t_out, "combo": combo, "compression_saved": compression_saved})
+        log.info(f"OmniRoute ok: provider={provider} model={model} combo={combo} dept={dept} t_in={t_in} t_out={t_out} saved={compression_saved}")
+        return {"reply": answer, "provider": provider, "model": model, "tokens_in": t_in, "tokens_out": t_out}
+    except http_requests.Timeout:
+        log.warning("OmniRoute timeout (120s)")
+        return None
+    except Exception as e:
+        log.warning(f"OmniRoute error: {e}")
+        return None
 
 # ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
 DEPT_COLORS = {
@@ -204,8 +275,10 @@ FORMAT_INSTRUCTION = """
 # FORMAT_INSTRUCTION (layered analysis with ✓/◈/⚡) only for analytical departments
 _ANALYTICAL_DEPTS = {"osp", "expert"}
 
-def get_dept_prompt(dept):
+def get_dept_prompt(dept, combo=None):
     fmt = FORMAT_INSTRUCTION if dept in _ANALYTICAL_DEPTS else ""
+    if combo and 'free' in combo:
+        return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + fmt
     try:
         f = LIB_DIR / f"{dept}.md"
         if f.exists():
@@ -256,6 +329,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')));
         """)
+        c.commit(); c.close()
+        for col_sql, col_name in [
+            ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
+            ("ALTER TABLE token_usage ADD COLUMN combo TEXT DEFAULT ''", "combo"),
+        ]:
+            try:
+                c.execute(col_sql)
+            except Exception:
+                pass
         c.commit(); c.close()
 
 init_db()
@@ -384,9 +466,10 @@ def strip_html_for_archive(html_content):
     return text.strip()
 
 # ──────────────────────────── LLM CALL ────────────────────────────
-def call_llm(dept, messages, model_override=None):
+def _call_direct_fallback(dept, messages, model=None):
+    """Direct provider fallback (original logic) — used when OmniRoute is down."""
     priority = _cfg_cache["priority_provider"]
-    model = model_override or _cfg_cache["overrides"].get(dept) or _cfg_cache["priority_model"] or "glm-4.6"
+    model = model or _cfg_cache["overrides"].get(dept) or _cfg_cache["priority_model"] or "glm-4.6"
     order = [p for p in [priority] + [k for k in PROVIDERS if k != priority] if p in PROVIDERS]
     last_err = None
     for prov_name in order:
@@ -435,12 +518,24 @@ def call_llm(dept, messages, model_override=None):
                    (prov_name, use_model, t_in, t_out, round(cost, 6), dept, now))
             _query("INSERT INTO audit_log (action,actor,dept,details,status) VALUES (?,'proxy',?,?,'ok')",
                    ("llm_call", dept, json.dumps({"dept": dept, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out})))
-            log.info(f"LLM ok: provider={prov_name} model={use_model} dept={dept} t_in={t_in} t_out={t_out}")
+            log.info(f"LLM ok (direct): provider={prov_name} model={use_model} dept={dept} t_in={t_in} t_out={t_out}")
             return {"reply": reply, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out}
         except Exception as e:
             last_err = str(e)
-            log.warning(f"LLM fail: provider={prov_name} err={last_err}")
+            log.warning(f"LLM fail (direct): provider={prov_name} err={last_err}")
     return {"reply": f"[Oshibka] Vse providery nedostupny: {last_err}", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}
+
+
+def call_llm(dept, messages, model_override=None, combo=None):
+    """Call LLM via OmniRoute first, fall back to direct provider chain."""
+    if combo is None:
+        combo = get_combo_for_task(dept)
+    if is_omniroute_alive():
+        result = call_omniroute(messages, combo=combo, dept=dept)
+        if result and result.get("reply"):
+            return result
+        log.warning(f"OmniRoute returned no result for combo={combo}, falling back to direct")
+    return _call_direct_fallback(dept, messages, model=model_override)
 
 # ──────────────────────────── TELEGRAM HELPERS ────────────────────────────
 def _tg_send_message(chat_id, text, parse_mode=None):
@@ -594,7 +689,7 @@ def _dept_kpis(dept):
 
 @app.get("/health")
 def health():
-    return "ok"
+    return jsonify({"status": "ok", "omniroute": "alive" if is_omniroute_alive() else "down"})
 
 @app.post("/detect-dept")
 def detect_dept_endpoint():
