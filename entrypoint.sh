@@ -7,6 +7,8 @@ echo "app.mlog:       $(md5sum app.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "dept/yana.mlog: $(md5sum dept/yana.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "llm_proxy.py:   $(md5sum llm_proxy.py 2>/dev/null | cut -d' ' -f1)"
 echo "miniapp.mlog:   $(md5sum dept/miniapp.mlog 2>/dev/null | cut -d' ' -f1)"
+echo "context.mlog:   $(md5sum dept/context.mlog 2>/dev/null | cut -d' ' -f1)"
+echo "library/yana:   $(md5sum library/yana.md 2>/dev/null | cut -d' ' -f1)"
 
 # Verify yana.mlog does NOT contain anti-format code
 if grep -q "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА" dept/yana.mlog 2>/dev/null; then
