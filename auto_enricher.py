@@ -337,6 +337,73 @@ def markdown_to_html(text):
 
 
 # ═══════════════════════════════════════════
+# OSINT RENDERER
+# ═══════════════════════════════════════════
+
+def render_osint_results(osint_data):
+    """Визуализация OSINT-результатов для Mini App."""
+    if not osint_data or 'platforms' not in osint_data:
+        return ''
+
+    found = osint_data.get('found', 0)
+    maybe = osint_data.get('maybe', 0)
+    total = osint_data.get('total_scanned', 0)
+
+    # Metrics
+    metrics_html = f'''<div class="metrics-grid" style="grid-template-columns:1fr 1fr 1fr">
+  <div class="metric-card"><div class="metric-value" style="color:#16a34a">{found}</div><div class="metric-label">Найдено</div></div>
+  <div class="metric-card"><div class="metric-value" style="color:#d97706">{maybe}</div><div class="metric-label">Под вопросом</div></div>
+  <div class="metric-card"><div class="metric-value" style="color:#64748b">{total}</div><div class="metric-label">Просканировано</div></div>
+</div>\n'''
+
+    # Categorize platforms
+    categories = {}
+    for p in osint_data.get('platforms', []):
+        cat = p.get('category', 'other')
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(p)
+
+    CAT_COLORS = {
+        'social': '#ec4899', 'professional': '#2563eb', 'tech': '#16a34a',
+        'media': '#7c3aed', 'messaging': '#0891b2', 'commerce': '#ea580c',
+        'gaming': '#6366f1', 'forum': '#64748b', 'darknet': '#dc2626', 'other': '#94a3b8'
+    }
+    CAT_NAMES = {
+        'social': 'Соцсети', 'professional': 'Проф. сети', 'tech': 'Tech',
+        'media': 'Медиа', 'messaging': 'Мессенджеры', 'commerce': 'Маркетплейсы',
+        'gaming': 'Игры', 'forum': 'Форумы', 'darknet': 'Даркнет', 'other': 'Другое'
+    }
+
+    cats_html = ''
+    for cat, platforms in sorted(categories.items(), key=lambda x: -len(x[1])):
+        color = CAT_COLORS.get(cat, '#94a3b8')
+        name = CAT_NAMES.get(cat, cat)
+        links = ', '.join([f'<a href="{p["url"]}" style="color:{color}">{p["name"]}</a>' for p in platforms[:5]])
+        conf_avg = sum(p.get('confidence', 0) for p in platforms) / len(platforms) if platforms else 0
+
+        cats_html += f'''<div class="info-card" style="border-left:4px solid {color}">
+  <div class="info-card-title" style="color:{color}">{name} ({len(platforms)})</div>
+  <div class="info-card-body">{links}</div>
+  <div style="font-size:11px;color:#94a3b8;margin-top:4px">Confidence: {conf_avg:.0f}%</div>
+</div>\n'''
+
+    # Uncertain
+    uncertain_html = ''
+    if osint_data.get('uncertain'):
+        uncertain_items = ', '.join([p['name'] for p in osint_data['uncertain'][:10]])
+        uncertain_html = f'''<div class="info-card" style="border-left:4px solid #d97706">
+  <div class="info-card-title" style="color:#d97706">Под вопросом ({maybe})</div>
+  <div class="info-card-body">{uncertain_items}</div>
+</div>\n'''
+
+    return f'''<h2 class="section-title" style="border-bottom:2px solid #0891b2">OSINT: 840+ платформ</h2>
+{metrics_html}
+{cats_html}
+{uncertain_html}'''
+
+
+# ═══════════════════════════════════════════
 # ГЛАВНАЯ ФУНКЦИЯ
 # ═══════════════════════════════════════════
 

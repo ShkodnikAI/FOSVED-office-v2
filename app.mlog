@@ -1024,12 +1024,135 @@ mlogserver {
       return respond("200 ok")
     }
 
+    // /lz osint <username> — OSINT 840+ platforms (30-120 sec)
+    if starts_with(text, "/lz osint ") then {
+      let username = trim(substring(text, 10.0, len(text)))
+      let _ = RecordUserMessage(chat_id, "lz", text)
+      send_message(chat_id, "Сканирую " + username + " по 840+ платформам... (30-120 сек)")
+
+      let body = json_encode({
+        username: username,
+        level: "basic",
+        tor: false,
+        chat_id: chat_id,
+        caller_id: chat_id
+      })
+      let result = http_post("http://127.0.0.1:4000/lz/osint", body, "application/json")
+      let parsed = parse_json(result)
+      let analysis = json_get(parsed, "response", "Ошибка OSINT-сканирования")
+      let found_count = json_get(parsed, "osint_data.found", "0")
+
+      let title = "OSINT: " + username + " (" + to_string(found_count) + " платформ)"
+      let _ = SendReport(analysis, "lz", title, "3.0", chat_id)
+      let _ = AuditLog("lz_osint", "system", "lz", username, "ok")
+      return respond("200 ok")
+    }
+
+    // /lz osint advanced <username> — extended scan with name variations
+    if starts_with(text, "/lz osint advanced ") then {
+      let username = trim(substring(text, 19.0, len(text)))
+      let _ = RecordUserMessage(chat_id, "lz", text)
+      send_message(chat_id, "Расширенное сканирование " + username + " (вариации имени)... (60-180 сек)")
+
+      let body = json_encode({
+        username: username,
+        level: "advanced",
+        tor: false,
+        chat_id: chat_id,
+        caller_id: chat_id
+      })
+      let result = http_post("http://127.0.0.1:4000/lz/osint", body, "application/json")
+      let parsed = parse_json(result)
+      let analysis = json_get(parsed, "response", "Ошибка OSINT-сканирования")
+      let _ = SendReport(analysis, "lz", "OSINT Advanced: " + username, "4.0", chat_id)
+      return respond("200 ok")
+    }
+
+    // /lz profile <name> — comprehensive profile (OSINT + Web + Social)
+    if starts_with(text, "/lz profile ") then {
+      let name = trim(substring(text, 12.0, len(text)))
+      let _ = RecordUserMessage(chat_id, "lz", text)
+      send_message(chat_id, "Строю комплексный профиль " + name + "... OSINT + Web + Social")
+
+      // 1. OSINT scan
+      let osint_body = json_encode({ username: name, level: "basic", chat_id: chat_id, caller_id: chat_id })
+      let osint_result = http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json")
+
+      // 2. Web search
+      let web_result = web_search(name, 5.0)
+
+      // 3. LLM builds profile
+      let lz_profile = read_file("library/lz.md")
+      let profile_prompt = lz_profile + "\n\nПостроить комплексный цифровой профиль на основе:\n1. OSINT (840+ платформ)\n2. Веб-поиск\n\nСтруктура:\n- Кто этот человек/бренд\n- Цифровой след (категории платформ)\n- Публичная активность\n- Профессиональный профиль\n- Аномалии и красные флаги\n- Оценка цифровой гигиены (1-10)"
+
+      let combined = "OSINT:\n" + osint_result + "\n\nWeb:\n" + web_result
+      let analysis = call_llm(profile_prompt, combined)
+
+      let _ = SendReport(analysis, "lz", "Профиль: " + name, "4.0", chat_id)
+      return respond("200 ok")
+    }
+
     // /osp special commands
     if starts_with(text, "/osp") then {
       let query = substring(text, 5.0, len(text))
+      // /osp profile <actor> — OSINT-based actor profiling
+      if starts_with(query, " profile ") then {
+        let actor = trim(substring(query, 9.0, len(query)))
+        let _ = RecordUserMessage(chat_id, "osp", text)
+        send_message(chat_id, "ОСП: профилирование актора " + actor + "...")
+
+        // OSINT data from LZ proxy
+        let osint_body = json_encode({ username: actor, level: "basic", chat_id: chat_id, caller_id: chat_id })
+        let osint = http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json")
+
+        // OSP analysis via LLM
+        let osp_profile = read_file("library/osp.md")
+        let profile_prompt = osp_profile + "\n\nПрофилирование актора по методологии ОСП:\n1. Цифровой след -> паттерн поведения\n2. Платформы присутствия -> social graph inference\n3. Отсутствие на платформах -> что скрывает?\n4. Временные паттерны -> когда активен\n5. Cross-reference -> противоречия между профилями\n6. Гипотезы мотивации (ACH)\n7. Используй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ]"
+
+        let analysis = call_llm(profile_prompt, "Актор: " + actor + "\n\nOSINT данные:\n" + osint)
+        let _ = SendReport(analysis, "osp", "Профиль актора: " + actor, "3.0", chat_id)
+        return respond("200 ok")
+      }
       let _ = RecordUserMessage(chat_id, "osp", text)
       let reply = HandleOSP(query, chat_id)
       let _ = SendReport(reply, "osp", query, "2.0", chat_id)
+      return respond("200 ok")
+    }
+
+    // /legal check <entity> — due diligence via OSINT
+    if starts_with(text, "/legal check ") then {
+      let entity = trim(substring(text, 13.0, len(text)))
+      send_message(chat_id, "Юрист: due diligence — проверка " + entity + "...")
+
+      let osint_body = json_encode({ username: entity, level: "advanced", chat_id: chat_id, caller_id: chat_id })
+      let osint = http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json")
+
+      let legal_profile = read_file("library/legal.md")
+      let check_prompt = legal_profile + "\n\nDue Diligence проверка контрагента:\n1. Цифровой след — насколько прозрачен?\n2. Профессиональные платформы (LinkedIn, Crunchbase) — совпадают с заявлениями?\n3. Красные флаги — даркнет-форумы, фрод-платформы, NSFW\n4. Возраст аккаунтов — давно ли существуют?\n5. Согласованность информации между платформами\n6. Рекомендация: безопасно / требует внимания / высокий риск\n7. ДИСКЛЕЙМЕР обязателен: \"OSINT-данные собраны из открытых источников. Результаты не гарантируют принадлежность аккаунтов конкретному лицу.\""
+
+      let analysis = call_llm(check_prompt, "Контрагент: " + entity + "\n\nOSINT:\n" + osint)
+      let _ = SendReport(analysis, "legal", "Due Diligence: " + entity, "3.0", chat_id)
+      return respond("200 ok")
+    }
+
+    // /marketing brand-check <brand> — brand availability across 840+ platforms
+    if starts_with(text, "/marketing brand-check ") then {
+      let brand = trim(substring(text, 22.0, len(text)))
+      send_message(chat_id, "Маркетинг: проверка бренда " + brand + " на 840+ платформах...")
+
+      let osint_body = json_encode({
+        username: brand,
+        level: "advanced",
+        chat_id: chat_id,
+        caller_id: chat_id
+      })
+      let osint = http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json")
+
+      let marketing_profile = read_file("library/marketing.md")
+      let brand_prompt = marketing_profile + "\n\nАнализ доступности бренда:\n1. На каких платформах имя уже занято?\n2. Кем занято — конкурент или просто тёзка?\n3. На каких ключевых платформах свободно?\n4. Рекомендация: использовать as-is / модифицировать / выбрать другое\n5. Если занято — варианты модификации (добавить _official, HQ, app...)\n6. Приоритетные платформы для регистрации (первые 48 часов после запуска)"
+
+      let analysis = call_llm(brand_prompt, "Бренд: " + brand + "\n\nOSINT:\n" + osint)
+      let _ = SendReport(analysis, "marketing", "Brand Check: " + brand, "2.0", chat_id)
       return respond("200 ok")
     }
 

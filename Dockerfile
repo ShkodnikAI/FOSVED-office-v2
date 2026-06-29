@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y ca-certificates git python3 python3-pip curl && rm -rf /var/lib/apt/lists/*
-RUN pip3 install flask requests edge-tts --break-system-packages
+RUN pip3 install flask requests edge-tts aliens-eye --break-system-packages
 COPY bin/mlog /usr/local/bin/mlog
 RUN chmod +x /usr/local/bin/mlog
 WORKDIR /office

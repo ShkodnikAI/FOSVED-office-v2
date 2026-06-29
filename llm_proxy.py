@@ -272,6 +272,82 @@ def _log_audit(action, details_dict, dept="system"):
     _query("INSERT INTO audit_log (action,actor,dept,details,status) VALUES (?,'proxy',?,?,'ok')",
            (action, dept, json.dumps(details_dict, ensure_ascii=False)))
 
+# ──────────────────────────── OSINT (Aliens Eye) ────────────────────────────
+OSINT_DISCLAIMER = "⚠ OSINT-данные собраны из открытых источников. Результаты не гарантируют принадлежность аккаунтов конкретному лицу. Используйте для легитимных целей в рамках законодательства."
+_osint_last_time = {}  # rate limiting: chat_id -> timestamp
+OSINT_RATE_LIMIT = 60  # seconds between scans
+
+def categorize_platform(site_name):
+    """Категоризация платформы по типу."""
+    categories = {
+        'social': ['twitter', 'facebook', 'instagram', 'tiktok', 'snapchat', 'threads', 'mastodon', 'bluesky', 'x.com'],
+        'professional': ['linkedin', 'xing', 'angellist', 'crunchbase'],
+        'tech': ['github', 'gitlab', 'bitbucket', 'stackoverflow', 'hackernews', 'dev.to', 'codepen'],
+        'media': ['youtube', 'twitch', 'vimeo', 'soundcloud', 'spotify', 'medium', 'substack'],
+        'messaging': ['telegram', 'discord', 'slack', 'signal', 'whatsapp'],
+        'commerce': ['amazon', 'ebay', 'etsy', 'shopify', 'aliexpress'],
+        'gaming': ['steam', 'xbox', 'playstation', 'epic', 'roblox', 'minecraft'],
+        'forum': ['reddit', 'quora', '4chan', 'hackforums'],
+        'dating': ['tinder', 'bumble', 'okcupid'],
+        'darknet': ['onion', 'tor', 'i2p'],
+    }
+    site_lower = site_name.lower()
+    for category, platforms in categories.items():
+        if any(p in site_lower for p in platforms):
+            return category
+    return 'other'
+
+
+def scan_osint(username, level='basic', timeout=120, tor=False, sites=None):
+    """Scan username across 840+ platforms via Aliens Eye."""
+    cmd = ['aliens_eye', username, '--format', 'json', '--plain', '-l', level]
+    if tor:
+        cmd.extend(['--tor'])
+    if sites:
+        cmd.extend(['--site', ','.join(sites)])
+    cmd.extend(['--no-nsfw'])
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, 'NO_COLOR': '1'}
+        )
+        if result.returncode != 0:
+            return {'error': f'Aliens Eye exited with code {result.returncode}', 'stderr': result.stderr[:500]}
+
+        data = json.loads(result.stdout)
+        results_list = data.get('results', [])
+        found = [p for p in results_list if p.get('status') == 'Found']
+        maybe = [p for p in results_list if p.get('status') == 'Maybe']
+
+        return {
+            'username': username,
+            'found': len(found),
+            'maybe': len(maybe),
+            'total_scanned': len(results_list),
+            'scan_time': data.get('elapsed', '?'),
+            'platforms': [{
+                'name': p.get('site', ''),
+                'url': p.get('url', ''),
+                'confidence': p.get('confidence', 0),
+                'category': categorize_platform(p.get('site', ''))
+            } for p in found],
+            'uncertain': [{
+                'name': p.get('site', ''),
+                'url': p.get('url', ''),
+                'confidence': p.get('confidence', 0)
+            } for p in maybe],
+        }
+    except subprocess.TimeoutExpired:
+        return {'error': f'Timeout after {timeout}s', 'username': username}
+    except json.JSONDecodeError:
+        return {'error': 'Failed to parse Aliens Eye output', 'raw': result.stdout[:500]}
+    except FileNotFoundError:
+        return {'error': 'aliens_eye binary not found. Install: pip3 install aliens-eye'}
+    except Exception as e:
+        return {'error': str(e)}
+
+
 # ──────────────────────────── HTML STRIP FOR ARCHIVE ────────────────────────────
 def strip_html_for_archive(html_content):
     """Convert HTML badges to text markers and strip all tags for Telegram."""
@@ -2851,6 +2927,102 @@ def memory_conflicts_endpoint():
     return jsonify({'conflicts': conflicts, 'count': len(conflicts)})
 
 # ══════════════════════════════════════════════════════════════════════
+#  OSINT ENDPOINT — Aliens Eye 840+ platforms
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/lz/osint', methods=['POST'])
+def lz_osint():
+    """OSINT scan via Aliens Eye. Owner-only, rate-limited."""
+    import time as _time
+    d = request.get_json(force=True) or {}
+    username = d.get('username', '').strip()
+    level = d.get('level', 'basic')
+    tor = d.get('tor', False)
+    sites = d.get('sites', None)
+    chat_id = str(d.get('chat_id', ''))
+    caller_id = str(d.get('caller_id', ''))
+
+    if not username:
+        return jsonify({'error': 'Username required'}), 400
+
+    # Owner-only check
+    owner_id = os.environ.get('OWNER_TELEGRAM_ID', '')
+    if owner_id and caller_id and caller_id != owner_id:
+        _log_audit('lz_osint_denied', {'caller_id': caller_id, 'username': username}, 'lz')
+        return jsonify({'error': 'OSINT доступен только владельцу'}), 403
+
+    # Rate limit
+    now = _time.time()
+    last = _osint_last_time.get(chat_id, 0)
+    if now - last < OSINT_RATE_LIMIT:
+        wait = int(OSINT_RATE_LIMIT - (now - last))
+        return jsonify({'error': f'Rate limit: подождите {wait} сек между сканами'}), 429
+    _osint_last_time[chat_id] = now
+
+    # Typing indicator
+    try:
+        _tg_send_message(chat_id, f"🔍 Сканирую {username} по 840+ платформам... (30-120 сек)")
+    except Exception:
+        pass
+
+    # Scan
+    result = scan_osint(username, level=level, tor=tor, sites=sites)
+
+    if 'error' in result:
+        _log_audit('lz_osint_error', {'username': username, 'error': result['error']}, 'lz')
+        return jsonify({'response': f"Ошибка OSINT: {result['error']}\n\n{OSINT_DISCLAIMER}", 'osint_data': result, 'dept': 'lz'}), 500
+
+    # LLM analysis
+    lz_profile = CONDENSED_PROMPTS.get('lz', '')
+    analysis_prompt = f"""{lz_profile}
+
+Проанализируй результаты OSINT-сканирования username "{username}":
+
+Найдено: {result['found']} платформ
+Под вопросом: {result['maybe']} платформ
+Просканировано: {result['total_scanned']} платформ
+Время: {result['scan_time']}
+
+Платформы где найден:
+{json.dumps(result['platforms'], indent=2, ensure_ascii=False)}
+
+Под вопросом:
+{json.dumps(result['uncertain'], indent=2, ensure_ascii=False)}
+
+Анализируй:
+1. Цифровой профиль — кто этот человек судя по платформам?
+2. Категоризация активности (tech/social/professional/media)
+3. Аномалии — отсутствие на ожидаемых платформах
+4. Противоречия между профилями
+5. Уровень цифровой гигиены (много следов = низкая, мало = высокая)
+6. [ФАКТ] для подтверждённых находок, [ИНТЕРПРЕТАЦИЯ] для выводов
+
+{OSINT_DISCLAIMER}"""
+
+    llm_result = _call_llm_with_failover(analysis_prompt, 'lz')
+    analysis = llm_result.get('reply', 'Ошибка LLM-анализа') if isinstance(llm_result, dict) else str(llm_result)
+
+    # Token tracking
+    t_in = llm_result.get('tokens_in', 0) if isinstance(llm_result, dict) else 0
+    t_out = llm_result.get('tokens_out', 0) if isinstance(llm_result, dict) else 0
+    prov = llm_result.get('provider', '?') if isinstance(llm_result, dict) else '?'
+    now_iso = datetime.utcnow().isoformat()
+    _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
+           (prov, 'osint-analysis', t_in, t_out, 0, 'lz', now_iso))
+
+    _log_audit('lz_osint', {
+        'username': username, 'found': result['found'], 'maybe': result['maybe'],
+        'total': result['total_scanned'], 'scan_time': result['scan_time']
+    }, 'lz')
+
+    return jsonify({
+        'response': analysis,
+        'osint_data': result,
+        'dept': 'lz',
+        'disclaimer': OSINT_DISCLAIMER
+    })
+
+# ══════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════
 
@@ -2858,5 +3030,5 @@ if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
-             f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research, memory/*")
+             f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research, lz/osint, memory/*")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
