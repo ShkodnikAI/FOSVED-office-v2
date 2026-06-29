@@ -184,7 +184,7 @@ Web, YouTube, Reddit, Science, GitHub, Social, Telegram, Darknet, Academic — �
 
 ## База данных (22 таблицы)
 
-`dialog_history`, `adapt_corrections`, `error_patterns`, `miniapp_responses`, `miniapp_notes`, `dept_metrics`, `token_usage`, `audit_log`, `system_settings`, `narads`, `admin_findings`, `admin_proposals`, `knowledge_nodes`, `knowledge_edges`, `lz_channels`, `lz_monitor`, `learning_stats`, `control_watches`, `archive`, `factory_steps`, `factory_deliverables`
+`dialog_history`, `adapt_corrections`, `error_patterns`, `miniapp_responses`, `miniapp_notes`, `dept_metrics`, `token_usage`, `audit_log`, `system_settings`, `narads`, `debriefs`, `admin_reports`, `admin_findings`, `admin_proposals`, `knowledge_graph`, `knowledge_edges`, `channel_archive`, `factory_orders`, `lz_telegram_channels`, `lz_telegram_posts`, `lz_monitors`, `yana_events`
 
 ## Быстрый старт
 
