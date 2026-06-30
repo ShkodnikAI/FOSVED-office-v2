@@ -22,16 +22,12 @@ fi
 python3 scripts/migrate_schema.py data/fosved.db
 
 # 1. OmniRoute (порт 20128) — ПЕРВЫЙ
-omniroute serve --port 20128 --no-open &
-OMNI_PID=$!
-echo "OmniRoute started (PID: $OMNI_PID)"
+# DISABLED: omniroute serve --port 20128 --no-open &
+# DISABLED: OMNI_PID=$!
+# DISABLED: echo "OmniRoute started"
 sleep 3
 
-for i in {1..10}; do
-  curl -sf http://127.0.0.1:20128/health && break
-  echo "Waiting for OmniRoute... ($i)"
-  sleep 2
-done
+# DISABLED: OmniRoute healthcheck
 
 # 2. LLM Proxy
 python3 llm_proxy.py &
@@ -65,15 +61,6 @@ python3 reverse_proxy.py &
 PROXY_PID=$!
 echo "Reverse proxy started (PID: $PROXY_PID)"
 
-# 5. OmniRoute Watchdog
-while true; do
-  if ! curl -sf http://127.0.0.1:20128/health > /dev/null 2>&1; then
-    echo "OmniRoute died, restarting..."
-    omniroute serve --port 20128 --no-open &
-  fi
-  sleep 30
-done &
-WATCHDOG_PID=$!
-echo "OmniRoute watchdog started (PID: $WATCHDOG_PID)"
+# DISABLED: OmniRoute watchdog
 
-wait $OMNI_PID $LLM_PID $MLOG_PID $PROXY_PID
+wait $LLM_PID $MLOG_PID $PROXY_PID
