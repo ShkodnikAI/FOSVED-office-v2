@@ -275,8 +275,11 @@ pattern DetectDepartment(text: String) -> String {
   if starts_with(text, "/calc") then { return "engineering" }
   if starts_with(text, "/simulate") then { return "engineering" }
 
-  // Russian keyword detection via proxy
+  // Bare keyword shortcuts (no slash)
   let lower_text = lower(text)
+  if lower_text == "админ" or lower_text == "admin" then { return "admin" }
+
+  // Russian keyword detection via proxy
   let body = json_encode({text: lower_text})
   let result = http_post("http://127.0.0.1:4000/detect-dept", body, "application/json")
   let detected = json_get(parse_json(result), "dept", "")
@@ -312,8 +315,13 @@ pattern HandleYana(query: String, chat_id: String) -> String {
 }
 
 pattern YanaNowInfo() -> String {
-  let ts = to_string(now())
-  return "Текущий Unix timestamp: " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
+  let resp = http_get("http://127.0.0.1:4000/now-time")
+  let time_str = json_get(parse_json(resp), "time", "")
+  if time_str == "" then {
+    let ts = to_string(now())
+    return "Текущее время (приблизительно): Unix " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
+  }
+  return "Сейчас: " + time_str + " (Europe/Minsk, UTC+3)"
 }
 
 pattern YanaCalendar() -> String {
@@ -1437,6 +1445,12 @@ mlogserver {
       let reply = HandleKavalnya(query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "kavalnya")
       let _ = SendReport(reply, "kavalnya", query, "2.0", chat_id)
+      let handled = 1.0
+    }
+    if dept == "admin" then {
+      let _ = RecordUserMessage(chat_id, "admin", text)
+      let reply = HandleAdmin(text, chat_id)
+      let _ = SendTelegramReply(chat_id, reply)
       let handled = 1.0
     }
 

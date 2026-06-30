@@ -690,6 +690,24 @@ def _dept_kpis(dept):
 def health():
     return jsonify({"status": "ok", "omniroute": "alive" if is_omniroute_alive() else "down"})
 
+@app.get("/now-time")
+def now_time_endpoint():
+    """Return current date/time in human-readable form for Yana prompt injection.
+    Timezone: Europe/Minsk (UTC+3) — configured via TZ env var."""
+    from zoneinfo import ZoneInfo
+    try:
+        tz = ZoneInfo("Europe/Minsk")
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+    weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня",
+                  "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+    human = (f"{now.day} {months_ru[now.month-1]} {now.year}, "
+             f"{weekdays_ru[now.weekday()]}, "
+             f"{now.strftime('%H:%M')}")
+    return jsonify({"time": human, "iso": now.isoformat(), "unix": now.timestamp()})
+
 @app.post("/detect-dept")
 def detect_dept_endpoint():
     d = request.get_json(force=True)
