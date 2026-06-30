@@ -22,7 +22,7 @@ fi
 python3 scripts/migrate_schema.py data/fosved.db
 
 # 1. OmniRoute (порт 20128) — ПЕРВЫЙ
-omniroute start --port 20128 --no-browser &
+omniroute start --port 20128 --no-open &
 OMNI_PID=$!
 echo "OmniRoute started (PID: $OMNI_PID)"
 sleep 3
@@ -69,7 +69,7 @@ echo "Reverse proxy started (PID: $PROXY_PID)"
 while true; do
   if ! curl -sf http://127.0.0.1:20128/health > /dev/null 2>&1; then
     echo "OmniRoute died, restarting..."
-    omniroute start --port 20128 --no-browser &
+    omniroute start --port 20128 --no-open &
   fi
   sleep 30
 done &
