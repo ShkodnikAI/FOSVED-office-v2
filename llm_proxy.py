@@ -3200,7 +3200,7 @@ def telegram_webhook():
     
     # ── Simple commands ──
     if text.lower() in ("/start", "/help"):
-        _tg_send_message(chat_id, "Fosved Office v2\n\nОтделы: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge\n\nГолос: /voice on|off\nОценка: /rate <1-10>\n\nПросто напиши сообщение — маршрутизация автоматическая.")
+        _tg_send_message(chat_id, "Fosved Office v2\n\nОтделы: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge /admin\n\nУтилиты: /brief /digest /audit /learning /review /cost /good /fix\nГолос: /voice on|off|male|female\nОценка: /rate <1-10>\nМодель: /model auto|cheap|best|fusion\n\nПросто напиши сообщение — маршрутизация автоматическая.")
         return "ok", 200
     
     if text.lower() == "/status":
@@ -3227,7 +3227,101 @@ def telegram_webhook():
             _tg_send_message(chat_id, f"Оценка записана: {score}/10")
         except: _tg_send_message(chat_id, "Формат: /rate <1-10>")
         return "ok", 200
-    
+
+    # ── Manual trigger commands (MEGA-3) ──
+    if text.lower() == "/brief":
+        try:
+            r = http_requests.post("http://127.0.0.1:4000/ask",
+                json={"dept": "yana", "messages": [
+                    {"role": "system", "content": get_dept_prompt("yana")},
+                    {"role": "user", "content": "Сделай утренний brief: что произошло за ночь, что на сегодня запланировано, что критично."}
+                ]}, timeout=120)
+            reply = r.json().get("reply", "Не удалось получить brief")
+            _tg_send_message(chat_id, reply)
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /brief: {e}")
+        return "ok", 200
+
+    if text.lower() == "/digest":
+        try:
+            r = http_requests.post("http://127.0.0.1:4000/ask",
+                json={"dept": "yana", "messages": [
+                    {"role": "system", "content": get_dept_prompt("yana")},
+                    {"role": "user", "content": "Сделай вечерний свод: что сделано за день, что перенесено, на чём акцент завтра."}
+                ]}, timeout=120)
+            reply = r.json().get("reply", "Не удалось получить digest")
+            _tg_send_message(chat_id, reply)
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /digest: {e}")
+        return "ok", 200
+
+    if text.lower() == "/audit":
+        try:
+            rows = _query("SELECT dept, COUNT(*) as c FROM dialog_history WHERE created_at >= datetime('now', '-7 days') AND role='user' GROUP BY dept ORDER BY c DESC", fetch=True)
+            dept_activity = "\n".join([f"  {r['dept']}: {r['c']} запросов" for r in rows]) if rows else "Нет данных"
+            costs = _query("SELECT dept, SUM(cost_usd) as total FROM token_usage WHERE created_at >= datetime('now', '-7 days') GROUP BY dept ORDER BY total DESC", fetch=True)
+            cost_lines = "\n".join([f"  {r['dept']}: ${float(r['total'] or 0):.4f}" for r in costs]) if costs else "Нет данных"
+            _tg_send_message(chat_id, f"📋 Аудит за 7 дней\n\nАктивность по отделам:\n{dept_activity}\n\nРасходы по отделам:\n{cost_lines}")
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /audit: {e}")
+        return "ok", 200
+
+    if text.lower() == "/learning":
+        try:
+            corrections = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days')", fetch=True)
+            positives = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days') AND corr_type='positive'", fetch=True)
+            errors = _query("SELECT COUNT(*) as c FROM error_patterns WHERE created_at >= datetime('now', '-7 days')", fetch=True)
+            c_count = corrections[0]['c'] if corrections else 0
+            p_count = positives[0]['c'] if positives else 0
+            e_count = errors[0]['c'] if errors else 0
+            _tg_send_message(chat_id, f"📊 Обучение за 7 дней\n\nКорректировок: {c_count}\nПозитивных примеров: {p_count}\nОшибок зафиксировано: {e_count}")
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /learning: {e}")
+        return "ok", 200
+
+    if text.lower() == "/review":
+        try:
+            now = datetime.utcnow()
+            week_ago = (now - timedelta(days=7)).isoformat()
+            tasks = _query("SELECT COUNT(*) as c FROM dialog_history WHERE created_at >= ? AND role='user'", (week_ago,), fetch=True)
+            metrics = _query("SELECT metric_name, metric_value, created_at FROM dept_metrics WHERE created_at >= ? ORDER BY created_at DESC LIMIT 10", (week_ago,), fetch=True)
+            msg = f"📊 Обзор за 7 дней\n\nВсего запросов: {tasks[0]['c'] if tasks else 0}\n\nПоследние метрики:\n"
+            for m in (metrics or []):
+                msg += f"  [{m['dept'] or '?'}] {m['metric_name']}: {m['metric_value']}\n"
+            _tg_send_message(chat_id, msg)
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /review: {e}")
+        return "ok", 200
+
+    if text.lower() == "/good":
+        try:
+            rows = _query("SELECT dept, content FROM dialog_history WHERE chat_id=? AND role='assistant' ORDER BY id DESC LIMIT 1", (chat_id,), fetch=True)
+            u_rows = _query("SELECT content FROM dialog_history WHERE chat_id=? AND role='user' ORDER BY id DESC LIMIT 1", (chat_id,), fetch=True)
+            if rows and u_rows:
+                _query("INSERT INTO adapt_corrections (dept, original_query, correction, created_at, corr_type) VALUES (?,?,?,?,?)",
+                       (rows[0]['dept'], u_rows[0]['content'][:500], rows[0]['content'][:2000], datetime.utcnow().isoformat(), "positive"))
+                _tg_send_message(chat_id, "✅ Последний ответ отмечен как хороший пример.")
+            else:
+                _tg_send_message(chat_id, "Нет предыдущего ответа для оценки.")
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /good: {e}")
+        return "ok", 200
+
+    if text.lower() == "/cost":
+        try:
+            rows = _query("SELECT provider, model, SUM(cost_usd) as total, SUM(input_tokens + output_tokens) as tokens FROM token_usage WHERE created_at >= datetime('now', '-7 days') GROUP BY provider, model ORDER BY total DESC", fetch=True)
+            msg = "💰 Расходы за 7 дней\n\n"
+            total_cost = 0
+            for r in (rows or []):
+                cost = float(r['total'] or 0)
+                total_cost += cost
+                msg += f"  {r['provider']}/{r['model']}: ${cost:.4f} ({r['tokens']} tokens)\n"
+            msg += f"\nИтого: ${total_cost:.4f}"
+            _tg_send_message(chat_id, msg)
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /cost: {e}")
+        return "ok", 200
+
     # ── Department detection ──
     dept = detect_dept(text)
     
@@ -3243,6 +3337,19 @@ def telegram_webhook():
     
     # ── Build prompt ──
     system_prompt = get_dept_prompt(dept)
+    # Inject current time for Yana (same as YanaNowInfo() in app.mlog)
+    if dept == "yana":
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("Europe/Minsk")
+            now_local = datetime.now(tz)
+            months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня",
+                          "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+            weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+            human_time = f"Сейчас: {now_local.day} {months_ru[now_local.month-1]} {now_local.year}, {weekdays_ru[now_local.weekday()]}, {now_local.strftime('%H:%M')} (Europe/Minsk, UTC+3)"
+            system_prompt += f"\n\n=== Current Time & Date ===\n{human_time}"
+        except Exception:
+            pass
     
     # Record user message
     _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
