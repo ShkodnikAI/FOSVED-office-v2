@@ -3131,6 +3131,190 @@ def lz_osint():
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════
 
+# ──────────────────────────── PYTHON TELEGRAM WEBHOOK ────────────────────────────
+# Bypasses mlog binary entirely — full control over FORMAT_INSTRUCTION, voice, Mini App
+
+OWNER_ID = os.environ.get("OWNER_TELEGRAM_ID", "")
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("RENDER_URL", "https://fosved-office-v2.onrender.com"))
+_voice_enabled = False
+_tts_voice = "ru-RU-DmitryNeural"
+
+@app.post("/webhook/telegram")
+def telegram_webhook():
+    global _voice_enabled, _tts_voice
+    data = request.get_json(force=True, silent=True) or {}
+    msg = data.get("message", {})
+    if not msg:
+        return "ok", 200
+    
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    user_id = str(msg.get("from", {}).get("id", ""))
+    user_name = msg.get("from", {}).get("first_name", "")
+    text = msg.get("text", "").strip()
+    voice = msg.get("voice")
+    
+    # Owner check
+    if OWNER_ID and user_id != OWNER_ID:
+        return "ok", 200
+    
+    # Voice → STT
+    if voice and not text:
+        file_id = voice.get("file_id", "")
+        if file_id:
+            try:
+                stt_resp = http_requests.post(f"http://127.0.0.1:4000/stt",
+                    json={"file_id": file_id, "chat_id": chat_id}, timeout=60)
+                stt_data = stt_resp.json()
+                text = stt_data.get("text", "")
+                if text:
+                    _tg_send_message(chat_id, f"🎤 Распознано: {text}")
+            except Exception as e:
+                log.error(f"STT failed: {e}")
+                _tg_send_message(chat_id, "Ошибка распознавания голоса")
+                return "ok", 200
+    
+    if not text:
+        return "ok", 200
+    
+    log.info(f"[WEBHOOK] from={user_name} text={text[:80]}")
+    
+    # ── Simple commands ──
+    if text.lower() in ("/start", "/help"):
+        _tg_send_message(chat_id, "Fosved Office v2\n\nОтделы: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge\n\nГолос: /voice on|off\nОценка: /rate <1-10>\n\nПросто напиши сообщение — маршрутизация автоматическая.")
+        return "ok", 200
+    
+    if text.lower() == "/status":
+        _tg_send_message(chat_id, f"Fosved Office v2 — online\nVoice: {'on' if _voice_enabled else 'off'}\nWebhook: Python (direct)")
+        return "ok", 200
+    
+    if text.lower().startswith("/voice"):
+        parts = text.split()
+        if len(parts) > 1:
+            cmd = parts[1].lower()
+            if cmd == "on": _voice_enabled = True; _tg_send_message(chat_id, "Голос включён 🎙")
+            elif cmd == "off": _voice_enabled = False; _tg_send_message(chat_id, "Голос выключен")
+            elif cmd == "male": _tts_voice = "ru-RU-DmitryNeural"; _tg_send_message(chat_id, "Голос: мужской")
+            elif cmd == "female": _tts_voice = "ru-RU-SvetlanaNeural"; _tg_send_message(chat_id, "Голос: женский")
+        else:
+            _tg_send_message(chat_id, f"Voice: {'on' if _voice_enabled else 'off'}\n/voice on|off|male|female")
+        return "ok", 200
+    
+    if text.lower().startswith("/rate "):
+        try:
+            score = int(text.split()[1])
+            _query("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES ('yana','owner_feedback',?,?,?)",
+                   (str(score), 'manual', datetime.utcnow().isoformat()))
+            _tg_send_message(chat_id, f"Оценка записана: {score}/10")
+        except: _tg_send_message(chat_id, "Формат: /rate <1-10>")
+        return "ok", 200
+    
+    # ── Department detection ──
+    dept = detect_dept(text)
+    
+    # Extract query (remove command prefix)
+    query = text
+    for prefix in [f"/{dept}", "/analyze", "/scan", "/deep", "/forge", "/calc", "/simulate",
+                   "/quickanalyze", "/wargame", "/market-research", "/segment", "/competitors", "/campaign"]:
+        if text.lower().startswith(prefix):
+            query = text[len(prefix):].strip() or text
+            break
+    
+    log.info(f"[WEBHOOK] dept={dept} query={query[:80]}")
+    
+    # ── Build prompt ──
+    system_prompt = get_dept_prompt(dept)
+    
+    # Record user message
+    _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
+           (chat_id, "user", dept, text[:2000], datetime.utcnow().isoformat()))
+    
+    # ── Call LLM ──
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": query}
+    ]
+    
+    log.info(f"[WEBHOOK] LLM call dept={dept} sys_len={len(system_prompt)} has_format={'ФОРМАТ ОТВЕТА' in system_prompt}")
+    
+    result = call_llm(dept, messages)
+    reply = result.get("reply", "Ошибка: пустой ответ")
+    provider = result.get("provider", "?")
+    
+    log.info(f"[WEBHOOK] reply_len={len(reply)} provider={provider}")
+    
+    # Record assistant message
+    _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
+           (chat_id, "assistant", dept, reply[:2000], datetime.utcnow().isoformat()))
+    
+    # ── Send response ──
+    if dept in ("yana", "admin"):
+        # Plain text, no Mini App, no formatting restrictions
+        _tg_send_message(chat_id, reply)
+    elif len(reply) > 800:
+        # Mini App report for long responses
+        doc_id = f"doc-{int(datetime.utcnow().timestamp())}"
+        try:
+            css = (BASE_DIR / "report_css.txt").read_text() if (BASE_DIR / "report_css.txt").exists() else ""
+            c = DEPT_COLORS.get(dept, DEPT_COLORS["admin"])
+            name = DEPT_NAMES.get(dept, dept)
+            
+            # Format badges in reply
+            body_html = reply.replace("\n", "<br>")
+            body_html = body_html.replace("[ФАКТ]", '<span class="badge badge-fact">✓</span>')
+            body_html = body_html.replace("[ИНТЕРПРЕТАЦИЯ]", '<span class="badge badge-interp">◈</span>')
+            body_html = body_html.replace("[СПЕКУЛЯЦИЯ]", '<span class="badge badge-spec">⚡</span>')
+            body_html = body_html.replace("[FACT]", '<span class="badge badge-fact">✓</span>')
+            body_html = body_html.replace("[INTERPRETATION]", '<span class="badge badge-interp">◈</span>')
+            body_html = body_html.replace("[SPECULATION]", '<span class="badge badge-spec">⚡</span>')
+            
+            html = f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>{css}</style></head><body>
+<div class="report-container">
+<div class="report-header" style="background:linear-gradient(135deg,{c['start']},{c['end']})">
+<h1>{name}</h1><div class="subtitle">{query[:100]}</div></div>
+<div class="report-meta"><span>ID: {doc_id}</span><span>{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}</span></div>
+<div class="report-body">{body_html}</div>
+</div></body></html>'''
+            
+            _query("INSERT INTO miniapp_responses (id,dept,title,query,raw_text,html,confidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                   (doc_id, dept, query[:200], query[:200], reply[:5000], html, "2.0", datetime.utcnow().isoformat()))
+            
+            miniapp_url = f"{RENDER_URL}/miniapp/{doc_id}"
+            short = reply[:200] + "..."
+            
+            # Send with Mini App button
+            payload = {
+                "chat_id": chat_id,
+                "text": short,
+                "reply_markup": {"inline_keyboard": [[{
+                    "text": f"📂 Открыть отчёт: {name}",
+                    "web_app": {"url": miniapp_url}
+                }]]}
+            }
+            http_requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                             json=payload, timeout=30)
+        except Exception as e:
+            log.error(f"Mini App report failed: {e}")
+            _tg_send_message(chat_id, reply)
+    else:
+        # Short response — plain text
+        _tg_send_message(chat_id, reply)
+    
+    # ── Voice response (TTS) ──
+    if _voice_enabled and len(reply) > 5:
+        tts_text = reply
+        if dept not in ("yana", "admin") and len(reply) > 1000:
+            tts_text = reply[:500] + "... Продолжение в текстовом отчёте."
+        try:
+            http_requests.post("http://127.0.0.1:4000/tts",
+                json={"text": tts_text, "voice": _tts_voice, "chat_id": chat_id}, timeout=60)
+        except Exception as e:
+            log.error(f"TTS failed: {e}")
+    
+    return "ok", 200
+
+
 if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
