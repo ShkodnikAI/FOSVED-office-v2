@@ -329,7 +329,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')));
         """)
-        c.commit(); c.close()
         for col_sql, col_name in [
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
             ("ALTER TABLE token_usage ADD COLUMN combo TEXT DEFAULT ''", "combo"),
