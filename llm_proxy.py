@@ -948,7 +948,7 @@ def tts_endpoint():
     """Text-to-speech via edge-tts, send voice to Telegram."""
     d = request.get_json(force=True)
     text = d.get("text", "")
-    voice = d.get("voice", "ru-RU-DmitryNeural")
+    voice = d.get("voice", "ru-RU-SvetlanaNeural")
     chat_id = d.get("chat_id", "")
 
     if not text:
@@ -961,9 +961,11 @@ def tts_endpoint():
 
     try:
         # Run edge-tts subprocess
+        rate = d.get("rate", "+20%")
         cmd = [
             "edge-tts",
             "--voice", voice,
+            "--rate", rate,
             "--text", text,
             "--write-media", tmp_path
         ]
