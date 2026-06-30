@@ -704,6 +704,17 @@ def ask():
     dept = d.get("dept", "yana")
     messages = d.get("messages", [])
     model_ov = d.get("model")
+    # DEBUG: log system prompt to find FORMAT_INSTRUCTION source
+    for m in messages:
+        if m.get("role") == "system":
+            sys_text = m.get("content", "")
+            has_format = "ФОРМАТ ОТВЕТА" in sys_text or "Слой 1" in sys_text
+            log.info(f"ASK dept={dept} sys_len={len(sys_text)} has_format={has_format} first200={sys_text[:200]}")
+            if has_format:
+                # Find exactly where FORMAT_INSTRUCTION appears
+                idx = sys_text.find("ФОРМАТ ОТВЕТА")
+                if idx < 0: idx = sys_text.find("Слой 1")
+                log.info(f"FORMAT found at char {idx}, context: ...{sys_text[max(0,idx-50):idx+100]}...")
     if not messages:
         return jsonify({"reply": "[Oshibka] Net soobshenii", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 400
     result = call_llm(dept, messages, model_ov)
