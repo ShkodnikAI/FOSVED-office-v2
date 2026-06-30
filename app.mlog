@@ -2,7 +2,7 @@
 // 14 departments + routing + memory + cron + lockdown + voice + chain + learning + audit + archive
 
 import dept/utils
-import dept/context
+// import dept/context — REMOVED: inlined below to bypass binary import caching (same issue as dept/yana)
 import dept/miniapp
 import dept/chain
 import dept/scheduler
@@ -179,6 +179,62 @@ pattern CallLLMProxy(dept: String, messages: String) -> String {
   let result = http_post("http://127.0.0.1:4000/ask", body, "application/json")
   return result
 }
+
+// ============================================================
+// INLINED from dept/context.mlog (bypass binary import caching)
+// ============================================================
+
+pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile(dept)
+  let skills = SelectSkillsByKeywords(dept, query)
+  let corrections = GetCorrections(dept)
+  let dialog = GetRecentDialog(chat_id, "5")
+  let context = profile + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Recent Dialog ===\n" + dialog
+
+  // FORMAT_INSTRUCTION — ONLY for osp and expert
+  if dept == "osp" or dept == "expert" then {
+    let format_instruction = "\n\n## ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)\n\nОтвечай РАЗВЁРНУТО (минимум 1000 символов). Структура:\n\n1. Используй секции: \"Слой 1 — ...\", \"Слой 2 — ...\" и т.д. (минимум 3 слоя)\n2. Маркируй каждое утверждение:\n   - [ФАКТ] — подтверждённые данные, цифры, даты\n   - [ИНТЕРПРЕТАЦИЯ] — твой анализ на основе фактов\n   - [СПЕКУЛЯЦИЯ] — гипотезы, предположения\n3. Завершай секцией \"Вердикт\" с ключевыми выводами\n4. Если применимо — добавь \"Индикаторы для наблюдения\"\n5. Язык: русский\n6. Не будь кратким. Препарируй тему глубоко.\n"
+    let context = context + format_instruction
+  }
+
+  return context
+}
+
+pattern ReadDeptProfile(dept: String) -> String {
+  let cached = kv_get("fc_profile_" + dept)
+  if cached != "" then { return cached }
+  let content = read_file("library/" + dept + ".md")
+  if content != "" then { return content }
+  return "Department: " + dept + ". Act professionally."
+}
+
+pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
+  let index_content = read_file("skills_index/" + dept + ".txt")
+  if index_content == "" then { return "No skills loaded." }
+  let skills_list = split(trim(index_content), "\n")
+  let result = ""
+  each skill in skills_list {
+    if len(result) < 2000.0 then {
+      let skill_content = read_file("skills/" + trim(skill) + "/SKILL.md")
+      if skill_content != "" then {
+        if contains(lower(skill_content), lower(substring(query, 0.0, 50.0))) then {
+          let result = result + "\n--- " + trim(skill) + " ---\n" + substring(skill_content, 0.0, 500.0)
+        }
+      }
+    }
+  }
+  if result == "" then { return "Skills available for " + dept + ": " + index_content }
+  return result
+}
+
+pattern CompressDialog(chat_id: String) -> String {
+  let rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ?", [chat_id])
+  return "ok"
+}
+
+// ============================================================
+// END inlined context
+// ============================================================
 
 pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String {
   let context = BuildContext(dept, query, chat_id)
