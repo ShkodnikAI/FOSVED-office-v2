@@ -766,12 +766,99 @@ def archive_digest():
     _log_audit("digest", d)
     return jsonify({"status": "ok", "digest_id": hashlib.md5(json.dumps(d).encode()).hexdigest()[:8]})
 
+def _build_action_bar(dept, doc_id, existing_notes_html=""):
+    """Build action bar HTML + JS for Mini App reports."""
+    osp_buttons = ""
+    osp_menus = ""
+    if dept == "osp":
+        osp_buttons = '''
+<button class="action-btn primary" onclick="doAction('journalist')"><span class="icon">✏️</span>Журналист</button>
+<button class="action-btn" onclick="toggleMenu('depthMenu')"><span class="icon">🔍</span>Погружение</button>
+<button class="action-btn" onclick="toggleMenu('controlMenu')"><span class="icon">📌</span>На контроль</button>
+<button class="action-btn danger" onclick="doAction('counter_forecast')"><span class="icon">⚡</span>Контр-прогноз</button>'''
+        osp_menus = '''
+<div class="depth-menu" id="depthMenu">
+  <div class="depth-option" onclick="doDepth(1)"><div class="depth-dot" style="background:#94a3b8"></div><div><b>Быстрая оценка</b><br><span style="font-size:11px;color:#64748b">2-3 слоя</span></div></div>
+  <div class="depth-option" onclick="doDepth(2)"><div class="depth-dot" style="background:#3b82f6"></div><div><b>Стандартный</b><br><span style="font-size:11px;color:#64748b">5-7 слоёв, ACH</span></div></div>
+  <div class="depth-option" onclick="doDepth(3)"><div class="depth-dot" style="background:#f59e0b"></div><div><b>Глубокое</b><br><span style="font-size:11px;color:#64748b">8-10 слоёв, premortem</span></div></div>
+  <div class="depth-option" onclick="doDepth(4)"><div class="depth-dot" style="background:#dc2626"></div><div><b>Полное + Red Team</b><br><span style="font-size:11px;color:#64748b">12+ слоёв, контр-анализ</span></div></div>
+</div>
+<div class="control-menu" id="controlMenu">
+  <div class="control-option" onclick="doControl('daily')">📅 Ежедневно</div>
+  <div class="control-option" onclick="doControl('weekly')">📆 Еженедельно</div>
+  <div class="control-option" onclick="doControl('monthly')">🗓 Ежемесячно</div>
+</div>'''
+
+    return f'''
+{osp_menus}
+<div class="action-bar{' osp-bar' if dept == 'osp' else ''}">
+{osp_buttons}
+<button class="action-btn" onclick="copyText()"><span class="icon">📋</span>Копировать</button>
+<button class="action-btn" onclick="window.print()"><span class="icon">📄</span>PDF</button>
+<button class="action-btn" onclick="shareReport()"><span class="icon">📤</span>Поделиться</button>
+</div>
+<div class="notes-section">
+<div class="notes-title">Важные замечания</div>
+<div class="notes-list" id="notesList">{existing_notes_html}</div>
+<div class="notes-input">
+<input type="text" id="noteInput" placeholder="Добавить замечание..." onkeydown="if(event.key==='Enter')addNote()"/>
+<button onclick="addNote()">+</button>
+</div>
+</div>
+<script>
+var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+var docId = "{doc_id}";
+if(tg) tg.ready();
+
+function copyText(){{
+  var body = document.querySelector('.report-body');
+  if(body) navigator.clipboard.writeText(body.innerText).then(function(){{ alert('Скопировано') }});
+}}
+function shareReport(){{
+  if(navigator.share) navigator.share({{title:document.title, url:location.href}});
+  else if(tg) tg.openTelegramLink('https://t.me/share/url?url='+encodeURIComponent(location.href));
+  else alert('Ссылка: '+location.href);
+}}
+function addNote(){{
+  var input=document.getElementById('noteInput');
+  var text=input.value.trim();
+  if(!text)return;
+  var list=document.getElementById('notesList');
+  var now=new Date().toLocaleTimeString('ru-RU',{{hour:'2-digit',minute:'2-digit'}});
+  list.innerHTML+='<div class="note-item"><span>'+text+'</span><span class="note-time">'+now+'</span></div>';
+  input.value='';
+  fetch('/miniapp/note',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{doc_id:docId,note_text:text}})}});
+}}
+function doAction(action){{
+  if(tg) tg.sendData(JSON.stringify({{action:action,doc_id:docId}}));
+  else fetch('/webhook/miniapp-action',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{action:action,doc_id:docId}})}}).then(function(){{alert(action+' запущен')}});
+}}
+function toggleMenu(id){{
+  var m=document.getElementById(id);
+  if(m)m.style.display=m.style.display==='none'?'block':'none';
+}}
+function doDepth(level){{
+  document.getElementById('depthMenu').style.display='none';
+  doAction('deepen_to_'+level);
+}}
+function doControl(freq){{
+  document.getElementById('controlMenu').style.display='none';
+  doAction('control_'+freq);
+}}
+</script>'''
+
+
 @app.get("/miniapp/<doc_id>")
 def miniapp_get(doc_id):
     rows = _query("SELECT html,title,created_at,dept,raw_text FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
     if not rows:
         return "<h1>Not found</h1>", 404
     r = rows[0]
+    dept = r.get("dept", "admin")
+    # Load notes for this doc
+    notes_rows = _query("SELECT note_text, created_at FROM miniapp_notes WHERE doc_id=? ORDER BY id", (doc_id,), fetch=True) or []
+    notes_html = "".join(f'<div class="note-item"><span>{html_lib_escape(n["note_text"])}</span><span class="note-time">{n["created_at"][-8:-3] if n.get("created_at") else ""}</span></div>' for n in notes_rows)
+    action_bar = _build_action_bar(dept, doc_id, notes_html)
     # Rich post-processor: if raw_text exists and has markdown structure, enrich it
     raw = r.get("raw_text", "")
     dept = r.get("dept", "admin")
@@ -810,9 +897,14 @@ body {{ font-family:'DM Sans',sans-serif; color:#1e293b; background:#F8F7F4; mar
 <div class="report-meta"><span>ID: {html_lib_escape(doc_id)}</span><span>{html_lib_escape(created)}</span></div>
 <div class="report-body">{enriched_body}</div>
 {disclaimer}
+{action_bar}
 </div></body></html>'''
             return Response(html, mimetype="text/html")
-    return Response(r["html"], mimetype="text/html")
+    # Fallback: return stored HTML with action bar injected
+    stored_html = r["html"]
+    if "</body>" in stored_html:
+        stored_html = stored_html.replace("</body>", f"{action_bar}</body>")
+    return Response(stored_html, mimetype="text/html")
 
 @app.post("/miniapp/note")
 def miniapp_note():
@@ -820,6 +912,62 @@ def miniapp_note():
     _query("INSERT INTO miniapp_notes (doc_id,note_text,created_at) VALUES (?,?,?)",
            (d.get("doc_id", ""), d.get("note_text", ""), datetime.utcnow().isoformat()))
     return jsonify({"status": "ok"})
+
+@app.post("/webhook/miniapp-action")
+def miniapp_action():
+    """Handle Mini App action bar button clicks (Journalist, Depth, Control, Counter)."""
+    d = request.get_json(force=True)
+    action = d.get("action", "")
+    doc_id = d.get("doc_id", "")
+    if not doc_id:
+        return jsonify({"status": "error", "msg": "no doc_id"}), 400
+    
+    rows = _query("SELECT raw_text, title, dept FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
+    if not rows:
+        return jsonify({"status": "error", "msg": "doc not found"}), 404
+    r = rows[0]
+    raw = r.get("raw_text", "")
+    title = r.get("title", "")
+    dept = r.get("dept", "osp")
+    
+    if action == "journalist":
+        prompt = f"""Ты — журналист-аналитик. Перепиши следующий аналитический отчёт в формат журналистской статьи.
+Без служебных реквизитов, без бейджей [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ].
+Живой язык, понятный обычному читателю. Лид-абзац + контекст + основная часть + вывод.
+1000-1500 слов. Заголовок — яркий, журналистский."""
+        messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": prompt + "\n\nИсходный отчёт:\n" + raw}]
+        result = call_llm("osp", messages)
+        return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "journalist"})
+    
+    elif action.startswith("deepen_to_"):
+        level = action.split("_")[-1]
+        depth_map = {"1": "Быстрая оценка. 2-3 слоя.", "2": "Стандартный анализ. 5-7 слоёв. ACH 3 гипотезы.",
+                     "3": "Глубокое. 8-10 слоёв. ACH 5 гипотез. Premortem. Кантильоновский анализ.",
+                     "4": "Полное + Red Team. 12+ слоёв. ACH, premortem, кантильон, source triangulation. Контраргументы."}
+        instruction = depth_map.get(level, "Стандартный анализ.")
+        messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": instruction + "\n\nПредыдущий анализ:\n" + raw + "\n\nУглуби до уровня " + level}]
+        result = call_llm("osp", messages)
+        return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "deepen", "level": level})
+    
+    elif action.startswith("control_"):
+        freq = action.split("_", 1)[1]
+        _query("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES ('osp','control_watch',?,?,?)",
+               (doc_id, freq, datetime.utcnow().isoformat()))
+        return jsonify({"status": "ok", "action": "control", "frequency": freq, "doc_id": doc_id})
+    
+    elif action == "counter_forecast":
+        prompt = """Ты — контр-аналитик. Построй максимально противоположный прогноз:
+- Найди слабые места исходного прогноза
+- Построй альтернативный сценарий
+- Используй те же факты, но с противоположной интерпретацией
+- Оцени вероятность контр-сценария
+- Укажи индикаторы реализации контр-сценария
+- Формат: ACH с минимум 3 контр-гипотезами"""
+        messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": prompt + "\n\nИсходный анализ:\n" + raw}]
+        result = call_llm("osp", messages)
+        return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "counter_forecast"})
+    
+    return jsonify({"status": "error", "msg": f"unknown action: {action}"}), 400
 
 @app.post("/enrich")
 def enrich_endpoint():
@@ -3402,6 +3550,7 @@ def telegram_webhook():
 <h1>{name}</h1><div class="subtitle">{query[:100]}</div></div>
 <div class="report-meta"><span>ID: {doc_id}</span><span>{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}</span></div>
 <div class="report-body">{body_html}</div>
+{_build_action_bar(dept, doc_id)}
 </div></body></html>'''
             
             _query("INSERT INTO miniapp_responses (id,dept,title,query,raw_text,html,confidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
