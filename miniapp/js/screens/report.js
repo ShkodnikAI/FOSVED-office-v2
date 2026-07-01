@@ -25,13 +25,14 @@ export async function render(container, id) {
   try {
     const reportHtml = await API.reportHtml(id);
 
-    let content = topbarHtml;
+    let content = `<div style="display:flex;flex-direction:column;height:100%;overflow:hidden">`;
+    content += topbarHtml;
     content += `<div class="screen-scroll">`;
     content += `<div class="report-body">${reportHtml}</div>`;
     content += `</div>`;
 
-    // ── Action Bar ──
-    content += `
+    // ── Action Bar (pinned to bottom) ──
+    content += `<div class="report-action-dock">
       <div class="action-bar">
         <button class="action-btn" data-action="deepen">Углубить</button>
         <button class="action-btn" data-action="redteam">Red Team</button>
@@ -45,7 +46,9 @@ export async function render(container, id) {
         <button class="action-btn" data-action="copy">Копировать</button>
         <button class="action-btn" data-action="pdf">PDF</button>
         <button class="action-btn" data-action="share">Поделиться</button>
-      </div>`;
+      </div>
+    </div>`;
+    content += `</div>`;
 
     container.innerHTML = content;
 
