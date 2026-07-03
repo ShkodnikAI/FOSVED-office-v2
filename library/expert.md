@@ -122,23 +122,13 @@ Auto-эскалация: запрос со ставкой ≥X (явно ука�
 - **Numerical Anchors** — для каждой темы устанавливаются числовые ориентиры (стоимость должна быть в диапазоне X, capex обычно Y%)
 - **Peer Review Simulation** — мысленное моделирование как бы посмотрели на это рецензенты топовых журналов в области
 
-# Tier 1 — Methodological core (всегда загружается)
-npx skills add fosved/expert/rapid-domain-immersion
-npx skills add fosved/expert/project-deconstruction
-npx skills add fosved/expert/failure-modes-mapping
-npx skills add fosved/expert/combat-questions-design
-npx skills add fosved/expert/bullshit-detection
+## Скиллы (8)
 
-# Tier 2 — Domain depth (по типу встречи)
-npx skills add fosved/expert/technical-economics-validation
-npx skills add fosved/expert/peer-review-simulation
-npx skills add fosved/expert/adjacent-field-cross-check
-npx skills add fosved/expert/competing-claims-comparison
+**Core (5):** rapid-domain-immersion, project-deconstruction, failure-modes-mapping, combat-questions-design, bullshit-detection
 
-# Tier 3 — Special techniques (для крупных due diligence)
-npx skills add fosved/expert/pre-meeting-intel
-npx skills add fosved/expert/tactical-meeting-protocol
-```
+**Domain (3):** technical-economics-validation, peer-review-simulation, adjacent-field-cross-check, competing-claims-comparison
+
+**Special (2):** pre-meeting-intel, tactical-meeting-protocol
 
 ## Команды
 
