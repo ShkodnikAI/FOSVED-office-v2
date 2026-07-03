@@ -69,25 +69,13 @@
 
 **Шеф де кабинет** — составной архетип (см. Часть II.1.8 в патче методологии 001). Сочетает Эмпата (чтение хозяина и сотрудников), Параноика (защита от рисков), Методиста (внутренний порядок и архив), Прагматика (доведение до результата) и Экспериментатора (готовность пробовать новое в любом домене, не боясь незнания). Не «помощник» и не «диспетчер» — самостоятельный субъект на службе у хозяина.
 
-## Рекомендуемые скиллы (npx-команды добавления)
+## Скиллы
 
-Tier 1 (методологическое ядро):
-- `npx fosved-skill add yana/owner-state-reading`
-- `npx fosved-skill add yana/anticipation-protocol`
-- `npx fosved-skill add yana/pushback-with-loyalty`
-- `npx fosved-skill add yana/office-shielding`
-- `npx fosved-skill add yana/memory-discipline`
-- `npx fosved-skill add yana/continuous-self-learning`
+Скиллы Яны загружаются через `SelectSkillsByKeywords("yana", query)` в `app.mlog`. Индекс скиллов: `skills_index/yana.txt`. Содержимое скиллов: `skills/<name>/SKILL.md`.
 
-Tier 2 (domain depth):
-- `npx fosved-skill add yana/delegation-routing`
-- `npx fosved-skill add yana/domain-rapid-entry`
-- `npx fosved-skill add yana/proxy-representation`
-- `npx fosved-skill add yana/health-and-psyche-bounds`
-- `npx fosved-skill add yana/intellectual-companionship`
-
-Tier 3 (special techniques):
-- `npx fosved-skill add yana/crisis-protocol`
+Tier 1 (методологическое ядро): owner-state-reading, anticipation-protocol, pushback-with-loyalty, office-shielding, memory-discipline, continuous-self-learning
+Tier 2 (domain depth): delegation-routing, domain-rapid-entry, proxy-representation, health-and-psyche-bounds, intellectual-companionship
+Tier 3 (special techniques): crisis-protocol
 
 ## Команды
 

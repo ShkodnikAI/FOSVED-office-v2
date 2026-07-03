@@ -211,19 +211,19 @@ COMMAND_DEPT = {
 }
 
 RUSSIAN_KEYWORDS = {
-    'osp': ['proanalizirui', 'prognoz', 'strategiya', 'geopolitik', 'analiz'],
-    'lz': ['tekhnolog', 'monitory', 'trend', 'proryv', 'nauka', 'issledovan'],
-    'expert': ['vstrech', 'brifing', 'podgotov k', 'ekspert', 'preparirui'],
-    'marketing': ['reklam', 'auditoriya', 'konversiya', 'marketing', 'pozitsionir'],
-    'finance': ['byudzhet', 'cashflow', 'nalog', 'finans', 'raskhod', 'dokhod'],
-    'legal': ['dogovor', 'isk', 'gdpr', 'yuridichesk', 'nda', 'pravo'],
-    'dev': ['kod', 'arkhitektur', 'api', 'programm', 'deploi', 'server'],
-    'design': ['dizain', 'wireframe', 'maket', 'ui', 'ux', 'interfeis'],
-    'qa': ['test', 'bag', 'kachestv', 'proverk'],
-    'visual': ['infografik', 'vizualizats', 'grafik', 'prezentats'],
-    'engineering': ['rasyot', 'nagruz', 'konstruktsi', 'inzhener', 'snip'],
-    'kavalnya': ['novyi otdel', 'poligon', 'metodolog', 'sozdat otdel'],
-    'admin': ['optimizirui', 'pochini', 'bag', 'oshibka v kode', 'refaktoring', 'deploy', 'admin', 'kode', 'infrastruktura'],
+    'osp': ['проанализируй', 'прогноз', 'стратегия', 'геополитик', 'анализ', 'сценари', 'вероятност', 'деconstruct', 'деконстру', 'тополог'],
+    'lz': ['технолог', 'монитор', 'тренд', 'прорыв', 'наука', 'исследован', 'обзор', 'что такое', 'как работает', 'лаборатори'],
+    'expert': ['встреч', 'брифинг', 'подготов к', 'эксперт', 'подготовь', 'вопросы для', 'комбат-вопрос', 'подготов'],
+    'marketing': ['реклам', 'аудитори', 'конверси', 'маркетинг', 'позицио', 'воронк', 'smm', 'бренд', 'контент', 'сегмент'],
+    'finance': ['бюджет', 'cashflow', 'налог', 'финанс', 'расход', 'доход', 'инвестиц', 'кредит', 'курс валют', 'кассовый разрыв'],
+    'legal': ['договор', 'иск', 'gdpr', 'юридическ', 'nda', 'право', 'суд', 'комплаенс', 'контракт', 'закон'],
+    'dev': ['код', 'архитектур', 'api', 'программ', 'деплой', 'сервер', 'git', 'баг', 'рефактор', 'бэкенд', 'фронтенд'],
+    'design': ['дизайн', 'wireframe', 'макет', 'ui', 'ux', 'интерфейс', 'прототип', 'фиго', 'компонент'],
+    'qa': ['тест', 'баг', 'качеств', 'проверк', 'регресси', 'автотест', 'e2e', 'покрыти'],
+    'visual': ['инфографик', 'визуализац', 'график', 'презентац', 'диаграмм', 'иллюстрац', 'дашборд'],
+    'engineering': ['расчёт', 'нагрузк', 'конструкц', 'инженер', 'снип', 'гидравлик', 'прочност', 'сварк', 'фундамент'],
+    'kavalnya': ['новый отдел', 'полигон', 'методолог', 'создать отдел', 'наряд', 'дефектив', 'assess', 'debrief'],
+    'admin': ['оптимизир', 'почини', 'рефакторинг', 'deploy', 'админ', 'инфраструктур', 'здравствуй', 'перезагруз', 'конфиг'],
 }
 
 def detect_dept(text):

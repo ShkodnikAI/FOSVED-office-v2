@@ -457,7 +457,20 @@ pattern YanaNowInfo() -> String {
 pattern YanaCalendar() -> String {
   let rows = query("SELECT event_text, event_date, event_type FROM yana_events WHERE created_at IS NOT NULL ORDER BY event_date ASC LIMIT 20", [])
   if rows == "[]" then { return "Нет запланированных событий." }
-  return to_string(rows)
+  let parsed = parse_json(rows)
+  if parsed == "" then { return "Нет запланированных событий." }
+  let count = len(parsed)
+  if count == 0.0 then { return "Нет запланированных событий." }
+  let result = "Запланированные события (" + to_string(count) + "):\n"
+  let i = 0.0
+  each row in parsed {
+    let i = i + 1.0
+    let etext = json_get(row, "event_text", "")
+    let edate = json_get(row, "event_date", "")
+    let etype = json_get(row, "event_type", "напоминание")
+    let result = result + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
+  }
+  return result
 }
 
 pattern YanaCheckDelegate(reply: String) -> String {
@@ -797,10 +810,22 @@ mlogserver {
       if rows == "[]" then {
         let _ = SendTelegramReply(chat_id, "Календарь пуст. Используй /remember <текст> [дата] чтобы добавить событие.")
       } else {
-        let output = "Календарь Яны:\n"
-        // Simple text output from JSON array
-        let output = output + to_string(rows)
-        let _ = SendTelegramReply(chat_id, output)
+        let parsed = parse_json(rows)
+        let count = len(parsed)
+        if count == 0.0 then {
+          let _ = SendTelegramReply(chat_id, "Календарь пуст. Используй /remember <текст> [дата] чтобы добавить событие.")
+        } else {
+          let output = "Календарь Яны (" + to_string(count) + "):\n\n"
+          let i = 0.0
+          each row in parsed {
+            let i = i + 1.0
+            let etext = json_get(row, "event_text", "")
+            let edate = json_get(row, "event_date", "")
+            let etype = json_get(row, "event_type", "напоминание")
+            let output = output + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
+          }
+          let _ = SendTelegramReply(chat_id, output)
+        }
       }
       return respond("200 ok")
     }
