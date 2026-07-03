@@ -272,8 +272,9 @@ FORMAT_INSTRUCTION = """
 6. Не будь кратким. Препарируй тему глубоко.
 """
 
-# FORMAT_INSTRUCTION (layered analysis with ✓/◈/⚡) only for analytical departments
-_ANALYTICAL_DEPTS = {"osp", "expert"}
+# FORMAT_INSTRUCTION (layered analysis with ✓/◈/⚡) only for expert dept
+# OSP format now comes from deconstruct skill (always loaded via LoadOspSkills in app.mlog)
+_ANALYTICAL_DEPTS = {"expert"}
 
 def get_dept_prompt(dept, combo=None):
     fmt = FORMAT_INSTRUCTION if dept in _ANALYTICAL_DEPTS else ""

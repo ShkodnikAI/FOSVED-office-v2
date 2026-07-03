@@ -74,12 +74,37 @@ pattern InitDB() -> String {
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
 
+  // OSP — analysis archive & research sources (per METHODOLOGY v3, hard rule #8)
+  // NOTE: db_execute/db_insert in this file — interpreter-only functions. Works because serve = interpreter (confirmed 2026-06-22). If backend changes — re-verify (METALOGOS_INSTRUCTIONS.md §6.9).
+  db_execute("CREATE TABLE IF NOT EXISTS analysis (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS research_source (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, url TEXT, title TEXT, tier TEXT DEFAULT 'secondary', claim TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))")
+
   return "ok"
 }
 
 // ============================================================
 // HELPERS
 // ============================================================
+
+// ── OSP archive helpers (interpreter-only, confirmed 2026-06-22) ──
+
+pattern SaveAnalysis(topic: String, result: String) -> String {
+  let escaped_topic = escape_json(topic)
+  let escaped_result = escape_json(result)
+  db_execute("INSERT INTO analysis (topic, full_result, status) VALUES ('" + escaped_topic + "', '" + escaped_result + "', 'drafted')")
+  let rows = query("SELECT last_insert_rowid() as lid", [])
+  if rows != "[]" then { return json_get(parse_json(rows), "[0].lid", "0") }
+  return "0"
+}
+
+pattern AttachSource(analysis_id: String, title: String, claim: String) -> String {
+  let et = escape_json(title)
+  let ec = escape_json(claim)
+  db_execute("INSERT INTO research_source (analysis_id, title, claim) VALUES ('" + analysis_id + "', '" + et + "', '" + ec + "')")
+  return "ok"
+}
+
+// ── Factory ──
 
 pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> String {
   let step = kv_get("order_step_" + order_id)
@@ -186,13 +211,21 @@ pattern CallLLMProxy(dept: String, messages: String) -> String {
 
 pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   let profile = ReadDeptProfile(dept)
-  let skills = SelectSkillsByKeywords(dept, query)
+
+  // OSP: use tier-based skill loading (LoadOspSkills), format from deconstruct skill
+  let skills = ""
+  if dept == "osp" then {
+    let skills = LoadOspSkills(query)
+  } else {
+    let skills = SelectSkillsByKeywords(dept, query)
+  }
+
   let corrections = GetCorrections(dept)
   let dialog = GetRecentDialog(chat_id, "5")
   let context = profile + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Recent Dialog ===\n" + dialog
 
-  // FORMAT_INSTRUCTION — ONLY for osp and expert
-  if dept == "osp" or dept == "expert" then {
+  // FORMAT_INSTRUCTION — ONLY for expert (OSP gets format from deconstruct skill)
+  if dept == "expert" then {
     let format_instruction = "\n\n## ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)\n\nОтвечай РАЗВЁРНУТО (минимум 1000 символов). Структура:\n\n1. Используй секции: \"Слой 1 — ...\", \"Слой 2 — ...\" и т.д. (минимум 3 слоя)\n2. Маркируй каждое утверждение:\n   - [ФАКТ] — подтверждённые данные, цифры, даты\n   - [ИНТЕРПРЕТАЦИЯ] — твой анализ на основе фактов\n   - [СПЕКУЛЯЦИЯ] — гипотезы, предположения\n3. Завершай секцией \"Вердикт\" с ключевыми выводами\n4. Если применимо — добавь \"Индикаторы для наблюдения\"\n5. Язык: русский\n6. Не будь кратким. Препарируй тему глубоко.\n"
     let context = context + format_instruction
   }
@@ -224,6 +257,103 @@ pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
     }
   }
   if result == "" then { return "Skills available for " + dept + ": " + index_content }
+  return result
+}
+
+// ── OSP tier-based skill loading (confirmed builtins only) ──
+// Tier 1 always, Tier 2 by topic triggers, Tier 3 by explicit triggers.
+// Budget: 25000 chars total. Path: skills/<name>/SKILL.md (flat, no osp/ subdir).
+pattern LoadOspSkills(query: String) -> String {
+  let t = lower(query)
+  let result = ""
+  let budget = 25000.0
+
+  // ── Tier 1: Methodological core (always) ──
+  let s = read_file("skills/deconstruct/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- deconstruct ---\n" + s }
+  let s = read_file("skills/awareness-frame/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- awareness-frame ---\n" + s }
+  let s = read_file("skills/root-cause-mapping/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- root-cause-mapping ---\n" + s }
+  let s = read_file("skills/forces-and-potentials/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- forces-and-potentials ---\n" + s }
+  let s = read_file("skills/strategic-maneuvers/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- strategic-maneuvers ---\n" + s }
+  let s = read_file("skills/two-paths-synthesis/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- two-paths-synthesis ---\n" + s }
+  let s = read_file("skills/decision-tree-forecast/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- decision-tree-forecast ---\n" + s }
+  let s = read_file("skills/reflexive-impact/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- reflexive-impact ---\n" + s }
+  let s = read_file("skills/calibration/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- calibration ---\n" + s }
+  let s = read_file("skills/system-health-diagnostics/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- system-health-diagnostics ---\n" + s }
+
+  // ── Tier 2: Domain depth (by topic triggers) ──
+  // Finance / markets
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "gold") or contains(t, "золот")) and len(result) < budget then {
+    let s = read_file("skills/cross-asset-divergence/SKILL.md")
+    if s != "" then { let result = result + "\n--- cross-asset-divergence ---\n" + s }
+  }
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "крипто") or contains(t, "нефт")) and len(result) < budget then {
+    let s = read_file("skills/macro-regime-id/SKILL.md")
+    if s != "" then { let result = result + "\n--- macro-regime-id ---\n" + s }
+    let s = read_file("skills/cantillon/SKILL.md")
+    if s != "" then { let result = result + "\n--- cantillon ---\n" + s }
+  }
+  // Person / leader
+  if (contains(t, "персона") or contains(t, "лидер") or contains(t, "президент") or contains(t, "глава") or contains(t, "министр") or contains(t, "губернатор") or contains(t, "ceo") or contains(t, "исчез")) and len(result) < budget then {
+    let s = read_file("skills/deep-profiling/SKILL.md")
+    if s != "" then { let result = result + "\n--- deep-profiling ---\n" + s }
+  }
+  // Narrative / media
+  if (contains(t, "нарратив") or contains(t, "пропаганд") or contains(t, "заявлен") or contains(t, "сми") or contains(t, "media") or contains(t, "информаци")) and len(result) < budget then {
+    let s = read_file("skills/narrative-vs-flows/SKILL.md")
+    if s != "" then { let result = result + "\n--- narrative-vs-flows ---\n" + s }
+  }
+  // Sources / verification
+  if (contains(t, "источник") or contains(t, "проверь") or contains(t, "правда") or contains(t, "фактчек")) and len(result) < budget then {
+    let s = read_file("skills/source-triangulation/SKILL.md")
+    if s != "" then { let result = result + "\n--- source-triangulation ---\n" + s }
+  }
+  // Investment / risk
+  if (contains(t, "ставк") or contains(t, "инвестиц") or contains(t, "риск") or contains(t, "портфель") or contains(t, "хедж")) and len(result) < budget then {
+    let s = read_file("skills/asymmetric-bet-structure/SKILL.md")
+    if s != "" then { let result = result + "\n--- asymmetric-bet-structure ---\n" + s }
+    let s = read_file("skills/antifragility-design/SKILL.md")
+    if s != "" then { let result = result + "\n--- antifragility-design ---\n" + s }
+  }
+  // Cycles
+  if (contains(t, "цикл") or contains(t, "фаза") or contains(t, "перелом") or contains(t, "кондратьев") or contains(t, "juglar")) and len(result) < budget then {
+    let s = read_file("skills/cycle-position/SKILL.md")
+    if s != "" then { let result = result + "\n--- cycle-position ---\n" + s }
+  }
+  // I&W
+  if (contains(t, "индикатор") or contains(t, "наблюден") or contains(t, "watch") or contains(t, "тревог")) and len(result) < budget then {
+    let s = read_file("skills/iw-watchlist/SKILL.md")
+    if s != "" then { let result = result + "\n--- iw-watchlist ---\n" + s }
+  }
+
+  // ── Tier 3: Special techniques (explicit triggers) ──
+  if (contains(t, "война") or contains(t, "армия") or contains(t, "фронт") or contains(t, "наступлен") or contains(t, "воен")) and len(result) < budget then {
+    let s = read_file("skills/order-of-battle/SKILL.md")
+    if s != "" then { let result = result + "\n--- order-of-battle ---\n" + s }
+  }
+  if (contains(t, "коллапс") or contains(t, "обвал") or contains(t, "транзит") or contains(t, "фазов")) and len(result) < budget then {
+    let s = read_file("skills/phase-transition-detection/SKILL.md")
+    if s != "" then { let result = result + "\n--- phase-transition-detection ---\n" + s }
+  }
+  if (contains(t, "переговор") or contains(t, "коалиц") or contains(t, "консенсус")) and len(result) < budget then {
+    let s = read_file("skills/schelling-points/SKILL.md")
+    if s != "" then { let result = result + "\n--- schelling-points ---\n" + s }
+  }
+  if (contains(t, "контр") or contains(t, "redteam") or contains(t, "red-team") or contains(t, "слеп")) and len(result) < budget then {
+    let s = read_file("skills/red-team/SKILL.md")
+    if s != "" then { let result = result + "\n--- red-team ---\n" + s }
+  }
+
+  if result == "" then { return "No OSP skills loaded." }
   return result
 }
 
