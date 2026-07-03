@@ -74,10 +74,14 @@ pattern InitDB() -> String {
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
 
-  // OSP — analysis archive & research sources (per METHODOLOGY v3, hard rule #8)
+// OSP — analysis archive & research sources (per METHODOLOGY v3, hard rule #8)
   // NOTE: db_execute/db_insert in this file — interpreter-only functions. Works because serve = interpreter (confirmed 2026-06-22). If backend changes — re-verify (METALOGOS_INSTRUCTIONS.md §6.9).
   db_execute("CREATE TABLE IF NOT EXISTS analysis (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS research_source (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, url TEXT, title TEXT, tier TEXT DEFAULT 'secondary', claim TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))")
+
+  // Generic dept archive (narad 3/6) — for marketing/finance/legal learning loop
+  db_execute("CREATE TABLE IF NOT EXISTS dept_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT NOT NULL, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS dept_verification (id INTEGER PRIMARY KEY AUTOINCREMENT, archive_id INTEGER, actual_outcome TEXT, error_diagnosis TEXT, verified_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(archive_id) REFERENCES dept_archive(id))")
 
   return "ok"
 }
@@ -366,6 +370,62 @@ pattern CompressDialog(chat_id: String) -> String {
 // END inlined context
 // ============================================================
 
+// ============================================================
+// GENERIC ARCHIVE (narad 3/6) — save/verify/score for generic depts
+// ============================================================
+
+pattern SaveToGenericArchive(dept: String, query: String, response: String) -> Int {
+  let topic = substring(query, 0.0, 120.0)
+  return db_insert("dept_archive", {dept: dept, topic: topic, full_result: response, status: "drafted"})
+}
+
+pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> String {
+  let existing = query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept])
+  if existing == "[]" or existing == "" then {
+    return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
+  }
+  db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
+  db_insert("dept_verification", {archive_id: entry_id, actual_outcome: outcome})
+  return "Запись #" + to_string(entry_id) + " (" + dept + ") верифицирована: " + outcome
+}
+
+pattern ScoreDept(dept: String) -> String {
+  let total_rows = query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1", [dept])
+  let verified_rows = query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1 AND status = 'verified'", [dept])
+  let drafted_rows = query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1 AND status = 'drafted'", [dept])
+  let total = json_get(parse_json(total_rows), "[0].cnt", "0")
+  let verified = json_get(parse_json(verified_rows), "[0].cnt", "0")
+  let drafted = json_get(parse_json(drafted_rows), "[0].cnt", "0")
+  return "Score: " + dept + "\nВсего записей: " + total + "\nВерифицировано: " + verified + "\nВ ожидании: " + drafted + "\n\n[Базовая метрика активности. Калиброванная domain-метрика — после наполнения content-скиллов (наряд #6)]"
+}
+
+pattern ArchiveSearch(dept: String, filter_text: String) -> String {
+  let rows = if filter_text != "" then {
+    query("SELECT id, topic, status, created_at FROM dept_archive WHERE dept = $1 AND topic LIKE $2 ORDER BY created_at DESC LIMIT 10", [dept, "%" + filter_text + "%"])
+  } else {
+    query("SELECT id, topic, status, created_at FROM dept_archive WHERE dept = $1 ORDER BY created_at DESC LIMIT 10", [dept])
+  }
+  return to_string(rows)
+}
+
+pattern FormatArchiveRows(rows_json: String) -> String {
+  if rows_json == "[]" or rows_json == "" then { return "Нет записей в архиве." }
+  let output = ""
+  let parsed = parse_json(rows_json)
+  each item in parsed {
+    let id = json_get(item, "id", "?")
+    let topic = json_get(item, "topic", "?")
+    let status = json_get(item, "status", "?")
+    let created = json_get(item, "created_at", "?")
+    let output = output + "#" + id + " [" + status + "] " + topic + " (" + created + ")\n"
+  }
+  return output
+}
+
+// ============================================================
+// END GENERIC ARCHIVE
+// ============================================================
+
 pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String {
   let context = BuildContext(dept, query, chat_id)
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
@@ -642,7 +702,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id] /autoarchive on|off /search <query>\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -1001,24 +1061,39 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // /archive — publish to archive channel (MEGA-3)
+    // /archive — TWO modes (narad 3/6):
+    //   /archive <doc_id> — legacy: publish MiniApp report to archive channel
+    //   /archive (no args) — legacy: publish last MiniApp report
+    //   /archive <dept> [filter] — NEW: search dept_archive for generic depts
     if starts_with(text, "/archive") then {
       let parts = split(text, " ")
       if len(parts) > 1.0 then {
-        let doc_id = trim(get(parts, 1.0))
-        // Publish specific doc
-        let doc_rows = query("SELECT dept, title, raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
-        let doc_dept = json_get(parse_json(to_string(doc_rows)), "[0].dept", "")
-        let doc_title = json_get(parse_json(to_string(doc_rows)), "[0].title", "")
-        let doc_content = json_get(parse_json(to_string(doc_rows)), "[0].raw_text", "")
-        if doc_dept != "" then {
-          let msg_id = PublishToArchive(doc_id, doc_dept, doc_title, doc_content)
-          let _ = SendTelegramReply(chat_id, "Archived: " + doc_title + " (msg_id: " + msg_id + ")")
+        let arg1 = trim(get(parts, 1.0))
+        // Check if arg1 is a generic dept name → dept_archive search
+        if arg1 == "marketing" or arg1 == "finance" or arg1 == "legal" then {
+          let filter_text = ""
+          if len(parts) > 2.0 then {
+            let filter_text = substring(text, 9.0 + len(arg1) + 1.0, len(text))
+          }
+          let rows_json = ArchiveSearch(arg1, trim(filter_text))
+          let formatted = FormatArchiveRows(rows_json)
+          let _ = SendTelegramReply(chat_id, "Архив " + arg1 + ":\n" + formatted)
         } else {
-          let _ = SendTelegramReply(chat_id, "Report " + doc_id + " not found.")
+          // Legacy: publish specific MiniApp doc by doc_id
+          let doc_id = arg1
+          let doc_rows = query("SELECT dept, title, raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
+          let doc_dept = json_get(parse_json(to_string(doc_rows)), "[0].dept", "")
+          let doc_title = json_get(parse_json(to_string(doc_rows)), "[0].title", "")
+          let doc_content = json_get(parse_json(to_string(doc_rows)), "[0].raw_text", "")
+          if doc_dept != "" then {
+            let msg_id = PublishToArchive(doc_id, doc_dept, doc_title, doc_content)
+            let _ = SendTelegramReply(chat_id, "Archived: " + doc_title + " (msg_id: " + msg_id + ")")
+          } else {
+            let _ = SendTelegramReply(chat_id, "Report " + doc_id + " not found.")
+          }
         }
       } else {
-        // Archive last report
+        // Legacy: archive last MiniApp report
         let last_rows = query("SELECT id, dept, title, raw_text FROM miniapp_responses ORDER BY created_at DESC LIMIT 1", [])
         let last_id = json_get(parse_json(to_string(last_rows)), "[0].id", "")
         if last_id != "" then {
@@ -1030,6 +1105,38 @@ mlogserver {
         } else {
           let _ = SendTelegramReply(chat_id, "No reports to archive.")
         }
+      }
+      return respond("200 ok")
+    }
+
+    // /verify <dept> <id> <outcome> — verify an archived entry (narad 3/6)
+    if starts_with(text, "/verify ") then {
+      let rest = substring(text, 8.0, len(text))
+      let parts = split(rest, " ")
+      if len(parts) >= 3.0 then {
+        let dept = trim(get(parts, 0.0))
+        let entry_id = to_int(trim(get(parts, 1.0)))
+        // outcome = everything after dept and id (may contain spaces)
+        let prefix_len = len(dept) + len(trim(get(parts, 1.0))) + 2.0
+        let outcome = substring(rest, prefix_len, len(rest))
+        if outcome == "" then { let outcome = "подтверждено" }
+        let result = VerifyArchiveEntry(dept, entry_id, outcome)
+        let _ = AuditLog("archive_verify", dept, "id=" + to_string(entry_id) + " outcome=" + substring(outcome, 0.0, 80.0))
+        let _ = SendTelegramReply(chat_id, result)
+      } else {
+        let _ = SendTelegramReply(chat_id, "Usage: /verify <dept> <id> <исход>\nExample: /verify finance 3 прогноз подтвердился\nDepts: marketing, finance, legal")
+      }
+      return respond("200 ok")
+    }
+
+    // /score <dept> — basic activity metrics (narad 3/6)
+    if starts_with(text, "/score ") then {
+      let dept = trim(substring(text, 7.0, len(text)))
+      if dept == "marketing" or dept == "finance" or dept == "legal" then {
+        let result = ScoreDept(dept)
+        let _ = SendTelegramReply(chat_id, result)
+      } else {
+        let _ = SendTelegramReply(chat_id, "Usage: /score <dept>\nGeneric depts: marketing, finance, legal\n[Базовая метрика. Domain-калибровка — после наряда #6]")
       }
       return respond("200 ok")
     }
