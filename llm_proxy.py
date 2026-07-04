@@ -1026,14 +1026,13 @@ def miniapp_get(doc_id):
     if not rows:
         return "<h1>Not found</h1>", 404
     r = rows[0]
-    dept = r.get("dept", "admin")
+    dept = r["dept"] or "admin"
     # Load notes for this doc
     notes_rows = _query("SELECT note_text, created_at FROM miniapp_notes WHERE doc_id=? ORDER BY id", (doc_id,), fetch=True) or []
-    notes_html = "".join(f'<div class="note-item"><span>{html_lib_escape(n["note_text"])}</span><span class="note-time">{n["created_at"][-8:-3] if n.get("created_at") else ""}</span></div>' for n in notes_rows)
+    notes_html = "".join(f'<div class="note-item"><span>{html_lib_escape(n["note_text"])}</span><span class="note-time">{(n["created_at"] or "")[-8:-3]}</span></div>' for n in notes_rows)
     action_bar = _build_action_bar(dept, doc_id, notes_html)
     # Rich post-processor: enrich any non-trivial raw_text
-    raw = r.get("raw_text", "")
-    dept = r.get("dept", "admin")
+    raw = r["raw_text"] or ""
     if raw and len(raw) > 100 and _has_enricher:
         accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
         try:
@@ -1047,8 +1046,8 @@ def miniapp_get(doc_id):
             css = css_path.read_text() if css_path.exists() else ""
             c = DEPT_COLORS.get(dept, DEPT_COLORS["admin"])
             name = DEPT_NAMES.get(dept, dept)
-            title = r.get("title", "") or doc_id
-            created = r.get("created_at", "")
+            title = r["title"] or doc_id
+            created = r["created_at"] or ""
             disclaimer = ""
             if dept == "finance":
                 disclaimer = '<div class="disclaimer-rich">Не является финансовой консультацией. Обратитесь к лицензированному специалисту.</div>'
@@ -1098,9 +1097,9 @@ def miniapp_action():
     if not rows:
         return jsonify({"status": "error", "msg": "doc not found"}), 404
     r = rows[0]
-    raw = r.get("raw_text", "")
-    title = r.get("title", "")
-    dept = r.get("dept", "osp")
+    raw = r["raw_text"] or ""
+    title = r["title"] or ""
+    dept = r["dept"] or "osp"
     
     if action == "journalist":
         prompt = f"""Ты — журналист-аналитик. Перепиши следующий аналитический отчёт в формат журналистской статьи.
@@ -2428,10 +2427,10 @@ def api_narads():
         narads = []
         for r in rows:
             narads.append({
-                "id": r["id"], "title": r["title"], "description": r.get("description", ""),
+                "id": r["id"], "title": r["title"], "description": r["description"] or "",
                 "risk": r["risk_level"], "status": r["status"],
                 "created": r["created_at"][:16] if r["created_at"] else "",
-                "approved": r["approved_at"][:16] if r.get("approved_at") else "",
+                "approved": r["approved_at"][:16] if r["approved_at"] else "",
             })
         return jsonify({"status": "ok", "narads": narads})
     except Exception as e:
