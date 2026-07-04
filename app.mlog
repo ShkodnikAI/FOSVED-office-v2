@@ -83,6 +83,14 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS dept_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT NOT NULL, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS dept_verification (id INTEGER PRIMARY KEY AUTOINCREMENT, archive_id INTEGER, actual_outcome TEXT, error_diagnosis TEXT, verified_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(archive_id) REFERENCES dept_archive(id))")
 
+  // Narad 8 — calibrated metrics: structured columns (nullable, additive, safe for existing data)
+  // dept_archive.forecast_value: numeric forecast at creation time (Finance only)
+  // dept_verification.actual_value: numeric actual post-factum (Finance only)
+  // dept_verification.outcome_flag: categorical flag (Legal: "clean" / "rewrite_required")
+  db_execute("ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
+  db_execute("ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
+  db_execute("ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
+
   return "ok"
 }
 
@@ -379,6 +387,41 @@ pattern SaveToGenericArchive(dept: String, query: String, response: String) -> I
   return db_insert("dept_archive", {dept: dept, topic: topic, full_result: response, status: "drafted"})
 }
 
+// Narad 8 — structured verify: /verify finance <id> actual=<число> or /verify legal <id> outcome=clean|rewrite_required
+// Falls back to legacy VerifyArchiveEntry for free-text outcome (marketing, etc.)
+pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: String) -> String {
+  // Check: is this a structured actual=<number> call (Finance)?
+  if starts_with(raw_args, "actual=") then {
+    let val_str = substring(raw_args, 7.0, len(raw_args))
+    let actual_val = to_float(val_str)
+    let existing = query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept])
+    if existing == "[]" or existing == "" then {
+      return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
+    }
+    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
+    db_insert("dept_verification", {archive_id: entry_id, actual_value: actual_val, actual_outcome: "actual=" + val_str})
+    return "Запись #" + to_string(entry_id) + " верифицирована: actual=" + val_str
+  }
+
+  // Check: is this a structured outcome=<flag> call (Legal)?
+  if starts_with(raw_args, "outcome=") then {
+    let flag = substring(raw_args, 8.0, len(raw_args))
+    if flag != "clean" and flag != "rewrite_required" then {
+      return "outcome должен быть 'clean' или 'rewrite_required', получено: " + flag
+    }
+    let existing = query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept])
+    if existing == "[]" or existing == "" then {
+      return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
+    }
+    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
+    db_insert("dept_verification", {archive_id: entry_id, outcome_flag: flag, actual_outcome: "outcome=" + flag})
+    return "Запись #" + to_string(entry_id) + " верифицирована: outcome=" + flag
+  }
+
+  // Fallback — legacy free-text (marketing and all other cases)
+  return VerifyArchiveEntry(dept, entry_id, raw_args)
+}
+
 pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> String {
   let existing = query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept])
   if existing == "[]" or existing == "" then {
@@ -389,6 +432,54 @@ pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> Stri
   return "Запись #" + to_string(entry_id) + " (" + dept + ") верифицирована: " + outcome
 }
 
+// Narad 8 — Finance MAPE: requires min 10 verified pairs (forecast_value + actual_value)
+pattern ComputeFinanceMAPE() -> String {
+  let rows = query("SELECT a.forecast_value, v.actual_value FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'finance' AND a.forecast_value IS NOT NULL AND v.actual_value IS NOT NULL")
+  if rows == "[]" or rows == "" then {
+    return "MAPE: недостаточно данных для калибровки (0/10 записей)"
+  }
+  let parsed = parse_json(rows)
+  let n = 0.0
+  let sum_error = 0.0
+  each row in parsed {
+    let n = n + 1.0
+    let forecast = to_float(json_get(row, "forecast_value", "0"))
+    let actual = to_float(json_get(row, "actual_value", "0"))
+    if actual != 0.0 then {
+      let error = abs(forecast - actual) / abs(actual)
+      let sum_error = sum_error + error
+    }
+  }
+  if n < 10.0 then {
+    return "MAPE: недостаточно данных для калибровки (" + to_string(to_int(n)) + "/10 записей)"
+  }
+  let mape = (sum_error / n) * 100.0
+  return "MAPE (калиброванная): " + to_string(mape, "%.1f") + "% (n=" + to_string(to_int(n)) + ")"
+}
+
+// Narad 8 — Legal % без rewrites: requires min 10 verified entries with outcome_flag
+pattern ComputeLegalCleanRate() -> String {
+  let rows = query("SELECT v.outcome_flag FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'legal' AND v.outcome_flag IS NOT NULL")
+  if rows == "[]" or rows == "" then {
+    return "% без rewrites: недостаточно данных для калибровки (0/10 записей)"
+  }
+  let parsed = parse_json(rows)
+  let n = 0.0
+  let clean_count = 0.0
+  each row in parsed {
+    let n = n + 1.0
+    let flag = json_get(row, "outcome_flag", "")
+    if flag == "clean" then {
+      let clean_count = clean_count + 1.0
+    }
+  }
+  if n < 10.0 then {
+    return "% без rewrites: недостаточно данных для калибровки (" + to_string(to_int(n)) + "/10 записей)"
+  }
+  let rate = (clean_count / n) * 100.0
+  return "% без rewrites (калиброванная): " + to_string(rate, "%.1f") + "% (n=" + to_string(to_int(n)) + ", clean=" + to_string(to_int(clean_count)) + ")"
+}
+
 pattern ScoreDept(dept: String) -> String {
   let total_rows = query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1", [dept])
   let verified_rows = query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1 AND status = 'verified'", [dept])
@@ -396,7 +487,20 @@ pattern ScoreDept(dept: String) -> String {
   let total = json_get(parse_json(total_rows), "[0].cnt", "0")
   let verified = json_get(parse_json(verified_rows), "[0].cnt", "0")
   let drafted = json_get(parse_json(drafted_rows), "[0].cnt", "0")
-  return "Score: " + dept + "\nВсего записей: " + total + "\nВерифицировано: " + verified + "\nВ ожидании: " + drafted + "\n\n[Базовая метрика активности. Калиброванная domain-метрика — после наполнения content-скиллов (наряд #6)]"
+
+  let base = "Score: " + dept + "\nВсего записей: " + total + "\nВерифицировано: " + verified + "\nВ ожидании: " + drafted
+
+  // Narad 8 — append calibrated metric for Finance and Legal
+  if dept == "finance" then {
+    let mape = ComputeFinanceMAPE()
+    return base + "\n\n" + mape
+  }
+  if dept == "legal" then {
+    let clean_rate = ComputeLegalCleanRate()
+    return base + "\n\n" + clean_rate
+  }
+
+  return base + "\n\n[Базовая метрика активности. Калиброванная domain-метрика — после наполнения content-скиллов]"
 }
 
 pattern ArchiveSearch(dept: String, filter_text: String) -> String {
@@ -702,7 +806,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -1109,34 +1213,37 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // /verify <dept> <id> <outcome> — verify an archived entry (narad 3/6)
+    // /verify <dept> <id> <outcome> — verify an archived entry (narad 3/6, extended narad 8)
+    // Structured: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required
+    // Legacy: /verify <dept> <id> <free text> (marketing, etc.)
     if starts_with(text, "/verify ") then {
       let rest = substring(text, 8.0, len(text))
       let parts = split(rest, " ")
       if len(parts) >= 3.0 then {
         let dept = trim(get(parts, 0.0))
         let entry_id = to_int(trim(get(parts, 1.0)))
-        // outcome = everything after dept and id (may contain spaces)
+        // outcome = everything after dept and id (may contain spaces, e.g. "actual=145200" or "outcome=clean")
         let prefix_len = len(dept) + len(trim(get(parts, 1.0))) + 2.0
         let outcome = substring(rest, prefix_len, len(rest))
         if outcome == "" then { let outcome = "подтверждено" }
-        let result = VerifyArchiveEntry(dept, entry_id, outcome)
+        // Narad 8: route to structured verify
+        let result = VerifyArchiveEntryStructured(dept, entry_id, outcome)
         let _ = AuditLog("archive_verify", dept, "id=" + to_string(entry_id) + " outcome=" + substring(outcome, 0.0, 80.0))
         let _ = SendTelegramReply(chat_id, result)
       } else {
-        let _ = SendTelegramReply(chat_id, "Usage: /verify <dept> <id> <исход>\nExample: /verify finance 3 прогноз подтвердился\nDepts: marketing, finance, legal")
+        let _ = SendTelegramReply(chat_id, "Usage: /verify <dept> <id> <исход>\nStructured: /verify finance 3 actual=145200\n           /verify legal 5 outcome=clean\nLegacy: /verify marketing 2 текст исхода\nDepts: marketing, finance, legal")
       }
       return respond("200 ok")
     }
 
-    // /score <dept> — basic activity metrics (narad 3/6)
+    // /score <dept> — activity + calibrated metrics (narad 3/6 + narad 8)
     if starts_with(text, "/score ") then {
       let dept = trim(substring(text, 7.0, len(text)))
       if dept == "marketing" or dept == "finance" or dept == "legal" then {
         let result = ScoreDept(dept)
         let _ = SendTelegramReply(chat_id, result)
       } else {
-        let _ = SendTelegramReply(chat_id, "Usage: /score <dept>\nGeneric depts: marketing, finance, legal\n[Базовая метрика. Domain-калибровка — после наряда #6]")
+        let _ = SendTelegramReply(chat_id, "Usage: /score <dept>\nGeneric depts: marketing, finance, legal\nFinance: базовая активность + MAPE (при >=10 verified pairs)\nLegal: базовая активность + % без rewrites (при >=10 verified)")
       }
       return respond("200 ok")
     }
