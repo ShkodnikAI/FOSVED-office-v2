@@ -1031,10 +1031,10 @@ def miniapp_get(doc_id):
     notes_rows = _query("SELECT note_text, created_at FROM miniapp_notes WHERE doc_id=? ORDER BY id", (doc_id,), fetch=True) or []
     notes_html = "".join(f'<div class="note-item"><span>{html_lib_escape(n["note_text"])}</span><span class="note-time">{n["created_at"][-8:-3] if n.get("created_at") else ""}</span></div>' for n in notes_rows)
     action_bar = _build_action_bar(dept, doc_id, notes_html)
-    # Rich post-processor: if raw_text exists and has markdown structure, enrich it
+    # Rich post-processor: enrich any non-trivial raw_text
     raw = r.get("raw_text", "")
     dept = r.get("dept", "admin")
-    if raw and ("## " in raw or "[ФАКТ]" in raw or "[" in raw) and _has_enricher:
+    if raw and len(raw) > 100 and _has_enricher:
         accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
         try:
             enriched_body = auto_enrich(raw, dept=dept, accent_color=accent)
@@ -3477,7 +3477,7 @@ def lz_osint():
 OWNER_ID = os.environ.get("OWNER_TELEGRAM_ID", "")
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("RENDER_URL", "https://fosved-office-v2.onrender.com"))
 _voice_enabled = False
-_tts_voice = "ru-RU-DmitryNeural"
+_tts_voice = "ru-RU-SvetlanaNeural"
 
 @app.post("/webhook/telegram")
 def telegram_webhook():
@@ -3533,7 +3533,7 @@ def telegram_webhook():
             cmd = parts[1].lower()
             if cmd == "on": _voice_enabled = True; _tg_send_message(chat_id, "Голос включён 🎙")
             elif cmd == "off": _voice_enabled = False; _tg_send_message(chat_id, "Голос выключен")
-            elif cmd == "male": _tts_voice = "ru-RU-DmitryNeural"; _tg_send_message(chat_id, "Голос: мужской")
+            elif cmd == "male": _tts_voice = "ru-RU-SvetlanaNeural"; _tg_send_message(chat_id, "Голос: мужской")
             elif cmd == "female": _tts_voice = "ru-RU-SvetlanaNeural"; _tg_send_message(chat_id, "Голос: женский")
         else:
             _tg_send_message(chat_id, f"Voice: {'on' if _voice_enabled else 'off'}\n/voice on|off|male|female")
@@ -3726,7 +3726,7 @@ def telegram_webhook():
 </div></body></html>'''
             
             _query("INSERT INTO miniapp_responses (id,dept,title,query,raw_text,html,confidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
-                   (doc_id, dept, query[:200], query[:200], reply[:5000], html, "2.0", datetime.utcnow().isoformat()))
+                   (doc_id, dept, query[:200], query[:200], reply, html, "2.0", datetime.utcnow().isoformat()))
             
             miniapp_url = f"{RENDER_URL}/miniapp/{doc_id}"
             short = reply[:200] + "..."
