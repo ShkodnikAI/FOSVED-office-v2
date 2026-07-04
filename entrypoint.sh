@@ -15,21 +15,13 @@ else
 fi
 
 if [ ! -f data/memory.db ]; then
-    echo "--- Seeding FosvedMemory ---"
-    python3 scripts/seed_memory.py data/memory.db
+  echo "--- Seeding FosvedMemory ---"
+  python3 scripts/seed_memory.py data/memory.db
 fi
 
 python3 scripts/migrate_schema.py data/fosved.db
 
-# 1. OmniRoute (порт 20128) — ПЕРВЫЙ
-# DISABLED: omniroute serve --port 20128 --no-open &
-# DISABLED: OMNI_PID=$!
-# DISABLED: echo "OmniRoute started"
-sleep 3
-
-# DISABLED: OmniRoute healthcheck
-
-# 2. LLM Proxy
+# 1. LLM Proxy (native circuit breaker + combo chains + compression)
 python3 llm_proxy.py &
 LLM_PID=$!
 echo "LLM Proxy started (PID: $LLM_PID)"
@@ -41,7 +33,7 @@ for i in {1..10}; do
   sleep 2
 done
 
-# 3. Metalogos
+# 2. Metalogos
 PORT=10001 mlog serve app.mlog &
 MLOG_PID=$!
 echo "Metalogos started (PID: $MLOG_PID)"
@@ -56,11 +48,9 @@ done
 echo "--- Version check ---"
 curl -sf http://127.0.0.1:10001/version 2>/dev/null || echo "version endpoint not available"
 
-# 4. Reverse Proxy
+# 3. Reverse Proxy
 python3 reverse_proxy.py &
 PROXY_PID=$!
 echo "Reverse proxy started (PID: $PROXY_PID)"
-
-# DISABLED: OmniRoute watchdog
 
 wait $LLM_PID $MLOG_PID $PROXY_PID

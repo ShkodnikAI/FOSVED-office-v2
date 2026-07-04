@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """llm_proxy.py — Fosved Office v2 LLM Proxy Server
-Flask server on port 4000 with OmniRoute integration (237 providers, auto-fallback, token compression),
+Flask server on port 4000 with native circuit breaker, combo chains, token compression,
 7-provider direct failover, dept routing, dashboards, SQLite,
 TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
@@ -78,11 +78,90 @@ TOKEN_COSTS = {
     "apodex": {"input": 2.0, "output": 8.0},
 }
 
-# ──────────────────────────── OMNIROUTE INTEGRATION ────────────────────────────
-OMNIROUTE_URL = os.environ.get("OMNIROUTE_URL", "http://127.0.0.1:20128/v1/chat/completions")
-OMNIROUTE_HEALTH = os.environ.get("OMNIROUTE_HEALTH", "http://127.0.0.1:20128/health")
+# ──────────────────────────── CIRCUIT BREAKER ────────────────────────────
+class CircuitBreaker:
+    """Per-provider circuit breaker: opens after N consecutive failures,
+    resets after reset_after_ms. Half-open allows 1 probe request."""
+    def __init__(self, threshold=3, reset_after_ms=60000, half_open_requests=1):
+        self.threshold = threshold
+        self.reset_after_ms = reset_after_ms
+        self.half_open_requests = half_open_requests
+        self._state = {}  # provider -> {failures: int, opens_at: float, half_open_remaining: int}
+        self._lock = threading.Lock()
 
-TASK_COMBOS = {
+    def _get(self, provider):
+        if provider not in self._state:
+            self._state[provider] = {"failures": 0, "opens_at": 0, "half_open_remaining": self.half_open_requests}
+        return self._state[provider]
+
+    def can_call(self, provider):
+        with self._lock:
+            s = self._get(provider)
+            if s["failures"] < self.threshold:
+                return True
+            # Circuit is open
+            if time.time() * 1000 < s["opens_at"] + self.reset_after_ms:
+                return False
+            # Reset period elapsed -> half-open
+            s["half_open_remaining"] = self.half_open_requests
+            return True
+
+    def record_success(self, provider):
+        with self._lock:
+            s = self._get(provider)
+            s["failures"] = 0
+            s["opens_at"] = 0
+
+    def record_failure(self, provider):
+        with self._lock:
+            s = self._get(provider)
+            s["failures"] += 1
+            if s["failures"] >= self.threshold:
+                s["opens_at"] = time.time() * 1000
+                log.warning(f"CircuitBreaker OPEN for {provider} ({s['failures']} consecutive failures)")
+
+    def status(self):
+        with self._lock:
+            result = {}
+            for p, s in self._state.items():
+                if s["failures"] < self.threshold:
+                    result[p] = "closed"
+                elif time.time() * 1000 < s["opens_at"] + self.reset_after_ms:
+                    result[p] = "open"
+                else:
+                    result[p] = "half-open"
+            return result
+
+_breaker = CircuitBreaker(threshold=3, reset_after_ms=60000)
+
+# ──────────────────────────── COMBO CHAINS ────────────────────────────
+# Each combo is an ordered list of (provider, [models]) tuples.
+# call_llm walks the chain: for each provider, try each model until one works.
+COMBO_CHAINS = {
+    "fosved-free": [
+        ("groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
+        ("deepseek", ["deepseek-chat"]),
+    ],
+    "fosved-standard": [
+        ("zai", ["glm-4.6", "glm-4-plus", "glm-4-flash"]),
+        ("deepseek", ["deepseek-chat"]),
+        ("groq", ["llama-3.3-70b-versatile"]),
+    ],
+    "fosved-deep": [
+        ("anthropic", ["claude-sonnet-4-20250514"]),
+        ("grok", ["grok-3"]),
+        ("zai", ["glm-4.6"]),
+    ],
+    "fosved-fusion": [
+        ("anthropic", ["claude-sonnet-4-20250514"]),
+        ("grok", ["grok-3"]),
+        ("zai", ["glm-4.6"]),
+        ("deepseek", ["deepseek-chat"]),
+    ],
+}
+
+# Map task types to combos (same logic as old TASK_COMBOS, but native)
+_TASK_COMBO_MAP = {
     'status': 'fosved-free', 'help': 'fosved-free', 'rate': 'fosved-free',
     'good': 'fosved-free', 'fix': 'fosved-free', 'remember': 'fosved-free',
     'learning': 'fosved-free', 'audit': 'fosved-free', 'voice_confirm': 'fosved-free',
@@ -90,21 +169,13 @@ TASK_COMBOS = {
     'osp_deep': 'fosved-deep', 'osp_full': 'fosved-deep', 'lz_deep': 'fosved-deep',
     'chain_heavy': 'fosved-deep', 'admin_analyze': 'fosved-deep',
     'osp_fusion': 'fosved-fusion', 'redteam': 'fosved-fusion', 'counter_forecast': 'fosved-fusion',
-    'lz_apodex': 'apodex/apodex-1.0-mini',
 }
 
 
-def is_omniroute_alive():
-    try:
-        r = http_requests.get(OMNIROUTE_HEALTH, timeout=3)
-        return r.status_code == 200
-    except Exception:
-        return False
-
-
-def get_combo_for_task(dept, command='', depth=2):
-    if command in TASK_COMBOS:
-        return TASK_COMBOS[command]
+def _combo_for_task(dept, command='', depth=2):
+    """Select combo based on task type, dept, and analysis depth."""
+    if command in _TASK_COMBO_MAP:
+        return _TASK_COMBO_MAP[command]
     if depth >= 4:
         return 'fosved-fusion'
     elif depth >= 3:
@@ -114,38 +185,125 @@ def get_combo_for_task(dept, command='', depth=2):
     else:
         return 'fosved-free'
 
+# ──────────────────────────── TOKEN COMPRESSION ────────────────────────────
+_COMPRESSION_MAX_TOKENS = 64000  # ~128K chars (conservative estimate: 1 token ~ 2 chars for Russian)
+_COMPRESSION_KEEP_SYSTEM = True
 
-def call_omniroute(messages, combo='fosved-standard', dept='yana', max_tokens=4096):
+
+def _estimate_tokens(messages):
+    """Rough token estimate: ~2 chars per token for mixed Russian/English."""
+    total = 0
+    for m in messages:
+        total += len(m.get("content", "")) // 2
+    return total
+
+
+def _compress_messages(messages, dept='yana'):
+    """Rolling summary compression: if messages exceed threshold,
+    summarize older messages into a single system-context message.
+    Returns (compressed_messages, tokens_saved_estimate)."""
+    est = _estimate_tokens(messages)
+    if est <= _COMPRESSION_MAX_TOKENS:
+        return messages, 0
+
+    # Separate system prompts from conversation
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    convo = [m for m in messages if m.get("role") != "system"]
+
+    if len(convo) <= 4:
+        return messages, 0  # Too few messages to compress meaningfully
+
+    # Keep last 6 messages, compress the rest
+    keep_count = 6
+    to_compress = convo[:-keep_count]
+    to_keep = convo[-keep_count:]
+
+    # Build a summary request using a cheap model
+    compress_text = "\n".join(
+        f"{'User' if m['role']=='user' else 'Assistant'}: {m['content'][:500]}"
+        for m in to_compress[-20:]  # Last 20 of old messages, truncated
+    )
+    if not compress_text.strip():
+        return messages, 0
+
+    summary_prompt = [
+        {"role": "system", "content": "Summarize the following conversation history into a concise context paragraph (max 300 words). Preserve key facts, decisions, names, numbers. Output ONLY the summary, nothing else."},
+        {"role": "user", "content": compress_text}
+    ]
+
     try:
-        response = http_requests.post(OMNIROUTE_URL, json={"model": combo, "messages": messages, "max_tokens": max_tokens, "temperature": 0.7}, headers={"Content-Type": "application/json"}, timeout=120)
-        data = response.json()
-        answer = data["choices"][0]["message"]["content"]
-        usage = data.get("usage", {})
-        meta = data.get("x_omniroute", {})
-        t_in = usage.get("prompt_tokens", 0)
-        t_out = usage.get("completion_tokens", 0)
-        provider = meta.get("provider", "omniroute")
-        model = meta.get("model", combo)
-        cost = meta.get("cost", 0)
-        compression_saved = meta.get("tokens_saved", 0)
-        now = datetime.utcnow().isoformat()
-        try:
-            _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at,compression_saved,combo) VALUES (?,?,?,?,?,?,?,?,?)",
-                   (provider, model, t_in, t_out, round(cost, 6), dept, now, compression_saved, combo))
-        except Exception:
+        # Use cheap provider for compression
+        summary_result = _call_single_provider("groq", "llama-3.3-70b-versatile", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
+        if summary_result and summary_result.get("reply"):
+            summary_msg = {"role": "system", "content": f"[Earlier conversation summary]: {summary_result['reply'][:2000]}"}
+            compressed = system_msgs + [summary_msg] + to_keep
+            saved = est - _estimate_tokens(compressed)
+            log.info(f"Token compression: {est} -> {_estimate_tokens(compressed)} (saved ~{saved} tokens, {len(to_compress)} messages compressed)")
+            return compressed, saved
+    except Exception as e:
+        log.warning(f"Token compression failed, sending uncompressed: {e}")
+
+    return messages, 0
+
+
+def _call_single_provider(provider_name, model, messages, dept='yana', max_tokens=4096, is_internal=False):
+    """Call a single provider+model. Returns result dict or None.
+    This is the low-level primitive used by both combo chains and direct calls."""
+    prov = PROVIDERS.get(provider_name)
+    if not prov:
+        return None
+    api_key = os.environ.get(prov["env_key"])
+    if not api_key:
+        return None
+    if not _breaker.can_call(provider_name):
+        log.debug(f"CircuitBreaker: skipping {provider_name} (open)")
+        return None
+
+    try:
+        if prov["format"] == "openai":
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            body = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": max_tokens}
+        else:  # anthropic
+            sys_msg = ""
+            user_msgs = []
+            for m in messages:
+                if m["role"] == "system":
+                    sys_msg = m["content"]
+                else:
+                    user_msgs.append(m)
+            headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+            body = {"model": model, "max_tokens": max_tokens, "system": sys_msg, "messages": user_msgs}
+
+        resp = http_requests.post(prov["url"], headers=headers, json=body, timeout=prov["timeout"])
+        resp.raise_for_status()
+        data = resp.json()
+
+        if prov["format"] == "openai":
+            reply = data["choices"][0]["message"]["content"]
+            t_in = data.get("usage", {}).get("prompt_tokens", 0)
+            t_out = data.get("usage", {}).get("completion_tokens", 0)
+        else:
+            reply = data["content"][0]["text"]
+            t_in = data.get("usage", {}).get("input_tokens", 0)
+            t_out = data.get("usage", {}).get("output_tokens", 0)
+
+        _breaker.record_success(provider_name)
+
+        if not is_internal:
+            costs = TOKEN_COSTS.get(provider_name, {"input": 1, "output": 1})
+            cost = t_in * costs["input"] / 1_000_000 + t_out * costs["output"] / 1_000_000
+            now = datetime.utcnow().isoformat()
             try:
                 _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
-                       (provider, model, t_in, t_out, round(cost, 6), dept, now))
-            except Exception as log_err:
-                log.warning(f"token_usage log failed: {log_err}")
-        _log_audit("llm_call_omniroute", {"dept": dept, "provider": provider, "model": model, "tokens_in": t_in, "tokens_out": t_out, "combo": combo, "compression_saved": compression_saved})
-        log.info(f"OmniRoute ok: provider={provider} model={model} combo={combo} dept={dept} t_in={t_in} t_out={t_out} saved={compression_saved}")
-        return {"reply": answer, "provider": provider, "model": model, "tokens_in": t_in, "tokens_out": t_out}
-    except http_requests.Timeout:
-        log.warning("OmniRoute timeout (120s)")
-        return None
+                       (provider_name, model, t_in, t_out, round(cost, 6), dept, now))
+            except Exception:
+                pass
+            log.info(f"LLM ok: provider={provider_name} model={model} dept={dept} t_in={t_in} t_out={t_out}")
+
+        return {"reply": reply, "provider": provider_name, "model": model, "tokens_in": t_in, "tokens_out": t_out}
     except Exception as e:
-        log.warning(f"OmniRoute error: {e}")
+        _breaker.record_failure(provider_name)
+        log.warning(f"LLM fail: provider={provider_name} model={model} err={e}")
         return None
 
 # ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
@@ -465,77 +623,90 @@ def strip_html_for_archive(html_content):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-# ──────────────────────────── LLM CALL ────────────────────────────
-def _call_direct_fallback(dept, messages, model=None):
-    """Direct provider fallback (original logic) — used when OmniRoute is down."""
+# ──────────────────────────── LLM CALL (combo chains + compression) ────────────────────────────
+def call_llm(dept, messages, model_override=None, combo=None, command='', depth=2):
+    """Call LLM via native combo chain with circuit breaker and token compression.
+    
+    Flow:
+    1. Apply token compression if messages are too long
+    2. Select combo chain (or use model_override for direct single-provider call)
+    3. Walk the chain: for each (provider, [models]), try each model until one works
+    4. Circuit breaker skips providers with recent consecutive failures
+    5. If combo chain exhausted, fall back to legacy priority-provider ordering
+    """
+    # 1. Token compression
+    messages, compression_saved = _compress_messages(messages, dept)
+
+    # 2. If model_override is set, do direct single-provider call
+    if model_override:
+        # Determine provider from model name
+        provider = _cfg_cache["priority_provider"]
+        for prov_name in PROVIDERS:
+            if model_override.startswith("claude"):
+                provider = "anthropic"; break
+            elif model_override.startswith("deepseek"):
+                provider = "deepseek"; break
+            elif model_override.startswith("grok"):
+                provider = "grok"; break
+            elif model_override.startswith("gpt"):
+                provider = "openai"; break
+            elif model_override.startswith("glm"):
+                provider = "zai"; break
+            elif model_override.startswith("llama") or model_override.startswith("mixtral") or model_override.startswith("gemma"):
+                provider = "groq"; break
+            elif model_override.startswith("apodex"):
+                provider = "apodex"; break
+        result = _call_single_provider(provider, model_override, messages, dept=dept)
+        if result and result.get("reply"):
+            if compression_saved > 0:
+                result["compression_saved"] = compression_saved
+            return result
+        # If direct call failed, fall through to combo chain
+        log.warning(f"Direct call failed for {provider}/{model_override}, falling back to combo chain")
+
+    # 3. Select combo
+    if combo is None:
+        combo = _combo_for_task(dept, command=command, depth=depth)
+
+    # 4. Walk combo chain
+    chain = COMBO_CHAINS.get(combo, COMBO_CHAINS["fosved-standard"])
+    for prov_name, models in chain:
+        if not _breaker.can_call(prov_name):
+            continue
+        for model in models:
+            max_tok = 16384 if dept in {"yana", "admin"} else 4096
+            result = _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok)
+            if result and result.get("reply"):
+                if compression_saved > 0:
+                    result["compression_saved"] = compression_saved
+                result["combo"] = combo
+                return result
+
+    # 5. Fallback: legacy priority-provider ordering (all providers, priority first)
+    log.warning(f"Combo chain '{combo}' exhausted, falling back to legacy ordering")
     priority = _cfg_cache["priority_provider"]
-    model = model or _cfg_cache["overrides"].get(dept) or _cfg_cache["priority_model"] or "glm-4.6"
+    fallback_model = _cfg_cache["overrides"].get(dept) or _cfg_cache["priority_model"] or "glm-4.6"
     order = [p for p in [priority] + [k for k in PROVIDERS if k != priority] if p in PROVIDERS]
     last_err = None
     for prov_name in order:
-        prov = PROVIDERS[prov_name]
-        api_key = os.environ.get(prov["env_key"])
-        if not api_key:
+        if not _breaker.can_call(prov_name):
             continue
-        try:
-            use_model = model
-            if prov_name == "anthropic" and use_model.startswith("gpt"):
-                use_model = "claude-sonnet-4-20250514"
-            elif prov_name == "deepseek" and not use_model.startswith("deepseek"):
-                use_model = "deepseek-chat"
-            elif prov_name == "groq" and not any(m in use_model for m in ("llama", "mixtral", "gemma")):
-                use_model = "llama-3.3-70b-versatile"
-
-            if prov["format"] == "openai":
-                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-                body = {"model": use_model, "messages": messages, "temperature": 0.7}
-            else:
-                sys_msg = ""
-                user_msgs = []
-                for m in messages:
-                    if m["role"] == "system": sys_msg = m["content"]
-                    else: user_msgs.append(m)
-                headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
-                body = {"model": use_model, "max_tokens": 16384 if dept in {"yana", "admin"} else 4096, "system": sys_msg, "messages": user_msgs}
-
-            resp = http_requests.post(prov["url"], headers=headers, json=body, timeout=prov["timeout"])
-            resp.raise_for_status()
-            data = resp.json()
-
-            if prov["format"] == "openai":
-                reply = data["choices"][0]["message"]["content"]
-                t_in = data.get("usage", {}).get("prompt_tokens", 0)
-                t_out = data.get("usage", {}).get("completion_tokens", 0)
-            else:
-                reply = data["content"][0]["text"]
-                t_in = data.get("usage", {}).get("input_tokens", 0)
-                t_out = data.get("usage", {}).get("output_tokens", 0)
-
-            costs = TOKEN_COSTS.get(prov_name, {"input": 1, "output": 1})
-            cost = t_in * costs["input"] / 1_000_000 + t_out * costs["output"] / 1_000_000
-            now = datetime.utcnow().isoformat()
-            _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
-                   (prov_name, use_model, t_in, t_out, round(cost, 6), dept, now))
-            _query("INSERT INTO audit_log (action,actor,dept,details,status) VALUES (?,'proxy',?,?,'ok')",
-                   ("llm_call", dept, json.dumps({"dept": dept, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out})))
-            log.info(f"LLM ok (direct): provider={prov_name} model={use_model} dept={dept} t_in={t_in} t_out={t_out}")
-            return {"reply": reply, "provider": prov_name, "model": use_model, "tokens_in": t_in, "tokens_out": t_out}
-        except Exception as e:
-            last_err = str(e)
-            log.warning(f"LLM fail (direct): provider={prov_name} err={last_err}")
-    return {"reply": f"[Oshibka] Vse providery nedostupny: {last_err}", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}
-
-
-def call_llm(dept, messages, model_override=None, combo=None):
-    """Call LLM via OmniRoute first, fall back to direct provider chain."""
-    if combo is None:
-        combo = get_combo_for_task(dept)
-    if is_omniroute_alive():
-        result = call_omniroute(messages, combo=combo, dept=dept)
+        use_model = fallback_model
+        # Auto-adapt model to provider
+        if prov_name == "anthropic" and use_model.startswith("gpt"):
+            use_model = "claude-sonnet-4-20250514"
+        elif prov_name == "deepseek" and not use_model.startswith("deepseek"):
+            use_model = "deepseek-chat"
+        elif prov_name == "groq" and not any(m in use_model for m in ("llama", "mixtral", "gemma")):
+            use_model = "llama-3.3-70b-versatile"
+        result = _call_single_provider(prov_name, use_model, messages, dept=dept)
         if result and result.get("reply"):
+            if compression_saved > 0:
+                result["compression_saved"] = compression_saved
             return result
-        log.warning(f"OmniRoute returned no result for combo={combo}, falling back to direct")
-    return _call_direct_fallback(dept, messages, model=model_override)
+        last_err = f"{prov_name}/{use_model}"
+
+    return {"reply": f"[Oshibka] Vse providery nedostupny (combo={combo}): {last_err}", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}
 
 # ──────────────────────────── TELEGRAM HELPERS ────────────────────────────
 def _tg_send_message(chat_id, text, parse_mode=None):
@@ -689,7 +860,7 @@ def _dept_kpis(dept):
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "omniroute": "alive" if is_omniroute_alive() else "down"})
+    return jsonify({"status": "ok", "circuit_breaker": _breaker.status(), "combos": list(COMBO_CHAINS.keys())})
 
 @app.get("/now-time")
 def now_time_endpoint():
