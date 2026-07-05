@@ -487,6 +487,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT, file_path TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS knowledge_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT, edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS admin_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, severity TEXT, category TEXT, file TEXT, issue TEXT, fix TEXT, status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS admin_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, status TEXT DEFAULT 'pending', narad_id TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS admin_night_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_data TEXT, review_data TEXT, health_score INTEGER, findings_count INTEGER, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, frequency TEXT DEFAULT 'daily', created_at TEXT DEFAULT (datetime('now')));
         """)
         for col_sql, col_name in [
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
@@ -2791,22 +2797,168 @@ def admin_ua_analyze():
     return jsonify({'summary': summary, 'analysis': analysis})
 
 
+def _ua_analyze_internal():
+    """Internal analyzer — returns list of file analysis dicts (no Flask)."""
+    office_dir = Path('/office')
+    analysis = []
+
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            ext = fpath.suffix
+            if ext not in ('.mlog', '.py'):
+                continue
+            rel = str(fpath.relative_to(office_dir))
+            try:
+                content = fpath.read_text(errors='ignore')
+            except Exception:
+                continue
+
+            fa = {'path': rel, 'patterns': [], 'routes': [], 'imports': [],
+                  'builtins_used': [], 'tables': []}
+
+            if ext == '.mlog':
+                for m in re.finditer(r'pattern\s+(\w+)\(([^)]*)\)\s*->\s*(\w+)', content):
+                    fa['patterns'].append({'name': m.group(1), 'args': m.group(2), 'returns': m.group(3)})
+                for m in re.finditer(r'route\s+"([^"]+)"\s+method=(\w+)', content):
+                    fa['routes'].append({'path': m.group(1), 'method': m.group(2)})
+                for m in re.finditer(r'import\s+([\w/]+)', content):
+                    fa['imports'].append(m.group(1))
+                for b in KNOWN_BUILTINS:
+                    if b + '(' in content:
+                        fa['builtins_used'].append(b)
+                for m in re.finditer(r'CREATE TABLE (?:IF NOT EXISTS )?(\w+)', content):
+                    fa['tables'].append(m.group(1))
+
+            elif ext == '.py':
+                for m in re.finditer(r'def\s+(\w+)\(', content):
+                    fa['patterns'].append({'name': m.group(1), 'args': '', 'returns': ''})
+                for m in re.finditer(r"@\w+\.route\(['\"]([^'\"]+)", content):
+                    fa['routes'].append({'path': m.group(1), 'method': 'GET/POST'})
+
+            analysis.append(fa)
+
+    return analysis
+
+
+def _ua_scan_internal():
+    """Internal scanner — returns inventory dict (no Flask)."""
+    inventory = {'files': [], 'total_lines': 0, 'total_files': 0, 'by_type': {}, 'by_dir': {}}
+    office_dir = Path('/office')
+
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            rel = str(fpath.relative_to(office_dir))
+            try:
+                lines = len(fpath.read_text(errors='ignore').splitlines())
+            except Exception:
+                lines = 0
+            ext = fpath.suffix
+            dir_name = rel.split('/')[0] if '/' in rel else 'root'
+            inventory['files'].append({
+                'path': rel, 'lines': lines, 'ext': ext, 'dir': dir_name,
+                'size_kb': round(fpath.stat().st_size / 1024, 1),
+            })
+            inventory['total_lines'] += lines
+            inventory['total_files'] += 1
+            inventory['by_type'][ext] = inventory['by_type'].get(ext, 0) + 1
+            inventory['by_dir'][dir_name] = inventory['by_dir'].get(dir_name, 0) + 1
+
+    inventory['files'].sort(key=lambda x: x['lines'], reverse=True)
+    return inventory
+
+
+def _ua_review_internal():
+    """Internal reviewer — returns findings dict with health_score (no Flask)."""
+    office_dir = Path('/office')
+    findings = []
+    all_mlog = {}
+    all_patterns = {}
+    called_patterns = set()
+    imported_files = set()
+
+    for root, dirs, files in os.walk(office_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            fpath = Path(root) / f
+            if fpath.suffix != '.mlog':
+                continue
+            rel = str(fpath.relative_to(office_dir))
+            try:
+                content = fpath.read_text(errors='ignore')
+            except Exception:
+                continue
+            all_mlog[rel] = content
+            for m in re.finditer(r'pattern\s+(\w+)\(', content):
+                all_patterns[m.group(1)] = rel
+            for m in re.finditer(r'import\s+([\w/]+)', content):
+                imported_files.add(m.group(1) + '.mlog')
+            for pname in all_patterns:
+                if pname + '(' in content:
+                    called_patterns.add(pname)
+            if rel.startswith('dept/') and 'AuditLog' not in content and rel not in ('dept/utils.mlog', 'dept/context.mlog'):
+                findings.append({'severity': 'medium', 'category': 'ARCHITECTURE',
+                                 'file': rel, 'issue': 'No AuditLog calls — actions not logged',
+                                 'fix': 'Add AuditLog() after LLM calls'})
+
+    for f in all_mlog:
+        if f != 'app.mlog' and f not in imported_files and f not in ('file_cache.mlog', 'file_cache_skills.mlog'):
+            findings.append({'severity': 'low', 'category': 'ORPHAN',
+                             'file': f, 'issue': f'File not imported — possible dead code',
+                             'fix': 'Import in app.mlog or delete'})
+
+    entry_points = {'InitDB', 'Main', 'mlogserver'}
+    for pname, pfile in all_patterns.items():
+        if pname not in called_patterns and pname not in entry_points:
+            findings.append({'severity': 'low', 'category': 'ORPHAN',
+                             'file': pfile, 'issue': f'Pattern {pname}() defined but never called',
+                             'fix': 'Call it or remove'})
+
+    for f, content in all_mlog.items():
+        for m in re.finditer(r'route\s+"(/cron/[^"]+)"', content):
+            route_block = content[m.end():m.end() + 500]
+            if 'CRON_SECRET' not in route_block and 'secret' not in route_block.lower():
+                findings.append({'severity': 'high', 'category': 'SECURITY',
+                                 'file': f, 'issue': f'Route {m.group(1)} has no CRON_SECRET check',
+                                 'fix': 'Add secret validation'})
+
+    for f, content in all_mlog.items():
+        for m in re.finditer(r'contains\([^)]+\)\s*==\s*1\.0', content):
+            findings.append({'severity': 'medium', 'category': 'BUGS',
+                             'file': f, 'issue': 'contains() returns Bool, == 1.0 is type mismatch',
+                             'fix': 'Use: if contains(...) then { }'})
+
+    high = len([f for f in findings if f['severity'] == 'high'])
+    medium = len([f for f in findings if f['severity'] == 'medium'])
+    low = len([f for f in findings if f['severity'] == 'low'])
+    score = max(1, round(10 - high * 2 - medium * 0.5 - low * 0.1, 1))
+
+    return {'findings': findings, 'health_score': score}
+
+
 @app.get("/admin-ua/graph")
 def admin_ua_graph():
     """Grapher: build knowledge graph from analysis data, save to SQLite."""
-    db_path = BASE_DIR / "data" / "fosved.db"
-    if not db_path.exists():
-        return jsonify({'summary': 'ERROR: database not found', 'nodes': 0, 'edges': 0})
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(DB_FILE))
     c = conn.cursor()
+
+    # Ensure tables exist (may be missing if DB predates this feature)
+    c.execute("""CREATE TABLE IF NOT EXISTS knowledge_graph
+        (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT,
+         file_path TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS knowledge_edges
+        (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT,
+         edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
 
     # Clear old graph
     c.execute("DELETE FROM knowledge_graph")
     c.execute("DELETE FROM knowledge_edges")
 
-    # Run analyzer internally
-    analyze_data = admin_ua_analyze().get_json(force=True)
-    analysis = analyze_data.get('analysis', [])
+    # Run analyzer internally (not via Flask)
+    analysis = _ua_analyze_internal()
 
     nodes_saved = 0
     edges_saved = 0
@@ -3068,34 +3220,167 @@ def admin_ua_docs():
     return jsonify({'structure': structure, 'api': api})
 
 
+@app.post("/admin-ua/night-cycle")
+def admin_ua_night_cycle():
+    """
+    Full UA night cycle: Scanner → Analyzer → Grapher → Reviewer → Differ → Documenter.
+    Saves results to admin_night_reports, updates knowledge graph.
+    Called from /cron/night or /admin analyze.
+    """
+    try:
+        log.info("UA Night Cycle: Phase 1/6 — Scanner")
+        inventory = _ua_scan_internal()
+
+        log.info("UA Night Cycle: Phase 2/6 — Analyzer")
+        analysis = _ua_analyze_internal()
+
+        log.info("UA Night Cycle: Phase 3/6 — Grapher")
+        # Build graph in SQLite
+        conn = sqlite3.connect(str(DB_FILE))
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS knowledge_graph
+            (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT,
+             file_path TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS knowledge_edges
+            (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT,
+             edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
+        c.execute("DELETE FROM knowledge_graph")
+        c.execute("DELETE FROM knowledge_edges")
+
+        nodes_saved = 0
+        edges_saved = 0
+        now_ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+        for fa in analysis:
+            rel = fa['path']
+            c.execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?,?,?,?,?)",
+                      ('file', rel, rel, f"{len(fa.get('patterns', []))}p {len(fa.get('routes', []))}r", now_ts))
+            nodes_saved += 1
+            for p in fa.get('patterns', []):
+                pname = p.get('name', '')
+                if not pname: continue
+                c.execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?,?,?,?,?)",
+                          ('pattern', pname, rel, '', now_ts))
+                nodes_saved += 1
+                c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
+                          (rel, pname, 'defines', rel, now_ts))
+                edges_saved += 1
+            for r in fa.get('routes', []):
+                rname = r.get('path', '')
+                if not rname: continue
+                c.execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?,?,?,?,?)",
+                          ('route', rname, rel, r.get('method', ''), now_ts))
+                nodes_saved += 1
+                c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
+                          (rel, rname, 'exposes', rel, now_ts))
+                edges_saved += 1
+            for imp in fa.get('imports', []):
+                c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
+                          (rel, imp + '.mlog', 'imports', rel, now_ts))
+                edges_saved += 1
+
+        # Cross-file pattern calls
+        pattern_to_file = {}
+        for fa in analysis:
+            for p in fa.get('patterns', []):
+                if p.get('name'): pattern_to_file[p['name']] = fa['path']
+        for fa in analysis:
+            rel = fa['path']
+            for pname, pfile in pattern_to_file.items():
+                if pname in ('Main', 'InitDB', 'mlogserver'): continue
+                if pfile != rel:
+                    try:
+                        content = (Path('/office') / rel).read_text(errors='ignore')
+                        if pname + '(' in content:
+                            c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
+                                      (rel, pname, 'calls', rel, now_ts))
+                            edges_saved += 1
+                    except Exception:
+                        pass
+
+        conn.commit()
+        conn.close()
+
+        log.info("UA Night Cycle: Phase 4/6 — Reviewer")
+        review = _ua_review_internal()
+        findings = review['findings']
+        health = review['health_score']
+
+        log.info("UA Night Cycle: Phase 5/6 — Differ (skip — needs file param)")
+        # Differ is on-demand via /admin impact <file>
+
+        log.info("UA Night Cycle: Phase 6/6 — Documenter")
+        structure_lines = []
+        api_lines = []
+        for fa in sorted(analysis, key=lambda x: x['path']):
+            structure_lines.append(f"- `{fa['path']}` — {len(fa.get('patterns', []))} patterns")
+            for r in fa.get('routes', []):
+                api_lines.append(f"{r.get('method', '?')} {r['path']} ({fa['path']})")
+
+        # Save night report to DB
+        import json as _json
+        _query("INSERT INTO admin_night_reports (scan_data, review_data, health_score, findings_count, created_at) VALUES (?,?,?,?,?)",
+               (_json.dumps({'total_files': inventory['total_files'], 'total_lines': inventory['total_lines']}),
+                _json.dumps(findings[:50]),
+                health, len(findings), datetime.utcnow().isoformat()))
+
+        # Save findings to admin_findings table
+        for f in findings:
+            _query("INSERT INTO admin_findings (severity, category, file, issue, fix, status) VALUES (?,?,?,?,?,?)",
+                   (f['severity'], f['category'], f.get('file', ''), f['issue'], f.get('fix', ''), 'open'))
+
+        # Close open findings that are resolved
+        _query("UPDATE admin_findings SET status='closed' WHERE status='open' AND created_at < datetime('now', '-7 days')")
+
+        summary = (f"UA NIGHT CYCLE COMPLETE\n"
+                   f"  Files: {inventory['total_files']} ({inventory['total_lines']:,} lines)\n"
+                   f"  Patterns: {sum(len(f['patterns']) for f in analysis)}\n"
+                   f"  Routes: {sum(len(f['routes']) for f in analysis)}\n"
+                   f"  Graph: {nodes_saved} nodes, {edges_saved} edges\n"
+                   f"  Findings: {len(findings)} (h={len([f for f in findings if f['severity']=='high'])} "
+                   f"m={len([f for f in findings if f['severity']=='medium'])} "
+                   f"l={len([f for f in findings if f['severity']=='low'])})\n"
+                   f"  Health: {health}/10")
+
+        _log_audit("ua_night_cycle", {"files": inventory['total_files'], "nodes": nodes_saved,
+                                       "edges": edges_saved, "findings": len(findings), "health": health})
+
+        return jsonify({'status': 'ok', 'summary': summary, 'health_score': health,
+                        'findings_count': len(findings)})
+
+    except Exception as e:
+        log.error(f"ua_night_cycle error: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.get("/admin-ua/tour")
 def admin_ua_tour():
     """Tour: guided architecture tour using all 6 sub-agents."""
-    scan_data = admin_ua_scan().get_json(force=True)
-    graph_data = admin_ua_graph().get_json(force=True)
-    review_data = admin_ua_review().get_json(force=True)
-
-    inv = scan_data.get('inventory', {})
-    findings = review_data.get('findings', [])
-    health = review_data.get('health_score', '?')
-    g_nodes = graph_data.get('nodes', 0)
-    g_edges = graph_data.get('edges', 0)
+    # Use internal functions, not Flask self-calls
+    scan_data = _ua_scan_internal()
+    review_data = _ua_review_internal()
+    g_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph", fetch=True)
+    g_edges = _query("SELECT COUNT(*) as c FROM knowledge_edges", fetch=True)
+    kg_nodes = g_nodes[0]['c'] if g_nodes else 0
+    kg_edges = g_edges[0]['c'] if g_edges else 0
 
     tour = f"Guided Tour по Fosved Office v2\n\n"
-    tour += f"Офис: {inv.get('total_files', 0)} файлов ({inv.get('total_lines', 0):,} строк)\n"
-    tour += f"Knowledge graph: {g_nodes} nodes, {g_edges} edges\n\n"
+    tour += f"Офис: {scan_data['total_files']} файлов ({scan_data['total_lines']:,} строк)\n"
+    tour += f"Knowledge graph: {kg_nodes} nodes, {kg_edges} edges\n\n"
 
-    top_files = sorted(inv.get('files', []), key=lambda x: x['lines'], reverse=True)[:5]
+    top_files = sorted(scan_data['files'], key=lambda x: x['lines'], reverse=True)[:5]
     tour += "Ключевые файлы:\n"
     for f in top_files:
         tour += f"  {f['path']} — {f['lines']} строк ({f['size_kb']} KB)\n"
 
     # Top dirs
-    by_dir = inv.get('by_dir', {})
+    by_dir = scan_data.get('by_dir', {})
     tour += f"\nСтруктура: {len(by_dir)} директорий\n"
     for d, cnt in sorted(by_dir.items(), key=lambda x: -x[1])[:6]:
         tour += f"  {d}/ — {cnt} файлов\n"
 
+    health = review_data.get('health_score', '?')
+    findings = review_data.get('findings', [])
     tour += f"\nCode health: {health}/10\n"
 
     high_f = [f for f in findings if f['severity'] == 'high'][:3]
