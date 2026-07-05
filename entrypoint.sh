@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "=== Fosved Office v2 Starting ==="
-export DATABASE_URL="${DATABASE_URL:-sqlite:data/fosved.db}"
+export DATABASE_URL="${DATABASE_URL:-sqlite:${DATABASE_PATH:-./data}/fosved.db}"
 
 # Log source file checksums
 echo "--- Source checksums ---"
@@ -23,6 +23,9 @@ fi
 python3 scripts/migrate_schema.py "${DATABASE_PATH:-./data}/fosved.db"
 
 # 1. LLM Proxy (native circuit breaker + combo chains + compression)
+if ! python3 -c "import llm_proxy" 2>/tmp/llm_import_err.log; then
+  echo "FATAL: llm_proxy import error"; cat /tmp/llm_import_err.log | tail -10; exit 1
+fi
 python3 llm_proxy.py &
 LLM_PID=$!
 echo "LLM Proxy started (PID: $LLM_PID)"
