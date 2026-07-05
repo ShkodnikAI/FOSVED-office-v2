@@ -64,7 +64,7 @@ Startup order (entrypoint.sh): llm_proxy → mlog serve → reverse_proxy
 
 ```
 app.mlog                 # Главный роутер. import dept/*, InitDB, команды, cron
-bin/mlog                 # Metalogos v0.7.10 бинарник (x86-64, Rust, 12MB)
+bin/mlog                 # Metalogos v0.8.9 бинарник (x86-64, Rust, CI #110)
 llm_proxy.py             # Flask сервер. LLM-прокси, API, Mini App serving
 reverse_proxy.py         # Роутер: LLM_ROUTES_PREFIXES → :4000, остальное → :10001
 entrypoint.sh            # Старт 3 процессов с healthcheck
@@ -241,4 +241,4 @@ mlog (:10001) обрабатывает:
   - .mlog: 3 038 | .py: 2 599 | .js: 1 996 | .css: 1 414 | .html: 607 | .md: 3 565
 - 14 отделов | 176 скиллов | 68 команд | 11 cron-роутов
 - 7 LLM провайдеров | 22 DB таблицы
-- Бинарник: Metalogos v0.7.10 (12MB, x86-64, 113 builtins)
+- Бинарник: Metalogos v0.8.9 (x86-64, 113 builtins, CI #110)

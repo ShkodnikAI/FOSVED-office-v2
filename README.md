@@ -137,7 +137,7 @@ Web, YouTube, Reddit, Science, GitHub, Social, Telegram, Darknet, Academic — �
 ```
 .
 ├── app.mlog                  # Главный роутер (1302 строки, 68 команд)
-├── bin/mlog                  # Metalogos v0.7.10 бинарник (x86-64, Rust)
+├── bin/mlog                  # Metalogos v0.8.9 бинарник (x86-64, Rust, CI #110)
 ├── llm_proxy.py              # LLM-прокси + API + SPA-сервер (2853 строк)
 ├── reverse_proxy.py          # Маршрутизатор запросов (108 строк)
 ├── entrypoint.sh             # Docker-запуск (3 процесса)
@@ -210,11 +210,15 @@ docker build -t fosved .
 docker run -p 10000:10000 --env-file .env fosved
 ```
 
+## Правило деплой-целостности
+
+> **app.mlog, bin/mlog, entrypoint.sh и env-переменные Render меняются только согласованным набором.** Частичный перенос (cherry-pick одного файла) запрещён — бинарник, mlog-грамматика и entrypoint-гейты образуют атомарный юнит. Нарушение этого правила привело к падению прода (85273f3 → db-роуты без fallback).
+
 ## Технологический стек
 
 | Компонент | Технология |
 |---|---|
-| Ядро | Metalogos v0.7.10 (Rust DSL, 113 встроенных функций) |
+| Ядро | Metalogos v0.8.9 (Rust DSL, 113 встроенных функций) |
 | Прокси-слой | Python 3.12 + Flask |
 | База данных | SQLite |
 | Голос STT | Whisper (Groq/OpenAI) |
