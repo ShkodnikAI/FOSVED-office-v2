@@ -4,58 +4,19 @@
 // The mlog layer collects data, builds payloads, and triggers the proxy.
 
 // ---------------------------------------------------------------------------
-// 1. Morning Brief — 08:00 daily
+// 1. Morning Brief — 07:20 MSK daily (4:20 UTC)
+// Яна: дата, время, погода, статус офиса, мировые события, находки ЛЗ
+// Endpoint сам собирает погоду, метрики, LZ-находки.
 // ---------------------------------------------------------------------------
 pattern MorningBrief() -> String {
   let owner_id = env("OWNER_TELEGRAM_ID")
 
-  // --- Collect overnight metrics ---
-  let dialog_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", [])
-  let dialog_count = to_string(json_get(to_string(dialog_rows), "[0].cnt", "0"))
-
-  let narad_rows = query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", [])
-  let narads_pending = to_string(json_get(to_string(narad_rows), "[0].cnt", "0"))
-
-  let corr_rows = query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", [])
-  let corrections = to_string(json_get(to_string(corr_rows), "[0].cnt", "0"))
-
-  let watch_rows = query("SELECT COUNT(*) as cnt FROM system_settings WHERE key LIKE 'control_%'", [])
-  let control_watches = to_string(json_get(to_string(watch_rows), "[0].cnt", "0"))
-
-  // --- Read Yana profile for context ---
-  let yana_profile = read_file("library/yana.md")
-
-  // --- Build prompt with metrics ---
-  let prompt = "Ty — Yana. Sostav' utrennij brief dlya vladel'ca. Kratko, 5-7 stroki.\n"
-  let prompt = prompt + "Dannie:\n"
-  let prompt = prompt + "- Dialogov za 24ch: " + dialog_count + "\n"
-  let prompt = prompt + "- Nereshennyh naryadov: " + narads_pending + "\n"
-  let prompt = prompt + "- Korrekcij za 24ch: " + corrections + "\n"
-  let prompt = prompt + "- Tem na kontrole: " + control_watches
-
-  // --- Admin section (MEGA-4: include night cycle summary) ---
-  let admin_summary = kv_get("admin_night_summary")
-  if len(admin_summary) > 10.0 then {
-    let prompt = prompt + "\n\nAdmin za noch':\n" + substring(admin_summary, 0, 500)
-  }
-
-  // --- Delegate to proxy ---
-  let payload = json_encode({
-    owner_id: owner_id,
-    dialog_count_24h: dialog_count,
-    narads_pending: narads_pending,
-    corrections_24h: corrections,
-    control_watches: control_watches,
-    prompt: prompt,
-    yana_profile: yana_profile
-  })
+  // Delegate to proxy — endpoint collects weather, metrics, LZ findings itself
+  let payload = json_encode({owner_id: owner_id})
   let _ = http_post("http://127.0.0.1:4000/scheduler/morning-brief", payload, "application/json")
 
-  // --- Also trigger self-learn cycle ---
-  let _ = YanaSelfLearn()
-
-  // --- Audit ---
-  let _ = AuditLog("morning_brief", "scheduler", "triggered with " + dialog_count + " dialogs, " + narads_pending + " narads, " + corrections + " corrections")
+  // Audit
+  let _ = AuditLog("morning_brief", "scheduler", "morning brief triggered (weather + office + world events + LZ)")
 
   return "ok"
 }

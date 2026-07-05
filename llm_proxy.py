@@ -1022,6 +1022,13 @@ function doControl(freq){{
 
 @app.get("/miniapp/<doc_id>")
 def miniapp_get(doc_id):
+    try:
+        return _miniapp_get_inner(doc_id)
+    except Exception as e:
+        log.error(f"miniapp_get crash for {doc_id}: {e}", exc_info=True)
+        return f"<h1>Ошибка рендеринга</h1><p>{html_lib_escape(str(e))}</p><p>ID: {html_lib_escape(doc_id)}</p>", 500
+
+def _miniapp_get_inner(doc_id):
     rows = _query("SELECT html,title,created_at,dept,raw_text FROM miniapp_responses WHERE id=?", (doc_id,), fetch=True)
     if not rows:
         return "<h1>Not found</h1>", 404
@@ -1072,7 +1079,14 @@ body {{ font-family:'DM Sans',sans-serif; color:#1e293b; background:#F8F7F4; mar
 </div></body></html>'''
             return Response(html, mimetype="text/html")
     # Fallback: return stored HTML with action bar injected
-    stored_html = r["html"]
+    stored_html = r["html"] or ""
+    if not stored_html:
+        # No stored HTML at all — render raw_text as plain HTML
+        raw_fallback = r["raw_text"] or "Отчёт пуст"
+        stored_html = f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://telegram.org/js/telegram-web-app.js"></script></head><body>
+<div style="padding:16px;font-family:sans-serif;color:#1e293b;white-space:pre-wrap">{html_lib_escape(raw_fallback)}</div>
+{action_bar}</body></html>'''
     if "</body>" in stored_html:
         stored_html = stored_html.replace("</body>", f"{action_bar}</body>")
     return Response(stored_html, mimetype="text/html")
@@ -1553,7 +1567,10 @@ def _format_metrics_text(metrics):
 
 @app.post("/scheduler/morning-brief")
 def scheduler_morning_brief():
-    """Generate and send a morning brief to the owner."""
+    """
+    Generate and send a morning brief to the owner.
+    Яна делает отчёт в 7:20: дата, время, прогноз погоды, как работает офис, важные мировые события.
+    """
     d = request.get_json(force=True)
     owner_id = d.get("owner_id", "")
 
@@ -1562,16 +1579,100 @@ def scheduler_morning_brief():
 
     try:
         now = datetime.utcnow()
+        # Moscow time for display
+        from datetime import timezone, timedelta as _td
+        msk = timezone(_td(hours=3))
+        now_msk = datetime.now(msk)
+        date_str = now_msk.strftime("%d.%m.%Y")
+        time_str = now_msk.strftime("%H:%M")
+        weekday = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"][now_msk.weekday()]
+
+        # ── 1. Weather (wttr.in — free, no API key) ──
+        weather_text = ""
+        try:
+            weather_resp = http_requests.get("https://wttr.in/Moscow?format=%C+%t+%w+%h+%P&lang=ru", timeout=10)
+            if weather_resp.ok:
+                weather_text = weather_resp.text.strip()
+            else:
+                weather_text = "Погода недоступна"
+        except Exception:
+            weather_text = "Не удалось получить прогноз погоды"
+
+        # Extended forecast
+        weather_ext = ""
+        try:
+            weather_ext_resp = http_requests.get("https://wttr.in/Moscow?format=3&lang=ru", timeout=10)
+            if weather_ext_resp.ok:
+                weather_ext = weather_ext_resp.text.strip()
+        except Exception:
+            pass
+
+        # ── 2. Office metrics ──
         yesterday = (now - timedelta(days=1)).isoformat()[:10] + "T00:00:00"
         today = now.isoformat()[:10] + "T00:00:00"
-
         metrics = _collect_metrics_for_period(yesterday, today)
         metrics_text = _format_metrics_text(metrics)
 
+        # Dialog count (24h)
+        dialog_rows = _query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+        dialog_24h = dialog_rows[0]["cnt"] if dialog_rows else 0
+
+        # Active departments (24h)
+        dept_rows = _query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+        active_depts = [r["dept"] for r in dept_rows] if dept_rows else []
+
+        # Pending narads
+        narad_rows = _query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", fetch=True)
+        narads_pending = narad_rows[0]["cnt"] if narad_rows else 0
+
+        # Recent corrections
+        corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+        corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
+
+        # ── 3. LZ daily findings (from memory) ──
+        lz_findings = ""
+        try:
+            lz_mem = memory.recall("LZ Daily", type_filter="observation", limit=3)
+            if lz_mem:
+                lz_findings = "\n".join([f"  - {f['content'][:120]}" for f in lz_mem])
+        except Exception:
+            pass
+
+        # ── 4. Build prompt ──
         dept_prompt = get_dept_prompt("yana")
+        user_prompt = f"""Составь утренний отчёт для хозяина офиса.
+
+Дата: {date_str} ({weekday})
+Время: {time_str} (МСК)
+
+=== ПОГОДА (Москва) ===
+{weather_text}
+{weather_ext}
+
+=== КАК РАБОТАЕТ ОФИС (последние 24ч) ===
+Диалогов: {dialog_24h}
+Активные отделы: {', '.join(active_depts) if active_depts else 'нет активности'}
+Нерешённых нарядов: {narads_pending}
+Коррекций за сутки: {corrections_24h}
+{metrics_text}
+
+=== НАХОДКИ ЛАБОРАТОРИИ ЗНАНИЙ ===
+{lz_findings if lz_findings else 'За последние сутки нет новых находок'}
+
+=== ТВОЯ ЗАДАЧА ===
+Напиши утренний отчёт на русском. Структура:
+1. 📅 Дата, время, день недели
+2. 🌤 Прогноз погоды в Москве
+3. 🏢 Статус офиса — кратко, что происходит
+4. 🌍 Важные мировые события — что актуально (на основе своих знаний)
+5. 🔍 Ключевые находки ЛЗ (если есть)
+6. ⚡ Что требует внимания хозяина
+
+Будь лаконичной но информативной. 7-12 предложений максимум."""
+
         messages = [
-            {"role": "system", "content": dept_prompt + "\n\nYou are generating a morning brief for the office owner. Be concise, highlight key events overnight, flag issues. Format in Russian."},
-            {"role": "user", "content": f"Sformirui utrennii brief za proshlou noch' i rannoe utro.\n\n{metrics_text}\n\nOzhidai: korotkii brief na 3-5 punktov."},
+            {"role": "system", "content": dept_prompt + "\n\nТы — Яна, управляющая офисом. Ты составляешь утренний отчёт для хозяина. Отчёт должен быть информативным, структурированным, на русском языке. Упоминай находки Лаборатории Знаний если они есть."},
+            {"role": "user", "content": user_prompt},
         ]
 
         result = call_llm("yana", messages)
@@ -1585,6 +1686,85 @@ def scheduler_morning_brief():
     except Exception as e:
         log.error(f"morning_brief error: {e}")
         _log_audit("scheduler_morning_brief_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.post("/scheduler/admin-morning-reply")
+def scheduler_admin_morning_reply():
+    """
+    Админ делает свой ответ на утренний отчёт Яны (7:25).
+    Анализирует отчёт Яны, добавляет своё видение, приоритеты, замечания.
+    """
+    d = request.get_json(force=True)
+    owner_id = d.get("owner_id", "")
+
+    if not owner_id:
+        return jsonify({"status": "error", "message": "owner_id is required"}), 400
+
+    try:
+        # ── 1. Get Yana's last morning brief from dialog_history ──
+        yana_rows = _query(
+            "SELECT content, created_at FROM dialog_history WHERE dept='yana' AND role='assistant' "
+            "AND created_at > datetime('now', '-2 hours') ORDER BY id DESC LIMIT 1",
+            fetch=True
+        )
+        yana_brief = yana_rows[0]["content"] if yana_rows else ""
+
+        if not yana_brief:
+            # Fallback: just send a status
+            msg_id = _tg_send_message(owner_id, "⏰ Утренний ответ Админа: не найден свежий отчёт Яны для комментирования.")
+            return jsonify({"status": "ok", "msg_id": msg_id, "note": "no_yana_brief"})
+
+        # ── 2. Get admin prompt ──
+        admin_prompt = get_dept_prompt("admin")
+
+        # ── 3. Get LZ daily findings for admin context ──
+        lz_context = ""
+        try:
+            lz_mem = memory.recall("LZ Daily", type_filter="observation", limit=5)
+            if lz_mem:
+                lz_context = "\n".join([f"  - {f['content'][:200]}" for f in lz_mem])
+        except Exception:
+            pass
+
+        # ── 4. Get pending issues ──
+        issues_context = ""
+        try:
+            narad_rows = _query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", fetch=True)
+            if narad_rows:
+                issues_context = f"Нерешённых нарядов: {narad_rows[0]['cnt']}"
+        except Exception:
+            pass
+
+        # ── 5. Build admin prompt ──
+        messages = [
+            {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и должен дать свой ответ. Твой ответ — это директива на день. Упомяни находки Лаборатории Знаний, если они релевантны."},
+            {"role": "user", "content": f"""Яна прислала утренний отчёт:
+
+{yana_brief}
+
+{f"=== НАХОДКИ ЛЗ ===\n{lz_context}" if lz_context else ""}
+{f"=== СТАТУС ===\n{issues_context}" if issues_context else ""}
+
+Твоя задача: напиши краткий ответ на отчёт Яны на русском. Структура:
+1. 📌 Приоритеты на сегодня — 2-3 главных задачи
+2. 💬 Замечания по отчёту Яны (если есть)
+3. 🔧 Указания отделам
+4. 🔍 Что из находок ЛЗ стоит изучить и применить
+
+Будь кратким, по-деловому. 5-8 предложений."""},
+        ]
+
+        result = call_llm("admin", messages)
+        reply = result["reply"]
+
+        msg_id = _tg_send_message(owner_id, reply)
+        _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+
+        return jsonify({"status": "ok", "reply": reply, "msg_id": msg_id})
+
+    except Exception as e:
+        log.error(f"admin_morning_reply error: {e}")
+        _log_audit("scheduler_admin_morning_reply_error", {"error": str(e)[:500]})
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.post("/scheduler/evening-summary")
