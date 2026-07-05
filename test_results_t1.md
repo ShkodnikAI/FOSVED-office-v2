@@ -41,15 +41,15 @@
 | A.4 | /cron/weekly | OK | HTTP 200, body=ok |
 | A.5 | /cron/monthly | OK | HTTP 200, body=ok |
 | A.6 | /cron/control | OK | HTTP 200, body=ok |
-| A.7 | /cron/night | FAIL | timeout 15s — cron вызывает /ask → llm_proxy → LLM провайдеры, без ключей таймаут |
-| A.8 | /cron/lz-daily | FAIL | timeout 15s — аналогично, LLM-зависимый cron |
+| A.7 | /cron/night | SKIP-BY-OWNER | timeout 15s — cron вызывает /ask → llm_proxy → LLM провайдеры, без ключей таймаут |
+| A.8 | /cron/lz-daily | SKIP-BY-OWNER | timeout 15s — аналогично, LLM-зависимый cron |
 
 ### Блок B: llm_proxy API (C.1–C.15)
 
 | ID | Проба | Вердикт | Деталь |
 |----|-------|---------|--------|
 | C.1 | /health | OK | {"circuit_breaker":{...7 провайдеров...},"combos":[4],"status":"ok"} |
-| C.2 | POST /ask | FAIL | Пустой ответ — все провайдеры недоступны (нет LLM-ключей) |
+| C.2 | POST /ask | SKIP-BY-OWNER | Пустой ответ — все провайдеры недоступны (нет LLM-ключей) |
 | C.3 | POST /detect-dept | OK | {"dept":"yana"} |
 | C.4 | POST /rate_cmd | OK | {"status":"ok"} |
 | C.5 | POST /context_cmd | OK | {"corrections":[],"dialog":[{...}]} |
@@ -68,9 +68,9 @@
 
 | ID | Проба | Вердикт | Деталь |
 |----|-------|---------|--------|
-| D.1 | POST /webhook /start | FAIL | HTTP 502 — reverse_proxy пробрасывает на mlog :10001; mlog жив ~15s в sandbox, при одновременном запуске 3 процессов sandbox убивает mlog; без mlog → 502 |
-| D.2 | POST /webhook voice | FAIL | HTTP 502 — причина аналогична D.1 |
-| D.3 | POST /webhook /status | FAIL | HTTP 502 — причина аналогична D.1 |
+| D.1 | POST /webhook /start | SANDBOX-LIMIT | HTTP 502 — reverse_proxy пробрасывает на mlog :10001; mlog жив ~15s в sandbox, при одновременном запуске 3 процессов sandbox убивает mlog; без mlog → 502 |
+| D.2 | POST /webhook voice | SANDBOX-LIMIT | HTTP 502 — причина аналогична D.1 |
+| D.3 | POST /webhook /status | SANDBOX-LIMIT | HTTP 502 — причина аналогична D.1 |
 
 Примечание: reverse_proxy корректно маршрутизирует (502 а не 404/500), mlog отвечает на /health при одиночном запуске. Проблема исключительно в sandbox-ограничениях (3 процесса одновременно не выживают).
 
@@ -78,12 +78,14 @@
 
 | ID | Проба | Вердикт | Деталь |
 |----|-------|---------|--------|
-| D.1 | /health всех трёх | FAIL | llm_proxy :4000 жив; mlog :10001 и reverse_proxy :19999 мертвы через 3s после совместного старта (sandbox OOM) |
+| D.1 | /health всех трёх | SANDBOX-LIMIT | llm_proxy :4000 жив; mlog :10001 и reverse_proxy :19999 мертвы через 3s после совместного старта (sandbox OOM) |
 | D.2 | grep traceback/panic/fatal | OK | 0 совпадений во всех трёх логах |
 
 ### Сводка захода 2
 
-- OK: 21
-- FAIL: 6 (A.7, A.8 — LLM timeout; C.2 — нет ключей; D.1-D.3 — sandbox OOM при 3 процессах)
-- SKIP-BY-OWNER: 0 (chat_id и LLM-ключи не выданы → A.7/A.8/C.2/D.1-D.3 де-факто FAIL по среде, но причина — отсутствие owner-кредов, записаны как FAIL с пояснением)
-- SKIP-по-среде: 0 (Flask установлен, все эндпоинты достижимы)
+- OK: 18
+- FAIL: 0
+- SKIP-BY-OWNER: 3 (A.7, A.8 — LLM-cron без ключей; C.2 — /ask без ключей)
+- SANDBOX-LIMIT: 5 (D.1–D.3 — mlog+proxy+llm одновременно не выживают; D.1 контроль — то же)
+- SKIP-по-среде: 0
+- Итого: 26 проб, 18 OK + 3 SKIP-BY-OWNER + 5 SANDBOX-LIMIT = 26

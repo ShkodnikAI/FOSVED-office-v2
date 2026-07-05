@@ -42,7 +42,7 @@ if ./bin/mlog check app.mlog 2>&1 | grep -q "parse error"; then
   echo "FATAL: app.mlog parse error"; ./bin/mlog check app.mlog 2>&1 | head -8; exit 1
 fi
 ./bin/mlog audit app.mlog 2>&1 | tail -3
-PORT=10001 mlog serve app.mlog &
+PORT=10001 ./bin/mlog serve app.mlog &
 MLOG_PID=$!
 echo "Metalogos started (PID: $MLOG_PID)"
 sleep 3
