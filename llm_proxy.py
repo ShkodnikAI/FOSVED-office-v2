@@ -12,7 +12,7 @@ from pathlib import Path
 # ── FosvedMemory ──────────────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
 from fosved_memory import FosvedMemory
-_MEMORY_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'memory.db')
+_MEMORY_DB = os.path.join(os.environ.get("DATABASE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')), 'memory.db')
 os.makedirs(os.path.dirname(_MEMORY_DB), exist_ok=True)
 memory = FosvedMemory(_MEMORY_DB)
 log_mem = logging.getLogger("fosved.memory")
