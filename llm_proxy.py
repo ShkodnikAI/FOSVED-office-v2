@@ -40,7 +40,8 @@ def auto_enrich(text, dept='yana', accent_color='#6366f1'):
         return text or ''
 
 # ──────────────────────────── APP & CONFIG ────────────────────────────
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None)
+app.url_map.strict_slashes = False
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("llm_proxy")
 
@@ -1134,6 +1135,7 @@ function doControl(freq){{
 
 
 @app.get("/miniapp/<doc_id>")
+@app.get("/miniapp/<doc_id>/")
 def miniapp_get(doc_id):
     try:
         return _miniapp_get_inner(doc_id)
@@ -4137,12 +4139,14 @@ def telegram_webhook():
 
     # ── Manual trigger commands (MEGA-3) ──
     if text.lower() == "/brief":
+        action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
         try:
             r = http_requests.post("http://127.0.0.1:4000/ask",
                 json={"dept": "yana", "messages": [
                     {"role": "system", "content": get_dept_prompt("yana")},
                     {"role": "user", "content": "Сделай утренний brief: что произошло за ночь, что на сегодня запланировано, что критично."}
                 ]}, timeout=120)
+            action_stop.set()
             reply = r.json().get("reply", "Не удалось получить brief")
             _tg_send_message(chat_id, reply)
         except Exception as e:
@@ -4150,12 +4154,14 @@ def telegram_webhook():
         return "ok", 200
 
     if text.lower() == "/digest":
+        action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
         try:
             r = http_requests.post("http://127.0.0.1:4000/ask",
                 json={"dept": "yana", "messages": [
                     {"role": "system", "content": get_dept_prompt("yana")},
                     {"role": "user", "content": "Сделай вечерний свод: что сделано за день, что перенесено, на чём акцент завтра."}
                 ]}, timeout=120)
+            action_stop.set()
             reply = r.json().get("reply", "Не удалось получить digest")
             _tg_send_message(chat_id, reply)
         except Exception as e:
@@ -4261,7 +4267,10 @@ def telegram_webhook():
     # Record user message
     _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
            (chat_id, "user", dept, text[:2000], datetime.utcnow().isoformat()))
-    
+
+    # ── Typing indicator while LLM processes ──
+    action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
+
     # ── Call LLM ──
     messages = [
         {"role": "system", "content": system_prompt},
@@ -4271,6 +4280,7 @@ def telegram_webhook():
     log.info(f"[WEBHOOK] LLM call dept={dept} sys_len={len(system_prompt)} has_format={'ФОРМАТ ОТВЕТА' in system_prompt}")
     
     result = call_llm(dept, messages)
+    action_stop.set()  # stop typing indicator
     reply = result.get("reply", "Ошибка: пустой ответ")
     provider = result.get("provider", "?")
     
