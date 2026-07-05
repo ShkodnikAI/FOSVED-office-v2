@@ -354,6 +354,113 @@ def html_lib_escape(s):
     """Safe HTML escape for report templates."""
     return html_lib.escape(str(s)) if s else ''
 
+# ── Text formatting helpers for Telegram ────────────────────────────
+
+# Emoji used as section markers — kept in visual text, stripped for TTS
+_MARKER_EMOJI = re.compile(
+    r'[\U0001F4C5\U0001F324\U0001F3E2\U0001F30D\U0001F50D\U000026A1'  # 📅🌤🏢🌍🔍⚡
+    r'\U0001F4CC\U0001F4AC\U0001F527\U00002705\U0000274C'                # 📌💬🔧✅❌
+    r'\U0001F5E3\U0001F4CB\U0001F4CA\U0001F4C8\U0001F4C9'                # 🗣📋📊📈📉
+    r'\U0002B50\U0001F680\U0001F389\U0001F514\U000023F0'                # ⭐🚀🎉🔔⏰
+    r'\U0001F4E6\U0001F4DD\U0001F3AF\U0001F4A1\U0001F517'                # 📦📝🎯💡🔗
+    r'\U0001F4C1\U0001F4C4\U0001F4C2\U0001F504\U00002699'                # 📁📄📂🔄⚙
+    r'\U0001F4D6\U0001F3DB\U0001F3E0\U0001F310\U0001F30F'                # 📖🏛🏠🌐🌍
+    r'\U0001F6E1\U00002696\U00002764\U00002753\U00002139'                # 🛡⚛❓❗
+    r'\U0001F534\U0001F7E0\U0001F7E1\U0001F7E2\U0001F535\U0001F7E3'  # 🔴🟠🟡🟢🔵🟣
+    r'\U000025B6\U000025AA\U000025CF\U000025CB\U00002500\U00002501'  # ▸▪●○──━
+    r'\U000025C6\U00002666\U00002737\U0000203C\U000000A9\U00002122]'  # ◆♠✳‼©®
+    r'[\U0001F300-\U0001F9FF]'                                            # catch-all: common emoji
+)
+
+# All emoji (broadest match) — for TTS
+_ALL_EMOJI = re.compile(
+    r'[\U00002600-\U000027BF]'   # Misc symbols, dingbats
+    r'|[\U0001F000-\U0001FAFF]'  # All emoji blocks
+    r'|[\U0000FE00-\U0000FE0F]'  # Variation selectors
+    r'|[\U0000200D]'             # Zero-width joiner
+    r'|[\U0001F900-\U0001F9FF]'  # Supplemental symbols
+    r'|[\U0001FA00-\U0001FA6F]'  # Chess, symbols
+    r'|[\U0001FA70-\U0001FAFF]'  # Symbols extended
+)
+
+
+def _clean_text_for_tts(text):
+    """Strip emoji, Markdown syntax, special chars for clean edge-tts voice output.
+    
+    Keeps: letters (all scripts), digits, basic sentence punctuation (. , - : ;).
+    Removes: emoji, *, _ `, #, ▸ ◦ ───, quotes (" " « »), ‑, •, etc.
+    """
+    if not text:
+        return ""
+    t = _ALL_EMOJI.sub(' ', text)            # remove all emoji
+    t = re.sub(r'[*_`#~|>]', ' ', t)          # remove Markdown syntax chars
+    t = re.sub(r'[«»""\u201C\u201D\u201E\u2018\u2019]', '', t)  # remove all quotes
+    t = re.sub(r'───+|──+|─+', '', t)         # remove decorative lines
+    t = re.sub(r'[▸◦▪●○◆◇▪▸►←→↑↓]', '', t)  # remove bullet/arrow chars
+    t = re.sub(r'[═─━─]', '', t)              # remove box-drawing lines
+    t = re.sub(r'[✓✗✘✔✖]', '', t)            # remove check/cross marks
+    t = re.sub(r'\s{2,}', ' ', t)             # collapse whitespace
+    t = re.sub(r'(?<=\S)\s*[.!?]\s*[.!?]+', '.', t)  # collapse multiple sentence ends
+    t = t.strip()
+    return t
+
+
+def _escape_mdv2(text):
+    """Escape text for Telegram MarkdownV2 parse_mode.
+    
+    Characters that MUST be escaped: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    Inside inline code or code blocks, no escaping needed.
+    Strategy: find code blocks/spans first, escape around them.
+    
+    For safety, this uses a simple approach: escape everything except
+    emoji (which Telegram renders natively) and content inside backticks.
+    """
+    if not text:
+        return ""
+    
+    # Split by backtick-delimited code spans
+    parts = re.split(r'(`[^`]+`)', text)
+    escaped_parts = []
+    for part in parts:
+        if part.startswith('`') and part.endswith('`'):
+            # Code span — keep as-is
+            escaped_parts.append(part)
+        else:
+            # Escape MarkdownV2 special chars, but preserve emoji and newlines
+            # MDV2 special: _ * [ ] ( ) ~ ` > # + - = | { } . !
+            escaped = re.sub(r'(?<!\\)([_*\[\]\(\)~`>#\+\-=|{}\.!])', r'\\\1', part)
+            # Un-escape emoji (they were incorrectly escaped)
+            escaped = _ALL_EMOJI.sub(lambda m: m.group(), escaped)
+            # Un-escape escaped newlines
+            escaped = escaped.replace('\\\n', '\n')
+            # Fix double-escaped backslashes before emoji
+            escaped = re.sub(r'\\(\\[\U0001F000-\U0001FAFF\U00002600-\U000027BF])', r'\1', escaped)
+            escaped_parts.append(escaped)
+    
+    return ''.join(escaped_parts)
+
+
+def _tg_send_formatted(chat_id, text, dept=None):
+    """Send message with MarkdownV2 formatting for Yana/Admin, plain for others.
+    
+    Tries MarkdownV2 first; if Telegram rejects it (400), falls back to plain text.
+    This ensures messages always get delivered even if formatting is imperfect.
+    """
+    if not text:
+        return None
+    
+    # Use MarkdownV2 for formatted departments
+    if dept in ("yana", "admin"):
+        mdv2_text = _escape_mdv2(text)
+        msg_id = _tg_send_message(chat_id, mdv2_text, parse_mode="MarkdownV2")
+        if msg_id is not None:
+            return msg_id
+        # Fallback: Telegram rejected formatting, send plain
+        log.warning(f"MarkdownV2 rejected for dept={dept}, falling back to plain text")
+    
+    return _tg_send_message(chat_id, text)
+
+
 # ──────────────────────────── DEPT DETECTION ────────────────────────────
 COMMAND_DEPT = {
     '/yana': 'yana', '/osp': 'osp', '/lz': 'lz', '/expert': 'expert',
@@ -1674,17 +1781,26 @@ def scheduler_morning_brief():
 5. 🔍 Ключевые находки ЛЗ (если есть)
 6. ⚡ Что требует внимания хозяина
 
+ФОРМАТИРОВАНИЕ (Telegram MarkdownV2):
+▸ Заголовки секций: *Жирный текст*
+▸ Ключевые цифры и термины: *выделить жирным*
+▸ Подчёркивания важных пунктов: __подчёркнуто__
+▸ Статусы: ✅ зелёный, ⚠️ жёлтый, ❌ красный
+▸ НЕ используй кавычки " " или « » — они озвучиваются TTS
+▸ Эмодзи только как маркеры секций (📅🌤🏢🌍🔍⚡), не ставь эмодзи в середине предложений
+▸ НЕ ставь # заголовки — Telegram их не рендерит
+
 Будь лаконичной но информативной. 7-12 предложений максимум."""
 
         messages = [
-            {"role": "system", "content": dept_prompt + "\n\nТы — Яна, управляющая офисом. Ты составляешь утренний отчёт для хозяина. Отчёт должен быть информативным, структурированным, на русском языке. Упоминай находки Лаборатории Знаний если они есть."},
+            {"role": "system", "content": dept_prompt + "\n\nТы — Яна, управляющая офисом. Ты составляешь утренний отчёт для хозяина. Отчёт должен быть информативным, структурированным, на русском языке. Упоминай находки Лаборатории Знаний если они есть. Форматирование: *жирный* для заголовков и ключевых слов, __подчёркнуто__ для важных пунктов, эмодзи только как маркеры секций. НЕ используй кавычки."},
             {"role": "user", "content": user_prompt},
         ]
 
         result = call_llm("yana", messages)
         brief = result["reply"]
 
-        msg_id = _tg_send_message(owner_id, brief)
+        msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
@@ -1743,7 +1859,7 @@ def scheduler_admin_morning_reply():
 
         # ── 5. Build admin prompt ──
         messages = [
-            {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и должен дать свой ответ. Твой ответ — это директива на день. Упомяни находки Лаборатории Знаний, если они релевантны."},
+            {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и должен дать свой ответ. Твой ответ — это директива на день. Упомяни находки Лаборатории Знаний, если они релевантны. Форматирование: *жирный* для приоритетов и ключевых слов, __подчёркнуто__ для указаний, эмодзи только как маркеры секций. НЕ используй кавычки."},
             {"role": "user", "content": f"""Яна прислала утренний отчёт:
 
 {yana_brief}
@@ -1757,13 +1873,20 @@ def scheduler_admin_morning_reply():
 3. 🔧 Указания отделам
 4. 🔍 Что из находок ЛЗ стоит изучить и применить
 
+ФОРМАТИРОВАНИЕ (Telegram MarkdownV2):
+▸ Заголовки: *Жирный текст*
+▸ Приоритеты и указания: __подчёркнуто__
+▸ Статусы: ✅ ⚠️ ❌
+▸ НЕ используй кавычки — они озвучиваются TTS
+▸ Эмодзи только как маркеры секций (📌💬🔧🔍), не в середине предложений
+
 Будь кратким, по-деловому. 5-8 предложений."""},
         ]
 
         result = call_llm("admin", messages)
         reply = result["reply"]
 
-        msg_id = _tg_send_message(owner_id, reply)
+        msg_id = _tg_send_formatted(owner_id, reply, dept="admin")
         _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "reply": reply, "msg_id": msg_id})
@@ -4159,8 +4282,8 @@ def telegram_webhook():
     
     # ── Send response ──
     if dept in ("yana", "admin"):
-        # Plain text, no Mini App, no formatting restrictions
-        _tg_send_message(chat_id, reply)
+        # Formatted text with MarkdownV2 (bold, italic, underline via __text__)
+        _tg_send_formatted(chat_id, reply, dept=dept)
     elif len(reply) > 800:
         # Mini App report for long responses
         doc_id = f"doc-{int(datetime.utcnow().timestamp())}"
@@ -4213,11 +4336,13 @@ def telegram_webhook():
         # Short response — plain text
         _tg_send_message(chat_id, reply)
     
-    # ── Voice response (TTS) ──
+    # ── Voice response (TTS) — clean text for natural speech ──
     if _voice_enabled and len(reply) > 5:
-        tts_text = reply
-        if dept not in ("yana", "admin") and len(reply) > 1000:
-            tts_text = reply[:500] + "... Продолжение в текстовом отчёте."
+        tts_text = _clean_text_for_tts(reply)
+        if dept not in ("yana", "admin") and len(tts_text) > 1000:
+            tts_text = tts_text[:500] + ". Продолжение в текстовом отчёте."
+        if len(tts_text) < 5:
+            tts_text = reply  # fallback to raw if cleaning was too aggressive
         try:
             http_requests.post("http://127.0.0.1:4000/tts",
                 json={"text": tts_text, "voice": _tts_voice, "chat_id": chat_id}, timeout=60)
