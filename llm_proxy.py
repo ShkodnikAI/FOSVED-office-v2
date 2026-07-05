@@ -1096,9 +1096,17 @@ var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : nu
 var docId = "{doc_id}";
 if(tg) tg.ready();
 
+function showToast(msg, dur){{
+  var t=document.createElement('div');
+  t.textContent=msg;
+  t.style.cssText='position:fixed;bottom:120px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.78);color:#fff;padding:8px 18px;border-radius:8px;font-size:13px;z-index:999;pointer-events:none;opacity:0;transition:opacity .2s';
+  document.body.appendChild(t);
+  requestAnimationFrame(function(){{ t.style.opacity='1' }});
+  setTimeout(function(){{ t.style.opacity='0'; setTimeout(function(){{ t.remove() }},300) }}, dur||1500);
+}}
 function copyText(){{
   var body = document.querySelector('.report-body');
-  if(body) navigator.clipboard.writeText(body.innerText).then(function(){{ alert('Скопировано') }});
+  if(body) navigator.clipboard.writeText(body.innerText).then(function(){{ showToast('Скопировано') }});
 }}
 function shareReport(){{
   if(navigator.share) navigator.share({{title:document.title, url:location.href}});
@@ -1116,12 +1124,15 @@ function addNote(){{
   fetch('/miniapp/note',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{doc_id:docId,note_text:text}})}});
 }}
 function doAction(action){{
-  if(tg) tg.sendData(JSON.stringify({{action:action,doc_id:docId}}));
-  else fetch('/webhook/miniapp-action',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{action:action,doc_id:docId}})}}).then(function(){{alert(action+' запущен')}});
+  showToast('Запуск: '+action, 2000);
+  fetch('/webhook/miniapp-action',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{action:action,doc_id:docId}})}})
+    .then(function(r){{ return r.json() }})
+    .then(function(d){{ showToast(d.status==='ok'?'Готово':'Ошибка: '+(d.msg||action), 2000) }})
+    .catch(function(){{ showToast('Сетевая ошибка', 2000) }});
 }}
 function toggleMenu(id){{
   var m=document.getElementById(id);
-  if(m)m.style.display=m.style.display==='none'?'block':'none';
+  if(m) m.style.display = m.style.display==='none'||m.style.display==='' ? 'block' : 'none';
 }}
 function doDepth(level){{
   document.getElementById('depthMenu').style.display='none';
