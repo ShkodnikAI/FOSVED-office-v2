@@ -20,7 +20,7 @@ if [ ! -f data/memory.db ]; then
   python3 scripts/seed_memory.py data/memory.db
 fi
 
-python3 scripts/migrate_schema.py data/fosved.db
+python3 scripts/migrate_schema.py "${DATABASE_PATH:-./data}/fosved.db"
 
 # 1. LLM Proxy (native circuit breaker + combo chains + compression)
 python3 llm_proxy.py &
