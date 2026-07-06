@@ -3985,6 +3985,50 @@ def memory_conflicts_endpoint():
     conflicts = memory.detect_conflicts()
     return jsonify({'conflicts': conflicts, 'count': len(conflicts)})
 
+
+@app.route('/yana/auto-memorize', methods=['POST'])
+def yana_auto_memorize():
+    """Extract key facts from Yana exchange and store to FosvedMemory.
+    Uses cheap model (groq) for extraction. Fire and forget."""
+    d = request.get_json(force=True) or {}
+    query = d.get('query', '')
+    reply = d.get('reply', '')
+    chat_id = d.get('chat_id', '')
+    if len(query) < 10 or len(reply) < 20:
+        return jsonify({'status': 'skipped', 'reason': 'too short'})
+    try:
+        prompt = [
+            {"role": "system", "content": "Extract 1-3 key facts worth remembering long-term from this conversation. "
+                "Only facts about the OWNER: name, location, preferences, decisions, obligations, relationships, projects, health. "
+                "Ignore: greetings, meta-comments, questions about system nature. "
+                "Output ONLY a JSON array of objects with keys: content (string), type (fact|preference|commitment|decision|context), confidence (0.5-1.0). "
+                "If nothing worth remembering, output: []"},
+            {"role": "user", "content": f"User: {query[:500]}\nYana: {reply[:500]}"}
+        ]
+        result = _call_single_provider("groq", "llama-3.3-70b-versatile", prompt, dept="yana", max_tokens=300, is_internal=True)
+        if result and result.get('reply'):
+            import json as _json
+            text = result['reply'].strip()
+            if text.startswith('```'):
+                text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+            facts = _json.loads(text)
+            saved = 0
+            for f in facts[:3]:
+                if isinstance(f, dict) and f.get('content'):
+                    memory.remember(
+                        content=f['content'][:500],
+                        mem_type=f.get('type', 'fact'),
+                        confidence=float(f.get('confidence', 0.8)),
+                        source='yana_auto'
+                    )
+                    saved += 1
+            log.info(f"Yana auto-memorize: extracted {saved} facts from chat {chat_id}")
+            return jsonify({'status': 'ok', 'saved': saved})
+    except Exception as e:
+        log.warning(f"Yana auto-memorize failed: {e}")
+    return jsonify({'status': 'error'})
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  OSINT ENDPOINT — Aliens Eye 840+ platforms
 # ══════════════════════════════════════════════════════════════════════

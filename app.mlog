@@ -235,9 +235,10 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   }
 
   let corrections = GetCorrections(dept)
-  let dialog = GetRecentDialog(chat_id, "5")
+  let dialog = GetRecentDialog(chat_id, "10")
+  let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
-  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Recent Dialog ===\n" + dialog
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Recent Dialog ===\n" + dialog
 
   // FORMAT_INSTRUCTION — ONLY for expert (OSP gets format from deconstruct skill)
   if dept == "expert" then {
@@ -540,6 +541,7 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   let proxy_result = CallLLMProxy(dept, messages)
   let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
   let _ = RecordAssistantMessage(chat_id, dept, reply)
+  let _ = YanaAutoMemorize(query, reply, chat_id)
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
   return reply
 }
@@ -628,6 +630,32 @@ pattern YanaWeather() -> String {
   let w = json_get(parse_json(resp), "weather", "")
   if w == "" then { return "Погода недоступна" }
   return w
+}
+
+pattern YanaRecallMemories(query: String) -> String {
+  if len(query) < 3.0 then { return "" }
+  let body = json_encode({query: query, limit: 8})
+  let resp = http_post("http://127.0.0.1:4000/memory/recall", body, "application/json")
+  let results = json_get(parse_json(resp), "results", "[]")
+  if results == "[]" then { return "" }
+  let parsed = parse_json(results)
+  if parsed == "" then { return "" }
+  let count = len(parsed)
+  if count == 0.0 then { return "" }
+  let output = "Долгосрочная память (" + to_string(count) + "):\n"
+  each m in parsed {
+    let content = json_get(m, "content", "")
+    let mtype = json_get(m, "type", "")
+    let output = output + "- [" + mtype + "] " + content + "\n"
+  }
+  return output
+}
+
+pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> String {
+  if len(reply) < 20.0 then { return "" }
+  let body = json_encode({query: query, reply: reply, chat_id: chat_id})
+  let _ = http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
+  return "ok"
 }
 
 pattern YanaCalendar() -> String {
