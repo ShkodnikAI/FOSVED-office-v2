@@ -994,6 +994,31 @@ def now_time_endpoint():
              f"{now.strftime('%H:%M')}")
     return jsonify({"time": human, "iso": now.isoformat(), "unix": now.timestamp()})
 
+# ── Weather cache (30 min) ──
+_weather_cache = {"text": "", "ts": 0.0}
+
+@app.get("/now-weather")
+def now_weather_endpoint():
+    """Return current weather for Moscow. Cached 30 min."""
+    import time as _time
+    now = _time.time()
+    if _weather_cache["text"] and (now - _weather_cache["ts"]) < 1800:
+        return jsonify({"weather": _weather_cache["text"]})
+    try:
+        r1 = http_requests.get("https://wttr.in/Moscow?format=%C+%t+%w+%h&lang=ru", timeout=10)
+        r2 = http_requests.get("https://wttr.in/Moscow?format=3&lang=ru", timeout=10)
+        parts = []
+        if r1.ok:
+            parts.append(r1.text.strip())
+        if r2.ok:
+            parts.append(r2.text.strip())
+        weather = " | ".join(parts) if parts else "Погода недоступна"
+    except Exception:
+        weather = "Погода недоступна"
+    _weather_cache["text"] = weather
+    _weather_cache["ts"] = now
+    return jsonify({"weather": weather})
+
 @app.post("/detect-dept")
 def detect_dept_endpoint():
     d = request.get_json(force=True)
