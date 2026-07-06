@@ -40,9 +40,6 @@ LLM_ROUTES_PREFIXES = [
 MLOG_ROUTES_PREFIXES = [
     # "/webhook/",  # Python handles Telegram
     "/cron/",
-    "/status",
-    "/dept/",
-    "/office",
     "/health",
     "/",
 ]
