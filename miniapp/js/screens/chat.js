@@ -36,75 +36,6 @@ const YANA_MESSAGES = [
   { role:'ai', label:'ЯНА', body:'Расход сегодня: €0.74 (247 запросов)\n\nGLM 4.6    €0.48    63%\nClaude      €0.18    24%\nDeepSeek    €0.06     9%\nGroq        €0.02     4%\n\nБюджет: €10.00/день · Осталось: €9.26', inlineBtn:{label:'Открыть отчёт →',nav:'/archive'} },
 ];
 
-/**
- * Quick-action buttons per department.
- * Each button sends a command to the bot via tg.sendData().
- */
-const DEPT_QUICK_ACTIONS = {
-  osp: [
-    { label: 'Деконструкция',  cmd: '/deconstruct' },
-    { label: 'Awareness frame', cmd: '/awareness' },
-    { label: 'Прогноз',         cmd: '/forecast' },
-    { label: 'IW Watchlist',    cmd: '/iw_watchlist' },
-    { label: 'Калман',          cmd: '/calibration' },
-    { label: 'Нарратив/Потоки', cmd: '/narrative_vs_flows' },
-  ],
-  lz: [
-    { label: 'Поиск в БЗ',       cmd: '/kb_search' },
-    { label: 'Последние отчёты', cmd: '/recent_reports' },
-    { label: 'Сводка знаний',    cmd: '/kb_summary' },
-  ],
-  expert: [
-    { label: 'Combat вопросы', cmd: '/combat_questions' },
-    { label: 'Deep profile',   cmd: '/deep_profile' },
-    { label: 'Cross-check',    cmd: '/cross_check' },
-  ],
-  marketing: [
-    { label: 'Аудитория',   cmd: '/audience' },
-    { label: 'Каналы',      cmd: '/channels' },
-    { label: 'A/B тест',    cmd: '/ab_test' },
-  ],
-  finance: [
-    { label: 'Cashflow',  cmd: '/cashflow' },
-    { label: 'MRR/ARR',  cmd: '/mrr' },
-    { label: 'Бюджет',    cmd: '/budget' },
-  ],
-  legal: [
-    { label: 'Договор',    cmd: '/contract' },
-    { label: 'Риски',      cmd: '/risk_map' },
-    { label: 'GDPR',       cmd: '/gdpr' },
-  ],
-  dev: [
-    { label: 'Деплой',   cmd: '/deploy_status' },
-    { label: 'Баги',     cmd: '/bugs' },
-    { label: 'CI/CD',    cmd: '/ci_status' },
-  ],
-  design: [
-    { label: 'Дизайн-система', cmd: '/design_system' },
-    { label: 'Компоненты',     cmd: '/components' },
-  ],
-  qa: [
-    { label: 'Тесты',    cmd: '/tests' },
-    { label: 'Покрытие',  cmd: '/coverage' },
-  ],
-  visual: [
-    { label: 'Инфографика', cmd: '/infographic' },
-    { label: 'Презентация', cmd: '/presentation' },
-  ],
-  engineering: [
-    { label: 'Нагрузка',  cmd: '/load' },
-    { label: 'Uptime',   cmd: '/uptime' },
-  ],
-  kavalnya: [
-    { label: 'Оперативка',  cmd: '/ops' },
-    { label: 'Доклад',      cmd: '/report' },
-  ],
-  admin: [
-    { label: 'Статус системы', cmd: '/system_status' },
-    { label: 'Логи',          cmd: '/logs' },
-  ],
-};
-
 export function render(container, deptSlug = 'yana') {
   const dept = DEPT_LIST.find(d => d.slug === deptSlug) || DEPT_LIST[0];
   const model = DEPT_MODELS[deptSlug] || 'GLM 4.6';
@@ -130,33 +61,16 @@ export function render(container, deptSlug = 'yana') {
     <div class="chat-context-bar">📌 Portal Nexus 78% 🔴</div>`;
 
   // ── Messages (scrollable, flex:1) ──
-  const quickActions = DEPT_QUICK_ACTIONS[deptSlug] || [];
   let msgContent = '';
   if (msgs.length === 0) {
-    if (quickActions.length > 0) {
-      msgContent += `
-        <div class="chat-msg chat-msg-ai">
-          <div class="chat-msg-label">${esc(dept.label)}</div>
-          <div style="font-size:13px;line-height:1.6;color:#555">
-            Быстрые команды <b>${esc(dept.label)}</b>.<br>
-            Нажмите для отправки в бота.
-          </div>
+    msgContent = `
+      <div class="chat-msg chat-msg-ai">
+        <div class="chat-msg-label">${esc(dept.label)}</div>
+        <div style="font-size:13px;line-height:1.6;color:#555">
+          Используйте Telegram бота для общения с <b>${esc(dept.label)}</b>.<br>
+          Все команды обрабатываются через основной чат бота.
         </div>
-        <div class="chat-quick-actions">
-          ${quickActions.map(a =>
-            `<button class="chat-quick-btn" data-cmd="${esc(a.cmd)}" style="border-color:${dept.color};color:${dept.color}">${esc(a.label)}</button>`
-          ).join('')}
-        </div>`;
-    } else {
-      msgContent += `
-        <div class="chat-msg chat-msg-ai">
-          <div class="chat-msg-label">${esc(dept.label)}</div>
-          <div style="font-size:13px;line-height:1.6;color:#555">
-            Используйте Telegram бота для общения с <b>${esc(dept.label)}</b>.<br>
-            Все команды обрабатываются через основной чат бота.
-          </div>
-        </div>`;
-    }
+      </div>`;
   } else {
     for (const m of msgs) {
       if (m.role === 'user') {
@@ -199,16 +113,4 @@ export function render(container, deptSlug = 'yana') {
       ${messages}
       ${inputBar}
     </div>`;
-
-  // ── Wire up quick-action buttons ──
-  container.querySelectorAll('.chat-quick-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const cmd = btn.dataset.cmd;
-      if (cmd && window.tgSendData) {
-        window.tgSendData({ action: 'dept_command', dept: deptSlug, command: cmd });
-        btn.style.opacity = '0.4';
-        btn.style.pointerEvents = 'none';
-      }
-    });
-  });
 }

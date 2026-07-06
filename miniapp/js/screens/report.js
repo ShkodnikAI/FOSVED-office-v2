@@ -25,14 +25,13 @@ export async function render(container, id) {
   try {
     const reportHtml = await API.reportHtml(id);
 
-    let content = `<div style="display:flex;flex-direction:column;height:100%;overflow:hidden">`;
-    content += topbarHtml;
+    let content = topbarHtml;
     content += `<div class="screen-scroll">`;
     content += `<div class="report-body">${reportHtml}</div>`;
     content += `</div>`;
 
-    // ── Action Bar (pinned to bottom) ──
-    content += `<div class="report-action-dock">
+    // ── Action Bar ──
+    content += `
       <div class="action-bar">
         <button class="action-btn" data-action="deepen">Углубить</button>
         <button class="action-btn" data-action="redteam">Red Team</button>
@@ -46,9 +45,7 @@ export async function render(container, id) {
         <button class="action-btn" data-action="copy">Копировать</button>
         <button class="action-btn" data-action="pdf">PDF</button>
         <button class="action-btn" data-action="share">Поделиться</button>
-      </div>
-    </div>`;
-    content += `</div>`;
+      </div>`;
 
     container.innerHTML = content;
 
@@ -79,35 +76,35 @@ function wireActions(container, id, reportHtml) {
       switch (action) {
         case 'deepen':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'deepen_to_2', doc_id: id });
+            window.tgSendData({ action: 'deepen', reportId: id });
           }
           showInlineToast(container, 'Углубление отправлено');
           break;
 
         case 'redteam':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'deepen_to_4', doc_id: id });
+            window.tgSendData({ action: 'redteam', reportId: id });
           }
           showInlineToast(container, 'Red Team запущен');
           break;
 
         case 'control':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'control_daily', doc_id: id });
+            window.tgSendData({ action: 'control', reportId: id });
           }
-          showInlineToast(container, 'На контроле');
+          showInlineToast(container, 'Контроль отправлен');
           break;
 
         case 'journalist':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'journalist', doc_id: id });
+            window.tgSendData({ action: 'journalist', reportId: id });
           }
           showInlineToast(container, 'Журналист запущен');
           break;
 
         case 'counterforecast':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'counter_forecast', doc_id: id });
+            window.tgSendData({ action: 'counterforecast', reportId: id });
           }
           showInlineToast(container, 'Контр-прогноз запущен');
           break;
@@ -119,12 +116,15 @@ function wireActions(container, id, reportHtml) {
           break;
 
         case 'pdf':
-          window.print();
+          if (window.tgSendData) {
+            window.tgSendData({ action: 'pdf', reportId: id });
+          }
+          showInlineToast(container, 'PDF запрошен');
           break;
 
         case 'share':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'share', doc_id: id });
+            window.tgSendData({ action: 'share', reportId: id });
           }
           showInlineToast(container, 'Отправлено');
           break;
