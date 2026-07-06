@@ -110,13 +110,13 @@ def convert_bullet_to_cards(text):
             elif plain:
                 title, body = plain.group(1), plain.group(2)
             else:
-                cards_html += f'<p>{html_lib.escape(clean)}</p>\n'
+                cards_html += f'<p>{clean}</p>\n'
                 continue
 
             color = CARD_COLORS[i % len(CARD_COLORS)]
             cards_html += f'''<div class="info-card" style="border-left:4px solid {color}">
-  <div class="info-card-title" style="color:{color}">{html_lib.escape(title)}</div>
-  <div class="info-card-body">{html_lib.escape(body)}</div>
+  <div class="info-card-title" style="color:{color}">{title}</div>
+  <div class="info-card-body">{body}</div>
 </div>\n'''
 
         return cards_html
@@ -153,11 +153,11 @@ def detect_comparison(text):
             compare_html = f'''<div class="compare-grid">
   <div class="compare-box rich" style="background:{bg_left};border:1px solid #bbf7d0">
     <div class="compare-title">{title_left}</div>
-    <div class="compare-body">{html_lib.escape(left_text)}</div>
+    <div class="compare-body">{left_text}</div>
   </div>
   <div class="compare-box rich" style="background:{bg_right};border:1px solid #fecaca">
     <div class="compare-title">{title_right}</div>
-    <div class="compare-body">{html_lib.escape(right_text)}</div>
+    <div class="compare-body">{right_text}</div>
   </div>
 </div>\n'''
             result = result[:match.start()] + compare_html + result[match.end():]
@@ -176,10 +176,8 @@ def format_badges(text):
         ('[ФАКТ]',           '<span class="badge badge-fact">✓ ФАКТ</span>'),
         ('[ИНТЕРПРЕТАЦИЯ]',  '<span class="badge badge-interp">◆ АНАЛИЗ</span>'),
         ('[СПЕКУЛЯЦИЯ]',     '<span class="badge badge-spec">⚡ ГИПОТЕЗА</span>'),
-        # Иконки (если LLM использовал)
-        ('✓',               '<span class="badge badge-fact">✓ ФАКТ</span>'),
-        ('◆',               '<span class="badge badge-interp">◆ АНАЛИЗ</span>'),
-        ('⚡',               '<span class="badge badge-spec">⚡ ГИПОТЕЗА</span>'),
+        # Standalone icons REMOVED — they caused double badges when LLM
+        # already used [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ] markers.
         # Английские
         ('[FACT]',           '<span class="badge badge-fact">✓ ФАКТ</span>'),
         ('[INTERPRETATION]', '<span class="badge badge-interp">◆ АНАЛИЗ</span>'),
@@ -202,11 +200,11 @@ def format_sections(text, accent_color):
     """## Слой N — Название → стилизованная секция"""
     def replace_h2(match):
         title = match.group(1).strip()
-        return f'<h2 class="section-title" style="border-bottom:2px solid {accent_color}">{html_lib.escape(title)}</h2>'
+        return f'<h2 class="section-title" style="border-bottom:2px solid {accent_color}">{title}</h2>'
 
     def replace_h3(match):
         title = match.group(1).strip()
-        return f'<h3 class="subsection-title">{html_lib.escape(title)}</h3>'
+        return f'<h3 class="subsection-title">{title}</h3>'
 
     result = re.sub(r'^##\s+(.+)$', replace_h2, text, flags=re.MULTILINE)
     result = re.sub(r'^###\s+(.+)$', replace_h3, result, flags=re.MULTILINE)
@@ -218,9 +216,9 @@ def format_sections(text, accent_color):
 # ═══════════════════════════════════════════
 
 def format_paragraphs(text):
-    """Оборачивает текст в <p> теги"""
+    """Оборачивает текст в <p> теги. Assumes text is already escaped."""
     paragraphs = text.strip().split('\n\n')
-    return '\n'.join(f'<p>{html_lib.escape(p.strip())}</p>' for p in paragraphs if p.strip())
+    return '\n'.join(f'<p>{p.strip()}</p>' for p in paragraphs if p.strip())
 
 
 def wrap_verdict(text):
@@ -272,7 +270,7 @@ def format_ach_table(text, accent_color):
 
     # Header
     headers = [c.strip() for c in rows[0].split('|') if c.strip()]
-    html_rows = '<tr>' + ''.join(f'<th>{html_lib.escape(h)}</th>' for h in headers) + '</tr>\n'
+    html_rows = '<tr>' + ''.join(f'<th>{h}</th>' for h in headers) + '</tr>\n'
 
     # Data rows
     for row in rows[1:]:
@@ -280,9 +278,9 @@ def format_ach_table(text, accent_color):
         html_cells = ''
         for i, cell in enumerate(cells):
             if i == len(cells) - 1 and re.match(r'\d+%', cell):
-                html_cells += f'<td class="ach-prob" style="color:{accent_color}">{html_lib.escape(cell)}</td>'
+                html_cells += f'<td class="ach-prob" style="color:{accent_color}">{cell}</td>'
             else:
-                html_cells += f'<td>{html_lib.escape(cell)}</td>'
+                html_cells += f'<td>{cell}</td>'
         html_rows += f'<tr>{html_cells}</tr>\n'
 
     table_html = f'<table class="ach-table">{html_rows}</table>'
@@ -308,7 +306,7 @@ def format_indicators(text, accent_color):
     cards = ''
     for item in items[:4]:
         cards += f'''<div class="indicator-card">
-  <div class="indicator-body">{html_lib.escape(item.strip())}</div>
+  <div class="indicator-body">{item.strip()}</div>
 </div>\n'''
 
     grid_html = f'<div class="indicators-grid">{cards}</div>'
@@ -416,43 +414,40 @@ def auto_enrich(text, dept='yana', accent_color='#6366f1'):
     if not text:
         return ''
 
-    result = text
-
-    # 1. Метрики
-    metrics = extract_metrics(result)
+    # 1. Метрики — extract from RAW text (before any modification)
+    metrics = extract_metrics(text)
     metrics_html = render_metrics_html(metrics)
 
-    # 2. Бейджи
+    # 2. Escape plain text FIRST — prevents HTML from enrichment steps
+    #    from being destroyed by a later escape pass.
+    #    html_lib.escape only affects &, <, >, ", ' —
+    #    markdown patterns ([ФАКТ], ##, *, |, -) are NOT affected.
+    result = html_lib.escape(text)
+
+    # 3. Structural enrichment on escaped text
     result = format_badges(result)
-
-    # 3. ACH таблица
     result = format_ach_table(result, accent_color)
-
-    # 4. Секции (## → styled h2)
     result = format_sections(result, accent_color)
-
-    # 5. Сравнения
     result = detect_comparison(result)
-
-    # 6. Bullet-списки → карточки
     result = convert_bullet_to_cards(result)
-
-    # 7. Индикаторы наблюдения
     result = format_indicators(result, accent_color)
-
-    # 8. Вердикт
     result = wrap_verdict(result)
 
-    # 9. Оставшийся markdown → HTML
+    # 4. Markdown formatting (no escape — text already escaped in step 2)
     result = markdown_to_html(result)
 
-    # 10. Вставить метрики после первой секции
+    # 5. Insert metrics after first section header
     if metrics_html:
-        first_section = result.find('</h2>')
-        if first_section > 0:
-            pos = first_section + 5
-            result = result[:pos] + '\n' + metrics_html + result[pos:]
+        pos = result.find('</h2>')
+        if pos > 0:
+            pos += 5
         else:
-            result = metrics_html + result
+            # No styled sections — insert after first paragraph
+            pos = result.find('</p>')
+            if pos > 0:
+                pos += 4
+            else:
+                pos = 0
+        result = result[:pos] + '\n' + metrics_html + result[pos:]
 
     return result
