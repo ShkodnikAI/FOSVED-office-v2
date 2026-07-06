@@ -4002,7 +4002,7 @@ def yana_auto_memorize():
                 "Only facts about the OWNER: name, location, preferences, decisions, obligations, relationships, projects, health. "
                 "Ignore: greetings, meta-comments, questions about system nature. "
                 "Output ONLY a JSON array of objects with keys: content (string), type (fact|preference|commitment|decision|context), confidence (0.5-1.0). "
-                "If nothing worth remembering, output: []"},
+                "When a fact is a commitment or reminder with a date/time, include a \"date\" key with the date in YYYY-MM-DD HH:MM format (or YYYY-MM-DD if no time). If the date is relative (tomorrow, next week), calculate the actual date based on today being 2026-07-06. If nothing worth remembering, output: []"},
             {"role": "user", "content": f"User: {query[:500]}\nYana: {reply[:500]}"}
         ]
         result = _call_single_provider("groq", "llama-3.3-70b-versatile", prompt, dept="yana", max_tokens=300, is_internal=True)
@@ -4023,10 +4023,62 @@ def yana_auto_memorize():
                     )
                     saved += 1
             log.info(f"Yana auto-memorize: extracted {saved} facts from chat {chat_id}")
+
+            # Also check for dated reminders — store in yana_events for scheduler
+            for f in facts[:3]:
+                if isinstance(f, dict) and f.get('type') == 'commitment' and f.get('date'):
+                    _query("INSERT OR IGNORE INTO yana_events (event_text, event_date, event_type) VALUES (?, ?, 'reminder')",
+                           (f['content'][:300], f['date'][:20]))
+                    log.info(f"Yana reminder stored: {f['content'][:60]} at {f.get('date', '?')}")
+
             return jsonify({'status': 'ok', 'saved': saved})
     except Exception as e:
         log.warning(f"Yana auto-memorize failed: {e}")
     return jsonify({'status': 'error'})
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  REMINDER CHECK — send due reminders to owner
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/scheduler/reminder-check")
+def scheduler_reminder_check():
+    """Check yana_events for due reminders and send them to owner."""
+    owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
+    if not owner_id:
+        return jsonify({"status": "error", "message": "OWNER_TELEGRAM_ID not set"}), 400
+
+    try:
+        now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+
+        # Find events due now (event_date <= now) that haven't been reminded yet
+        rows = _query("SELECT id, event_text, event_date FROM yana_events "
+                       "WHERE event_date <= ? AND reminded_at IS NULL "
+                       "ORDER BY event_date ASC LIMIT 5",
+                       (now_iso,))
+
+        sent = 0
+        for r in rows:
+            event_text = r["event_text"]
+            event_date = r["event_date"]
+            event_id = r["id"]
+
+            msg = f"Напоминание: {event_text}\n({event_date})"
+            _send_telegram_message(owner_id, msg)
+
+            # Mark as reminded
+            _query("UPDATE yana_events SET reminded_at = datetime('now') WHERE id = ?", (event_id,))
+            sent += 1
+            log.info(f"Reminder sent: [{event_date}] {event_text[:60]}")
+
+        # Clean up old reminded events (older than 7 days)
+        _query("DELETE FROM yana_events WHERE reminded_at IS NOT NULL AND reminded_at < datetime('now', '-7 days')")
+
+        return jsonify({"status": "ok", "sent": sent, "checked": len(rows)})
+    except Exception as e:
+        log.error(f"reminder_check error: {e}")
+        _log_audit("scheduler_reminder_check_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # ══════════════════════════════════════════════════════════════════════
