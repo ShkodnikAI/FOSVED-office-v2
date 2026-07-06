@@ -79,35 +79,35 @@ function wireActions(container, id, reportHtml) {
       switch (action) {
         case 'deepen':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'deepen', reportId: id });
+            window.tgSendData({ action: 'deepen_to_2', doc_id: id });
           }
           showInlineToast(container, 'Углубление отправлено');
           break;
 
         case 'redteam':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'redteam', reportId: id });
+            window.tgSendData({ action: 'deepen_to_4', doc_id: id });
           }
           showInlineToast(container, 'Red Team запущен');
           break;
 
         case 'control':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'control', reportId: id });
+            window.tgSendData({ action: 'control_daily', doc_id: id });
           }
-          showInlineToast(container, 'Контроль отправлен');
+          showInlineToast(container, 'На контроле');
           break;
 
         case 'journalist':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'journalist', reportId: id });
+            window.tgSendData({ action: 'journalist', doc_id: id });
           }
           showInlineToast(container, 'Журналист запущен');
           break;
 
         case 'counterforecast':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'counterforecast', reportId: id });
+            window.tgSendData({ action: 'counter_forecast', doc_id: id });
           }
           showInlineToast(container, 'Контр-прогноз запущен');
           break;
@@ -119,15 +119,12 @@ function wireActions(container, id, reportHtml) {
           break;
 
         case 'pdf':
-          if (window.tgSendData) {
-            window.tgSendData({ action: 'pdf', reportId: id });
-          }
-          showInlineToast(container, 'PDF запрошен');
+          window.print();
           break;
 
         case 'share':
           if (window.tgSendData) {
-            window.tgSendData({ action: 'share', reportId: id });
+            window.tgSendData({ action: 'share', doc_id: id });
           }
           showInlineToast(container, 'Отправлено');
           break;
