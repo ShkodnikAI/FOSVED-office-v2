@@ -45,6 +45,16 @@ app.url_map.strict_slashes = False
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("llm_proxy")
 
+# ── Auth middleware (before_request) ──────────────────────────
+@app.before_request
+def auth_middleware():
+    path = request.path
+    # Protect API, admin, memory, miniapp-action endpoints
+    if any(path.startswith(p) for p in PROTECTED_PREFIXES):
+        if not _check_bearer():
+            return jsonify({"error": "unauthorized"}), 401
+    return None
+
 PORT = int(os.environ.get("PORT_PROXY", 4000))
 DB_PATH = os.environ.get("DATABASE_PATH", "./data")
 Path(DB_PATH).mkdir(parents=True, exist_ok=True)
@@ -60,6 +70,24 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_ARCHIVE_CHANNEL_ID = os.environ.get("TELEGRAM_ARCHIVE_CHANNEL_ID", "")
 WHISPER_API_KEY = os.environ.get("WHISPER_API_KEY", "")
 WHISPER_PROVIDER = os.environ.get("WHISPER_PROVIDER", "groq")
+API_SECRET = os.environ.get("API_SECRET", "")  # Bearer token for protected endpoints
+WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # X-Telegram-Bot-Api-Secret-Token
+
+# ── Auth helpers ──────────────────────────────────────────────
+PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/webhook/miniapp-action')
+
+def _check_bearer():
+    """Return True if request bears valid API_SECRET, or if API_SECRET is empty (open mode)."""
+    if not API_SECRET:
+        return True
+    auth = request.headers.get('Authorization', '')
+    return auth == f'Bearer {API_SECRET}'
+
+def _verify_webhook_secret():
+    """Verify Telegram webhook secret token header."""
+    if not WEBHOOK_SECRET:
+        return True  # no secret configured — open mode
+    return request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') == WEBHOOK_SECRET
 
 # ──────────────────────────── PROVIDERS ────────────────────────────
 PROVIDERS = {
@@ -4208,6 +4236,11 @@ _tts_voice = "ru-RU-SvetlanaNeural"
 
 @app.post("/webhook/telegram")
 def telegram_webhook():
+    # Verify Telegram webhook secret
+    if not _verify_webhook_secret():
+        log.warning("Webhook secret verification failed")
+        return "forbidden", 403
+
     global _voice_enabled, _tts_voice
     data = request.get_json(force=True, silent=True) or {}
     msg = data.get("message", {})
