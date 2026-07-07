@@ -11,13 +11,19 @@ export async function render(container, id) {
     return;
   }
 
-  let topbarHtml = '';
+  const isLandscape = document.documentElement.classList.contains('landscape-mode');
 
   // ── Top Bar ──
-  topbarHtml = `
+  const topbarHtml = `
     <div class="top-bar">
+      <a class="topbar-back" data-nav="/archive" title="В архив">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:18px;height:18px"><path d="M15 18l-6-6 6-6"/></svg>
+      </a>
       <div class="top-bar-title">Отчёт</div>
-      <span style="margin-left:auto;font-family:'DM Mono',monospace;font-size:11px;color:#aaa">${esc(id)}</span>
+      <button class="orientation-toggle ${isLandscape ? 'active' : ''}" data-action="toggle-orientation" title="Таблет">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:18px;height:18px"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01" stroke-width="2.5" stroke-linecap="round"/></svg>
+      </button>
+      <span style="font-family:'DM Mono',monospace;font-size:11px;color:#aaa">${esc(id)}</span>
     </div>`;
 
   container.innerHTML = topbarHtml + `<div class="screen-scroll"><div style="text-align:center;padding:60px;color:#aaa">Загрузка отчёта...</div></div>`;
@@ -134,6 +140,12 @@ function wireActions(container, id, reportHtml) {
               .then(() => showInlineToast(container, 'Скопировано (Share недоступен)'))
               .catch(() => showInlineToast(container, 'Ошибка'));
           }
+          break;
+
+        case 'toggle-orientation':
+          document.documentElement.classList.toggle('landscape-mode');
+          btn.classList.toggle('active');
+          showInlineToast(container, document.documentElement.classList.contains('landscape-mode') ? 'Таблет' : 'Телефон');
           break;
       }
     });
