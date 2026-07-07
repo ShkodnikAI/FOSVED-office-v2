@@ -138,6 +138,12 @@ window.addEventListener('hashchange', handleHashChange);
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-nav]');
   if (el) { e.preventDefault(); const t = el.dataset.nav; if (t) location.hash = t; }
+  // [data-route] for bottom-nav & sidebar buttons (no href)
+  const routeEl = e.target.closest('[data-route]');
+  if (routeEl && !routeEl.closest('[data-nav]')) {
+    const r = routeEl.dataset.route;
+    if (r) location.hash = r;
+  }
 });
 
 // ─── Init ─────────────────────────────────────────────────────
