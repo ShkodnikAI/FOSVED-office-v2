@@ -585,7 +585,7 @@ def init_db():
     with db_lock:
         c = _db()
         c.executescript("""
-        CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, title TEXT, query TEXT, raw_text TEXT DEFAULT '', html TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, title TEXT, query TEXT, raw_text TEXT DEFAULT '', html TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')), archived INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, period TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, provider TEXT, model TEXT, input_tokens TEXT, output_tokens TEXT, cost_usd TEXT, request_type TEXT, created_at TEXT DEFAULT (datetime('now')));
@@ -605,6 +605,7 @@ def init_db():
         for col_sql, col_name in [
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
             ("ALTER TABLE token_usage ADD COLUMN combo TEXT DEFAULT ''", "combo"),
+            ("ALTER TABLE miniapp_responses ADD COLUMN archived INTEGER DEFAULT 0", "archived"),
         ]:
             try:
                 c.execute(col_sql)
@@ -1291,6 +1292,22 @@ def miniapp_action():
         messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": prompt + "\n\nИсходный анализ:\n" + raw}]
         result = call_llm("osp", messages)
         return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "counter_forecast"})
+    
+    elif action == "archive":
+        _query("UPDATE miniapp_responses SET archived=1 WHERE id=?", (doc_id,))
+        return jsonify({"status": "ok", "action": "archive", "doc_id": doc_id})
+    
+    elif action == "crisis_protocol":
+        prompt = """Ты — кризис-аналитик. Проанализируй данный отчёт с точки зрения кризисных рисков:
+- Выдели все потенциальные кризисы и точки перелома
+- Оцени вероятность и сроки наступления каждого (30/60/90/180 дней)
+- Для каждого кризиса укажи индикаторы-предвестники
+- Построй дерево решений: что делать при реализации каждого сценария
+- Выдели критический путь: какой кризис наиболее вероятен и наиболее опасен
+- Формат: структурированный отчёт с заголовками"""
+        messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": prompt + "\n\nОтчёт:\n" + raw}]
+        result = call_llm("osp", messages)
+        return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "crisis_protocol"})
     
     return jsonify({"status": "error", "msg": f"unknown action: {action}"}), 400
 

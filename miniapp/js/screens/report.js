@@ -31,10 +31,13 @@ export async function render(container, id) {
   try {
     const reportHtml = await API.reportHtml(id);
 
-    let content = `<div style="display:flex;flex-direction:column;height:100%;overflow:hidden">`;
+    // Wrap bare <table> elements in .table-wrap for horizontal scroll
+    const wrappedHtml = reportHtml.replace(/<table/gi, '<div class="table-wrap"><table').replace(/<\/table>/gi, '</table></div>');
+
+    let content = `<div class="report-screen">`;
     content += topbarHtml;
-    content += `<div style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch">`;
-    content += `<div class="report-body">${reportHtml}</div>`;
+    content += `<div class="report-scroll">`;
+    content += `<div class="report-body">${wrappedHtml}</div>`;
     content += `</div>`;
 
     // ── Action Bar (pinned to bottom) ──
@@ -49,6 +52,7 @@ export async function render(container, id) {
         <button class="action-btn" data-action="counterforecast">Контр-прогноз</button>
       </div>
       <div class="action-bar">
+        <button class="action-btn action-btn-archive" data-action="archive">В архив</button>
         <button class="action-btn" data-action="copy">Копировать</button>
         <button class="action-btn" data-action="pdf">PDF</button>
         <button class="action-btn" data-action="share">Поделиться</button>
@@ -125,6 +129,10 @@ function wireActions(container, id, reportHtml) {
           postAction(container, id, 'counter_forecast', 'Контр-прогноз запущен');
           break;
 
+        case 'archive':
+          postAction(container, id, 'archive', 'В архив');
+          break;
+
         case 'copy':
           copyToClipboard(reportHtml)
             .then(() => showInlineToast(container, 'Скопировано'))
@@ -133,6 +141,10 @@ function wireActions(container, id, reportHtml) {
 
         case 'pdf':
           window.print();
+          break;
+
+        case 'crisis':
+          postAction(container, id, 'crisis_protocol', 'Кризис-протокол запущен');
           break;
 
         case 'share':
