@@ -3607,11 +3607,13 @@ def miniapp_redirect():
 @app.get("/miniapp-spa")
 @app.get("/miniapp-spa/")
 def miniapp_spa_index():
-    """Serve the Mini App SPA index page."""
+    """Serve the Mini App SPA index page with API_SECRET injected."""
     index_path = MINIAPP_DIR / "index.html"
     if not index_path.exists():
         return "<h1>Mini App not found</h1>", 404
-    return Response(index_path.read_text(encoding="utf-8"), mimetype="text/html")
+    html = index_path.read_text(encoding="utf-8")
+    html = html.replace('{{API_SECRET}}', API_SECRET)
+    return Response(html, mimetype="text/html")
 
 @app.get("/miniapp-spa/<path:filepath>")
 def miniapp_spa_static(filepath):

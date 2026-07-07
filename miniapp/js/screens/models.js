@@ -72,7 +72,7 @@ export async function render(container) {
 
   // ── Analytics KPI Row (3 cards) ──
   if (analytics) {
-    html += `<div class="kpi-row">`;
+    html += `<div class="analytics-kpi-row">`;
     html += createKPICard(analytics.requests_today ?? '—', 'ЗАПРОСОВ', '#C9A84C');
     html += createKPICard(analytics.cost_today ?? '—', 'РАСХОД', '#185FA5');
     html += createKPICard(analytics.active_providers ?? '—', 'МОДЕЛЕЙ', '#3730a3');

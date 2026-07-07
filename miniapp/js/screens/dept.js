@@ -5,7 +5,6 @@
 
 import { esc } from '../app.js';
 import { createKPICard, createSectionTitle } from '../components/card.js';
-import { createChip, createStatusDot } from '../components/badge.js';
 
 export async function render(container, slug) {
   if (!slug) {

@@ -87,7 +87,7 @@ async function postAction(container, docId, action, toastMsg) {
   try {
     const res = await fetch('/webhook/miniapp-action', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (window._apiSecret || '') },
       body: JSON.stringify({ action, doc_id: docId }),
     });
     const data = await res.json();
