@@ -76,6 +76,28 @@ export async function render(container, id) {
 }
 
 /**
+ * POST action to backend /webhook/miniapp-action, then show result or toast.
+ */
+async function postAction(container, docId, action, toastMsg) {
+  showInlineToast(container, toastMsg);
+  try {
+    const res = await fetch('/webhook/miniapp-action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, doc_id: docId }),
+    });
+    const data = await res.json();
+    if (data.status === 'ok' && data.reply) {
+      showInlineToast(container, 'Готово');
+    } else if (data.status === 'error') {
+      showInlineToast(container, 'Ошибка: ' + (data.msg || 'неизвестно'));
+    }
+  } catch (e) {
+    // Silent — toast already shown
+  }
+}
+
+/**
  * Attach event handlers to the action bar buttons.
  */
 function wireActions(container, id, reportHtml) {
@@ -84,38 +106,23 @@ function wireActions(container, id, reportHtml) {
       const action = btn.dataset.action;
       switch (action) {
         case 'deepen':
-          if (window.tgSendData) {
-            window.tgSendData({ action: 'deepen_to_2', doc_id: id });
-          }
-          showInlineToast(container, 'Углубление отправлено');
+          postAction(container, id, 'deepen_to_2', 'Углубление отправлено');
           break;
 
         case 'redteam':
-          if (window.tgSendData) {
-            window.tgSendData({ action: 'deepen_to_4', doc_id: id });
-          }
-          showInlineToast(container, 'Red Team запущен');
+          postAction(container, id, 'deepen_to_4', 'Red Team запущен');
           break;
 
         case 'control':
-          if (window.tgSendData) {
-            window.tgSendData({ action: 'control_daily', doc_id: id });
-          }
-          showInlineToast(container, 'На контроле');
+          postAction(container, id, 'control_daily', 'На контроле');
           break;
 
         case 'journalist':
-          if (window.tgSendData) {
-            window.tgSendData({ action: 'journalist', doc_id: id });
-          }
-          showInlineToast(container, 'Журналист запущен');
+          postAction(container, id, 'journalist', 'Журналист запущен');
           break;
 
         case 'counterforecast':
-          if (window.tgSendData) {
-            window.tgSendData({ action: 'counter_forecast', doc_id: id });
-          }
-          showInlineToast(container, 'Контр-прогноз запущен');
+          postAction(container, id, 'counter_forecast', 'Контр-прогноз запущен');
           break;
 
         case 'copy':
