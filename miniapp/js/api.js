@@ -7,7 +7,7 @@
  */
 
 const BASE_URL = '';
-const USE_MOCKS = true;
+const USE_MOCKS = false;
 
 // ---------------------------------------------------------------------------
 // Error class & helpers

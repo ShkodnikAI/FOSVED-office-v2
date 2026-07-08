@@ -133,11 +133,6 @@ export async function render(container) {
                 <span style="font-size:11px;color:#aaa">${esc(time)}</span>
               </div>
               <div class="archive-title" style="font-size:13px;line-height:1.4">${esc(item.title)}</div>
-              <div class="archive-meta" style="display:flex;gap:8px;margin-top:4px;font-size:11px;color:#888">
-                ${item.depth != null ? `<span>depth ${item.depth}</span>` : ''}
-                ${item.stars != null ? `<span>&#9733; ${esc(item.stars)}</span>` : ''}
-                ${item.conf ? `<span>${esc(item.conf)}</span>` : ''}
-              </div>
             </div>`;
         }
       }
