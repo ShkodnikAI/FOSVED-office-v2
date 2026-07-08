@@ -220,6 +220,41 @@ pattern CallLLMProxy(dept: String, messages: String) -> String {
   return result
 }
 
+pattern IsImageRequest(text: String) -> String {
+  // Returns "true" if text asks for image generation, "" otherwise
+  let t = lower(text)
+  if contains(t, "сгенерируй изображен") then { return "true" }
+  if contains(t, "сгенерируй картинк") then { return "true" }
+  if contains(t, "нарисуй") then { return "true" }
+  if contains(t, "создай изображен") then { return "true" }
+  if contains(t, "создай картинк") then { return "true" }
+  if contains(t, "generate image") then { return "true" }
+  if contains(t, "create image") then { return "true" }
+  if contains(t, "нарисуй логотип") then { return "true" }
+  if contains(t, "сделай иллюстрац") then { return "true" }
+  if contains(t, "сгенерируй логотип") then { return "true" }
+  if contains(t, "generate logo") then { return "true" }
+  if contains(t, "create logo") then { return "true" }
+  if contains(t, "нарисуй иконк") then { return "true" }
+  if contains(t, "нарисуй постер") then { return "true" }
+  if contains(t, "сделай обложк") then { return "true" }
+  return ""
+}
+
+pattern HandleDesignImage(prompt: String, chat_id: String) -> String {
+  // Call /generate-image endpoint — it generates and sends photo to Telegram
+  let body = json_encode({prompt: prompt, chat_id: to_float(chat_id)})
+  let result = http_post("http://127.0.0.1:4000/generate-image", body, "application/json", 180.0)
+  let parsed = parse_json(result)
+  let status = json_get(parsed, "status", "error")
+  if status == "ok" then {
+    return ""
+  } else {
+    let err = json_get(parsed, "error", "Unknown error")
+    return "Ошибка генерации: " + err
+  }
+}
+
 // ============================================================
 // INLINED from dept/context.mlog (bypass binary import caching)
 // ============================================================
@@ -556,6 +591,7 @@ pattern DetectDepartment(text: String) -> String {
   if starts_with(text, "/finance") then { return "finance" }
   if starts_with(text, "/legal") then { return "legal" }
   if starts_with(text, "/dev") then { return "dev" }
+  if starts_with(text, "/design-image") then { return "design-image" }
   if starts_with(text, "/design") then { return "design" }
   if starts_with(text, "/qa") then { return "qa" }
   if starts_with(text, "/visual") then { return "visual" }
@@ -849,7 +885,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected)\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -1734,9 +1770,17 @@ mlogserver {
           let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
         }
         if delegate_dept == "design" then {
-          let del_reply = HandleDesign(query, chat_id)
-          let _ = SendVoiceReply(chat_id, del_reply, delegate_dept)
-          let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
+          let is_img = IsImageRequest(query)
+          if is_img == "true" then {
+            let err = HandleDesignImage(query, chat_id)
+            if len(err) > 0.0 then {
+              let _ = SendVoiceReply(chat_id, err, delegate_dept)
+            }
+          } else {
+            let del_reply = HandleDesign(query, chat_id)
+            let _ = SendVoiceReply(chat_id, del_reply, delegate_dept)
+            let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
+          }
         }
         if delegate_dept == "qa" then {
           let del_reply = HandleQA(query, chat_id)
@@ -1824,11 +1868,31 @@ mlogserver {
       let _ = SendReport(reply, "dev", query, "2.0", chat_id)
       let handled = 1.0
     }
+    if dept == "design-image" then {
+      let _ = RecordUserMessage(chat_id, "design", text)
+      // Extract prompt: everything after /design-image or the full text
+      let img_prompt = substring(text, 14.0, 0.0)
+      if len(trim(img_prompt)) < 3.0 then { let img_prompt = query }
+      let err = HandleDesignImage(img_prompt, chat_id)
+      if len(err) > 0.0 then {
+        let _ = SendTelegramReply(chat_id, err)
+      }
+      let handled = 1.0
+    }
     if dept == "design" then {
       let _ = RecordUserMessage(chat_id, "design", text)
-      let reply = HandleDesign(query, chat_id)
-      let _ = SendVoiceReply(chat_id, reply, "design")
-      let _ = SendReport(reply, "design", query, "2.0", chat_id)
+      // Auto-detect image generation requests within design dept
+      let is_img = IsImageRequest(query)
+      if is_img == "true" then {
+        let err = HandleDesignImage(query, chat_id)
+        if len(err) > 0.0 then {
+          let _ = SendTelegramReply(chat_id, err)
+        }
+      } else {
+        let reply = HandleDesign(query, chat_id)
+        let _ = SendVoiceReply(chat_id, reply, "design")
+        let _ = SendReport(reply, "design", query, "2.0", chat_id)
+      }
       let handled = 1.0
     }
     if dept == "qa" then {

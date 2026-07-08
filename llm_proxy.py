@@ -936,6 +936,113 @@ def _tg_download_file(file_path):
         log.error(f"Telegram file download failed: {e}")
     return None
 
+# ──────────────────────────── IMAGE GENERATION ─────────────────────────────
+
+_ZAI_CONFIG_PATHS = ['/etc/.z-ai-config', os.path.expanduser('~/.z-ai-config'), '.z-ai-config']
+_ZAI_CONFIG = None
+
+
+def _load_zai_config():
+    """Load z-ai SDK config (baseUrl, apiKey, headers) from file."""
+    global _ZAI_CONFIG
+    if _ZAI_CONFIG is not None:
+        return _ZAI_CONFIG
+    for p in _ZAI_CONFIG_PATHS:
+        try:
+            with open(p, 'r') as f:
+                cfg = json.load(f)
+                _ZAI_CONFIG = cfg
+                log.info(f"z-ai config loaded from {p}")
+                return cfg
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+    log.warning("z-ai config not found in any search path")
+    return None
+
+
+def _zai_headers():
+    """Build headers dict for z-ai API calls."""
+    cfg = _load_zai_config()
+    if not cfg:
+        return None
+    h = {
+        'Content-Type': 'application/json',
+        'Authorization': f"Bearer {cfg.get('apiKey', '')}",
+        'X-Z-AI-From': 'Z',
+    }
+    if cfg.get('chatId'):
+        h['X-Chat-Id'] = cfg['chatId']
+    if cfg.get('userId'):
+        h['X-User-Id'] = cfg['userId']
+    if cfg.get('token'):
+        h['X-Token'] = cfg['token']
+    return h
+
+
+_IMG_DIR = os.path.join(DB_PATH, 'generated_images')
+_ALLOWED_SIZES = ('1024x1024', '768x1344', '864x1152', '1344x768', '1152x864', '1440x720', '720x1440')
+
+
+def _generate_image(prompt, size='1024x1024'):
+    """Call z-ai image generation API and return (local_path, error)."""
+    if size not in _ALLOWED_SIZES:
+        size = '1024x1024'
+    headers = _zai_headers()
+    if not headers:
+        return None, 'z-ai config not found'
+    cfg = _load_zai_config()
+    url = f"{cfg['baseUrl']}/images/generations"
+    payload = {'prompt': prompt, 'size': size}
+    try:
+        # Step 1: request generation
+        log.info(f"Image generation request: {prompt[:80]}...")
+        resp = http_requests.post(url, json=payload, headers=headers, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        images = data.get('data', [])
+        if not images:
+            return None, 'API returned no images'
+        image_url = images[0].get('url', '')
+        if not image_url:
+            return None, 'API returned no image URL'
+        # Step 2: download the generated image
+        img_resp = http_requests.get(image_url, timeout=60)
+        img_resp.raise_for_status()
+        # Step 3: save locally
+        os.makedirs(_IMG_DIR, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        fname = f"img_{ts}_{uuid.uuid4().hex[:6]}.jpg"
+        fpath = os.path.join(_IMG_DIR, fname)
+        with open(fpath, 'wb') as f:
+            f.write(img_resp.content)
+        log.info(f"Image saved: {fpath} ({len(img_resp.content)} bytes)")
+        return fpath, None
+    except Exception as e:
+        log.error(f"Image generation failed: {e}")
+        return None, str(e)
+
+
+def _tg_send_photo(chat_id, photo_path, caption=None):
+    """Send a photo via Telegram Bot API using multipart upload."""
+    if not TELEGRAM_BOT_TOKEN:
+        log.warning("TELEGRAM_BOT_TOKEN not set, cannot send photo")
+        return None
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    try:
+        with open(photo_path, 'rb') as f:
+            payload = {'chat_id': chat_id}
+            if caption:
+                payload['caption'] = caption[:1000]
+            resp = http_requests.post(url, data=payload, files={'photo': f}, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get('ok'):
+            return data['result'].get('message_id')
+    except Exception as e:
+        log.error(f"Telegram sendPhoto failed: {e}")
+    return None
+
+
 # ──────────────────────────── MEMORIZE HELPER ────────────────────────────
 def _memorize(dept, topic, content):
     """Save a finding to dialog_history as a system memorization entry."""
@@ -4129,6 +4236,36 @@ def scheduler_reminder_check():
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  IMAGE GENERATION ENDPOINT
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/generate-image', methods=['POST'])
+def generate_image_endpoint():
+    """Generate an image via z-ai API and send it to Telegram chat.
+    Request body: {prompt, size?, chat_id, caption?}
+    Returns: {status, path?, error?}"""
+    d = request.get_json(force=True) or {}
+    prompt = d.get('prompt', '').strip()
+    chat_id = str(d.get('chat_id', ''))
+    size = d.get('size', '1024x1024')
+    caption = d.get('caption', '')
+    if not prompt:
+        return jsonify({'status': 'error', 'error': 'prompt is required'}), 400
+    if not chat_id:
+        return jsonify({'status': 'error', 'error': 'chat_id is required'}), 400
+    # Send upload_photo action so user sees progress
+    _tg_send_chat_action(chat_id, 'upload_photo')
+    fpath, err = _generate_image(prompt, size)
+    if err:
+        _tg_send_message(chat_id, f"Не удалось сгенерировать изображение: {err}")
+        return jsonify({'status': 'error', 'error': err}), 500
+    # Send to Telegram
+    msg_id = _tg_send_photo(chat_id, fpath, caption or None)
+    _log_audit('image_generated', {'prompt': prompt[:100], 'size': size, 'path': fpath, 'chat_id': chat_id, 'tg_msg_id': msg_id}, dept='design')
+    return jsonify({'status': 'ok', 'path': fpath, 'tg_msg_id': msg_id})
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  OSINT ENDPOINT — Aliens Eye 840+ platforms
 # ══════════════════════════════════════════════════════════════════════
 
@@ -4539,5 +4676,5 @@ if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
-             f"tts, stt, scheduler/*, learning/*, audit/recent, search, lz/deep-research, lz/osint, memory/*")
+             f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
     app.run(host="0.0.0.0", port=PORT, threaded=True)

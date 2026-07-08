@@ -67,6 +67,8 @@ Fosved brand (sync с Visual): navy/cream/gold/burgundy/forest/grey, Inter Tight
 
 **Workflows:** `/design-discover <topic>` · `/design-validate <id>` · `/design-handoff <id>` · `/design-system-audit <project>` · `/design-ai <feature>` · `/design-research <topic>`
 
+**Image generation:** `/design-image <prompt>` — генерирует изображение и отправляет в чат. Также срабатывает автоматически при запросах содержащих «нарисуй», «сгенерируй изображение», «создай картинку», «сделай иллюстрацию», «сгенерируй логотип». Поддерживаемые размеры: 1024x1024 (квадрат), 1344x768 (ландшафт), 768x1344 (портрет).
+
 ---
 
 ## Протокол работы
