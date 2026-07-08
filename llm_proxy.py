@@ -1028,14 +1028,14 @@ _weather_cache = {"text": "", "ts": 0.0}
 
 @app.get("/now-weather")
 def now_weather_endpoint():
-    """Return current weather for Moscow. Cached 30 min."""
+    """Return current weather for Minsk. Cached 30 min."""
     import time as _time
     now = _time.time()
     if _weather_cache["text"] and (now - _weather_cache["ts"]) < 1800:
         return jsonify({"weather": _weather_cache["text"]})
     try:
-        r1 = http_requests.get("https://wttr.in/Moscow?format=%C+%t+%w+%h&lang=ru", timeout=10)
-        r2 = http_requests.get("https://wttr.in/Moscow?format=3&lang=ru", timeout=10)
+        r1 = http_requests.get("https://wttr.in/Minsk?format=%C+%t+%w+%h&lang=ru", timeout=10)
+        r2 = http_requests.get("https://wttr.in/Minsk?format=3&lang=ru", timeout=10)
         parts = []
         if r1.ok:
             parts.append(r1.text.strip())
@@ -1775,7 +1775,7 @@ def scheduler_morning_brief():
         # ── 1. Weather (wttr.in — free, no API key) ──
         weather_text = ""
         try:
-            weather_resp = http_requests.get("https://wttr.in/Moscow?format=%C+%t+%w+%h+%P&lang=ru", timeout=10)
+            weather_resp = http_requests.get("https://wttr.in/Minsk?format=%C+%t+%w+%h+%P&lang=ru", timeout=10)
             if weather_resp.ok:
                 weather_text = weather_resp.text.strip()
             else:
@@ -1786,7 +1786,7 @@ def scheduler_morning_brief():
         # Extended forecast
         weather_ext = ""
         try:
-            weather_ext_resp = http_requests.get("https://wttr.in/Moscow?format=3&lang=ru", timeout=10)
+            weather_ext_resp = http_requests.get("https://wttr.in/Minsk?format=3&lang=ru", timeout=10)
             if weather_ext_resp.ok:
                 weather_ext = weather_ext_resp.text.strip()
         except Exception:
