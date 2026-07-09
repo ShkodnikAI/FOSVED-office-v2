@@ -4664,8 +4664,9 @@ def telegram_webhook():
         if len(tts_text) < 5:
             tts_text = reply  # fallback to raw if cleaning was too aggressive
         try:
+            voice = "ru-RU-DmitryNeural" if dept == "admin" else _tts_voice
             http_requests.post("http://127.0.0.1:4000/tts",
-                json={"text": tts_text, "voice": _tts_voice, "chat_id": chat_id}, timeout=60)
+                json={"text": tts_text, "voice": voice, "chat_id": chat_id}, timeout=60)
         except Exception as e:
             log.error(f"TTS failed: {e}")
     
