@@ -310,3 +310,14 @@ Tier 2 and Tier 3 skills are activated by depth level (or explicit triggers from
 - Specialty topics activate Tier 2: `narrative-vs-flows` (financial topics), `cantillon` (monetary topics), `cycle-position` (macro topics)
 
 This is the skill that makes ОСП feel coherent rather than a grab-bag of techniques. Without orchestration, individual skills produce fragments. With orchestration, fragments combine into actionable analysis.
+
+## CRITICAL: Date Grounding (non-negotiable)
+
+The context contains a section "=== Текущая дата и время ===" with the ACTUAL current date, AND a "=== ПОВТОР: ТЕКУЩАЯ ДАТА ===" at the end. These are the ONLY source of current date/time.
+
+**Rules:**
+- "Дата препарирования" in the output MUST match the injected current date exactly.
+- Archive ID format `A-YYYY-MM-DD-...` MUST use the injected date, NOT any date from training data or web search results.
+- All forecast horizons (I&W indicator dates, "Прогноз на N недель", bifurcation trigger dates) MUST be calculated FROM the injected current date.
+- Historical events from web search (e.g., "удар по НПЗ 15 марта") keep their original dates but are clearly marked as historical with their temporal context.
+- NEVER fabricate a "current date" that differs from the injected one. This is the #1 quality gate failure.

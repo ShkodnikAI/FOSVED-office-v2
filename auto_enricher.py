@@ -318,6 +318,65 @@ def format_indicators(text, accent_color):
 # УТИЛИТЫ
 # ═══════════════════════════════════════════
 
+def format_tables(text, accent_color):
+    """Конвертирует markdown pipe-таблицы в HTML <table>.
+    Ищет блоки вида:
+      | Header1 | Header2 |
+      |---------|---------|
+      | Cell1   | Cell2   |
+    Пропускает таблицы гипотез (format_ach_table уже обработает).
+    """
+    # Match markdown table blocks: header + separator + 1+ data rows
+    pattern = re.compile(
+        r'(^|\n)'                        # start of line or newline before table
+        r'(\|.+\|)\n'                    # header row
+        r'(\|[\s\-:|]+\|)\n'             # separator row (|---|---|)
+        r'((?:\|.+\|\n?)*)'              # 1+ data rows
+    )
+
+    def _replace_table(m):
+        prefix = m.group(1)  # preserve leading newline
+
+        header_line = m.group(2).strip()
+        data_lines = m.group(4).strip().split('\n') if m.group(4).strip() else []
+
+        # Skip if no data rows
+        if not data_lines:
+            return m.group(0)
+
+        headers = [c.strip() for c in header_line.split('|') if c.strip()]
+
+        html = '<div class="table-wrap"><table class="rich-table">'
+        # Header
+        html += '<thead><tr>'
+        for h in headers:
+            html += f'<th>{h}</th>'
+        html += '</tr></thead>'
+        # Body
+        html += '<tbody>'
+        for row_line in data_lines:
+            row_line = row_line.strip()
+            if not row_line or re.match(r'^\|[\s\-:|]+\|$', row_line):
+                continue
+            cells = [c.strip() for c in row_line.split('|') if c.strip()]
+            html += '<tr>'
+            for cell in cells:
+                html += f'<td>{cell}</td>'
+            html += '</tr>'
+        html += '</tbody></table></div>'
+
+        return prefix + html
+
+    # Run once — handles all tables in the text
+    result = pattern.sub(_replace_table, text)
+
+    # Clean up any remaining stray pipe rows that weren't part of a full table
+    # (orphan separator lines)
+    result = re.sub(r'\n\|[\s\-:|]+\|\n', '\n', result)
+
+    return result
+
+
 def markdown_to_html(text):
     """Базовая конвертация markdown → HTML"""
     result = text
@@ -427,6 +486,7 @@ def auto_enrich(text, dept='yana', accent_color='#6366f1'):
     # 3. Structural enrichment on escaped text
     result = format_badges(result)
     result = format_ach_table(result, accent_color)
+    result = format_tables(result, accent_color)
     result = format_sections(result, accent_color)
     result = detect_comparison(result)
     result = convert_bullet_to_cards(result)
