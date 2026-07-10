@@ -629,6 +629,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, status TEXT DEFAULT 'pending', narad_id TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS admin_night_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_data TEXT, review_data TEXT, health_score INTEGER, findings_count INTEGER, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, frequency TEXT DEFAULT 'daily', created_at TEXT DEFAULT (datetime('now')));
+        CREATE TABLE IF NOT EXISTS news_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, title TEXT NOT NULL, summary TEXT, url TEXT, category TEXT DEFAULT 'general', language TEXT DEFAULT 'ru', published TIMESTAMP, collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, relevance_score REAL DEFAULT 0, hash TEXT UNIQUE);
+        CREATE INDEX IF NOT EXISTS idx_news_category ON news_cache (category, collected DESC);
+        CREATE INDEX IF NOT EXISTS idx_news_hash ON news_cache (hash);
         """)
         for col_sql, col_name in [
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
@@ -1950,6 +1953,8 @@ def scheduler_morning_brief():
 
 === НАХОДКИ ЛАБОРАТОРИИ ЗНАНИЙ ===
 {lz_findings if lz_findings else 'За последние сутки нет новых находок'}
+
+{get_night_news_digest()}
 
 === ТВОЯ ЗАДАЧА ===
 Напиши утренний отчёт на русском. Структура:
@@ -4679,3 +4684,272 @@ if __name__ == "__main__":
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
              f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  NEWS MONITORING: RSS + GDELT + Telegram channels
+# ══════════════════════════════════════════════════════════════════════
+
+RSS_FEEDS = {
+    "ria": {"url": "https://ria.ru/export/rss2/archive/index.xml", "category": "news_ru", "language": "ru", "name": "РИА Новости"},
+    "tass": {"url": "https://tass.ru/rss/v2.xml", "category": "news_ru", "language": "ru", "name": "ТАСС"},
+    "rbk": {"url": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss", "category": "news_ru", "language": "ru", "name": "РБК"},
+    "interfax": {"url": "https://www.interfax.ru/rss.asp", "category": "news_ru", "language": "ru", "name": "Интерфакс"},
+    "kommersant": {"url": "https://www.kommersant.ru/RSS/news.xml", "category": "news_ru", "language": "ru", "name": "Коммерсантъ"},
+    "reuters": {"url": "https://feeds.reuters.com/reuters/topNews", "category": "news_en", "language": "en", "name": "Reuters"},
+    "bbc": {"url": "http://feeds.bbci.co.uk/news/world/rss.xml", "category": "news_en", "language": "en", "name": "BBC World"},
+    "techcrunch": {"url": "https://techcrunch.com/feed/", "category": "tech", "language": "en", "name": "TechCrunch"},
+    "theverge": {"url": "https://www.theverge.com/rss/index.xml", "category": "tech", "language": "en", "name": "The Verge"},
+    "hackernews": {"url": "https://hnrss.org/frontpage", "category": "tech", "language": "en", "name": "Hacker News"},
+    "arxiv_ai": {"url": "https://rss.arxiv.org/rss/cs.AI", "category": "science", "language": "en", "name": "arXiv AI"},
+    "arxiv_cl": {"url": "https://rss.arxiv.org/rss/cs.CL", "category": "science", "language": "en", "name": "arXiv NLP"},
+    "investing_ru": {"url": "https://ru.investing.com/rss/news.rss", "category": "finance", "language": "ru", "name": "Investing.com RU"},
+    "foreignaffairs": {"url": "https://www.foreignaffairs.com/rss.xml", "category": "geopolitics", "language": "en", "name": "Foreign Affairs"},
+}
+
+GDELT_BASE = "https://api.gdeltproject.org/api/v2"
+
+DEPT_QUERIES = {
+    "osp": "geopolitics OR sanctions OR regulation OR war OR election",
+    "lz": "artificial intelligence OR quantum computing OR disruption OR breakthrough",
+    "finance": "economy OR inflation OR GDP OR stock market OR cryptocurrency",
+    "legal": "legislation OR court OR GDPR OR compliance OR lawsuit",
+    "marketing": "consumer trends OR advertising OR social media OR brand",
+    "engineering": "infrastructure OR energy OR construction OR nuclear OR solar",
+}
+
+DEPT_CATEGORIES = {
+    "osp": ("news_ru", "geopolitics", "news_en"),
+    "lz": ("tech", "science"),
+    "finance": ("finance",),
+    "legal": ("geopolitics", "news_ru"),
+    "marketing": ("tech", "news_en"),
+}
+
+
+def collect_rss():
+    """Collect from all RSS feeds. Dedup by hash(title+url). TTL 7 days."""
+    import feedparser as _fp
+    collected, errors = 0, 0
+    for feed_id, fc in RSS_FEEDS.items():
+        try:
+            feed = _fp.parse(fc["url"])
+            for entry in feed.entries[:20]:
+                title = entry.get("title", "").strip()
+                summary = re.sub(r"<[^>]+>", "", entry.get("summary", entry.get("description", ""))).strip()
+                url = entry.get("link", "").strip()
+                published = entry.get("published_parsed") or entry.get("updated_parsed")
+                if not title:
+                    continue
+                if len(summary) > 500:
+                    summary = summary[:500] + "..."
+                content_hash = hashlib.md5((title + url).encode()).hexdigest()
+                pub_date = None
+                if published:
+                    try:
+                        pub_date = datetime(*published[:6]).isoformat()
+                    except Exception:
+                        pass
+                try:
+                    _query("""INSERT OR IGNORE INTO news_cache
+                        (source,title,summary,url,category,language,published,hash)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                        (fc["name"], title, summary, url, fc["category"], fc["language"], pub_date, content_hash))
+                    collected += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            errors += 1
+            _log_audit("rss_error", {"feed": feed_id, "error": str(e)[:100]}, "collector")
+    _query("DELETE FROM news_cache WHERE collected < datetime('now', '-7 days')")
+    _log_audit("rss_collected", {"collected": collected, "errors": errors}, "collector")
+    return collected
+
+
+def collect_gdelt(query=None, language="russian", max_items=25):
+    """GDELT DOC API — free, no key."""
+    params = {
+        "query": query or "Russia OR technology OR AI",
+        "mode": "artlist",
+        "maxrecords": str(max_items),
+        "format": "json",
+        "sort": "DateDesc",
+        "sourcelang": language,
+    }
+    try:
+        resp = http_requests.get(f"{GDELT_BASE}/doc/doc", params=params, timeout=15)
+        if resp.status_code != 200:
+            return 0
+        data = resp.json()
+        articles = data.get("articles", [])
+        collected = 0
+        for a in articles:
+            title = a.get("title", "").strip()
+            url = a.get("url", "").strip()
+            source = a.get("domain", a.get("sourcecountry", "GDELT"))
+            seendate = a.get("seendate", "")
+            tone = a.get("tone", 0)
+            if not title:
+                continue
+            content_hash = hashlib.md5((title + url).encode()).hexdigest()
+            cat = "geopolitics"
+            tl = title.lower()
+            if any(w in tl for w in ["technology", "ai", "artificial", "технолог", "искусствен"]):
+                cat = "tech"
+            elif any(w in tl for w in ["economy", "экономик", "market", "рынок", "billion", "млрд"]):
+                cat = "finance"
+            elif any(w in tl for w in ["science", "наук", "research", "исследован"]):
+                cat = "science"
+            try:
+                _query("""INSERT OR IGNORE INTO news_cache
+                    (source,title,summary,url,category,language,published,relevance_score,hash)
+                    VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (f"GDELT/{source}", title, f"Tone: {float(tone):.1f}", url, cat,
+                     language[:2], seendate, abs(float(tone)), content_hash))
+                collected += 1
+            except Exception:
+                pass
+        _log_audit("gdelt_collected", {"collected": collected}, "collector")
+        return collected
+    except Exception as e:
+        _log_audit("gdelt_error", {"error": str(e)[:200]}, "collector")
+        return 0
+
+
+def collect_gdelt_themes():
+    total = 0
+    for dept, query in DEPT_QUERIES.items():
+        total += collect_gdelt(query=query, language="russian", max_items=10)
+        total += collect_gdelt(query=query, language="english", max_items=10)
+    return total
+
+
+def _extract_keywords(text):
+    stop = {"и", "в", "на", "с", "по", "для", "от", "что", "как", "не", "это", "the", "a", "an", "in", "on", "for", "of", "and", "to", "is", "it"}
+    words = re.findall(r"[а-яёa-z]{3,}", text.lower())
+    return [w for w in words if w not in stop][:10]
+
+
+def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
+    """Get recent news relevant to query. Used by BuildContext in mlog."""
+    keywords = _extract_keywords(query)
+    conditions, params = [], []
+    for kw in keywords[:5]:
+        conditions.append("(title LIKE ? OR summary LIKE ?)")
+        params.extend([f"%{kw}%", f"%{kw}%"])
+    where = " OR ".join(conditions) if conditions else "1=1"
+
+    cats = DEPT_CATEGORIES.get(dept, ("news_ru", "tech", "geopolitics"))
+    cat_filter = " OR ".join(["category = ?" for _ in cats])
+    params.extend(cats)
+
+    sql = f"""SELECT source, title, summary, url, published, relevance_score
+             FROM news_cache WHERE ({where}) AND ({cat_filter})
+             AND collected > datetime('now', '-48 hours')
+             ORDER BY published DESC LIMIT ?"""
+    params.append(limit)
+    rows = _query(sql, params, fetch=True)
+
+    if not rows:
+        sql2 = f"""SELECT source, title, summary, url, published, relevance_score
+                  FROM news_cache WHERE ({cat_filter})
+                  AND collected > datetime('now', '-24 hours')
+                  ORDER BY published DESC LIMIT ?"""
+        rows = _query(sql2, list(cats) + [limit], fetch=True)
+
+    if not rows:
+        return ""
+
+    news_text = "=== СВЕЖИЕ СОБЫТИЯ (последние 48ч) ===\n\n"
+    current_len = 0
+    for r in rows:
+        entry = f"[{r[0]}] {r[1]}\n"
+        if r[2] and r[2] != r[1]:
+            entry += f"  {r[2][:150]}\n"
+        if r[4]:
+            entry += f"  Дата: {r[4]}\n"
+        entry += "\n"
+        if current_len + len(entry) > max_chars:
+            break
+        news_text += entry
+        current_len += len(entry)
+
+    news_text += "=== КОНЕЦ СОБЫТИЙ ===\n"
+    return news_text
+
+
+def get_night_news_digest():
+    """Top-5 events over last 12 hours for morning brief."""
+    rows = _query("""SELECT source, title, category FROM news_cache
+                     WHERE collected > datetime('now', '-12 hours')
+                     ORDER BY relevance_score DESC, published DESC LIMIT 5""", fetch=True)
+    if not rows:
+        return ""
+    emoji = {"tech": "🔬", "finance": "💰", "geopolitics": "🌍", "science": "🧪", "news_ru": "📌", "news_en": "📌"}
+    digest = "\n📰 Топ события за ночь:\n"
+    for r in rows:
+        digest += f"  {emoji.get(r[2], '📄')} [{r[0]}] {r[1][:80]}\n"
+    return digest
+
+
+# ── Cron endpoint ──
+@app.route("/cron/collect-news", methods=["GET"])
+def cron_collect_news():
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    rss_count = collect_rss()
+    gdelt_count = collect_gdelt_themes()
+    _log_audit("news_collection", {"rss": rss_count, "gdelt": gdelt_count}, "collector")
+    return jsonify({"rss": rss_count, "gdelt": gdelt_count, "total": rss_count + gdelt_count})
+
+
+# ── Fresh news for mlog BuildContext ──
+@app.route("/news/fresh", methods=["POST"])
+def news_fresh():
+    d = request.get_json(force=True)
+    query = d.get("query", "")
+    dept = d.get("dept", "")
+    limit = int(d.get("limit", 5))
+    news = get_fresh_news(query, dept=dept, limit=limit)
+    return jsonify({"news": news})
+
+
+# ── /lz news endpoint ──
+@app.route("/lz/news", methods=["POST"])
+def lz_news():
+    d = request.get_json(force=True)
+    query = d.get("query", "")
+    category = d.get("category", None)
+    limit = int(d.get("limit", 15))
+    if query:
+        news = get_fresh_news(query, dept="lz", limit=limit)
+    elif category:
+        rows = _query("""SELECT source, title, summary, url, published FROM news_cache
+                         WHERE category = ? ORDER BY published DESC LIMIT ?""", (category, limit), fetch=True)
+        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}" for r in rows) if rows else "Нет событий"
+    else:
+        rows = _query("""SELECT source, title, summary, url, published FROM news_cache
+                         ORDER BY published DESC LIMIT ?""", (limit,), fetch=True)
+        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}" for r in rows) if rows else "Нет событий"
+
+    lz_prompt = get_dept_prompt("lz")
+    analysis_prompt = lz_prompt + "\n\nПроанализируй свежие события. Выдели тренды, аномалии, сигналы. Маркируй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ].\n\n" + news
+    try:
+        result = call_llm("lz", [{"role": "user", "content": analysis_prompt}])
+        analysis = result.get("reply", "Ошибка анализа")
+    except Exception as e:
+        analysis = f"Ошибка: {e}"
+    return jsonify({"response": analysis, "news_count": news.count("\n")})
+
+
+# ── News stats ──
+@app.route("/news/stats", methods=["GET"])
+def news_stats():
+    total = _query("SELECT COUNT(*) FROM news_cache", fetch=True)[0][0]
+    last_24h = _query("SELECT COUNT(*) FROM news_cache WHERE collected > datetime('now', '-24 hours')", fetch=True)[0][0]
+    by_source = _query("SELECT source, COUNT(*) as c FROM news_cache GROUP BY source ORDER BY c DESC LIMIT 10", fetch=True)
+    by_category = _query("SELECT category, COUNT(*) as c FROM news_cache GROUP BY category ORDER BY c DESC", fetch=True)
+    return jsonify({"total": total, "last_24h": last_24h,
+                    "by_source": {r[0]: r[1] for r in by_source},
+                    "by_category": {r[0]: r[1] for r in by_category}})

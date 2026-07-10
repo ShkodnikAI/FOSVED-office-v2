@@ -274,7 +274,22 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   let dialog = GetRecentDialog(chat_id, "10")
   let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
+
+  // Fresh news for OSP and LZ departments
+  let news = ""
+  if dept == "osp" or dept == "lz" then {
+    let news_body = json_encode({query: query, dept: dept, limit: 5})
+    let news_result = http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json")
+    let news_parsed = parse_json(news_result)
+    let news = json_get(news_parsed, "news", "")
+  }
+
   let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Recent Dialog ===\n" + dialog
+
+  // Append fresh news if available
+  if news != "" then {
+    let context = context + "\n\n" + news + "\nУчитывай эти свежие события в своём анализе. Ссылайся на них если релевантны."
+  }
 
   // Дублируем дату в самый конец контекста — чтобы LLM не забыл после 25K навыков
   if dept == "osp" then {
@@ -1550,6 +1565,19 @@ mlogserver {
         let compare_query = substring(query, 9.0, len(query))
         let reply = LZCompare(compare_query, chat_id)
         let _ = SendReport(reply, "lz", "Compare: " + compare_query, "3.0", chat_id)
+        return respond("200 ok")
+      }
+      // /lz news [query] — news monitoring
+      if starts_with(query, " news") then {
+        let news_query = substring(query, 6.0, len(query))
+        let _ = SendTelegramReply(chat_id, "Анализирую свежие события...")
+        let body = json_encode({query: news_query, limit: 15, chat_id: chat_id})
+        let result = http_post("http://127.0.0.1:4000/lz/news", body, "application/json")
+        let parsed = parse_json(result)
+        let analysis = json_get(parsed, "response", "Нет свежих событий")
+        let news_title = "Мониторинг информпространства"
+        if news_query != "" then { let news_title = "События: " + news_query }
+        let _ = SendReport(analysis, "lz", news_title, "2.0", chat_id)
         return respond("200 ok")
       }
 
