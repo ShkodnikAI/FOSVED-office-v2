@@ -817,7 +817,7 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
         if not _breaker.can_call(prov_name):
             continue
         for model in models:
-            max_tok = 16384 if dept in {"yana", "admin"} else 4096
+            max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
             result = _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok)
             if result and result.get("reply"):
                 if compression_saved > 0:
