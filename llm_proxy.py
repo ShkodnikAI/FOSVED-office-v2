@@ -98,6 +98,8 @@ PROVIDERS = {
     "anthropic": {"url": "https://api.anthropic.com/v1/messages", "env_key": "ANTHROPIC_API_KEY", "format": "anthropic", "timeout": 120},
     "openai": {"url": "https://api.openai.com/v1/chat/completions", "env_key": "OPENAI_API_KEY", "format": "openai", "timeout": 120},
     "apodex": {"url": "https://api.apodex.ai/v1/chat/completions", "env_key": "APODEX_API_KEY", "format": "openai", "timeout": 300},
+    "nvidia": {"url": "https://integrate.api.nvidia.com/v1/chat/completions", "env_key": "NVIDIA_API_KEY", "format": "openai", "timeout": 120},
+    "cerebras": {"url": "https://api.cerebras.ai/v1/chat/completions", "env_key": "CEREBRAS_API_KEY", "format": "openai", "timeout": 120},
 }
 
 TOKEN_COSTS = {
@@ -105,6 +107,8 @@ TOKEN_COSTS = {
     "groq": {"input": 0.0, "output": 0.0}, "grok": {"input": 3.0, "output": 15.0},
     "anthropic": {"input": 3.0, "output": 15.0}, "openai": {"input": 2.5, "output": 10.0},
     "apodex": {"input": 2.0, "output": 8.0},
+    "nvidia": {"input": 0.0, "output": 0.0},
+    "cerebras": {"input": 0.0, "output": 0.0},
 }
 
 # ──────────────────────────── CIRCUIT BREAKER ────────────────────────────
@@ -168,22 +172,30 @@ _breaker = CircuitBreaker(threshold=3, reset_after_ms=60000)
 # call_llm walks the chain: for each provider, try each model until one works.
 COMBO_CHAINS = {
     "fosved-free": [
+        ("nvidia", ["nvidia/llama-3.3-nemotron-super-49b-v1.5"]),
+        ("cerebras", ["gpt-oss-120b"]),
         ("groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
         ("deepseek", ["deepseek-chat"]),
     ],
     "fosved-standard": [
         ("zai", ["glm-4.6", "glm-4-plus", "glm-4-flash"]),
+        ("nvidia", ["nvidia/llama-3.3-nemotron-super-49b-v1.5"]),
+        ("cerebras", ["gpt-oss-120b"]),
         ("deepseek", ["deepseek-chat"]),
         ("groq", ["llama-3.3-70b-versatile"]),
     ],
     "fosved-deep": [
         ("anthropic", ["claude-sonnet-4-20250514"]),
+        ("nvidia", ["deepseek-ai/deepseek-v4-pro"]),
+        ("cerebras", ["zai-glm-4.7"]),
         ("grok", ["grok-3"]),
         ("zai", ["glm-4.6"]),
     ],
     "fosved-fusion": [
         ("anthropic", ["claude-sonnet-4-20250514"]),
         ("grok", ["grok-3"]),
+        ("nvidia", ["deepseek-ai/deepseek-v4-pro"]),
+        ("cerebras", ["zai-glm-4.7"]),
         ("zai", ["glm-4.6"]),
         ("deepseek", ["deepseek-chat"]),
     ],
@@ -807,6 +819,10 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
                 provider = "groq"; break
             elif model_override.startswith("apodex"):
                 provider = "apodex"; break
+            elif model_override.startswith("nvidia/"):
+                provider = "nvidia"; break
+            elif model_override.startswith("gpt-oss") or model_override.startswith("zai-glm"):
+                provider = "cerebras"; break
         result = _call_single_provider(provider, model_override, messages, dept=dept)
         if result and result.get("reply"):
             if compression_saved > 0:
@@ -850,6 +866,10 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
             use_model = "deepseek-chat"
         elif prov_name == "groq" and not any(m in use_model for m in ("llama", "mixtral", "gemma")):
             use_model = "llama-3.3-70b-versatile"
+        elif prov_name == "nvidia" and not use_model.startswith("nvidia/"):
+            use_model = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
+        elif prov_name == "cerebras" and not use_model.startswith("gpt-oss") and not use_model.startswith("zai-glm"):
+            use_model = "gpt-oss-120b"
         result = _call_single_provider(prov_name, use_model, messages, dept=dept)
         if result and result.get("reply"):
             if compression_saved > 0:
