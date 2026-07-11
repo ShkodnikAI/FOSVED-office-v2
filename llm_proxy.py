@@ -4593,19 +4593,20 @@ def telegram_webhook():
     
     # ── Build prompt ──
     system_prompt = get_dept_prompt(dept)
-    # Inject current time for Yana (same as YanaNowInfo() in app.mlog)
-    if dept == "yana":
-        try:
-            from zoneinfo import ZoneInfo
-            tz = ZoneInfo("Europe/Minsk")
-            now_local = datetime.now(tz)
-            months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня",
-                          "июля", "августа", "сентября", "октября", "ноября", "декабря"]
-            weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-            human_time = f"Сейчас: {now_local.day} {months_ru[now_local.month-1]} {now_local.year}, {weekdays_ru[now_local.weekday()]}, {now_local.strftime('%H:%M')} (Europe/Minsk, UTC+3)"
-            system_prompt += f"\n\n=== Current Time & Date ===\n{human_time}"
-        except Exception:
-            pass
+    # Inject current time for ALL departments (was yana-only — root cause of OSP date bug)
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Minsk")
+        now_local = datetime.now(tz)
+        months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня",
+                      "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+        weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+        human_time = f"Сейчас: {now_local.day} {months_ru[now_local.month-1]} {now_local.year}, {weekdays_ru[now_local.weekday()]}, {now_local.strftime('%H:%M')} (Europe/Minsk, UTC+3)"
+        system_prompt += f"\n\n=== Current Time & Date ===\n{human_time}"
+        if dept == "osp":
+            system_prompt += f"\n\nКРИТИЧНО: используй ТОЛЬКО дату выше как текущую. Дату в шапке отчёта («Дата препарирования», «Сейчас», ID) копируй ПОСИМВОЛЬНО из значения выше. Игнорируй любые другие даты, включая упомянутые в архиве/памяти/примерах."
+    except Exception:
+        pass
     
     # Record user message
     _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
