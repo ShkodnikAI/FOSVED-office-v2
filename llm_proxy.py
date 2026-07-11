@@ -648,11 +648,16 @@ init_db()
 
 def _query(sql, params=(), fetch=False):
     with db_lock:
-        c = _db()
-        cur = c.execute(sql, params)
-        if fetch:
-            rows = cur.fetchall(); c.close(); return rows
-        c.commit(); c.close()
+        try:
+            c = _db()
+            cur = c.execute(sql, params)
+            if fetch:
+                rows = cur.fetchall(); c.close(); return rows
+            c.commit(); c.close()
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e):
+                return [] if fetch else None
+            raise
 
 def _log_audit(action, details_dict, dept="system"):
     _query("INSERT INTO audit_log (action,actor,dept,details,status) VALUES (?,'proxy',?,?,'ok')",
