@@ -23,11 +23,15 @@ class ApiError extends Error {
 }
 
 function buildHeaders(custom = {}) {
-  return {
+  const headers = {
     'Accept': 'application/json',
     'Content-Type': 'application/json',
     ...custom,
   };
+  if (window._apiSecret) {
+    headers['Authorization'] = 'Bearer ' + window._apiSecret;
+  }
+  return headers;
 }
 
 function buildQuery(params) {
