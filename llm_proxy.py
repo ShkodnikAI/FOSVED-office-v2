@@ -1190,6 +1190,29 @@ def ask():
     if not messages:
         return jsonify({"reply": "[Oshibka] Net soobshenii", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 400
     result = call_llm(dept, messages, model_ov)
+    if dept == "osp" and "reply" in result:
+        import re as _re
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+        try:
+            _tz = _ZI("Europe/Minsk")
+        except Exception:
+            _tz = _ZI("UTC")
+        _today = _dt.now(_tz).strftime("%Y-%m-%d")
+        _reply = result["reply"]
+        _reply = _re.sub(
+            r'(Дата препарирования:\s*)\d{4}-\d{2}-\d{2}',
+            r'\g<1>' + _today, _reply
+        )
+        _reply = _re.sub(
+            r'(Сейчас:\s*)\d{4}-\d{2}-\d{2}',
+            r'\g<1>' + _today, _reply
+        )
+        _reply = _re.sub(
+            r'(Темпоральная якорная точка:\s*Сейчас:\s*)\d{4}-\d{2}-\d{2}',
+            r'\g<1>' + _today, _reply
+        )
+        result["reply"] = _reply
     return jsonify(result)
 
 @app.post("/rate_cmd")
