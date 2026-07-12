@@ -207,6 +207,26 @@ pattern SendTelegramReply(chat_id: String, text: String) -> String {
   return result
 }
 
+// Send Telegram reply with MarkdownV2 formatting + fallback to plain text.
+// Escapes text via EscapeMarkdownV2Simple, sends with parse_mode: "MarkdownV2".
+// If Telegram rejects the formatting (ok != true), resends original text without parse_mode.
+// Used for yana/admin departments where bold/italic formatting matters.
+pattern SendTelegramReplyMDV2(chat_id: String, text: String) -> String {
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let escaped = EscapeMarkdownV2Simple(text)
+  let body = json_encode({chat_id: to_float(chat_id), text: escaped, parse_mode: "MarkdownV2"})
+  let result = http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+  let parsed = parse_json(result)
+  let ok = json_get(parsed, "ok", "")
+  if ok != "true" then {
+    // Fallback: resend original text without formatting
+    let body2 = json_encode({chat_id: to_float(chat_id), text: text})
+    let result2 = http_post("https://api.telegram.org/bot" + token + "/sendMessage", body2, "application/json")
+    return result2
+  }
+  return result
+}
+
 pattern SendTyping(chat_id: String) -> String {
   let token = env("TELEGRAM_BOT_TOKEN")
   let body = json_encode({chat_id: to_float(chat_id), action: "typing"})
