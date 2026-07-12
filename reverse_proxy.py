@@ -39,6 +39,7 @@ LLM_ROUTES_PREFIXES = [
 # Routes that go to Metalogos
 MLOG_ROUTES_PREFIXES = [
     # "/webhook/",  # Python handles Telegram
+    "/mlog-wh/",   # Dual-test: test bot webhook -> mlog (rewritten to /webhook/?test=1)
     "/cron/",
     "/health",
     "/",
@@ -70,6 +71,12 @@ def root():
 def proxy(path):
     full_path = "/" + path
 
+    # Dual-test path rewrite: /mlog-wh/telegram -> /webhook/telegram?test=1
+    rewrite_params = None
+    if full_path.startswith("/mlog-wh/"):
+        full_path = full_path.replace("/mlog-wh/", "/webhook/", 1)
+        rewrite_params = {"test": "1"}
+
     # Determine target
     if is_llm_route(full_path):
         target_url = LLM_URL + full_path
@@ -84,7 +91,7 @@ def proxy(path):
             url=target_url,
             headers=headers,
             data=request.get_data(),
-            params=request.args,
+            params=rewrite_params if rewrite_params else request.args,
             timeout=300,
             allow_redirects=False,
         )
