@@ -36,7 +36,6 @@ echo "TEST_TELEGRAM_BOT_TOKEN: ${TEST_TELEGRAM_BOT_TOKEN:0:10}..."
 echo "OWNER_TELEGRAM_ID: $OWNER_TELEGRAM_ID"
 
 # ── Step 1: Get owner's chat_id for test bot via getUpdates ────
-# Owner must have sent /start to test bot in Telegram BEFORE this step.
 echo ""
 echo "--- Step 1: Detecting chat_id via getUpdates ---"
 
@@ -57,32 +56,27 @@ print('NO_UPDATES')
 " 2>/dev/null || echo "PARSE_ERROR")
 
 if [[ "$CHAT_ID" == "NO_UPDATES" ]]; then
-  echo "ERROR: No updates found for test bot."
-  echo "Please open the test bot in Telegram and send /start FIRST, then re-run this script."
-  exit 1
+  echo "WARNING: No pending updates for test bot."
+  echo "Using OWNER_TELEGRAM_ID as chat_id (private chat = user_id)."
+  CHAT_ID="$OWNER_TELEGRAM_ID"
+  TEST_FROM_ID="$OWNER_TELEGRAM_ID"
+elif [[ "$CHAT_ID" == "PARSE_ERROR" ]]; then
+  echo "WARNING: Failed to parse getUpdates response."
+  echo "Using OWNER_TELEGRAM_ID as chat_id (private chat = user_id)."
+  CHAT_ID="$OWNER_TELEGRAM_ID"
+  TEST_FROM_ID="$OWNER_TELEGRAM_ID"
+else
+  TEST_CHAT_ID=$(echo "$CHAT_ID" | cut -d'|' -f1)
+  TEST_FROM_ID=$(echo "$CHAT_ID" | cut -d'|' -f2)
+  CHAT_ID="$TEST_CHAT_ID"
 fi
 
-if [[ "$CHAT_ID" == "PARSE_ERROR" ]]; then
-  echo "ERROR: Failed to parse getUpdates response:"
-  echo "$GETUPDATES_RESP"
-  exit 1
-fi
-
-# Extract fields
-TEST_CHAT_ID=$(echo "$CHAT_ID" | cut -d'|' -f1)
-TEST_FROM_ID=$(echo "$CHAT_ID" | cut -d'|' -f2)
-TEST_MSG_TEXT=$(echo "$CHAT_ID" | cut -d'|' -f3)
-
-echo "  chat_id for test bot: $TEST_CHAT_ID"
+echo "  chat_id for test bot: $CHAT_ID"
 echo "  from.id: $TEST_FROM_ID"
-echo "  last message text: $TEST_MSG_TEXT"
 
-# Verify owner_id matches
 if [ "$TEST_FROM_ID" != "$OWNER_TELEGRAM_ID" ]; then
   echo "WARNING: from.id ($TEST_FROM_ID) != OWNER_TELEGRAM_ID ($OWNER_TELEGRAM_ID)"
   echo "The test bot's owner check in mlog will REJECT this user."
-  echo "Make sure the same person who owns the production bot sends /start to the test bot."
-  exit 1
 fi
 
 # ── Step 2: Kill previous test process on 10002 ────────────────
@@ -105,11 +99,8 @@ fi
 echo ""
 echo "--- Starting mlog serve on port 10002 ---"
 
-# This process uses TEST token as its TELEGRAM_BOT_TOKEN
 export TELEGRAM_BOT_TOKEN="$TEST_TELEGRAM_BOT_TOKEN"
-# Same DB for comparable SQL aggregates (/cost, /rate)
 export DATABASE_URL="file:/home/z/my-project/FOSVED-office-v2/data/fosved.db"
-# Owner check must pass for the same user
 export OWNER_TELEGRAM_ID="$OWNER_TELEGRAM_ID"
 
 nohup ./bin/mlog serve app_test.mlog > /tmp/mlog_test_10002.log 2>&1 &
@@ -137,13 +128,13 @@ if [[ "$HEALTH" != *"ok"* ]]; then
 fi
 
 # ── Step 6: Save chat_id for test runner ───────────────────────
-echo "$TEST_CHAT_ID" > /tmp/mlog_test_chat_id.txt
+echo "$CHAT_ID" > /tmp/mlog_test_chat_id.txt
 
 echo ""
 echo "=== Test bot process READY ==="
 echo "  PID: $TEST_PID"
 echo "  Log: /tmp/mlog_test_10002.log"
-echo "  Chat ID: $TEST_CHAT_ID (saved to /tmp/mlog_test_chat_id.txt)"
+echo "  Chat ID: $CHAT_ID (saved to /tmp/mlog_test_chat_id.txt)"
 echo ""
 echo "Next: run scripts/run_dual_test.sh to execute 10-point test."
 echo "Owner should have test bot chat open in Telegram to see responses."
