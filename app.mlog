@@ -242,7 +242,8 @@ pattern SendTyping(chat_id: String) -> String {
 
 pattern CallLLMProxy(dept: String, messages: String) -> String {
   let body = json_encode({dept: dept, messages: parse_json(messages)})
-  let result = http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
+  let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
+  if result == "" then { return "" }
   return result
 }
 
@@ -270,7 +271,11 @@ pattern IsImageRequest(text: String) -> String {
 pattern HandleDesignImage(prompt: String, chat_id: String) -> String {
   // Call /generate-image endpoint — it generates and sends photo to Telegram
   let body = json_encode({prompt: prompt, chat_id: to_float(chat_id)})
-  let result = http_post("http://127.0.0.1:4000/generate-image", body, "application/json", 180.0)
+  let result = try http_post("http://127.0.0.1:4000/generate-image", body, "application/json", 180.0)
+  if result == "" then {
+    let _ = SendTelegramReply(chat_id, "Ошибка: генерация изображений недоступна.")
+    return ""
+  }
   let parsed = parse_json(result)
   let status = json_get(parsed, "status", "error")
   if status == "ok" then {
@@ -305,9 +310,11 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   let news = ""
   if dept == "osp" or dept == "lz" then {
     let news_body = json_encode({query: query, dept: dept, limit: 5})
-    let news_result = http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json")
-    let news_parsed = parse_json(news_result)
-    let news = json_get(news_parsed, "news", "")
+    let news_result = try http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json")
+    if news_result != "" then {
+      let news_parsed = parse_json(news_result)
+      let news = json_get(news_parsed, "news", "")
+    }
   }
 
   let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Recent Dialog ===\n" + dialog
@@ -664,7 +671,8 @@ pattern DetectDepartment(text: String) -> String {
 
   // Russian keyword detection via proxy
   let body = json_encode({text: lower_text})
-  let result = http_post("http://127.0.0.1:4000/detect-dept", body, "application/json")
+  let result = try http_post("http://127.0.0.1:4000/detect-dept", body, "application/json")
+  if result == "" then { return "" }
   let detected = json_get(parse_json(result), "dept", "")
   if detected != "" then { return detected }
 
@@ -701,7 +709,11 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   return reply
 }
 pattern YanaNowInfo() -> String {
-  let resp = http_get("http://127.0.0.1:4000/now-time")
+  let resp = try http_get("http://127.0.0.1:4000/now-time")
+  if resp == "" then {
+    let ts = to_string(now())
+    return "Текущее время (приблизительно): Unix " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
+  }
   let time_str = json_get(parse_json(resp), "time", "")
   if time_str == "" then {
     let ts = to_string(now())
@@ -711,7 +723,8 @@ pattern YanaNowInfo() -> String {
 }
 
 pattern YanaWeather() -> String {
-  let resp = http_get("http://127.0.0.1:4000/now-weather")
+  let resp = try http_get("http://127.0.0.1:4000/now-weather")
+  if resp == "" then { return "Погода недоступна" }
   let w = json_get(parse_json(resp), "weather", "")
   if w == "" then { return "Погода недоступна" }
   return w
@@ -728,7 +741,7 @@ pattern YanaRecallMemories(query: String) -> String {
 pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> String {
   if len(reply) < 20.0 then { return "" }
   let body = json_encode({query: query, reply: reply, chat_id: chat_id})
-  let _ = http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
+  let _ = try http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
   return "ok"
 }
 
@@ -832,7 +845,11 @@ mlogserver {
     if voice_file_id != "" then {
       let _ = AuditLog("voice_received", "voice", "file_id: " + voice_file_id)
       let stt_body = json_encode({file_id: voice_file_id})
-      let stt_result = http_post("http://127.0.0.1:4000/stt", stt_body, "application/json")
+      let stt_result = try http_post("http://127.0.0.1:4000/stt", stt_body, "application/json")
+      if stt_result == "" then {
+        let _ = SendTelegramReply(chat_id, "Ошибка распознавания: STT-прокси недоступен.")
+        return respond("200 ok")
+      }
       let _ = AuditLog("stt_raw_response", "voice", substring(stt_result, 0.0, 300.0))
       let stt_parsed = parse_json(stt_result)
       let stt_status = json_get(stt_parsed, "status", "error")
@@ -974,7 +991,11 @@ mlogserver {
       let recent_dept = json_get(parse_json(to_string(recent_rows)), "[0].dept", "global")
       if len(correction_text) > 1.0 then {
         let fix_body = json_encode({text: correction_text, dept: recent_dept})
-        let fix_result = http_post("http://127.0.0.1:4000/learning/fix", fix_body, "application/json")
+        let fix_result = try http_post("http://127.0.0.1:4000/learning/fix", fix_body, "application/json")
+        if fix_result == "" then {
+          let _ = SendTelegramReply(chat_id, "Сервис обучения временно недоступен. Коррекция не сохранена.")
+          return respond("200 ok")
+        }
         let error_type = json_get(parse_json(fix_result), "error_type", "classified")
         let suggestion = json_get(parse_json(fix_result), "suggestion", "")
         let _ = AuditLog("correction_fix", recent_dept, "type=" + error_type + " text=" + substring(correction_text, 0.0, 80.0))
@@ -1588,7 +1609,11 @@ mlogserver {
         let news_query = substring(query, 6.0, len(query))
         let _ = SendTelegramReply(chat_id, "Анализирую свежие события...")
         let body = json_encode({query: news_query, limit: 15, chat_id: chat_id})
-        let result = http_post("http://127.0.0.1:4000/lz/news", body, "application/json")
+        let result = try http_post("http://127.0.0.1:4000/lz/news", body, "application/json")
+        if result == "" then {
+          let _ = SendTelegramReply(chat_id, "Сервис новостей временно недоступен.")
+          return respond("200 ok")
+        }
         let parsed = parse_json(result)
         let analysis = json_get(parsed, "response", "Нет свежих событий")
         let news_title = "Мониторинг информпространства"
@@ -1641,7 +1666,11 @@ mlogserver {
         chat_id: chat_id,
         caller_id: chat_id
       })
-      let result = http_post("http://127.0.0.1:4000/lz/osint", body, "application/json", 240.0)
+      let result = try http_post("http://127.0.0.1:4000/lz/osint", body, "application/json", 240.0)
+      if result == "" then {
+        let _ = SendReport("OSINT-сканирование недоступно (прокси не отвечает).", "lz", "OSINT: " + username, "3.0", chat_id)
+        return respond("200 ok")
+      }
       let parsed = parse_json(result)
       let analysis = json_get(parsed, "response", "Ошибка OSINT-сканирования")
       let found_count = json_get(parsed, "osint_data.found", "0")
@@ -1665,7 +1694,11 @@ mlogserver {
         chat_id: chat_id,
         caller_id: chat_id
       })
-      let result = http_post("http://127.0.0.1:4000/lz/osint", body, "application/json", 240.0)
+      let result = try http_post("http://127.0.0.1:4000/lz/osint", body, "application/json", 240.0)
+      if result == "" then {
+        let _ = SendReport("OSINT-сканирование недоступно (прокси не отвечает).", "lz", "OSINT Advanced: " + username, "4.0", chat_id)
+        return respond("200 ok")
+      }
       let parsed = parse_json(result)
       let analysis = json_get(parsed, "response", "Ошибка OSINT-сканирования")
       let _ = SendReport(analysis, "lz", "OSINT Advanced: " + username, "4.0", chat_id)
@@ -1680,7 +1713,8 @@ mlogserver {
 
       // 1. OSINT scan
       let osint_body = json_encode({ username: name, level: "basic", chat_id: chat_id, caller_id: chat_id })
-      let osint_result = http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      let osint_result = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      if osint_result == "" then { let osint_result = "(OSINT-данные недоступны)" }
 
       // 2. Web search
       let web_result = web_search(name, 5.0)
@@ -1707,7 +1741,8 @@ mlogserver {
 
         // OSINT data from LZ proxy
         let osint_body = json_encode({ username: actor, level: "basic", chat_id: chat_id, caller_id: chat_id })
-        let osint = http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+        let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+        if osint == "" then { let osint = "(OSINT-данные недоступны)" }
 
         // OSP analysis via LLM
         let osp_profile = read_file("library/osp.md")
@@ -1729,7 +1764,8 @@ mlogserver {
       send_message(chat_id, "Юрист: due diligence — проверка " + entity + "...")
 
       let osint_body = json_encode({ username: entity, level: "advanced", chat_id: chat_id, caller_id: chat_id })
-      let osint = http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      if osint == "" then { let osint = "(OSINT-данные недоступны)" }
 
       let legal_profile = read_file("library/legal.md")
       let check_prompt = legal_profile + "\n\nDue Diligence проверка контрагента:\n1. Цифровой след — насколько прозрачен?\n2. Профессиональные платформы (LinkedIn, Crunchbase) — совпадают с заявлениями?\n3. Красные флаги — даркнет-форумы, фрод-платформы, NSFW\n4. Возраст аккаунтов — давно ли существуют?\n5. Согласованность информации между платформами\n6. Рекомендация: безопасно / требует внимания / высокий риск\n7. ДИСКЛЕЙМЕР обязателен: \"OSINT-данные собраны из открытых источников. Результаты не гарантируют принадлежность аккаунтов конкретному лицу.\""
@@ -1750,7 +1786,8 @@ mlogserver {
         chat_id: chat_id,
         caller_id: chat_id
       })
-      let osint = http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      if osint == "" then { let osint = "(OSINT-данные недоступны)" }
 
       let marketing_profile = read_file("library/marketing.md")
       let brand_prompt = marketing_profile + "\n\nАнализ доступности бренда:\n1. На каких платформах имя уже занято?\n2. Кем занято — конкурент или просто тёзка?\n3. На каких ключевых платформах свободно?\n4. Рекомендация: использовать as-is / модифицировать / выбрать другое\n5. Если занято — варианты модификации (добавить _official, HQ, app...)\n6. Приоритетные платформы для регистрации (первые 48 часов после запуска)"
@@ -1873,11 +1910,11 @@ mlogserver {
           let voice_name = kv_get("tts_voice")
           if len(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
           let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id})
-          let _ = http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
+          let _ = try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
         }
         // Text: send via proxy (handles 4096 limit with splitting)
         let text_body = json_encode({chat_id: chat_id, text: reply})
-        let _ = http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json")
+        let _ = try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json")
         let handled = 1.0
       }
     }
@@ -2002,10 +2039,10 @@ mlogserver {
         let voice_name = kv_get("tts_voice")
         if len(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
         let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id})
-        let _ = http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
+        let _ = try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
       }
       let text_body = json_encode({chat_id: chat_id, text: reply})
-      let _ = http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json")
+      let _ = try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json")
     }
 
     return respond("200 ok")
