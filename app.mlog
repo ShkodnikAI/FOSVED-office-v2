@@ -183,6 +183,7 @@ pattern LZDeepScan(query: String, chat_id: String) -> String {
   let context = BuildContext("lz", "Deep research: " + query, chat_id)
   let messages = json_encode([{role: "system", content: context + "\n\nIMPORTANT: This is a DEEP SCAN request. Use all available sources. Structure findings with [FACT verified] badges."}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy("lz", messages)
+  if proxy_result == "" then { return "Deep scan unavailable (proxy down)." }
   let reply = json_get(parse_json(proxy_result), "reply", "Deep scan failed.")
   let _ = RecordAssistantMessage(chat_id, "lz", reply)
   return reply
@@ -216,7 +217,7 @@ pattern SendTelegramReplyMDV2(chat_id: String, text: String) -> String {
   let escaped = EscapeMarkdownV2Simple(text)
   let body = json_encode({chat_id: to_float(chat_id), text: escaped, parse_mode: "MarkdownV2"})
   let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
-  if result == "" then {
+  if to_string(result) == "()" then {
     // Network error caught by try — fallback to plain text directly
     let body2 = json_encode({chat_id: to_float(chat_id), text: text})
     let result2 = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body2, "application/json")
@@ -243,7 +244,7 @@ pattern SendTyping(chat_id: String) -> String {
 pattern CallLLMProxy(dept: String, messages: String) -> String {
   let body = json_encode({dept: dept, messages: parse_json(messages)})
   let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
-  if result == "" then { return "" }
+  if to_string(result) == "()" then { return "" }
   return result
 }
 
@@ -272,7 +273,7 @@ pattern HandleDesignImage(prompt: String, chat_id: String) -> String {
   // Call /generate-image endpoint — it generates and sends photo to Telegram
   let body = json_encode({prompt: prompt, chat_id: to_float(chat_id)})
   let result = try http_post("http://127.0.0.1:4000/generate-image", body, "application/json", 180.0)
-  if result == "" then {
+  if to_string(result) == "()" then {
     let _ = SendTelegramReply(chat_id, "Ошибка: генерация изображений недоступна.")
     return ""
   }
@@ -311,7 +312,7 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   if dept == "osp" or dept == "lz" then {
     let news_body = json_encode({query: query, dept: dept, limit: 5})
     let news_result = try http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json")
-    if news_result != "" then {
+    if to_string(news_result) != "()" then {
       let news_parsed = parse_json(news_result)
       let news = json_get(news_parsed, "news", "")
     }
@@ -628,6 +629,7 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   let context = BuildContext(dept, query, chat_id)
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy(dept, messages)
+  if proxy_result == "" then { return respond("200 ok") }
   let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = YanaAutoMemorize(query, reply, chat_id)
@@ -672,7 +674,7 @@ pattern DetectDepartment(text: String) -> String {
   // Russian keyword detection via proxy
   let body = json_encode({text: lower_text})
   let result = try http_post("http://127.0.0.1:4000/detect-dept", body, "application/json")
-  if result == "" then { return "" }
+  if to_string(result) == "()" then { return "" }
   let detected = json_get(parse_json(result), "dept", "")
   if detected != "" then { return detected }
 
@@ -697,6 +699,11 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let context = profile + anti_format + "\n\n=== Current Time & Date ===\n" + now_info + "\n\n=== Погода ===\n" + weather + "\n\n=== Calendar & Reminders ===\n" + calendar + "\n\n=== Долгосрочная память ===\n" + memories + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Recent Dialog ===\n" + dialog
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy(dept, messages)
+  if proxy_result == "" then {
+    let fallback = "Сервис временно недоступен. Попробуйте позже."
+    let _ = SendTelegramReply(chat_id, fallback)
+    return respond("200 ok")
+  }
   let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
   let delegate_target = YanaCheckDelegate(reply)
   if delegate_target != "" then {
@@ -710,7 +717,7 @@ pattern HandleYana(query: String, chat_id: String) -> String {
 }
 pattern YanaNowInfo() -> String {
   let resp = try http_get("http://127.0.0.1:4000/now-time")
-  if resp == "" then {
+  if to_string(resp) == "()" then {
     let ts = to_string(now())
     return "Текущее время (приблизительно): Unix " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
   }
@@ -724,7 +731,7 @@ pattern YanaNowInfo() -> String {
 
 pattern YanaWeather() -> String {
   let resp = try http_get("http://127.0.0.1:4000/now-weather")
-  if resp == "" then { return "Погода недоступна" }
+  if to_string(resp) == "()" then { return "Погода недоступна" }
   let w = json_get(parse_json(resp), "weather", "")
   if w == "" then { return "Погода недоступна" }
   return w
@@ -846,7 +853,7 @@ mlogserver {
       let _ = AuditLog("voice_received", "voice", "file_id: " + voice_file_id)
       let stt_body = json_encode({file_id: voice_file_id})
       let stt_result = try http_post("http://127.0.0.1:4000/stt", stt_body, "application/json")
-      if stt_result == "" then {
+      if to_string(stt_result) == "()" then {
         let _ = SendTelegramReply(chat_id, "Ошибка распознавания: STT-прокси недоступен.")
         return respond("200 ok")
       }
@@ -992,7 +999,7 @@ mlogserver {
       if len(correction_text) > 1.0 then {
         let fix_body = json_encode({text: correction_text, dept: recent_dept})
         let fix_result = try http_post("http://127.0.0.1:4000/learning/fix", fix_body, "application/json")
-        if fix_result == "" then {
+        if to_string(fix_result) == "()" then {
           let _ = SendTelegramReply(chat_id, "Сервис обучения временно недоступен. Коррекция не сохранена.")
           return respond("200 ok")
         }
@@ -1610,7 +1617,7 @@ mlogserver {
         let _ = SendTelegramReply(chat_id, "Анализирую свежие события...")
         let body = json_encode({query: news_query, limit: 15, chat_id: chat_id})
         let result = try http_post("http://127.0.0.1:4000/lz/news", body, "application/json")
-        if result == "" then {
+        if to_string(result) == "()" then {
           let _ = SendTelegramReply(chat_id, "Сервис новостей временно недоступен.")
           return respond("200 ok")
         }
@@ -1667,7 +1674,7 @@ mlogserver {
         caller_id: chat_id
       })
       let result = try http_post("http://127.0.0.1:4000/lz/osint", body, "application/json", 240.0)
-      if result == "" then {
+      if to_string(result) == "()" then {
         let _ = SendReport("OSINT-сканирование недоступно (прокси не отвечает).", "lz", "OSINT: " + username, "3.0", chat_id)
         return respond("200 ok")
       }
@@ -1695,7 +1702,7 @@ mlogserver {
         caller_id: chat_id
       })
       let result = try http_post("http://127.0.0.1:4000/lz/osint", body, "application/json", 240.0)
-      if result == "" then {
+      if to_string(result) == "()" then {
         let _ = SendReport("OSINT-сканирование недоступно (прокси не отвечает).", "lz", "OSINT Advanced: " + username, "4.0", chat_id)
         return respond("200 ok")
       }
@@ -1714,7 +1721,7 @@ mlogserver {
       // 1. OSINT scan
       let osint_body = json_encode({ username: name, level: "basic", chat_id: chat_id, caller_id: chat_id })
       let osint_result = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
-      if osint_result == "" then { let osint_result = "(OSINT-данные недоступны)" }
+      if to_string(osint_result) == "()" then { let osint_result = "(OSINT-данные недоступны)" }
 
       // 2. Web search
       let web_result = web_search(name, 5.0)
@@ -1742,7 +1749,7 @@ mlogserver {
         // OSINT data from LZ proxy
         let osint_body = json_encode({ username: actor, level: "basic", chat_id: chat_id, caller_id: chat_id })
         let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
-        if osint == "" then { let osint = "(OSINT-данные недоступны)" }
+        if to_string(osint) == "()" then { let osint = "(OSINT-данные недоступны)" }
 
         // OSP analysis via LLM
         let osp_profile = read_file("library/osp.md")
@@ -1765,7 +1772,7 @@ mlogserver {
 
       let osint_body = json_encode({ username: entity, level: "advanced", chat_id: chat_id, caller_id: chat_id })
       let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
-      if osint == "" then { let osint = "(OSINT-данные недоступны)" }
+      if to_string(osint) == "()" then { let osint = "(OSINT-данные недоступны)" }
 
       let legal_profile = read_file("library/legal.md")
       let check_prompt = legal_profile + "\n\nDue Diligence проверка контрагента:\n1. Цифровой след — насколько прозрачен?\n2. Профессиональные платформы (LinkedIn, Crunchbase) — совпадают с заявлениями?\n3. Красные флаги — даркнет-форумы, фрод-платформы, NSFW\n4. Возраст аккаунтов — давно ли существуют?\n5. Согласованность информации между платформами\n6. Рекомендация: безопасно / требует внимания / высокий риск\n7. ДИСКЛЕЙМЕР обязателен: \"OSINT-данные собраны из открытых источников. Результаты не гарантируют принадлежность аккаунтов конкретному лицу.\""
@@ -1787,7 +1794,7 @@ mlogserver {
         caller_id: chat_id
       })
       let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
-      if osint == "" then { let osint = "(OSINT-данные недоступны)" }
+      if to_string(osint) == "()" then { let osint = "(OSINT-данные недоступны)" }
 
       let marketing_profile = read_file("library/marketing.md")
       let brand_prompt = marketing_profile + "\n\nАнализ доступности бренда:\n1. На каких платформах имя уже занято?\n2. Кем занято — конкурент или просто тёзка?\n3. На каких ключевых платформах свободно?\n4. Рекомендация: использовать as-is / модифицировать / выбрать другое\n5. Если занято — варианты модификации (добавить _official, HQ, app...)\n6. Приоритетные платформы для регистрации (первые 48 часов после запуска)"
@@ -2114,18 +2121,21 @@ mlogserver {
     // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
     let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
     let ua_body = "{}"
-    let ua_result = http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
+    let ua_result = try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
+    if to_string(ua_result) == "()" then { let ua_result = "{}" }
     let ua_summary = json_get(parse_json(ua_result), "summary", "UA cycle failed")
 
     // Phase 1: LZ Daily Report (GitHub scan → Admin)
     let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
     let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
-    let lz_result = http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
+    let lz_result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
+    if to_string(lz_result) == "()" then { let lz_result = "{}" }
     let lz_summary = json_get(parse_json(lz_result), "report", "LZ daily failed")
 
     // Phase 2: Memory Maintenance
     let mem_body = "{}"
-    let mem_result = http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
+    let mem_result = try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
+    if to_string(mem_result) == "()" then { let mem_result = "{}" }
     let mem_summary = json_get(parse_json(mem_result), "result", "Memory maintenance failed")
 
     // Phase 3: Original AdminNightCycle
@@ -2142,8 +2152,7 @@ mlogserver {
     if secret != cron_secret then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by cron")
     let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
-    let result = http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0)
-    return respond("200 ok")
+    let result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0)
   }
 
   // Admin morning reply — 7:25 MSK (4:25 UTC) — response to Yana's morning brief
@@ -2154,7 +2163,7 @@ mlogserver {
     if secret != cron_secret then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_admin_reply", "admin", "admin morning reply triggered by cron")
     let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
-    let result = http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0)
+    let result = try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0)
     return respond("200 ok")
   }
 }
