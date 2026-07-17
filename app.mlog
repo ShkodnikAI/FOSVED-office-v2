@@ -2160,6 +2160,64 @@ mlogserver {
     let result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0)
   }
 
+  // Diagnostic: inspect real prod data + json_encode/parse_json reliability
+  // Uses /cron/ prefix (already routed to mlog, no reverse_proxy.py change)
+  // Protected by CRON_SECRET like all /cron/* endpoints
+  route "/cron/debug-echo" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let owner_id = env("OWNER_TELEGRAM_ID")
+    let out = ""
+
+    // 1) ReadDeptProfile("yana")
+    let r1_raw = ReadDeptProfile("yana")
+    let out = out + "=== ReadDeptProfile(yana) ===\n"
+    let out = out + "RAW (first 300): " + substring(r1_raw, 0.0, 300.0) + "\n"
+    let out = out + "json_encode: " + json_encode(r1_raw) + "\n\n"
+
+    // 2) GetCorrections("yana") — returns json_encode(query_result) internally
+    let r2_raw = GetCorrections("yana")
+    let out = out + "=== GetCorrections(yana) ===\n"
+    let out = out + "RAW (first 300): " + substring(r2_raw, 0.0, 300.0) + "\n"
+    let out = out + "json_encode: " + json_encode(r2_raw) + "\n\n"
+
+    // 3) GetRecentDialog(owner_id, "5") — returns json_encode(query_result) internally
+    let r3_raw = GetRecentDialog(owner_id, "5")
+    let out = out + "=== GetRecentDialog(owner, 5) ===\n"
+    let out = out + "RAW (first 300): " + substring(r3_raw, 0.0, 300.0) + "\n"
+    let out = out + "json_encode: " + json_encode(r3_raw) + "\n\n"
+
+    // 4) YanaCalendar() — returns plain text (manual concatenation)
+    let r4_raw = YanaCalendar()
+    let out = out + "=== YanaCalendar() ===\n"
+    let out = out + "RAW (first 300): " + substring(r4_raw, 0.0, 300.0) + "\n"
+    let out = out + "json_encode: " + json_encode(r4_raw) + "\n\n"
+
+    // 5) YanaRecallMemories("привет") — currently returns "" (stub for Block C)
+    let r5_raw = YanaRecallMemories("привет")
+    let out = out + "=== YanaRecallMemories(привет) ===\n"
+    let out = out + "RAW (first 300): " + substring(r5_raw, 0.0, 300.0) + "\n"
+    let out = out + "json_encode: " + json_encode(r5_raw) + "\n\n"
+
+    // 6) FULL context assembly — identical to HandleYana lines 690-700
+    // This is where json_encode must produce valid JSON for CallLLMProxy
+    let context = r1_raw + "\n\n=== Corrections ===\n" + r2_raw + "\n\n=== Recent Dialog ===\n" + r3_raw
+    let msg_json = json_encode([{role: "system", content: context}, {role: "user", content: "привет"}])
+    let out = out + "=== FULL CONTEXT json_encode (HandleYana line 700) ===\n"
+    let out = out + "RESULT (first 500): " + substring(msg_json, 0.0, 500.0) + "\n\n"
+
+    // 7) parse_json on json_encode output — this is CallLLMProxy line 245
+    // If this fails, we get the SAME "parse_json() error: expected value at line 1 column 2"
+    let parsed = parse_json(msg_json)
+    let out = out + "=== parse_json(json_encode(messages)) — CallLLMProxy test ===\n"
+    let out = out + "parse_json OK: YES\n"
+
+    return respond("200 " + out)
+  }
+
   // Admin morning reply — 7:25 MSK (4:25 UTC) — response to Yana's morning brief
   route "/cron/admin-reply" method=GET {
     let secret = query_param("secret")
