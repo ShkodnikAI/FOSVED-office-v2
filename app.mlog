@@ -107,9 +107,10 @@ pattern SaveAnalysis(topic: String, result: String) -> String {
   let escaped_topic = escape_json(topic)
   let escaped_result = escape_json(result)
   db_execute("INSERT INTO analysis (topic, full_result, status) VALUES ('" + escaped_topic + "', '" + escaped_result + "', 'drafted')")
-  let rows = to_string(query("SELECT last_insert_rowid() as lid", []))
-  if rows != "[]" then { return json_get(parse_json(rows), "[0].lid", "0") }
-  return "0"
+  let rows = query("SELECT last_insert_rowid() as lid", [])
+  let count = len(rows)
+  if count == 0.0 then { return "0" }
+  return json_get(rows[0], "lid", "0")
 }
 
 pattern AttachSource(analysis_id: String, title: String, claim: String) -> String {
@@ -488,8 +489,8 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
   if starts_with(raw_args, "actual=") then {
     let val_str = substring(raw_args, 7.0, len(raw_args))
     let actual_val = to_float(val_str)
-    let existing = to_string(query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept]))
-    if existing == "[]" or existing == "" then {
+    let existing = query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept])
+    if len(existing) == 0.0 then {
       return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
     }
     db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
@@ -503,8 +504,8 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
     if flag != "clean" and flag != "rewrite_required" then {
       return "outcome должен быть 'clean' или 'rewrite_required', получено: " + flag
     }
-    let existing = to_string(query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept]))
-    if existing == "[]" or existing == "" then {
+    let existing = query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept])
+    if len(existing) == 0.0 then {
       return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
     }
     db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
@@ -517,8 +518,8 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
 }
 
 pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> String {
-  let existing = to_string(query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept]))
-  if existing == "[]" or existing == "" then {
+  let existing = query("SELECT * FROM dept_archive WHERE id = $1 AND dept = $2", [to_string(entry_id), dept])
+  if len(existing) == 0.0 then {
     return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
   }
   db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
@@ -528,14 +529,13 @@ pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> Stri
 
 // Narad 8 — Finance MAPE: requires min 10 verified pairs (forecast_value + actual_value)
 pattern ComputeFinanceMAPE() -> String {
-  let rows = to_string(query("SELECT a.forecast_value, v.actual_value FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'finance' AND a.forecast_value IS NOT NULL AND v.actual_value IS NOT NULL"))
-  if rows == "[]" or rows == "" then {
+  let rows = query("SELECT a.forecast_value, v.actual_value FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'finance' AND a.forecast_value IS NOT NULL AND v.actual_value IS NOT NULL")
+  if len(rows) == 0.0 then {
     return "MAPE: недостаточно данных для калибровки (0/10 записей)"
   }
-  let parsed = parse_json(rows)
   let n = 0.0
   let sum_error = 0.0
-  each row in parsed {
+  each row in rows {
     let n = n + 1.0
     let forecast = to_float(json_get(row, "forecast_value", "0"))
     let actual = to_float(json_get(row, "actual_value", "0"))
@@ -553,14 +553,13 @@ pattern ComputeFinanceMAPE() -> String {
 
 // Narad 8 — Legal % без rewrites: requires min 10 verified entries with outcome_flag
 pattern ComputeLegalCleanRate() -> String {
-  let rows = to_string(query("SELECT v.outcome_flag FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'legal' AND v.outcome_flag IS NOT NULL"))
-  if rows == "[]" or rows == "" then {
+  let rows = query("SELECT v.outcome_flag FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'legal' AND v.outcome_flag IS NOT NULL")
+  if len(rows) == 0.0 then {
     return "% без rewrites: недостаточно данных для калибровки (0/10 записей)"
   }
-  let parsed = parse_json(rows)
   let n = 0.0
   let clean_count = 0.0
-  each row in parsed {
+  each row in rows {
     let n = n + 1.0
     let flag = json_get(row, "outcome_flag", "")
     if flag == "clean" then {
@@ -575,12 +574,12 @@ pattern ComputeLegalCleanRate() -> String {
 }
 
 pattern ScoreDept(dept: String) -> String {
-  let total_rows = to_string(query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1", [dept]))
-  let verified_rows = to_string(query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1 AND status = 'verified'", [dept]))
-  let drafted_rows = to_string(query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1 AND status = 'drafted'", [dept]))
-  let total = json_get(parse_json(total_rows), "[0].cnt", "0")
-  let verified = json_get(parse_json(verified_rows), "[0].cnt", "0")
-  let drafted = json_get(parse_json(drafted_rows), "[0].cnt", "0")
+  let total_rows = query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1", [dept])
+  let verified_rows = query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1 AND status = 'verified'", [dept])
+  let drafted_rows = query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = $1 AND status = 'drafted'", [dept])
+  let total = json_get(total_rows[0], "cnt", "0")
+  let verified = json_get(verified_rows[0], "cnt", "0")
+  let drafted = json_get(drafted_rows[0], "cnt", "0")
 
   let base = "Score: " + dept + "\nВсего записей: " + total + "\nВерифицировано: " + verified + "\nВ ожидании: " + drafted
 
@@ -598,20 +597,17 @@ pattern ScoreDept(dept: String) -> String {
 }
 
 pattern ArchiveSearch(dept: String, filter_text: String) -> String {
-  let rows = ""
   if filter_text != "" then {
-    let rows = to_string(query("SELECT id, topic, status, created_at FROM dept_archive WHERE dept = $1 AND topic LIKE $2 ORDER BY created_at DESC LIMIT 10", [dept, "%" + filter_text + "%"]))
+    return query("SELECT id, topic, status, created_at FROM dept_archive WHERE dept = $1 AND topic LIKE $2 ORDER BY created_at DESC LIMIT 10", [dept, "%" + filter_text + "%"])
   } else {
-    let rows = to_string(query("SELECT id, topic, status, created_at FROM dept_archive WHERE dept = $1 ORDER BY created_at DESC LIMIT 10", [dept]))
+    return query("SELECT id, topic, status, created_at FROM dept_archive WHERE dept = $1 ORDER BY created_at DESC LIMIT 10", [dept])
   }
-  return rows
 }
 
-pattern FormatArchiveRows(rows_json: String) -> String {
-  if rows_json == "[]" or rows_json == "" then { return "Нет записей в архиве." }
+pattern FormatArchiveRows(rows) -> String {
+  if len(rows) == 0.0 then { return "Нет записей в архиве." }
   let output = ""
-  let parsed = parse_json(rows_json)
-  each item in parsed {
+  each item in rows {
     let id = json_get(item, "id", "?")
     let topic = json_get(item, "topic", "?")
     let status = json_get(item, "status", "?")
@@ -764,15 +760,12 @@ pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> Strin
 }
 
 pattern YanaCalendar() -> String {
-  let rows = to_string(query("SELECT event_text, event_date, event_type FROM yana_events WHERE created_at IS NOT NULL ORDER BY event_date ASC LIMIT 20", []))
-  if rows == "[]" then { return "Нет запланированных событий." }
-  let parsed = parse_json(rows)
-  if parsed == "" then { return "Нет запланированных событий." }
-  let count = len(parsed)
+  let rows = query("SELECT event_text, event_date, event_type FROM yana_events WHERE created_at IS NOT NULL ORDER BY event_date ASC LIMIT 20", [])
+  let count = len(rows)
   if count == 0.0 then { return "Нет запланированных событий." }
   let result = "Запланированные события (" + to_string(count) + "):\n"
   let i = 0.0
-  each row in parsed {
+  each row in rows {
     let i = i + 1.0
     let etext = json_get(row, "event_text", "")
     let edate = json_get(row, "event_date", "")
@@ -1138,26 +1131,20 @@ mlogserver {
 
     // /calendar — show Yana events
     if text == "/calendar" then {
-      let rows = to_string(query("SELECT event_text, event_date, event_type FROM yana_events ORDER BY event_date ASC LIMIT 20", []))
-      if rows == "[]" then {
+      let rows = query("SELECT event_text, event_date, event_type FROM yana_events ORDER BY event_date ASC LIMIT 20", [])
+      if len(rows) == 0.0 then {
         let _ = SendTelegramReply(chat_id, "Календарь пуст. Используй /remember <текст> [дата] чтобы добавить событие.")
       } else {
-        let parsed = parse_json(rows)
-        let count = len(parsed)
-        if count == 0.0 then {
-          let _ = SendTelegramReply(chat_id, "Календарь пуст. Используй /remember <текст> [дата] чтобы добавить событие.")
-        } else {
-          let output = "Календарь Яны (" + to_string(count) + "):\n\n"
-          let i = 0.0
-          each row in parsed {
-            let i = i + 1.0
-            let etext = json_get(row, "event_text", "")
-            let edate = json_get(row, "event_date", "")
-            let etype = json_get(row, "event_type", "напоминание")
-            let output = output + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
-          }
-          let _ = SendTelegramReply(chat_id, output)
+        let output = "Календарь Яны (" + to_string(len(rows)) + "):\n\n"
+        let i = 0.0
+        each row in rows {
+          let i = i + 1.0
+          let etext = json_get(row, "event_text", "")
+          let edate = json_get(row, "event_date", "")
+          let etype = json_get(row, "event_type", "напоминание")
+          let output = output + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
         }
+        let _ = SendTelegramReply(chat_id, output)
       }
       return respond("200 ok")
     }
