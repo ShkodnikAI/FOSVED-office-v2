@@ -14,7 +14,7 @@ PORT = int(os.environ.get("PORT", 10000))
 
 # Routes that go to LLM Proxy (Mini App + dashboards + archive + scheduler + learning)
 LLM_ROUTES_PREFIXES = [
-    "/webhook/",   # Telegram webhook — Python handler
+    # "/webhook/",   # Telegram webhook — Block C: mlog
     "/miniapp/",
     "/miniapp",
     "/miniapp-spa/",
@@ -38,7 +38,7 @@ LLM_ROUTES_PREFIXES = [
 
 # Routes that go to Metalogos
 MLOG_ROUTES_PREFIXES = [
-    # "/webhook/",  # Python handles Telegram
+    "/webhook/",  # Block C: mlog
     "/cron/",
     "/health",
     "/",
