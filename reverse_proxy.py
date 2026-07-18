@@ -70,6 +70,10 @@ def root():
 def proxy(path):
     full_path = "/" + path
 
+    # Rewrite /webhook/ → /webhook/telegram for mlog (Telegram sends /webhook/, mlog route is /webhook/telegram)
+    if full_path == "/webhook/":
+        full_path = "/webhook/telegram"
+
     # Determine target
     if is_llm_route(full_path):
         target_url = LLM_URL + full_path
