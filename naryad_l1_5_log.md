@@ -1,17 +1,16 @@
-# Наряд L1.5 — лог исполнителя
+# Лог: L1.5 calendar NULL
 
-## Хронология
+## 2026-07-19
 
-1. Ветка `fix/l1-5-timeouts` от main (4ddd680)
-2. Блок A: sed-подстановка `, 240.0)` в 10 строк (3 оставшихся; 7 уже имели 240.0 от частичных правок в предыдущей сессии)
-3. Блок B: первая попытка sed -i с фиксированными номерами — сдвиг строк из-за вставок, 4 из 8 уехали. Откат, переписал через bash-скрипт с reverse-order insert. Вторая попытка — чисто.
-4. mlog check: 0 parse errors, 384 предсуществующих warnings
-5. Локальный smoke: CRON_SECRET="" → Forbidden, CRON_SECRET=testsecret + secret=testsecret → прошёл guard
-6. Коммит 8a91ffc, мерж в main, пуш → 14b46fb
+- 06:00 Создана ветка `fix/l1-5-calendar-null` от `be7ad06`.
+- 06:01 A.1: COALESCE в SELECT YanaCalendar (app.mlog:765).
+- 06:01 A.2: COALESCE в SELECT /calendar (app.mlog:1149).
+- 06:02 Smoke-тест: БЕЗ COALESCE на NULL-строке → `type mismatch in string concatenation: String + Unit` (воспроизведён).
+- 06:02 Smoke-тест: С COALESCE на NULL-строке → ошибки `String + Unit` нет (Float от `to_string()` — отдельный баг L1, не в scope).
+- 06:03 `mlog check` — 0 parse errors.
+- 06:03 `git diff --stat -- app.mlog` → 1 file, 2 insertions, 2 deletions.
+- 06:03 Коммит `0681e71`.
 
-## Итог
+## Затруднения
 
-- 10 http_post получили 240.0s таймаут
-- 8 cron-роутов закрыты при пустом CRON_SECRET
-- 0 parse errors
-- Ничего кроме app.mlog не менялось
+Нет.
