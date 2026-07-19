@@ -1,0 +1,53 @@
+db { url: "sqlite:/tmp/test_calendar.db" }
+
+pattern YanaCalendarUnderTest() -> String {
+  let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_1_before_query','ok')")
+  let rows = query("SELECT event_text, event_date, event_type FROM yana_events WHERE created_at IS NOT NULL ORDER BY event_date ASC LIMIT 20", [])
+  let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_2_after_query','ok')")
+  let count = len(rows)
+  let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_3_after_len','ok')")
+  if count == 0.0 then { return "Нет запланированных событий." }
+  let result = "Запланированные события (" + to_string(count) + "):\n"
+  let i = 0.0
+  each row in rows {
+    let i = i + 1.0
+    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_3b_i=" + to_string(i) + "','ok')")
+    let etext = json_get(row, "event_text", "")
+    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_4_after_etext','ok')")
+    let edate = json_get(row, "event_date", "")
+    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_4b_after_edate','ok')")
+    let etype = json_get(row, "event_type", "напоминание")
+    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_4c_after_etype','ok')")
+    let result = result + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
+    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_4d_after_result_concat','ok')")
+  }
+  let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_5_complete','ok')")
+  return result
+}
+
+mlogserver {
+  port: 19997
+  route "/setup" method=GET {
+    let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    let _ = db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    let _ = db_execute("DELETE FROM audit_log")
+    let _ = db_execute("DELETE FROM yana_events")
+    let _ = db_execute("INSERT INTO yana_events (event_text, event_date, event_type, created_at) VALUES ('Встреча с партнёрами', '2026-07-20 10:00', 'встреча', datetime('now'))")
+    let _ = db_execute("INSERT INTO yana_events (event_text, event_date, event_type, created_at) VALUES ('Отправить отчёт', '2026-07-21 18:00', 'напоминание', datetime('now'))")
+    let _ = db_execute("INSERT INTO yana_events (event_text, event_date, event_type, created_at) VALUES ('Код-ревью', '2026-07-22 14:00', 'задача', datetime('now'))")
+    return respond("200 setup done: 3 events inserted")
+  }
+  route "/run" method=GET {
+    let r = YanaCalendarUnderTest()
+    return respond("200 " + r)
+  }
+  route "/checkpoints" method=GET {
+    let rows = query("SELECT details FROM audit_log WHERE action = 'checkpoint' ORDER BY id", [])
+    let out = ""
+    each row in rows {
+      let out = out + json_get(row, "details", "") + "\n"
+    }
+    if out == "" then { return respond("200 NO CHECKPOINTS") }
+    return respond("200 " + out)
+  }
+}
