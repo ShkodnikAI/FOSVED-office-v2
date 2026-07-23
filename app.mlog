@@ -813,6 +813,67 @@ pattern YanaCheckDelegate(reply: String) -> String {
   return ""
 }
 
+// ── Reminder Delivery (F-2) ──────────────────────────────────────────
+pattern DeliverDueReminders() -> String {
+  let rows = query("SELECT id, COALESCE(event_text,'') AS event_text, COALESCE(rrule_kind,'') AS rrule_kind, COALESCE(fire_time,'') AS fire_time, COALESCE(fire_weekday,'') AS fire_weekday, COALESCE(fire_monthday,'') AS fire_monthday, COALESCE(chat_id,'') AS chat_id, COALESCE(until_date,'') AS until_date FROM yana_events WHERE active = 1 AND rrule_kind IS NOT NULL AND rrule_kind != '' AND next_fire_at IS NOT NULL AND next_fire_at <= datetime('now') ORDER BY next_fire_at ASC LIMIT 20", [])
+  let count = 0.0
+  each row in rows {
+    let rid = json_get(row, "id", "")
+    let rtext = json_get(row, "event_text", "")
+    let rkind = json_get(row, "rrule_kind", "")
+    let rchat = json_get(row, "chat_id", "")
+    let runtil = json_get(row, "until_date", "")
+    let target_chat = rchat
+    if target_chat == "" then { let target_chat = env("OWNER_TELEGRAM_ID") }
+    let send_result = try SendTelegramReply(target_chat, "Напоминание: " + rtext)
+    if to_string(send_result) != "()" then {
+      let _ = query("UPDATE yana_events SET reminded_at = datetime('now') WHERE id = ?", [rid])
+      if rkind == "once" then {
+        let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
+      } else if rkind == "daily" then {
+        if runtil != "" then {
+          let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
+          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
+            let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
+          } else {
+            let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 day') WHERE id = ?", [rid])
+          }
+        } else {
+          let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 day') WHERE id = ?", [rid])
+        }
+      } else if rkind == "weekly" then {
+        if runtil != "" then {
+          let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
+          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
+            let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
+          } else {
+            let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+7 days') WHERE id = ?", [rid])
+          }
+        } else {
+          let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+7 days') WHERE id = ?", [rid])
+        }
+      } else if rkind == "yearly" then {
+        if runtil != "" then {
+          let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
+          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
+            let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
+          } else {
+            let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 year') WHERE id = ?", [rid])
+          }
+        } else {
+          let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 year') WHERE id = ?", [rid])
+        }
+      }
+      let count = count + 1.0
+    }
+  }
+  let _ = AuditLog("reminders_delivered", "system", "sent=" + to_string(count))
+  return "sent=" + to_string(count)
+}
+
 // ============================================================
 // SERVER
 // ============================================================
@@ -2280,6 +2341,17 @@ mlogserver {
     let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by cron")
     let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
     let result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0)
+  }
+
+  // F-2: Reminder delivery cron — called every 5 minutes by external scheduler
+  route "/cron/reminders" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let result = DeliverDueReminders()
+    return respond("200 " + result)
   }
 
   // Diagnostic: read last checkpoint trail from audit_log
