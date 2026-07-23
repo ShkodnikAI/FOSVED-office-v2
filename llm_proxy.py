@@ -4732,7 +4732,7 @@ if __name__ == "__main__":
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
              f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
+    app.run(host="127.0.0.1", port=PORT, threaded=True)
 
 
 # ══════════════════════════════════════════════════════════════════════
