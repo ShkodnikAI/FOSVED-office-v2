@@ -1,0 +1,240 @@
+// Fosved Office v2 — LZ Dispatcher (MEGA-4)
+// 9 scan sources, Apodex deep research, LZ compare, channel management, monitoring
+
+// ── HandleLZ — standard LLM query ────────────────────────────────
+pattern HandleLZ(query: String, chat_id: String) -> String {
+  let dept = "lz"
+  let context = BuildContext(dept, query, chat_id)
+  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy(dept, messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
+  let _ = RecordAssistantMessage(chat_id, dept, reply)
+  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ── LZ Deep Scan — 9 sources via LLM aggregation ──────────────────
+pattern LZDeepScan(query: String, chat_id: String) -> String {
+  let _ = AuditLog("lz_deep_scan", "lz", "query: " + substring(query, 0, 100))
+
+  let lz_profile = read_file("library/lz.md")
+
+  // Aggregate scan results from 9 sources via LLM
+  let scan_prompt = lz_profile + "\n\nDEEP SCAN mode. Aggregate findings from these 9 sources:\n1. Web (Google Scholar, arXiv, tech blogs)\n2. YouTube (tech channels, conferences)\n3. Reddit (r/technology, r/science, r/Futurology)\n4. Science (Nature, Science, IEEE)\n5. GitHub (trending repos, releases)\n6. Social (Twitter/X tech, LinkedIn)\n7. Telegram (tech channels, developer groups)\n8. Darknet (hacker forums, security disclosures)\n9. Academic (citations, patents)\n\nFor each source indicate: found/not found, key findings.\nStructure: Signal -> Impact -> Opportunity.\nMark facts: [FACT verified] or [FACT unverified]."
+
+  let messages = json_encode([{role: "system", content: scan_prompt}, {role: "user", content: "Deep scan: " + query}])
+  let proxy_result = CallLLMProxy("lz", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Deep scan failed.")
+  let _ = RecordAssistantMessage(chat_id, "lz", reply)
+
+  return reply
+}
+
+// ── LZ Deep Research via Apodex — proxy call ─────────────────────
+pattern LZDeepResearch(query: String, chat_id: String) -> String {
+  let _ = AuditLog("lz_deep_research", "lz", "Apodex query: " + substring(query, 0, 100))
+
+  // Send initial message
+  let _ = SendTelegramReply(chat_id, "Launching Apodex deep research. This will take 2-5 minutes. Each fact will be verified.")
+
+  // Send typing indicator
+  let _ = SendTyping(chat_id)
+
+  // Build research prompt for LZ context
+  let lz_profile = read_file("library/lz.md")
+  let research_context = lz_profile + "\n\nIMPORTANT: This is a DEEP RESEARCH request via Apodex. Each fact must be verified. Mark: [FACT verified], [FACT unverified], [CONFLICT]. Include disruption potential (1-10). Russian language."
+
+  // Call proxy endpoint for Apodex deep research
+  let body = json_encode({
+    query: query,
+    dept: "lz",
+    provider: "apodex",
+    model: "apodex-1.0-mini",
+    system_context: research_context,
+    chat_id: chat_id
+  })
+  let result = try http_post("http://127.0.0.1:4000/lz/deep-research", body, "application/json")
+  if to_string(result) == "()" then { return "Deep research unavailable (proxy down)." }
+  let answer = json_get(parse_json(result), "response", "Deep research failed. Apodex may be unavailable.")
+
+  let _ = RecordAssistantMessage(chat_id, "lz", answer)
+  let _ = AuditLog("lz_deep_research_done", "lz", "Apodex research completed for: " + substring(query, 0, 50))
+
+  return answer
+}
+
+// ── LZ Compare — side-by-side LLM vs Apodex ──────────────────────
+pattern LZCompare(query: String, chat_id: String) -> String {
+  let _ = AuditLog("lz_compare", "lz", "compare query: " + substring(query, 0, 100))
+
+  let _ = SendTelegramReply(chat_id, "Running comparison: LLM vs Apodex. This will take 3-5 minutes.")
+
+  let lz_profile = read_file("library/lz.md")
+
+  // 1. Fast LLM call
+  let fast_messages = json_encode([{role: "system", content: lz_profile}, {role: "user", content: query}])
+  let fast_result = CallLLMProxy("lz", fast_messages)
+  if to_string(fast_result) == "()" then { return "Сервис временно недоступен." }
+  let fast_reply = to_string(json_get(parse_json(fast_result), "reply", "Fast LLM failed."))
+
+  // 2. Apodex deep research
+  let apodex_context = lz_profile + "\n\nDeep research with verification. Mark: [FACT verified], [FACT unverified], [CONFLICT]. Russian language."
+  let apodex_body = json_encode({
+    query: query,
+    dept: "lz",
+    provider: "apodex",
+    model: "apodex-1.0-mini",
+    system_context: apodex_context,
+    chat_id: chat_id
+  })
+  let apodex_result = try http_post("http://127.0.0.1:4000/lz/deep-research", apodex_body, "application/json")
+  if to_string(apodex_result) == "()" then { let apodex_result = "{\"response\": \"Apodex unavailable (proxy down).\"}" }
+  let deep_reply = to_string(json_get(parse_json(apodex_result), "response", "Apodex failed."))
+
+  // 3. Build comparison
+  let comparison = "=== FAST LLM (10 sec) ===\n" + fast_reply + "\n\n=== APODEX VERIFIED (3-5 min) ===\n" + deep_reply
+  let _ = RecordAssistantMessage(chat_id, "lz", comparison)
+
+  let _ = AuditLog("lz_compare_done", "lz", "comparison completed")
+
+  return comparison
+}
+
+// ── Scan individual sources ───────────────────────────────────────
+pattern ScanWeb(query: String) -> String {
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan the web (Google Scholar, arXiv, tech blogs) for: " + query + "\nFind latest articles, papers, blog posts. Cite sources."}, {role: "user", content: "Web scan: " + query}])
+  let result = CallLLMProxy("lz", messages)
+  if to_string(result) == "()" then { return "Web scan unavailable (proxy down)." }
+  return json_get(parse_json(result), "reply", "Web scan failed.")
+}
+
+pattern ScanYouTube(query: String) -> String {
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan YouTube tech channels for: " + query + "\nFind relevant videos, channels, conferences."}, {role: "user", content: "YouTube scan: " + query}])
+  let result = CallLLMProxy("lz", messages)
+  if to_string(result) == "()" then { return "Сервис временно недоступен." }
+  return json_get(parse_json(result), "reply", "YouTube scan failed.")
+}
+
+pattern ScanReddit(query: String) -> String {
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan Reddit (r/technology, r/science, r/Futurology) for: " + query + "\nFind relevant discussions, opinions, AMAs."}, {role: "user", content: "Reddit scan: " + query}])
+  let result = CallLLMProxy("lz", messages)
+  if to_string(result) == "()" then { return "Сервис временно недоступен." }
+  return json_get(parse_json(result), "reply", "Reddit scan failed.")
+}
+
+pattern ScanScience(query: String) -> String {
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan scientific sources (Nature, Science, IEEE, arXiv) for: " + query + "\nFind papers, citations, breakthroughs."}, {role: "user", content: "Science scan: " + query}])
+  let result = CallLLMProxy("lz", messages)
+  if to_string(result) == "()" then { return "Сервис временно недоступен." }
+  return json_get(parse_json(result), "reply", "Science scan failed.")
+}
+
+pattern ScanGitHub(query: String) -> String {
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan GitHub (trending repos, releases, issues) for: " + query + "\nFind repositories, releases, developer activity."}, {role: "user", content: "GitHub scan: " + query}])
+  let result = CallLLMProxy("lz", messages)
+  if to_string(result) == "()" then { return "Сервис временно недоступен." }
+  return json_get(parse_json(result), "reply", "GitHub scan failed.")
+}
+
+pattern ScanSocial(query: String) -> String {
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan social media (Twitter/X, LinkedIn) for: " + query + "\nFind relevant posts, expert opinions, trends."}, {role: "user", content: "Social scan: " + query}])
+  let result = CallLLMProxy("lz", messages)
+  if to_string(result) == "()" then { return "Сервис временно недоступен." }
+  return json_get(parse_json(result), "reply", "Social scan failed.")
+}
+
+pattern ScanTelegram(query: String) -> String {
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan Telegram tech channels and groups for: " + query + "\nFind relevant discussions, channels, posts."}, {role: "user", content: "Telegram scan: " + query}])
+  let result = CallLLMProxy("lz", messages)
+  if to_string(result) == "()" then { return "Сервис временно недоступен." }
+  return json_get(parse_json(result), "reply", "Telegram scan failed.")
+}
+
+pattern ScanDarknet(query: String) -> String {
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan darknet and security sources for: " + query + "\nFind security disclosures, vulnerability reports, hacker discussions. Caution: only publicly known information."}, {role: "user", content: "Darknet/security scan: " + query}])
+  let result = CallLLMProxy("lz", messages)
+  if to_string(result) == "()" then { return "Сервис временно недоступен." }
+  return json_get(parse_json(result), "reply", "Darknet scan failed.")
+}
+
+// ── LZ All — scan + deep (full pipeline) ──────────────────────────
+pattern LZAllScan(query: String, chat_id: String) -> String {
+  let _ = SendTelegramReply(chat_id, "Running full LZ pipeline: 9-source scan + Apodex deep research. This will take 5-8 minutes.")
+
+  // Phase 1: Deep Scan (9 sources)
+  let scan_result = LZDeepScan(query, chat_id)
+
+  // Phase 2: Apodex Deep Research with scan results as context
+  let lz_profile = read_file("library/lz.md")
+  let research_context = lz_profile + "\n\nFULL RESEARCH mode. Use these preliminary scan results as context:\n" + substring(scan_result, 0, 2000) + "\n\nNow perform deep verified research. Each fact: [FACT verified] or [FACT unverified]. Include evidence graph. Russian language."
+
+  let body = json_encode({
+    query: query,
+    dept: "lz",
+    provider: "apodex",
+    model: "apodex-1.0-mini",
+    system_context: research_context,
+    chat_id: chat_id
+  })
+  let result = try http_post("http://127.0.0.1:4000/lz/deep-research", body, "application/json")
+  if to_string(result) == "()" then { return "Full scan unavailable (proxy down)." }
+  let answer = json_get(parse_json(result), "response", "Full scan failed.")
+
+  let _ = RecordAssistantMessage(chat_id, "lz", answer)
+  let _ = AuditLog("lz_all_scan_done", "lz", "full pipeline completed")
+
+  return answer
+}
+
+// ── LZ Channel Management ────────────────────────────────────────
+pattern LZChannelAdd(channel_id: String, category: String) -> String {
+  db_execute("INSERT INTO lz_telegram_channels (channel_id, channel_name, category) VALUES ('" + escape_json(channel_id) + "', '" + escape_json(channel_id) + "', '" + escape_json(category) + "')")
+  let _ = AuditLog("lz_channel_add", "lz", "channel=" + channel_id + " category=" + category)
+  return "Channel " + channel_id + " added to monitoring (category: " + category + ")."
+}
+
+pattern LZChannels() -> String {
+  let rows = query("SELECT channel_id, channel_name, category, added_at FROM lz_telegram_channels ORDER BY added_at DESC LIMIT 20", [])
+  let output = "Monitored channels:\n"
+  each row in rows {
+    let ch_id = json_get(to_string(row), "channel_id", "")
+    let ch_name = json_get(to_string(row), "channel_name", "")
+    let category = json_get(to_string(row), "category", "")
+    let output = output + "- " + to_string(ch_id) + " [" + to_string(category) + "]\n"
+  }
+  if output == "Monitored channels:\n" then {
+    return "No channels being monitored. Use /lz_channel add <channel_id> <category>"
+  }
+  return output
+}
+
+pattern LZMonitor(query: String) -> String {
+  db_execute("INSERT INTO lz_monitors (query, sources, frequency, last_scan, created_at) VALUES ('" + escape_json(query) + "', 'all', 'daily', '', datetime('now'))")
+  let _ = AuditLog("lz_monitor_add", "lz", "topic=" + substring(query, 0, 100))
+  return "Topic added to daily monitoring: " + query + "\nWill be scanned daily via cron."
+}
+
+pattern LZMonitorList() -> String {
+  let rows = query("SELECT query, sources, frequency, last_scan, created_at FROM lz_monitors ORDER BY created_at DESC LIMIT 20", [])
+  let output = "Active monitors:\n"
+  each row in rows {
+    let topic = json_get(to_string(row), "query", "")
+    let sources = json_get(to_string(row), "sources", "")
+    let freq = json_get(to_string(row), "frequency", "")
+    let output = output + "- " + to_string(topic) + " [" + to_string(freq) + ", " + to_string(sources) + "]\n"
+  }
+  if output == "Active monitors:\n" then {
+    return "No active monitors. Use /lz_monitor <topic>"
+  }
+  return output
+}

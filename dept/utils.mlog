@@ -1,0 +1,230 @@
+// Fosved Office v2 — Utils (MEGA-3)
+// AuditLog, archive helpers, strip HTML, dept hashtags, shared utilities
+
+// ── Audit Log (18 action types) ──────────────────────────────────────
+pattern AuditLog(action: String, dept: String, details: String) -> String {
+  let escaped_details = escape_json(details)
+  let escaped_action = escape_json(action)
+  let escaped_dept = escape_json(dept)
+  db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('" + escaped_action + "', 'system', '" + escaped_dept + "', '" + escaped_details + "', 'ok')")
+  return "ok"
+}
+
+// ── Corrections retrieval ─────────────────────────────────────────────
+pattern GetCorrections(dept: String) -> String {
+  let rows = query("SELECT correction FROM adapt_corrections WHERE dept = ? ORDER BY created_at DESC LIMIT 5", [dept])
+  return json_encode(rows)
+}
+
+// ── Recent dialog context ────────────────────────────────────────────
+pattern GetRecentDialog(chat_id: String, limit: String) -> String {
+  let rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?", [chat_id, limit])
+  return json_encode(rows)
+}
+
+// ── Strip HTML for archive (Telegram plain text, MEGA-4: Apodex badges) ──
+pattern StripHtml(text: String) -> String {
+  let clean = text
+  // Replace HTML badges with text markers
+  let clean = replace(clean, "<span class=\"badge badge-fact\">ФАКТ</span>", "[ФАКТ]")
+  let clean = replace(clean, "<span class=\"badge badge-fact\">FACT</span>", "[FACT]")
+  let clean = replace(clean, "<span class=\"badge badge-verified\">FACT verified</span>", "[FACT verified]")
+  let clean = replace(clean, "<span class=\"badge badge-verified\">ФАКТ ✓verified</span>", "[ФАКТ verified]")
+  let clean = replace(clean, "<span class=\"badge badge-unverified\">FACT unverified</span>", "[FACT unverified]")
+  let clean = replace(clean, "<span class=\"badge badge-unverified\">ФАКТ ⚠unverified</span>", "[ФАКТ unverified]")
+  let clean = replace(clean, "<span class=\"badge badge-conflicting\">CONFLICT</span>", "[КОНФЛИКТ]")
+  let clean = replace(clean, "<span class=\"badge badge-conflicting\">КОНФЛИКТ</span>", "[КОНФЛИКТ]")
+  let clean = replace(clean, "<span class=\"badge badge-interp\">ИНТЕРПРЕТАЦИЯ</span>", "[ИНТЕРПРЕТАЦИЯ]")
+  let clean = replace(clean, "<span class=\"badge badge-interp\">INTERPRETATION</span>", "[ИНТЕРПРЕТАЦИЯ]")
+  let clean = replace(clean, "<span class=\"badge badge-spec\">СПЕКУЛЯЦИЯ</span>", "[СПЕКУЛЯЦИЯ]")
+  let clean = replace(clean, "<span class=\"badge badge-spec\">SPEC</span>", "[СПЕКУЛЯЦИЯ]")
+  // Remove remaining HTML tags
+  let clean = replace(clean, "<h2>", "\n\n** ")
+  let clean = replace(clean, "</h2>", " **\n")
+  let clean = replace(clean, "<h3>", "\n* ")
+  let clean = replace(clean, "</h3>", " *\n")
+  let clean = replace(clean, "<p>", "")
+  let clean = replace(clean, "</p>", "\n")
+  let clean = replace(clean, "<li>", "- ")
+  let clean = replace(clean, "</li>", "\n")
+  let clean = replace(clean, "<br>", "\n")
+  let clean = replace(clean, "<br/>", "\n")
+  let clean = replace(clean, "<hr>", "\n---\n")
+  let clean = replace(clean, "<hr/>", "\n---\n")
+  let clean = replace(clean, "<div class=\"verdict\">", "\n[VERDICT]\n")
+  let clean = replace(clean, "<div class=\"disclaimer\">", "\n[DISCLAIMER]\n")
+  let clean = replace(clean, "<div", "")
+  let clean = replace(clean, "</div>", "")
+  let clean = replace(clean, "<b>", "")
+  let clean = replace(clean, "</b>", "")
+  let clean = replace(clean, "<strong>", "")
+  let clean = replace(clean, "</strong>", "")
+  let clean = replace(clean, "<em>", "")
+  let clean = replace(clean, "</em>", "")
+  let clean = replace(clean, "<i>", "")
+  let clean = replace(clean, "</i>", "")
+  let clean = replace(clean, "<span", "")
+  let clean = replace(clean, "</span>", "")
+  let clean = replace(clean, "<a ", "")
+  let clean = replace(clean, "</a>", "")
+  let clean = replace(clean, "<table>", "")
+  let clean = replace(clean, "</table>", "")
+  let clean = replace(clean, "<tr>", "\n")
+  let clean = replace(clean, "</tr>", "")
+  let clean = replace(clean, "<td>", " ")
+  let clean = replace(clean, "</td>", " ")
+  let clean = replace(clean, "<th>", " ")
+  let clean = replace(clean, "</th>", " ")
+  // Clean up leftover attribute fragments
+  let clean = replace(clean, "class=\"", "")
+  let clean = replace(clean, "style=\"", "")
+  return clean
+}
+
+// ── Department hashtags for archive channel ─────────────────────────
+pattern DeptHashtags(dept: String) -> String {
+  if dept == "osp" then { return "#OSP #analytics #strategy" }
+  if dept == "lz" then { return "#LZ #technology #research" }
+  if dept == "expert" then { return "#Expert #briefing" }
+  if dept == "marketing" then { return "#Marketing #audience" }
+  if dept == "finance" then { return "#Finance #cashflow" }
+  if dept == "legal" then { return "#Legal #contracts" }
+  if dept == "dev" then { return "#Dev #code #architecture" }
+  if dept == "design" then { return "#Design #UX" }
+  if dept == "qa" then { return "#QA #testing" }
+  if dept == "visual" then { return "#Visual #infographic" }
+  if dept == "engineering" then { return "#Engineering #calculations" }
+  if dept == "kavalnya" then { return "#Kavalnya #methodology" }
+  if dept == "yana" then { return "#Yana #cabinet" }
+  if dept == "admin" then { return "#Admin #system" }
+  return "#FosvedOffice"
+}
+
+// ── Department display name (extended) ─────────────────────────────
+pattern DeptDisplayName(dept: String) -> String {
+  if dept == "yana" then { return "Yana — Shef de kabinet" }
+  if dept == "osp" then { return "OSP — Strategicheskij analiz" }
+  if dept == "lz" then { return "LZ — Laboratoriya znanij" }
+  if dept == "expert" then { return "Expert" }
+  if dept == "marketing" then { return "Marketing" }
+  if dept == "finance" then { return "Finance" }
+  if dept == "legal" then { return "Legal" }
+  if dept == "dev" then { return "Dev" }
+  if dept == "design" then { return "Design" }
+  if dept == "qa" then { return "QA" }
+  if dept == "visual" then { return "Visual" }
+  if dept == "engineering" then { return "Engineering" }
+  if dept == "kavalnya" then { return "Kavalnya" }
+  if dept == "admin" then { return "Admin" }
+  return dept
+}
+
+// ── Publish to archive channel ──────────────────────────────────────
+pattern PublishToArchive(doc_id: String, dept: String, title: String, content: String) -> String {
+  // Delegate to Python proxy for proper HTML stripping and Telegram sending
+  let body = json_encode({doc_id: doc_id, dept: dept, title: title, content: content})
+  let result = try http_post("http://127.0.0.1:4000/archive/publish", body, "application/json")
+  if to_string(result) == "()" then { return "" }
+  let msg_id = json_get(parse_json(result), "msg_id", "")
+  let _ = AuditLog("archive_publish", dept, "doc: " + doc_id + " msg_id: " + msg_id)
+  return msg_id
+}
+
+// ── Publish daily digest to archive channel ──────────────────────────
+pattern PublishDailyDigest() -> String {
+  let body = json_encode({trigger: "scheduler"})
+  let _ = try http_post("http://127.0.0.1:4000/archive/daily-digest", body, "application/json")
+  let _ = AuditLog("daily_digest_channel", "scheduler", "")
+  return "ok"
+}
+
+// ── Learning: classify correction via LLM ────────────────────────────
+pattern ClassifyCorrection(text: String, dept: String) -> String {
+  let body = json_encode({text: text, dept: dept})
+  let result = try http_post("http://127.0.0.1:4000/learning/fix", body, "application/json")
+  if to_string(result) == "()" then { return "" }
+  return result
+}
+
+// ── Learning: record positive example ───────────────────────────────
+pattern RecordPositiveExample(dept: String, query: String, response: String) -> String {
+  let body = json_encode({dept: dept, query: query, response: response})
+  let result = try http_post("http://127.0.0.1:4000/learning/good", body, "application/json")
+  if to_string(result) == "()" then { return "" }
+  let _ = AuditLog("positive_example", dept, "recorded positive")
+  return result
+}
+
+// ── Learning: get stats ──────────────────────────────────────────────
+pattern GetLearningStats() -> String {
+  let body = json_encode({trigger: "scheduler"})
+  let result = try http_post("http://127.0.0.1:4000/learning/stats", body, "application/json")
+  if to_string(result) == "()" then { return "{}" }
+  return result
+}
+
+// ── Learning: debrief department ────────────────────────────────────
+pattern DebriefDepartment(dept: String) -> String {
+  let body = json_encode({dept: dept})
+  let result = try http_post("http://127.0.0.1:4000/learning/debrief", body, "application/json")
+  if to_string(result) == "()" then { return "" }
+  let _ = AuditLog("debrief", dept, "dept debrief requested")
+  return result
+}
+
+// ── Search archive ───────────────────────────────────────────────────
+pattern SearchArchive(query_text: String) -> String {
+  let body = json_encode({query: query_text})
+  let result = try http_post("http://127.0.0.1:4000/search", body, "application/json")
+  if to_string(result) == "()" then { return "{}" }
+  return result
+}
+
+// ── TTS helper — send voice reply if voice is enabled ───────────────
+// Max 1000 chars for TTS. Longer text is truncated with a note.
+pattern SendVoiceReply(chat_id: String, text: String, dept: String) -> String {
+  let voice_on = kv_get("voice_enabled")
+  if voice_on != "true" then { return "" }
+  if len(text) < 5.0 then { return "" }
+  let tts_text = ""
+  if dept != "yana" and dept != "admin" and len(text) > 1000.0 then {
+    let tts_text = substring(text, 0.0, 500.0) + "... Продолжение в текстовом отчёте."
+  }
+  if tts_text == "" then {
+    let tts_text = text
+  }
+  let voice_name = kv_get("tts_voice")
+  if len(voice_name) < 3.0 then { let voice_name = "ru-RU-DmitryNeural" }
+  let tts_body = json_encode({text: tts_text, voice: voice_name, chat_id: chat_id})
+  let _ = try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
+  let _ = AuditLog("tts_reply", dept, "len=" + to_string(len(tts_text)) + " orig_len=" + to_string(len(text)))
+  return "ok"
+}
+
+// ── Simplified MarkdownV2 escaping ───────────────────────────────
+// Упрощённое MarkdownV2-экранирование. НЕ различает код-спаны (`text`) —
+// весь текст экранируется одинаково, включая содержимое обратных кавычек.
+// Полный порт Python _escape_mdv2 (code-span/emoji-aware regex) не сделан:
+// язык не имеет regex-builtin. См. наряд "webhook Python -> mlog", Блок A.
+pattern EscapeMarkdownV2Simple(text: String) -> String {
+  let t = replace(text, "\\", "\\\\")
+  let t = replace(t, "_", "\\_")
+  let t = replace(t, "*", "\\*")
+  let t = replace(t, "[", "\\[")
+  let t = replace(t, "]", "\\]")
+  let t = replace(t, "(", "\\(")
+  let t = replace(t, ")", "\\)")
+  let t = replace(t, "~", "\\~")
+  let t = replace(t, "`", "\\`")
+  let t = replace(t, ">", "\\>")
+  let t = replace(t, "#", "\\#")
+  let t = replace(t, "+", "\\+")
+  let t = replace(t, "-", "\\-")
+  let t = replace(t, "=", "\\=")
+  let t = replace(t, "|", "\\|")
+  let t = replace(t, "{", "\\{")
+  let t = replace(t, "}", "\\}")
+  let t = replace(t, ".", "\\.")
+  let t = replace(t, "!", "\\!")
+  return t
+}
