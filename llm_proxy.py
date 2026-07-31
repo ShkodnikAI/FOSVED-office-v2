@@ -888,7 +888,8 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
             use_model = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
         elif prov_name == "cerebras" and not use_model.startswith("gpt-oss"):
             use_model = "gpt-oss-120b"
-        result = _call_single_provider(prov_name, use_model, messages, dept=dept)
+        fb_max = PROVIDER_MAX_TOKENS.get(prov_name, 4096)
+        result = _call_single_provider(prov_name, use_model, messages, dept=dept, max_tokens=fb_max)
         if result and result.get("reply"):
             if compression_saved > 0:
                 result["compression_saved"] = compression_saved
