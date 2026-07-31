@@ -112,6 +112,12 @@ TOKEN_COSTS = {
     "cerebras": {"input": 0.0, "output": 0.0},
 }
 
+# Some providers count prompt + max_tokens against a per-minute token budget
+# and reject the request outright (Groq answers 413). Cap the ask per provider.
+PROVIDER_MAX_TOKENS = {
+    "groq": 2048,
+}
+
 # ──────────────────────────── CIRCUIT BREAKER ────────────────────────────
 class CircuitBreaker:
     """Per-provider circuit breaker: opens after N consecutive failures,
@@ -337,7 +343,8 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
                        (provider_name, model, t_in, t_out, round(cost, 6), dept, now))
             except Exception:
                 pass
-            log.info(f"LLM ok: provider={provider_name} model={model} dept={dept} t_in={t_in} t_out={t_out}")
+            log.info(f"LLM ok: provider={provider_name} model={model} dept={dept} "
+                     f"t_in={t_in} t_out={t_out} reply_chars={len(reply)} reply_head={reply[:120]!r}")
 
         return {"reply": reply, "provider": provider_name, "model": model, "tokens_in": t_in, "tokens_out": t_out}
     except Exception as e:
@@ -850,6 +857,9 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
             continue
         for model in models:
             max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
+            cap = PROVIDER_MAX_TOKENS.get(prov_name)
+            if cap:
+                max_tok = min(max_tok, cap)
             result = _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok)
             if result and result.get("reply"):
                 if compression_saved > 0:
@@ -5054,13 +5064,6 @@ def news_stats():
                     "by_source": {r[0]: r[1] for r in by_source},
                     "by_category": {r[0]: r[1] for r in by_category}})
 
-if __name__ == "__main__":
-    log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
-    log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
-             f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
-             f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
-    app.run(host="127.0.0.1", port=PORT, threaded=True)
-
 
 # ══════════════════════════════════════════════════════════════════════
 #  NEWS MONITORING: RSS + GDELT + Telegram channels
@@ -5266,5 +5269,14 @@ def get_night_news_digest():
     for r in rows:
         digest += f"  {emoji.get(r[2], '📄')} [{r[0]}] {r[1][:80]}\n"
     return digest
+
+
+
+if __name__ == "__main__":
+    log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
+    log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
+             f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
+             f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
+    app.run(host="127.0.0.1", port=PORT, threaded=True)
 
 
