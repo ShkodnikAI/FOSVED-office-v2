@@ -248,14 +248,14 @@ COMBO_CHAINS = {
         ("deepseek", ["deepseek-chat"]),
     ],
     "fosved-standard": [
-        ("kimi", ["kimi-k2-0711-preview"]),
+        ("kimi", ["kimi-k3"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6", "glm-4-plus"]),
         ("groq", ["llama-3.3-70b-versatile"]),
         ("cerebras", ["gpt-oss-120b"]),
     ],
     "fosved-deep": [
-        ("kimi", ["kimi-k2-0711-preview"]),
+        ("kimi", ["kimi-k3"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6"]),
         ("groq", ["llama-3.3-70b-versatile"]),
@@ -263,7 +263,7 @@ COMBO_CHAINS = {
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
     "fosved-fusion": [
-        ("kimi", ["kimi-k2-0711-preview"]),
+        ("kimi", ["kimi-k3"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6"]),
         ("groq", ["llama-3.3-70b-versatile"]),
