@@ -11,6 +11,7 @@ app = Flask(__name__)
 MLOG_URL = "http://127.0.0.1:10001"
 LLM_URL = "http://127.0.0.1:4000"
 PORT = int(os.environ.get("PORT", 10000))
+WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
 # Routes that go to LLM Proxy (Mini App + dashboards + archive + scheduler + learning)
 LLM_ROUTES_PREFIXES = [
@@ -99,6 +100,13 @@ def proxy(path):
     # SEC-1: Block internal-only paths from public access
     if is_internal_only(full_path):
         return jsonify({"error": "not found"}), 404
+
+    # SEC-3: Verify Telegram webhook secret token
+    if WEBHOOK_SECRET and full_path in ("/webhook/", "/webhook/telegram"):
+        got = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if got != WEBHOOK_SECRET:
+            app.logger.warning("SEC-3: webhook rejected — bad or missing secret token")
+            return jsonify({"error": "not found"}), 404
 
     # Rewrite /webhook/ → /webhook/telegram for mlog (Telegram sends /webhook/, mlog route is /webhook/telegram)
     if full_path == "/webhook/":
