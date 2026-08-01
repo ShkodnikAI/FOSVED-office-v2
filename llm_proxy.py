@@ -132,6 +132,47 @@ def _verify_init_data(init_data, max_age_seconds=86400):
         return False
 
 
+# SEC-4: Telegram delivers initData to the WebApp JS object, not to the URL.
+# When the signature is absent we serve this bootstrap page: its script reads
+# initData from Telegram and re-requests the same URL with the header set.
+_TG_BOOTSTRAP_PAGE = """<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Загрузка</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+body{margin:0;padding:40px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+background:#17212b;color:#e9edf2;text-align:center}
+.msg{margin-top:24px;font-size:15px;color:#8fa3b8}
+</style></head><body>
+<div class="msg" id="s">Загрузка…</div>
+<script>
+(function () {
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var initData = tg && tg.initData ? tg.initData : "";
+  if (!initData) {
+    document.getElementById("s").textContent =
+      "Эта страница открывается только из Telegram.";
+    return;
+  }
+  if (tg.expand) { tg.expand(); }
+  fetch(window.location.href, {
+    headers: { "X-Telegram-Init-Data": initData }
+  }).then(function (r) {
+    if (!r.ok) { throw new Error("HTTP " + r.status); }
+    return r.text();
+  }).then(function (html) {
+    document.open();
+    document.write(html);
+    document.close();
+  }).catch(function (e) {
+    document.getElementById("s").textContent = "Не удалось загрузить: " + e.message;
+  });
+})();
+</script>
+</body></html>"""
+
+
 def require_telegram(view):
     """Allow the request only from inside Telegram (valid initData)."""
     from functools import wraps
@@ -141,6 +182,12 @@ def require_telegram(view):
         init_data = (request.args.get("tgWebAppData")
                      or request.headers.get("X-Telegram-Init-Data", ""))
         if not _verify_init_data(init_data):
+            # No signature at all: browser navigation from a web_app button.
+            # Serve the bootstrap page so its script can supply initData.
+            if not init_data:
+                return Response(_TG_BOOTSTRAP_PAGE, status=200, mimetype="text/html")
+            # Signature present but invalid, stale, or from another user: refuse.
+            log.warning("SEC-4: initData present but rejected")
             return Response(
                 "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
                 "<title>Доступ закрыт</title></head><body style='font-family:sans-serif;"
