@@ -163,6 +163,7 @@ PROVIDERS = {
     "apodex": {"url": "https://api.apodex.ai/v1/chat/completions", "env_key": "APODEX_API_KEY", "format": "openai", "timeout": 300},
     "nvidia": {"url": "https://integrate.api.nvidia.com/v1/chat/completions", "env_key": "NVIDIA_API_KEY", "format": "openai", "timeout": 120},
     "cerebras": {"url": "https://api.cerebras.ai/v1/chat/completions", "env_key": "CEREBRAS_API_KEY", "format": "openai", "timeout": 120},
+    "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
 }
 
 TOKEN_COSTS = {
@@ -172,6 +173,7 @@ TOKEN_COSTS = {
     "apodex": {"input": 2.0, "output": 8.0},
     "nvidia": {"input": 0.0, "output": 0.0},
     "cerebras": {"input": 0.0, "output": 0.0},
+    "kimi": {"input": 0.6, "output": 2.5},
 }
 
 # Some providers count prompt + max_tokens against a per-minute token budget
@@ -242,26 +244,29 @@ _breaker = CircuitBreaker(threshold=3, reset_after_ms=60000)
 COMBO_CHAINS = {
     "fosved-free": [
         ("groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
-        ("deepseek", ["deepseek-chat", "deepseek-chat"]),
         ("cerebras", ["gpt-oss-120b"]),
+        ("deepseek", ["deepseek-chat"]),
     ],
     "fosved-standard": [
+        ("kimi", ["kimi-k2-0711-preview"]),
+        ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6", "glm-4-plus"]),
         ("groq", ["llama-3.3-70b-versatile"]),
-        ("deepseek", ["deepseek-chat", "deepseek-chat"]),
         ("cerebras", ["gpt-oss-120b"]),
     ],
     "fosved-deep": [
+        ("kimi", ["kimi-k2-0711-preview"]),
+        ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6"]),
         ("groq", ["llama-3.3-70b-versatile"]),
-        ("deepseek", ["deepseek-chat"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
     "fosved-fusion": [
+        ("kimi", ["kimi-k2-0711-preview"]),
+        ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6"]),
         ("groq", ["llama-3.3-70b-versatile"]),
-        ("deepseek", ["deepseek-chat"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
@@ -279,6 +284,9 @@ _TASK_COMBO_MAP = {
 }
 
 
+_FREE_DEPTS = {'yana'}
+
+
 def _combo_for_task(dept, command='', depth=2):
     """Select combo based on task type, dept, and analysis depth."""
     if command in _TASK_COMBO_MAP:
@@ -287,10 +295,10 @@ def _combo_for_task(dept, command='', depth=2):
         return 'fosved-fusion'
     elif depth >= 3:
         return 'fosved-deep'
-    elif dept in ['osp', 'lz', 'expert']:
-        return 'fosved-standard'
-    else:
+    elif dept in _FREE_DEPTS:
         return 'fosved-free'
+    else:
+        return 'fosved-standard'
 
 # ──────────────────────────── TOKEN COMPRESSION ────────────────────────────
 _COMPRESSION_MAX_TOKENS = 64000  # ~128K chars (conservative estimate: 1 token ~ 2 chars for Russian)
