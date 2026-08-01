@@ -90,6 +90,68 @@ def _verify_webhook_secret():
         return True  # no secret configured — open mode
     return request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') == WEBHOOK_SECRET
 
+
+def _verify_init_data(init_data, max_age_seconds=86400):
+    """Validate Telegram Mini App initData signature and owner identity.
+
+    Returns True when the signature matches the bot token, the payload is
+    fresh, and the user is the owner. Disabled (returns True) when the bot
+    token is not configured, so a misconfigured environment stays usable.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        return True
+    if not init_data:
+        return False
+    try:
+        import hmac as _hmac
+        from urllib.parse import parse_qsl
+
+        pairs = dict(parse_qsl(init_data, strict_parsing=True))
+        received_hash = pairs.pop("hash", "")
+        if not received_hash:
+            return False
+
+        check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
+        secret_key = _hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode(), hashlib.sha256).digest()
+        expected = _hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(expected, received_hash):
+            return False
+
+        auth_date = int(pairs.get("auth_date", "0"))
+        if max_age_seconds and (time.time() - auth_date) > max_age_seconds:
+            return False
+
+        owner = os.environ.get("OWNER_TELEGRAM_ID", "")
+        if owner:
+            user = json.loads(pairs.get("user", "{}"))
+            if str(user.get("id", "")) != str(owner):
+                return False
+        return True
+    except Exception as e:
+        log.warning(f"initData verification failed: {e}")
+        return False
+
+
+def require_telegram(view):
+    """Allow the request only from inside Telegram (valid initData)."""
+    from functools import wraps
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        init_data = (request.args.get("tgWebAppData")
+                     or request.headers.get("X-Telegram-Init-Data", ""))
+        if not _verify_init_data(init_data):
+            return Response(
+                "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
+                "<title>Доступ закрыт</title></head><body style='font-family:sans-serif;"
+                "padding:40px;background:#17212b;color:#e9edf2'>"
+                "<h2>Доступ закрыт</h2><p>Эта страница открывается только из Telegram.</p>"
+                "</body></html>",
+                status=403, mimetype="text/html")
+        return view(*args, **kwargs)
+
+    return wrapper
+
 # ──────────────────────────── PROVIDERS ────────────────────────────
 PROVIDERS = {
     "zai": {"url": "https://api.z.ai/api/paas/v4/chat/completions", "env_key": "ZAI_API_KEY", "format": "openai", "timeout": 120},
@@ -1404,6 +1466,7 @@ function doControl(freq){{
 
 @app.get("/miniapp/<doc_id>")
 @app.get("/miniapp/<doc_id>/")
+@require_telegram
 def miniapp_get(doc_id):
     try:
         return _miniapp_get_inner(doc_id)
@@ -1484,19 +1547,37 @@ ARCHIVE_MONTHS_RU = {
 }
 
 
-def _browse_page(title, crumbs, items, back_href):
-    """Render one level of the archive browser."""
+def _browse_page(title, crumbs, items, back_href, tg_suffix=""):
+    """Render one level of the archive browser.
+
+    tg_suffix is appended to all internal links so tgWebAppData survives
+    navigation inside the Telegram Mini App.
+    """
     rows = []
     for it in items:
         e_name = html_lib.escape(str(it.get("name", "")))
         e_sub = html_lib.escape(str(it.get("sub", "")))
-        e_href = html_lib.escape(str(it.get("href", "")), quote=True)
+        raw_href = str(it.get("href", ""))
+        # Append tg_suffix: use ? if no query string yet, & otherwise
+        if tg_suffix and "?" not in raw_href:
+            full_href = raw_href + "?" + tg_suffix
+        else:
+            full_href = raw_href + ("&" + tg_suffix if tg_suffix else "")
+        e_href = html_lib.escape(full_href, quote=True)
         sub = f'<span class="sub">{e_sub}</span>' if it.get("sub") else ""
         rows.append(
             f'<a class="row" href="{e_href}"><span class="name">{e_name}</span>{sub}</a>'
         )
     body = "".join(rows) or '<div class="empty">Пусто</div>'
-    back = f'<a class="back" href="{back_href}">← Назад</a>' if back_href else ""
+    # Append tg_suffix to back link too
+    if back_href:
+        if tg_suffix and "?" not in back_href:
+            back_full = back_href + "?" + tg_suffix
+        else:
+            back_full = back_href + ("&" + tg_suffix if tg_suffix else "")
+        back = f'<a class="back" href="{html_lib.escape(back_full, quote=True)}">← Назад</a>'
+    else:
+        back = ""
     e_title = html_lib.escape(str(title))
     e_crumbs = html_lib.escape(str(crumbs))
     return f"""<!DOCTYPE html>
@@ -1522,11 +1603,15 @@ text-decoration:none;color:#e9edf2}}
 
 
 @app.get("/archive/browse")
+@require_telegram
 def archive_browse():
     """Browse archived reports: year -> month -> dept -> documents."""
     year = (request.args.get("year") or "").strip()
     month = (request.args.get("month") or "").strip()
     dept = (request.args.get("dept") or "").strip()
+    # Preserve tgWebAppData across navigation inside Mini App
+    tg = request.args.get("tgWebAppData", "")
+    tg_suffix = ("tgWebAppData=" + html_lib.escape(tg, quote=True)) if tg else ""
     try:
         if not year:
             rows = _query(
@@ -1535,7 +1620,7 @@ def archive_browse():
                 (), fetch=True) or []
             items = [{"name": r["y"], "sub": f'{r["n"]} шт.',
                       "href": f'/archive/browse?year={r["y"]}'} for r in rows]
-            return _browse_page("Архив", "Годы", items, "")
+            return _browse_page("Архив", "Годы", items, "", tg_suffix)
 
         if not month:
             rows = _query(
@@ -1544,7 +1629,7 @@ def archive_browse():
                 (year,), fetch=True) or []
             items = [{"name": ARCHIVE_MONTHS_RU.get(r["m"], r["m"]), "sub": f'{r["n"]} шт.',
                       "href": f'/archive/browse?year={year}&month={r["m"]}'} for r in rows]
-            return _browse_page(year, "Месяцы", items, "/archive/browse")
+            return _browse_page(year, "Месяцы", items, "/archive/browse", tg_suffix)
 
         if not dept:
             rows = _query(
@@ -1556,7 +1641,7 @@ def archive_browse():
                       "href": f'/archive/browse?year={year}&month={month}&dept={r["dept"]}'}
                      for r in rows]
             return _browse_page(f'{ARCHIVE_MONTHS_RU.get(month, month)} {year}', "Отделы",
-                                items, f"/archive/browse?year={year}")
+                                items, f"/archive/browse?year={year}", tg_suffix)
 
         rows = _query(
             "SELECT id, title, created_at FROM miniapp_responses "
@@ -1567,10 +1652,10 @@ def archive_browse():
                   "href": f'/miniapp/{r["id"]}'} for r in rows]
         return _browse_page(f'{dept} · {ARCHIVE_MONTHS_RU.get(month, month)} {year}',
                             "Отчёты", items,
-                            f"/archive/browse?year={year}&month={month}")
+                            f"/archive/browse?year={year}&month={month}", tg_suffix)
     except Exception as e:
         log.error(f"archive_browse error: {e}")
-        return _browse_page("Архив", "Ошибка", [], "/archive/browse"), 500
+        return _browse_page("Архив", "Ошибка", [], "/archive/browse", tg_suffix), 500
 
 
 @app.post("/miniapp/note")
@@ -1734,6 +1819,7 @@ def tg_send_report_file():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.get("/dept-dashboard/<slug>")
+@require_telegram
 def dept_dashboard(slug):
     dept = slug.lower()
     if dept not in DEPT_NAMES:
@@ -1759,6 +1845,7 @@ def dept_dashboard(slug):
     return Response(html, mimetype="text/html")
 
 @app.get("/office-dashboard")
+@require_telegram
 def office_dashboard():
     now = datetime.utcnow()
     today = now.isoformat()[:10]
@@ -2794,6 +2881,7 @@ def learning_debrief():
 # ══════════════════════════════════════════════════════════════════════
 
 @app.get("/audit/recent")
+@require_telegram
 def audit_recent():
     """Return recent audit log entries."""
     try:
@@ -4034,6 +4122,7 @@ def admin_ua_tour():
 MINIAPP_DIR = BASE_DIR / "miniapp"
 
 @app.get("/miniapp")
+@require_telegram
 def miniapp_redirect():
     """Redirect /miniapp to /miniapp-spa."""
     from flask import redirect
@@ -4041,6 +4130,7 @@ def miniapp_redirect():
 
 @app.get("/miniapp-spa")
 @app.get("/miniapp-spa/")
+@require_telegram
 def miniapp_spa_index():
     """Serve the Mini App SPA index page with API_SECRET injected."""
     index_path = MINIAPP_DIR / "index.html"
@@ -4051,6 +4141,7 @@ def miniapp_spa_index():
     return Response(html, mimetype="text/html")
 
 @app.get("/miniapp-spa/<path:filepath>")
+@require_telegram
 def miniapp_spa_static(filepath):
     """Serve static files for the Mini App SPA."""
     file_path = MINIAPP_DIR / filepath
@@ -5056,6 +5147,7 @@ def lz_news():
 
 # ── News stats ──
 @app.route("/news/stats", methods=["GET"])
+@require_telegram
 def news_stats():
     total = _query("SELECT COUNT(*) FROM news_cache", fetch=True)[0][0]
     last_24h = _query("SELECT COUNT(*) FROM news_cache WHERE collected > datetime('now', '-24 hours')", fetch=True)[0][0]
