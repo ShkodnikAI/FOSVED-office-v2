@@ -16,6 +16,8 @@ PORT = int(os.environ.get("PORT", 10000))
 LLM_ROUTES_PREFIXES = [
     # "/webhook/",   # Telegram webhook — Python handler
     "/webhook/miniapp-action",  # Mini App action bar → LLM Proxy (must precede generic mlog routing)
+    "/cron/collect-news",  # registered in LLM Proxy, not in Metalogos; guarded by CRON_SECRET
+    "/news/stats",         # read-only counters, used by the smoke script,
     "/miniapp/",
     "/miniapp",
     "/miniapp-spa/",
@@ -46,7 +48,7 @@ INTERNAL_ONLY_PREFIXES = [
     "/now-time",
     "/now-weather",
     "/generate-image",
-    "/news/",
+    "/news/fresh",
     "/yana/",
     "/admin-ua/",
     "/archive/publish",
