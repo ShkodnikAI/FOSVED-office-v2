@@ -4196,10 +4196,16 @@ def miniapp_spa_index():
     return Response(html, mimetype="text/html")
 
 @app.get("/miniapp-spa/<path:filepath>")
-@require_telegram
 def miniapp_spa_static(filepath):
-    """Serve static files for the Mini App SPA."""
-    file_path = MINIAPP_DIR / filepath
+    """Serve static assets for the Mini App SPA.
+
+    No initData check here: browsers do not send custom headers when loading
+    <link> and <script> resources, so requiring it would break every screen.
+    These files contain no user data — the pages that do remain protected.
+    """
+    file_path = (MINIAPP_DIR / filepath).resolve()
+    if not str(file_path).startswith(str(MINIAPP_DIR.resolve())):
+        return "<h1>Not found</h1>", 404
     if not file_path.exists() or not file_path.is_file():
         return "<h1>Not found</h1>", 404
     ext = file_path.suffix
