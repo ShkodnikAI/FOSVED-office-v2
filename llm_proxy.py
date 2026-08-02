@@ -52,6 +52,11 @@ def auth_middleware():
     path = request.path
     # Protect API, admin, memory, miniapp-action endpoints
     if any(path.startswith(p) for p in PROTECTED_PREFIXES):
+        # Internal requests from mlog (localhost) are allowed to /memory/
+        # without Bearer — mlog http_post() has no custom-header support.
+        # External traffic is blocked by reverse_proxy (SEC-1) and firewall.
+        if path.startswith("/memory/") and request.remote_addr in ("127.0.0.1", "::1"):
+            return None
         if not _check_bearer():
             return jsonify({"error": "unauthorized"}), 401
     return None
