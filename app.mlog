@@ -769,15 +769,25 @@ pattern YanaWeather() -> String {
 
 pattern YanaRecallMemories(query: String) -> String {
   // MEM-1: Internal requests from localhost bypass Bearer auth (auth_middleware).
-  // MEM-1.1: json_get already returns a parsed List — do not parse_json() it again.
+  // MEM-1.1: json_get returns a parsed List — do not parse_json() it again.
+  // MEM-1.1b: wrap critical steps in try to prevent 500 on runtime type errors.
   let body = json_encode({query: query, limit: 10})
   let resp = try http_post("http://127.0.0.1:4000/memory/recall", body, "application/json")
   if to_string(resp) == "()" then { return "" }
-  let parsed = parse_json(resp)
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "" }
   let count = to_float(json_get(parsed, "count", "0"))
   if count == 0.0 then { return "" }
+  let results = try json_get(parsed, "results", "[]")
+  if to_string(results) == "()" then { return "" }
+  let mem_text = try FormatMemoryResults(results)
+  if to_string(mem_text) == "()" then { return "" }
+  return mem_text
+}
+
+pattern FormatMemoryResults(results: String) -> String {
   let mut mem_text = ""
-  each r in json_get(parsed, "results", "[]") {
+  each r in results {
     let content = to_string(json_get(r, "content", ""))
     let mem_type = to_string(json_get(r, "type", "fact"))
     let conf = to_string(json_get(r, "confidence", "0.5"))
