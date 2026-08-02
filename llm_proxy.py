@@ -471,7 +471,14 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
         return {"reply": reply, "provider": provider_name, "model": model, "tokens_in": t_in, "tokens_out": t_out}
     except Exception as e:
         _breaker.record_failure(provider_name)
-        log.warning(f"LLM fail: provider={provider_name} model={model} err={e}")
+        detail = ""
+        resp_obj = getattr(e, "response", None)
+        if resp_obj is not None:
+            try:
+                detail = f" body={resp_obj.text[:300]}"
+            except Exception:
+                pass
+        log.warning(f"LLM fail: provider={provider_name} model={model} err={e}{detail}")
         return None
 
 # ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
