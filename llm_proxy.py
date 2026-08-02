@@ -1320,7 +1320,7 @@ def health():
 @app.get("/now-time")
 def now_time_endpoint():
     """Return current date/time in human-readable form for Yana prompt injection.
-    Timezone: Europe/Minsk (UTC+3) — configured via TZ env var."""
+    Timezone: Europe/Minsk (UTC+3 year-round) — configured via TZ env var."""
     from zoneinfo import ZoneInfo
     try:
         tz = ZoneInfo("Europe/Minsk")
@@ -2344,7 +2344,7 @@ def scheduler_morning_brief():
 
     try:
         now = datetime.utcnow()
-        # Moscow time for display
+        # Minsk time for display (UTC+3 year-round)
         from datetime import timezone, timedelta as _td
         msk = timezone(_td(hours=3))
         now_msk = datetime.now(msk)
@@ -2408,9 +2408,9 @@ def scheduler_morning_brief():
         user_prompt = f"""Составь утренний отчёт для хозяина офиса.
 
 Дата: {date_str} ({weekday})
-Время: {time_str} (МСК)
+Время: {time_str} (Минск)
 
-=== ПОГОДА (Москва) ===
+=== ПОГОДА (Минск) ===
 {weather_text}
 {weather_ext}
 
@@ -2429,7 +2429,7 @@ def scheduler_morning_brief():
 === ТВОЯ ЗАДАЧА ===
 Напиши утренний отчёт на русском. Структура:
 1. 📅 Дата, время, день недели
-2. 🌤 Прогноз погоды в Москве
+2. 🌤 Прогноз погоды в Минске
 3. 🏢 Статус офиса — кратко, что происходит
 4. 🌍 Важные мировые события — что актуально (на основе своих знаний)
 5. 🔍 Ключевые находки ЛЗ (если есть)
