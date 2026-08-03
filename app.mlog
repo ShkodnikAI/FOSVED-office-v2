@@ -137,31 +137,31 @@ pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> S
   if step_num == 1.0 then {
     kv_set("order_step_" + order_id, "2")
     kv_set("order_client_" + order_id, input)
-    db_execute("UPDATE factory_orders SET client_name = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+    db_execute("UPDATE factory_orders SET client_name = ?1 WHERE id = ?2", [input, order_id])
     return "Step 2/7: What tasks should the office handle?"
   }
   if step_num == 2.0 then {
     kv_set("order_step_" + order_id, "3")
     kv_set("order_tasks_" + order_id, input)
-    db_execute("UPDATE factory_orders SET requirements = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+    db_execute("UPDATE factory_orders SET requirements = ?1 WHERE id = ?2", [input, order_id])
     return "Step 3/7: Which departments? (yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya)"
   }
   if step_num == 3.0 then {
     kv_set("order_step_" + order_id, "4")
     kv_set("order_depts_" + order_id, input)
-    db_execute("UPDATE factory_orders SET departments = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+    db_execute("UPDATE factory_orders SET departments = ?1 WHERE id = ?2", [input, order_id])
     return "Step 4/7: Branding? (name, language, style preferences)"
   }
   if step_num == 4.0 then {
     kv_set("order_step_" + order_id, "5")
     kv_set("order_branding_" + order_id, input)
-    db_execute("UPDATE factory_orders SET branding = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+    db_execute("UPDATE factory_orders SET branding = ?1 WHERE id = ?2", [input, order_id])
     return "Step 5/7: Which LLM providers/keys are available?"
   }
   if step_num == 5.0 then {
     kv_set("order_step_" + order_id, "6")
     kv_set("order_llm_" + order_id, input)
-    db_execute("UPDATE factory_orders SET llm_config = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
+    db_execute("UPDATE factory_orders SET llm_config = ?1 WHERE id = ?2", [input, order_id])
     let summary = "Order summary:\n"
     let summary = summary + "Client: " + kv_get("order_client_" + order_id) + "\n"
     let summary = summary + "Tasks: " + kv_get("order_tasks_" + order_id) + "\n"
@@ -1151,13 +1151,13 @@ mlogserver {
       // Handle approve/reject narads
       if starts_with(cb_data, "approve_") then {
         let narad_id = substring(cb_data, 8.0, len(cb_data))
-        db_execute("UPDATE narads SET status = 'approved', approved_at = datetime('now') WHERE id = '" + escape_json(narad_id) + "'")
+        db_execute("UPDATE narads SET status = 'approved', approved_at = datetime('now') WHERE id = ?1", [narad_id])
         let _ = AuditLog("narad_approve", "admin", "approved narad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Narad " + narad_id + " approved.")
       }
       if starts_with(cb_data, "reject_") then {
         let narad_id = substring(cb_data, 7.0, len(cb_data))
-        db_execute("UPDATE narads SET status = 'rejected' WHERE id = '" + escape_json(narad_id) + "'")
+        db_execute("UPDATE narads SET status = 'rejected' WHERE id = ?1", [narad_id])
         let _ = AuditLog("narad_reject", "admin", "rejected narad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Narad " + narad_id + " rejected.")
       }
@@ -1337,7 +1337,7 @@ mlogserver {
       let parts = split(text, " ")
       if len(parts) > 1.0 then {
         let rating = get(parts, 1.0)
-        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period) VALUES ('global', 'satisfaction', '" + escape_json(rating) + "', 'daily')")
+        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period) VALUES ('global', 'satisfaction', ?1, 'daily')", [rating])
         let _ = AuditLog("rating", "system", "rating=" + rating)
         let _ = SendTelegramReply(chat_id, "Rating " + rating + " recorded.")
       }
@@ -1349,9 +1349,9 @@ mlogserver {
       let parts = split(text, " ")
       let score = get(parts, 1.0)
       let comment = join(slice(parts, 2.0, len(parts)), " ")
-      db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_feedback', '" + escape_json(score) + "', 'manual', datetime('now'))")
+      db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_feedback', ?1, 'manual', datetime('now'))", [score])
       if len(comment) > 0.0 then {
-        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_comment', '" + escape_json(comment) + "', 'manual', datetime('now'))")
+        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_comment', ?1, 'manual', datetime('now'))", [comment])
       }
       let _ = AuditLog("rate_yana", "owner", "score=" + score)
       let _ = SendTelegramReply(chat_id, "Yana feedback recorded: " + score + "/10")
@@ -1846,14 +1846,14 @@ mlogserver {
       }
       if starts_with(text, "/factory_deploy") then {
         let id = substring(text, 16.0, len(text))
-        db_execute("UPDATE factory_orders SET status = 'deployed' WHERE id = '" + escape_json(trim(id)) + "'")
+        db_execute("UPDATE factory_orders SET status = 'deployed' WHERE id = ?1", [trim(id)])
         let _ = AuditLog("factory_deploy", "factory", "deployed: " + trim(id))
         let _ = SendTelegramReply(chat_id, "Factory order " + trim(id) + " deployed.")
         return respond("200 ok")
       }
       if starts_with(text, "/factory_deliver") then {
         let id = substring(text, 17.0, len(text))
-        db_execute("UPDATE factory_orders SET status = 'delivered', completed_at = datetime('now') WHERE id = '" + escape_json(trim(id)) + "'")
+        db_execute("UPDATE factory_orders SET status = 'delivered', completed_at = datetime('now') WHERE id = ?1", [trim(id)])
         let _ = SendTelegramReply(chat_id, "Factory order " + trim(id) + " delivered.")
         return respond("200 ok")
       }
