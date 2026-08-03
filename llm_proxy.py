@@ -218,6 +218,12 @@ PROVIDERS = {
     "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
 }
 
+# Some providers require a specific temperature value;
+# list only providers that differ from the default (0.7).
+PROVIDER_TEMPERATURE = {
+    "kimi": 1.0,
+}
+
 TOKEN_COSTS = {
     "zai": {"input": 0.5, "output": 1.5}, "deepseek": {"input": 0.14, "output": 0.28},
     "groq": {"input": 0.0, "output": 0.0}, "grok": {"input": 3.0, "output": 15.0},
@@ -429,7 +435,8 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     try:
         if prov["format"] == "openai":
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            body = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": max_tokens}
+            temp = PROVIDER_TEMPERATURE.get(provider_name, 0.7)
+            body = {"model": model, "messages": messages, "temperature": temp, "max_tokens": max_tokens}
         else:  # anthropic
             sys_msg = ""
             user_msgs = []
