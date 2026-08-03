@@ -112,9 +112,7 @@ pattern InitDB() -> String {
 // ── OSP archive helpers (interpreter-only, confirmed 2026-06-22) ──
 
 pattern SaveAnalysis(topic: String, result: String) -> String {
-  let escaped_topic = escape_json(topic)
-  let escaped_result = escape_json(result)
-  db_execute("INSERT INTO analysis (topic, full_result, status) VALUES ('" + escaped_topic + "', '" + escaped_result + "', 'drafted')")
+  db_execute("INSERT INTO analysis (topic, full_result, status) VALUES (?1, ?2, 'drafted')", [topic, result])
   let rows = query("SELECT last_insert_rowid() as lid", [])
   let count = len(rows)
   if count == 0.0 then { return "0" }
@@ -122,9 +120,7 @@ pattern SaveAnalysis(topic: String, result: String) -> String {
 }
 
 pattern AttachSource(analysis_id: String, title: String, claim: String) -> String {
-  let et = escape_json(title)
-  let ec = escape_json(claim)
-  db_execute("INSERT INTO research_source (analysis_id, title, claim) VALUES ('" + analysis_id + "', '" + et + "', '" + ec + "')")
+  db_execute("INSERT INTO research_source (analysis_id, title, claim) VALUES (?1, ?2, ?3)", [analysis_id, title, claim])
   return "ok"
 }
 
@@ -174,13 +170,13 @@ pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> S
   if step_num == 6.0 then {
     if lower(input) == "yes" or lower(input) == "ok" then {
       kv_set("order_step_" + order_id, "7")
-      db_execute("UPDATE factory_orders SET status = 'building' WHERE id = '" + order_id + "'")
+      db_execute("UPDATE factory_orders SET status = 'building' WHERE id = ?1", [order_id])
       let _ = AuditLog("factory_build", "factory", "building: " + order_id)
       kv_set("active_order", "")
       return "Order confirmed. Building office...\nStatus: building\nTrack: /factory_list"
     } else {
       kv_set("active_order", "")
-      db_execute("UPDATE factory_orders SET status = 'cancelled' WHERE id = '" + order_id + "'")
+      db_execute("UPDATE factory_orders SET status = 'cancelled' WHERE id = ?1", [order_id])
       return "Order cancelled."
     }
   }
@@ -199,14 +195,12 @@ pattern LZDeepScan(query: String, chat_id: String) -> String {
 }
 
 pattern RecordUserMessage(chat_id: String, dept: String, text: String) -> String {
-  let escaped = escape_json(text)
-  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('" + chat_id + "', 'user', '" + dept + "', '" + escaped + "')")
+  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES (?1, 'user', ?2, ?3)", [chat_id, dept, text])
   return "ok"
 }
 
 pattern RecordAssistantMessage(chat_id: String, dept: String, text: String) -> String {
-  let escaped = escape_json(text)
-  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('" + chat_id + "', 'assistant', '" + dept + "', '" + escaped + "')")
+  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES (?1, 'assistant', ?2, ?3)", [chat_id, dept, text])
   return "ok"
 }
 
@@ -512,7 +506,7 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
     if len(existing) == 0.0 then {
       return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
     }
-    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
+    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
     db_insert("dept_verification", {archive_id: entry_id, actual_value: actual_val, actual_outcome: "actual=" + val_str})
     return "Запись #" + to_string(entry_id) + " верифицирована: actual=" + val_str
   }
@@ -527,7 +521,7 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
     if len(existing) == 0.0 then {
       return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
     }
-    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
+    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
     db_insert("dept_verification", {archive_id: entry_id, outcome_flag: flag, actual_outcome: "outcome=" + flag})
     return "Запись #" + to_string(entry_id) + " верифицирована: outcome=" + flag
   }
@@ -541,7 +535,7 @@ pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> Stri
   if len(existing) == 0.0 then {
     return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
   }
-  db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
+  db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
   db_insert("dept_verification", {archive_id: entry_id, actual_outcome: outcome})
   return "Запись #" + to_string(entry_id) + " (" + dept + ") верифицирована: " + outcome
 }
@@ -1866,7 +1860,7 @@ mlogserver {
       let order_id = "fo-" + to_string(now())
       kv_set("active_order", order_id)
       kv_set("order_step_" + order_id, "1")
-      db_execute("INSERT INTO factory_orders (id, status) VALUES ('" + order_id + "', 'intake')")
+      db_execute("INSERT INTO factory_orders (id, status) VALUES (?1, 'intake')", [order_id])
       let _ = AuditLog("factory_start", "factory", "new order: " + order_id)
       let _ = SendTelegramReply(chat_id, "Factory: Creating new office.\n\nStep 1/7: What is the client's name or company?")
       return respond("200 ok")
@@ -2181,7 +2175,7 @@ mlogserver {
     // ============================================================
 
     let dept = DetectDepartment(text)
-    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook','step_0_after_detect_dept=" + dept + "','ok')")
+    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook','step_0_after_detect_dept=' || ?1 || ','ok')", [dept])
     let query = text
     let handled = 0.0
 
