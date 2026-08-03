@@ -137,7 +137,7 @@ Web, YouTube, Reddit, Science, GitHub, Social, Telegram, Darknet, Academic — �
 ```
 .
 ├── app.mlog                  # Главный роутер (1302 строки, 68 команд)
-├── bin/mlog                  # Metalogos v0.8.9 бинарник (x86-64, Rust, CI #110)
+├── bin/mlog                  # Metalogos v0.11.0 бинарник (x86-64, Rust)
 ├── llm_proxy.py              # LLM-прокси + API + SPA-сервер (2853 строк)
 ├── reverse_proxy.py          # Маршрутизатор запросов (108 строк)
 ├── entrypoint.sh             # Docker-запуск (3 процесса)
@@ -218,7 +218,7 @@ docker run -p 10000:10000 --env-file .env fosved
 
 | Компонент | Технология |
 |---|---|
-| Ядро | Metalogos v0.8.9 (Rust DSL, 113 встроенных функций) |
+| Ядро | Metalogos v0.11.0 (Rust DSL, 113+ встроенных функций) |
 | Прокси-слой | Python 3.12 + Flask |
 | База данных | SQLite |
 | Голос STT | Whisper (Groq/OpenAI) |
