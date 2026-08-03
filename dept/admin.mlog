@@ -70,7 +70,7 @@ pattern SaveFindings(issues: String) -> String {
       }
 
       if severity != "" then {
-        db_execute("INSERT INTO admin_findings (severity, file_path, issue, fix_suggestion, status) VALUES ('" + escape_json(severity) + "', '" + escape_json(file_path) + "', '" + escape_json(issue_text) + "', '', 'open')")
+        db_execute("INSERT INTO admin_findings (severity, file_path, issue, fix_suggestion, status) VALUES (?1, ?2, ?3, '', 'open')", [severity, file_path, issue_text])
         let saved = saved + 1.0
       }
     }
@@ -86,7 +86,7 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
   let edges_saved = 0.0
 
   // Save file node
-  db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES ('file', '" + escape_json(file_path) + "', '" + escape_json(file_path) + "', 'Department dispatcher', datetime('now'))")
+  db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES ('file', ?1, ?1, 'Department dispatcher', datetime('now'))", [file_path])
   let nodes_saved = nodes_saved + 1.0
 
   // Look for pattern definitions
@@ -100,9 +100,9 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
       if p_end > p_start then {
         let pattern_name = substring(trimmed, p_start, p_end)
         if len(pattern_name) > 2.0 then {
-          db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES ('pattern', '" + escape_json(pattern_name) + "', '" + escape_json(file_path) + "', 'Function', datetime('now'))")
+          db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES ('pattern', ?1, ?2, 'Function', datetime('now'))", [pattern_name, file_path])
           // Edge: file calls pattern
-          db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES ('" + escape_json(file_path) + "', '" + escape_json(pattern_name) + "', 'calls', '" + escape_json(file_path) + "', datetime('now'))")
+          db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?1, ?2, 'calls', ?1, datetime('now'))", [file_path, pattern_name])
           let nodes_saved = nodes_saved + 1.0
           let edges_saved = edges_saved + 1.0
         }
@@ -117,7 +117,7 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
       let imp_start = index_of(trimmed, "import") + 7.0
       let imp_name = substring(trimmed, imp_start, len(trimmed))
       if len(imp_name) > 2.0 then {
-        db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES ('" + escape_json(file_path) + "', '" + escape_json(imp_name) + "', 'imports', '" + escape_json(file_path) + "', datetime('now'))")
+        db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?1, ?2, 'imports', ?1, datetime('now'))", [file_path, imp_name])
         let edges_saved = edges_saved + 1.0
       }
     }
@@ -322,7 +322,7 @@ pattern AdminProposals() -> String {
   let reply = json_get(parse_json(proposals), "reply", "No proposals at this time.")
 
   // Save to admin_proposals table
-  db_execute("INSERT INTO admin_proposals (content, status, created_at) VALUES ('" + escape_json(reply) + "', 'pending', datetime('now'))")
+  db_execute("INSERT INTO admin_proposals (content, status, created_at) VALUES (?1, 'pending', datetime('now'))", [reply])
 
   let _ = AuditLog("proposals_generated", "admin", "proposals saved")
 
@@ -377,7 +377,7 @@ pattern AdminNightCycle() -> String {
 
   // Save report
   let duration = to_string(to_int(now() - start_time))
-  db_execute("INSERT INTO admin_reports (type, content, duration_sec, created_at) VALUES ('night_cycle', '" + escape_json(report) + "', '" + duration + "', datetime('now'))")
+  db_execute("INSERT INTO admin_reports (type, content, duration_sec, created_at) VALUES ('night_cycle', ?1, ?2, datetime('now'))", [report, duration])
 
   // Save for morning brief
   kv_set("admin_night_summary", report)
@@ -435,7 +435,7 @@ pattern AdminBuild(task: String, chat_id: String) -> String {
 
   let narad_id = "narad-" + to_string(to_int(now()))
 
-  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES ('" + escape_json(narad_id) + "', '" + escape_json(task) + "', '" + escape_json(narad_text) + "', 'owner', 'medium', 'pending')")
+  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES (?1, ?2, ?3, 'owner', 'medium', 'pending')", [narad_id, task, narad_text])
 
   // Send with approve/reject buttons
   let short_text = substring(narad_text, 0, 2000)
@@ -463,7 +463,7 @@ pattern AdminFix(bug_description: String, chat_id: String) -> String {
   // Create narad (not auto-fix — complex bug)
   let narad_id = "fix-" + to_string(to_int(now()))
 
-  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES ('" + escape_json(narad_id) + "', 'Fix: " + escape_json(bug_description) + "', '" + escape_json(fix_text) + "', 'admin', 'medium', 'pending')")
+  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES (?1, 'Fix: ' || ?2, ?3, 'admin', 'medium', 'pending')", [narad_id, bug_description, fix_text])
 
   // Send with approve/reject
   let short_fix = substring(fix_text, 0, 1500)
@@ -590,7 +590,7 @@ pattern AdminNarads() -> String {
 
 // ── /admin rollback <id> ───────────────────────────────────────────
 pattern AdminRollback(narad_id: String) -> String {
-  db_execute("UPDATE narads SET status = 'rolled_back' WHERE id = '" + escape_json(narad_id) + "'")
+  db_execute("UPDATE narads SET status = 'rolled_back' WHERE id = ?1", [narad_id])
   let _ = AuditLog("admin_rollback", "admin", "rolled back: " + narad_id)
   return "Narad " + narad_id + " rolled back."
 }
