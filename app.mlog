@@ -787,6 +787,9 @@ pattern YanaWeather() -> String {
 }
 
 pattern YanaRecallMemories(query: String) -> String {
+  // Guard: skip HTTP call when query is empty (routing sets query=""
+  // when /command has no arguments, e.g. bare "/yana").
+  if query == "" then { return "" }
   // MEM-1: Internal requests from localhost bypass Bearer auth (auth_middleware).
   // MEM-1.1: json_get returns a parsed List — do not parse_json() it again.
   // MEM-1.1b: wrap critical steps in try to prevent 500 on runtime type errors.
@@ -2194,7 +2197,11 @@ mlogserver {
     if dept == "yana" then {
       let _ = RecordUserMessage(chat_id, "yana", text)
       let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook','step_0c_before_HandleYana','ok')")
-      let reply = HandleYana(query, chat_id)
+      // Source fix: routing sets query="" when /command has no args (e.g. bare "/yana").
+      // Fall back to full text so recall and LLM get a usable query.
+      let yana_query = query
+      if yana_query == "" then { let yana_query = text }
+      let reply = HandleYana(yana_query, chat_id)
 
       // Check if Yana delegated to another department
       // HandleYana returns dept name (e.g. "osp") if delegation detected
