@@ -1149,6 +1149,60 @@ mlogserver {
       if doc_file_id != "" then {
         let doc_name = to_string(json_get(data, "message.document.file_name", "file"))
         let caption = to_string(json_get(data, "message.caption", ""))
+        let doc_mime = to_string(json_get(data, "message.document.mime_type", ""))
+
+        // ── Native PDF processing via Metalogos pdf-inspector (Наряд №48) ──
+        if ends_with(doc_name, ".pdf") or doc_mime == "application/pdf" then {
+          let _ = AuditLog("pdf_received", "document", "name=" + doc_name + " mime=" + doc_mime)
+          let token = env("TELEGRAM_BOT_TOKEN")
+          // Step 1: getFile to obtain file_path
+          let getfile_body = json_encode({file_id: doc_file_id})
+          let getfile_resp = try http_post("https://api.telegram.org/bot" + token + "/getFile", getfile_body, "application/json")
+          let getfile_parsed = try parse_json(getfile_resp)
+          let file_path = to_string(json_get(getfile_parsed, "result.file_path", ""))
+          if file_path == "" then {
+            let _ = SendTelegramReply(chat_id, "Ошибка: не удалось получить путь к файлу от Telegram.")
+            return respond("200 ok")
+          }
+          // Step 2: download file to temp location
+          let download_url = "https://api.telegram.org/file/bot" + token + "/" + file_path
+          let tmp_path = "/tmp/metalogos_pdf_" + doc_file_id + ".pdf"
+          let pdf_bytes = try http_get(download_url)
+          let _ = write_file(tmp_path, to_string(pdf_bytes))
+          // Step 3: classify PDF
+          let classification = try pdf_classify(tmp_path)
+          let pdf_type = to_string(json_get(classification, "type", "unknown"))
+          let confidence = to_string(json_get(classification, "confidence", "0"))
+          let _ = AuditLog("pdf_classified", "document", "type=" + pdf_type + " conf=" + confidence)
+          // Step 4: route by type
+          if pdf_type == "TextBased" or pdf_type == "Mixed" then {
+            let result = try pdf_to_markdown(tmp_path)
+            let markdown = to_string(json_get(result, "markdown", ""))
+            let pages = to_string(json_get(result, "page_count", "?"))
+            let proc_ms = to_string(json_get(result, "processing_time_ms", "?"))
+            if len(markdown) < 10.0 then {
+              let _ = SendTelegramReply(chat_id, "PDF (" + pages + " стр., " + proc_ms + "мс): не удалось извлечь текст. Формат может быть нестандартным.")
+            } else {
+              if caption != "" then {
+                let text = caption + "\n\n=== PDF: " + doc_name + " (" + pages + " стр.) ===\n" + markdown
+              } else {
+                let text = "=== PDF: " + doc_name + " (" + pages + " стр.) ===\n" + markdown
+              }
+              let _ = AuditLog("pdf_extracted", "document", "pages=" + pages + " ms=" + proc_ms + " chars=" + to_string(len(markdown)))
+            }
+          } else {
+            // Scanned or ImageBased — cannot extract text without OCR
+            let pages = to_string(json_get(classification, "page_count", "?"))
+            let _ = SendTelegramReply(chat_id, "PDF-документ '" + doc_name + "' (" + pages + " стр.) — сканированный. Извлечение текста требует OCR-сервис (пока не подключён).")
+            let _ = AuditLog("pdf_scanned", "document", "type=" + pdf_type + " pages=" + pages)
+            return respond("200 ok")
+          }
+          // Cleanup temp file
+          let _ = delete_file(tmp_path)
+          return respond("200 ok")
+        }
+
+        // ── Non-PDF documents: existing Python extraction service ──
         let _ = AuditLog("document_received", "document", "name=" + doc_name)
         let _ = SendTelegramReply(chat_id, "Файл получен: " + doc_name + ". Извлекаю текст.")
         let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
