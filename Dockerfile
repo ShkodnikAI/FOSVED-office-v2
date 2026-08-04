@@ -2,6 +2,7 @@ FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
     ca-certificates git python3 python3-pip curl \
+    tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-jpn tesseract-ocr-kor \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps

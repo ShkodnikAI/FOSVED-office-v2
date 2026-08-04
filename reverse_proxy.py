@@ -56,6 +56,7 @@ INTERNAL_ONLY_PREFIXES = [
     "/archive/digest",
     "/archive/daily-digest",
     "/extract-document",
+    "/download-telegram-file",
 ]
 
 

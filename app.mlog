@@ -25,11 +25,7 @@ import dept/admin
 
 // ============================================================
 // MEMORY — SQLite via db_execute() in InitDB()
-// Metalogos runtime memory: persist to separate SQLite DB for parallel accumulation.
-// Python FosvedMemory (via HTTP) remains the primary memory system.
 // ============================================================
-
-memory { kv: { type: key_value persist: true }, persist: "data/metalogos_memory.db" }
 
 // ============================================================
 // INIT DATABASE — all 22 tables
@@ -826,61 +822,10 @@ pattern FormatMemoryResults(results: String) -> String {
 }
 
 pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> String {
-  // Guard: skip when reply is too short for meaningful extraction.
   if len(reply) < 20.0 then { return "" }
   let body = json_encode({query: query, reply: reply, chat_id: chat_id})
-  let resp = try http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
-  // Parallel memory: feed extracted facts into Metalogos runtime memory (Phase 3-5).
-  // This accumulates typed data for future Phase 4 (scenario grouping) and Phase 6 (persona aggregation).
-  // Python FosvedMemory remains the primary memory — Metalogos memory accumulates in parallel.
-  let parsed = try parse_json(resp)
-  let facts = try json_get(parsed, "facts", "[]")
-  if to_string(facts) != "()" then {
-    each f in facts {
-      let content = to_string(json_get(f, "content", ""))
-      let mem_type = to_string(json_get(f, "type", "fact"))
-      let conf = to_float(json_get(f, "confidence", "0.8"))
-      if content != "" then {
-        let _ = try memorize(content, conf, mem_type)
-      }
-    }
-  }
+  let _ = try http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
   return "ok"
-}
-
-// ── MemoryStatus — /memory command for Admin ──────────────────
-// Shows Metalogos memory stats + Phase 4/6 readiness.
-// Uses recall_top_k() to test search; Python FosvedMemory status via HTTP.
-pattern MemoryStatus() -> String {
-  // Test Metalogos memory recall
-  let test_results = try recall_top_k("test query", 3)
-  let metalogos_count = len(to_string(test_results))
-
-  // Test Python FosvedMemory via HTTP
-  let python_ok = "unknown"
-  let body = json_encode({query: "test", top_k: 1, chat_id: "monitor"})
-  let python_resp = try http_post("http://127.0.0.1:4000/memory/recall", body, "application/json")
-  let parsed = try parse_json(python_resp)
-  let python_mem_count = json_get(parsed, "total_memories", "?")
-  if to_string(python_mem_count) != "?" then {
-    let python_ok = "online"
-  }
-
-  // Build status message
-  let msg = "Memory System Status\n"
-  let msg = msg + "━━━━━━━━━━━━━━━━━━━\n"
-  let msg = msg + "\nMetalogos (Rust builtin):\n"
-  let msg = msg + "  Recall test: " + to_string(metalogos_count) + " results\n"
-  let msg = msg + "  Mode: parallel accumulator\n"
-  let msg = msg + "\nPython FosvedMemory (HTTP):\n"
-  let msg = msg + "  Status: " + python_ok + "\n"
-  let msg = msg + "  Memories: " + to_string(python_mem_count) + "\n"
-  let msg = msg + "  Mode: PRIMARY\n"
-  let msg = msg + "\nPhase readiness:\n"
-  let msg = msg + "  Phase 4 (L2): accumulating data\n"
-  let msg = msg + "  Phase 6 (L3): waiting for Phase 4\n"
-  let msg = msg + "\nFor full dashboard: scripts/memory_monitor.py"
-  return msg
 }
 
 pattern YanaCalendar() -> String {
@@ -1148,86 +1093,102 @@ mlogserver {
       let doc_file_id = to_string(json_get(data, "message.document.file_id", ""))
       if doc_file_id != "" then {
         let doc_name = to_string(json_get(data, "message.document.file_name", "file"))
-        let caption = to_string(json_get(data, "message.caption", ""))
         let doc_mime = to_string(json_get(data, "message.document.mime_type", ""))
+        let caption = to_string(json_get(data, "message.caption", ""))
+        let _ = AuditLog("document_received", "document", "name=" + doc_name + " mime=" + doc_mime)
 
-        // ── Native PDF processing via Metalogos pdf-inspector (Наряд №48) ──
-        if ends_with(doc_name, ".pdf") or doc_mime == "application/pdf" then {
-          let _ = AuditLog("pdf_received", "document", "name=" + doc_name + " mime=" + doc_mime)
+        // НАРЯД №48: PDF-роутинг через нативный pdf_classify
+        if contains(doc_mime, "application/pdf") or ends_with(lower(doc_name), ".pdf") then {
+          let _ = SendTelegramReply(chat_id, "PDF получен: " + doc_name + ". Классифицирую и извлекаю текст.")
+          // Скачиваем файл через Telegram File API → proxy
           let token = env("TELEGRAM_BOT_TOKEN")
-          // Step 1: getFile to obtain file_path
-          let getfile_body = json_encode({file_id: doc_file_id})
-          let getfile_resp = try http_post("https://api.telegram.org/bot" + token + "/getFile", getfile_body, "application/json")
-          let getfile_parsed = try parse_json(getfile_resp)
-          let file_path = to_string(json_get(getfile_parsed, "result.file_path", ""))
+          let file_info = try http_post("https://api.telegram.org/bot" + token + "/getFile", json_encode({file_id: doc_file_id}), "application/json")
+          if to_string(file_info) == "()" then {
+            let _ = SendTelegramReply(chat_id, "Ошибка: не удалось получить информацию о файле.")
+            return respond("200 ok")
+          }
+          let file_parsed = parse_json(file_info)
+          let file_path = to_string(json_get(file_parsed, "result.file_path", ""))
           if file_path == "" then {
-            let _ = SendTelegramReply(chat_id, "Ошибка: не удалось получить путь к файлу от Telegram.")
+            let _ = SendTelegramReply(chat_id, "Ошибка: файл недоступен (истёк срок).")
             return respond("200 ok")
           }
-          // Step 2: download file to temp location
-          let download_url = "https://api.telegram.org/file/bot" + token + "/" + file_path
-          let tmp_path = "/tmp/metalogos_pdf_" + doc_file_id + ".pdf"
-          let pdf_bytes = try http_get(download_url)
-          let _ = write_file(tmp_path, to_string(pdf_bytes))
-          // Step 3: classify PDF
-          let classification = try pdf_classify(tmp_path)
-          let pdf_type = to_string(json_get(classification, "type", "unknown"))
-          let confidence = to_string(json_get(classification, "confidence", "0"))
-          let _ = AuditLog("pdf_classified", "document", "type=" + pdf_type + " conf=" + confidence)
-          // Step 4: route by type
-          if pdf_type == "TextBased" or pdf_type == "Mixed" then {
-            let result = try pdf_to_markdown(tmp_path)
-            let markdown = to_string(json_get(result, "markdown", ""))
-            let pages = to_string(json_get(result, "page_count", "?"))
-            let proc_ms = to_string(json_get(result, "processing_time_ms", "?"))
-            if len(markdown) < 10.0 then {
-              let _ = SendTelegramReply(chat_id, "PDF (" + pages + " стр., " + proc_ms + "мс): не удалось извлечь текст. Формат может быть нестандартным.")
-            } else {
-              if caption != "" then {
-                let text = caption + "\n\n=== PDF: " + doc_name + " (" + pages + " стр.) ===\n" + markdown
-              } else {
-                let text = "=== PDF: " + doc_name + " (" + pages + " стр.) ===\n" + markdown
-              }
-              let _ = AuditLog("pdf_extracted", "document", "pages=" + pages + " ms=" + proc_ms + " chars=" + to_string(len(markdown)))
+          // Скачиваем binary через proxy (base64-кодированный)
+          let dl_body = json_encode({file_path: file_path})
+          let dl_result = try http_post("http://127.0.0.1:4000/download-telegram-file", dl_body, "application/json", 120.0)
+          if to_string(dl_result) == "()" then {
+            let _ = SendTelegramReply(chat_id, "Ошибка: скачивание файла не удалось.")
+            return respond("200 ok")
+          }
+          let dl_parsed = parse_json(dl_result)
+          let pdf_b64 = to_string(json_get(dl_parsed, "data", ""))
+          if pdf_b64 == "" then {
+            // Fallback: используем старый extract-document
+            let _ = SendTelegramReply(chat_id, "PDF получен. Извлекаю текст через прокси...")
+            let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
+            let doc_result = try http_post("http://127.0.0.1:4000/extract-document", doc_body, "application/json", 120.0)
+            if to_string(doc_result) == "()" then {
+              let _ = SendTelegramReply(chat_id, "Ошибка: сервис извлечения текста недоступен.")
+              return respond("200 ok")
             }
-          } else {
-            // Scanned or ImageBased — cannot extract text without OCR
-            let pages = to_string(json_get(classification, "page_count", "?"))
-            let _ = SendTelegramReply(chat_id, "PDF-документ '" + doc_name + "' (" + pages + " стр.) — сканированный. Извлечение текста требует OCR-сервис (пока не подключён).")
-            let _ = AuditLog("pdf_scanned", "document", "type=" + pdf_type + " pages=" + pages)
-            return respond("200 ok")
-          }
-          // Cleanup temp file
-          let _ = delete_file(tmp_path)
-          return respond("200 ok")
-        }
-
-        // ── Non-PDF documents: existing Python extraction service ──
-        let _ = AuditLog("document_received", "document", "name=" + doc_name)
-        let _ = SendTelegramReply(chat_id, "Файл получен: " + doc_name + ". Извлекаю текст.")
-        let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
-        let doc_result = try http_post("http://127.0.0.1:4000/extract-document", doc_body, "application/json", 120.0)
-        if to_string(doc_result) == "()" then {
-          let _ = SendTelegramReply(chat_id, "Ошибка: сервис извлечения текста недоступен.")
-          return respond("200 ok")
-        } else {
-          let doc_parsed = parse_json(doc_result)
-          let doc_status = to_string(json_get(doc_parsed, "status", "error"))
-          if doc_status == "ok" then {
+            let doc_parsed = parse_json(doc_result)
             let extracted = to_string(json_get(doc_parsed, "text", ""))
-            let was_cut = to_string(json_get(doc_parsed, "truncated", "false"))
-            if was_cut == "true" then {
-              let _ = SendTelegramReply(chat_id, "Файл длинный, взяты первые 60000 символов.")
-            }
-            if caption != "" then {
-              let text = caption + "\n\n=== Вложенный файл: " + doc_name + " ===\n" + extracted
-            } else {
-              let text = extracted
-            }
+            let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + extracted
+            // text устанавливается, продолжаем к маршрутизации департамента
           } else {
-            let doc_err = to_string(json_get(doc_parsed, "message", "неизвестная ошибка"))
-            let _ = SendTelegramReply(chat_id, "Не удалось прочитать файл: " + doc_err)
+            // Нативная классификация через pdf_classify builtin
+            let pdf_info = try pdf_classify(pdf_b64)
+            let pdf_type = to_string(json_get(pdf_info, "type", "unknown"))
+            let pdf_needs_ocr = to_string(json_get(pdf_info, "needs_ocr", "0"))
+            let pdf_pages = to_string(json_get(pdf_info, "pages", "0"))
+
+            let _ = AuditLog("pdf_classified", "document", "type=" + pdf_type + " pages=" + pdf_pages + " needs_ocr=" + pdf_needs_ocr)
+
+            // Извлекаем текст нативно
+            let md_result = try pdf_to_markdown(pdf_b64)
+            let md_text = to_string(json_get(md_result, "markdown", ""))
+            let ocr_pages_count = to_string(json_get(md_result, "pages_needing_ocr", "0"))
+
+            // Если есть страницы требующие OCR — пробуем pdf_ocr
+            if pdf_needs_ocr == "1" then {
+              let ocr_result = try pdf_ocr(pdf_b64)
+              let ocr_markdown = to_string(json_get(ocr_result, "markdown", ""))
+              let ocr_confidence = to_string(json_get(ocr_result, "ocr_confidence", "0"))
+              let _ = SendTelegramReply(chat_id, "PDF: " + pdf_type + ", " + pdf_pages + " стр. OCR: " + ocr_pages_count + " стр. (confidence: " + ocr_confidence + "%)")
+              // Заменяем [OCR_NEEDED] плейсхолдеры на OCR-результат
+              let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text + "\n\n--- OCR ---\n" + ocr_markdown
+            } else {
+              let _ = SendTelegramReply(chat_id, "PDF: " + pdf_type + ", " + pdf_pages + " стр. Текст извлечён.")
+              let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text
+            }
+          }
+        } else {
+          // Не PDF — используем старый extract-document прокси
+          let _ = SendTelegramReply(chat_id, "Файл получен: " + doc_name + ". Извлекаю текст.")
+          let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
+          let doc_result = try http_post("http://127.0.0.1:4000/extract-document", doc_body, "application/json", 120.0)
+          if to_string(doc_result) == "()" then {
+            let _ = SendTelegramReply(chat_id, "Ошибка: сервис извлечения текста недоступен.")
             return respond("200 ok")
+          } else {
+            let doc_parsed = parse_json(doc_result)
+            let doc_status = to_string(json_get(doc_parsed, "status", "error"))
+            if doc_status == "ok" then {
+              let extracted = to_string(json_get(doc_parsed, "text", ""))
+              let was_cut = to_string(json_get(doc_parsed, "truncated", "false"))
+              if was_cut == "true" then {
+                let _ = SendTelegramReply(chat_id, "Файл длинный, взяты первые 60000 символов.")
+              }
+              if caption != "" then {
+                let text = caption + "\n\n=== Вложенный файл: " + doc_name + " ===\n" + extracted
+              } else {
+                let text = extracted
+              }
+            } else {
+              let doc_err = to_string(json_get(doc_parsed, "message", "неизвестная ошибка"))
+              let _ = SendTelegramReply(chat_id, "Не удалось прочитать файл: " + doc_err)
+              return respond("200 ok")
+            }
           }
         }
       } else {
@@ -1303,7 +1264,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected)\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /memory /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected)\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -1311,13 +1272,6 @@ mlogserver {
     if text == "/status" then {
       let _ = SendTelegramReply(chat_id, "Fosved Office v2 — Status\n\nDepartments: yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya, admin\nAll 14 online.\nVoice: " + kv_get("voice_enabled") + "\nArchive: " + kv_get("auto_archive"))
       let _ = AuditLog("status_check", "system", "status requested")
-      return respond("200 ok")
-    }
-
-    // /memory — memory system status (Metalogos + Python FosvedMemory)
-    if text == "/memory" then {
-      let _ = SendTelegramReply(chat_id, MemoryStatus())
-      let _ = AuditLog("memory_status", "admin", "memory dashboard requested")
       return respond("200 ok")
     }
 

@@ -4,7 +4,7 @@ Flask server on port 4000 with native circuit breaker, combo chains, token compr
 7-provider direct failover, dept routing, dashboards, SQLite,
 TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
-import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
+import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid, base64
 import doc_extract
 import html as html_lib
 from datetime import datetime, timedelta
@@ -2153,6 +2153,29 @@ def extract_document():
                 os.remove(tmp)
             except Exception:
                 pass
+
+
+@app.post("/download-telegram-file")
+def download_telegram_file():
+    """НАРЯД №48: Download a Telegram file and return base64-encoded data.
+    Used by Metalogos native PDF builtins (pdf_classify, pdf_to_markdown, pdf_ocr).
+    """
+    d = request.get_json(force=True)
+    file_path = d.get("file_path", "")
+    if not file_path:
+        return jsonify({"status": "error", "message": "file_path is required"}), 400
+    try:
+        blob = _tg_download_file(file_path)
+        if not blob:
+            return jsonify({"status": "error",
+                            "message": "не удалось скачать файл"}), 200
+        b64_data = base64.b64encode(blob).decode("ascii")
+        _log_audit("telegram_file_downloaded", {"file_path": file_path,
+                                                 "size": len(blob)})
+        return jsonify({"status": "ok", "data": b64_data, "size": len(blob)})
+    except Exception as e:
+        log.error(f"download_telegram_file failed: {e}")
+        return jsonify({"status": "error", "message": "внутренняя ошибка скачивания"}), 500
 
 
 # ══════════════════════════════════════════════════════════════════════
