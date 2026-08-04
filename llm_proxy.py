@@ -1407,6 +1407,8 @@ def ask():
     if not messages:
         return jsonify({"reply": "[Oshibka] Net soobshenii", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 400
     result = call_llm(dept, messages, model_ov)
+    if result is None:
+        return jsonify({"reply": "[Oshibka] LLM nedostupen", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 503
     if dept == "osp" and "reply" in result:
         import re as _re
         from datetime import datetime as _dt
@@ -2495,10 +2497,13 @@ def scheduler_morning_brief():
         ]
 
         result = call_llm("yana", messages)
+        if result is None or not result.get("reply"):
+            log.error(f"morning_brief: call_llm failed or empty reply")
+            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         brief = result["reply"]
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
-        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
 
         return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
 
@@ -2581,10 +2586,13 @@ def scheduler_admin_morning_reply():
         ]
 
         result = call_llm("admin", messages)
+        if result is None or not result.get("reply"):
+            log.error(f"admin_morning_reply: call_llm failed or empty reply")
+            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         reply = result["reply"]
 
         msg_id = _tg_send_formatted(owner_id, reply, dept="admin")
-        _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+        _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
 
         return jsonify({"status": "ok", "reply": reply, "msg_id": msg_id})
 
@@ -2616,6 +2624,9 @@ def scheduler_evening_summary():
         ]
 
         result = call_llm("yana", messages)
+        if result is None or not result.get("reply"):
+            log.error(f"evening_summary: call_llm failed or empty reply")
+            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         summary = result["reply"]
 
         # Send to owner
@@ -2668,6 +2679,9 @@ def scheduler_weekly_digest():
         ]
 
         result = call_llm("yana", messages)
+        if result is None or not result.get("reply"):
+            log.error(f"weekly_digest: call_llm failed or empty reply")
+            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         digest = result["reply"]
 
         # Send via SendReport (if > 800 chars, use Mini App button)
@@ -2708,11 +2722,14 @@ def scheduler_monthly_review():
         ]
 
         result = call_llm("yana", messages)
+        if result is None or not result.get("reply"):
+            log.error(f"monthly_review: call_llm failed or empty reply")
+            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         review = result["reply"]
 
         msg_id = _tg_send_report_with_button(owner_id, review)
 
-        _log_audit("scheduler_monthly_review", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
+        _log_audit("scheduler_monthly_review", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
 
         return jsonify({"status": "ok", "msg_id": msg_id})
 
@@ -2761,7 +2778,10 @@ def scheduler_control_check():
                     {"role": "user", "content": f"Control check: {topic}\n\nOriginal prediction: {original_prediction}\n\nAnalyze: did the prediction match reality? What changed?\n\nOzhidai: korotkii analiz 2-3 predlozheniya."},
                 ]
                 check_result = call_llm("osp", messages)
-                analysis = check_result["reply"]
+                if check_result is None or not check_result.get("reply"):
+                    analysis = "[контроль недоступен — LLM не ответил]"
+                else:
+                    analysis = check_result["reply"]
                 results.append({"key": key, "topic": topic, "frequency": frequency, "analysis": analysis})
 
         # Format and send results
@@ -2812,6 +2832,9 @@ def scheduler_self_learn():
         ]
 
         result = call_llm("yana", messages)
+        if result is None or not result.get("reply"):
+            log.error(f"self_learn: call_llm failed or empty reply")
+            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         finding = result["reply"]
 
         # Memorize finding
@@ -2849,6 +2872,9 @@ def learning_fix():
         ]
 
         result = call_llm(dept, messages)
+        if result is None or not result.get("reply"):
+            log.error(f"learning_fix: call_llm failed or empty reply")
+            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         reply = result["reply"]
 
         # Parse JSON from LLM response
@@ -2968,9 +2994,12 @@ def learning_debrief():
         ]
 
         result = call_llm(dept, messages)
+        if result is None or not result.get("reply"):
+            log.error(f"learning_debrief: call_llm failed or empty reply")
+            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         analysis = result["reply"]
 
-        _log_audit("learning_debrief", {"dept": dept, "corrections_analyzed": len(corrs), "provider": result["provider"]})
+        _log_audit("learning_debrief", {"dept": dept, "corrections_analyzed": len(corrs), "provider": result.get("provider")})
 
         return jsonify({"status": "ok", "analysis": analysis})
 
@@ -5126,7 +5155,19 @@ def telegram_webhook():
     
     result = call_llm(dept, messages)
     action_stop.set()  # stop typing indicator
-    reply = result.get("reply", "Ошибка: пустой ответ")
+
+    # Guard: call_llm can return None if all providers fail or circuit breaker is open
+    if result is None:
+        log.error(f"[WEBHOOK] call_llm returned None for dept={dept} — all providers dead or circuit breaker open")
+        _tg_send_message(chat_id, "⏱ Все провайдеры перегружены. Попробуйте через 30 сек.")
+        return "ok", 200
+
+    reply = result.get("reply", "")
+    if not reply:
+        log.error(f"[WEBHOOK] Empty reply from provider={result.get('provider')} model={result.get('model')}")
+        _tg_send_message(chat_id, "Пустой ответ от модели. Попробуйте ещё раз.")
+        return "ok", 200
+
     provider = result.get("provider", "?")
     
     log.info(f"[WEBHOOK] reply_len={len(reply)} provider={provider}")
@@ -5136,9 +5177,14 @@ def telegram_webhook():
            (chat_id, "assistant", dept, reply[:2000], datetime.utcnow().isoformat()))
     
     # ── Send response ──
+    msg_delivered = False
     if dept in ("yana", "admin"):
         # Formatted text with MarkdownV2 (bold, italic, underline via __text__)
-        _tg_send_formatted(chat_id, reply, dept=dept)
+        msg_id = _tg_send_formatted(chat_id, reply, dept=dept)
+        if msg_id is not None:
+            msg_delivered = True
+        else:
+            log.error(f"[WEBHOOK] _tg_send_formatted returned None for dept={dept} — Telegram delivery failed")
     elif len(reply) > 800:
         # Mini App report for long responses
         doc_id = f"doc-{int(datetime.utcnow().timestamp())}"
@@ -5182,14 +5228,31 @@ def telegram_webhook():
                     "web_app": {"url": miniapp_url}
                 }]]}
             }
-            http_requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            mini_resp = http_requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                              json=payload, timeout=30)
+            if mini_resp.status_code == 200 and mini_resp.json().get("ok"):
+                msg_delivered = True
+            else:
+                log.warning(f"Mini App send failed: status={mini_resp.status_code} body={mini_resp.text[:200]}")
+                # Fallback: send as plain text
+                fb_id = _tg_send_message(chat_id, reply)
+                if fb_id is not None:
+                    msg_delivered = True
         except Exception as e:
             log.error(f"Mini App report failed: {e}")
-            _tg_send_message(chat_id, reply)
+            fb_id = _tg_send_message(chat_id, reply)
+            if fb_id is not None:
+                msg_delivered = True
     else:
         # Short response — plain text
-        _tg_send_message(chat_id, reply)
+        msg_id = _tg_send_message(chat_id, reply)
+        if msg_id is not None:
+            msg_delivered = True
+        else:
+            log.error(f"[WEBHOOK] _tg_send_message returned None — Telegram delivery failed")
+
+    if not msg_delivered:
+        log.error(f"[WEBHOOK] CRITICAL: response NOT delivered to chat_id={chat_id} dept={dept} reply_len={len(reply)}")
     
     # ── Voice response (TTS) — clean text for natural speech ──
     if _voice_enabled and len(reply) > 5:
