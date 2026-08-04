@@ -4666,6 +4666,7 @@ def yana_auto_memorize():
                 text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
             facts = _json.loads(text)
             saved = 0
+            saved_facts = []
             for f in facts[:3]:
                 if isinstance(f, dict) and f.get('content'):
                     memory.remember(
@@ -4675,6 +4676,11 @@ def yana_auto_memorize():
                         source='yana_auto'
                     )
                     saved += 1
+                    saved_facts.append({
+                        'content': f['content'][:500],
+                        'type': f.get('type', 'fact'),
+                        'confidence': f.get('confidence', 0.8),
+                    })
             log.info(f"Yana auto-memorize: extracted {saved} facts from chat {chat_id}")
 
             # Also check for dated reminders — store in yana_events for scheduler
@@ -4684,7 +4690,7 @@ def yana_auto_memorize():
                            (f['content'][:300], f['date'][:20]))
                     log.info(f"Yana reminder stored: {f['content'][:60]} at {f.get('date', '?')}")
 
-            return jsonify({'status': 'ok', 'saved': saved})
+            return jsonify({'status': 'ok', 'saved': saved, 'facts': saved_facts})
     except Exception as e:
         log.warning(f"Yana auto-memorize failed: {e}")
     return jsonify({'status': 'error'})

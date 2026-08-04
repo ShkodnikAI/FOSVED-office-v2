@@ -25,7 +25,11 @@ import dept/admin
 
 // ============================================================
 // MEMORY — SQLite via db_execute() in InitDB()
+// Metalogos runtime memory: persist to separate SQLite DB for parallel accumulation.
+// Python FosvedMemory (via HTTP) remains the primary memory system.
 // ============================================================
+
+memory { kv: { type: key_value persist: true }, persist: "data/metalogos_memory.db" }
 
 // ============================================================
 // INIT DATABASE — all 22 tables
@@ -822,9 +826,25 @@ pattern FormatMemoryResults(results: String) -> String {
 }
 
 pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> String {
+  // Guard: skip when reply is too short for meaningful extraction.
   if len(reply) < 20.0 then { return "" }
   let body = json_encode({query: query, reply: reply, chat_id: chat_id})
-  let _ = try http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
+  let resp = try http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
+  // Parallel memory: feed extracted facts into Metalogos runtime memory (Phase 3-5).
+  // This accumulates typed data for future Phase 4 (scenario grouping) and Phase 6 (persona aggregation).
+  // Python FosvedMemory remains the primary memory — Metalogos memory accumulates in parallel.
+  let parsed = try parse_json(resp)
+  let facts = try json_get(parsed, "facts", "[]")
+  if to_string(facts) != "()" then {
+    each f in facts {
+      let content = to_string(json_get(f, "content", ""))
+      let mem_type = to_string(json_get(f, "type", "fact"))
+      let conf = to_float(json_get(f, "confidence", "0.8"))
+      if content != "" then {
+        let _ = try memorize(content, conf, mem_type)
+      }
+    }
+  }
   return "ok"
 }
 
