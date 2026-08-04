@@ -300,30 +300,34 @@ _breaker = CircuitBreaker(threshold=3, reset_after_ms=60000)
 # Each combo is an ordered list of (provider, [models]) tuples.
 # call_llm walks the chain: for each provider, try each model until one works.
 COMBO_CHAINS = {
+    # Fix: groq 413 (sys_len>6K chars) kills Yana. kimi ($0.60/M) and zai ($0.50/M)
+    # are cheap enough for the "free" chain and actually work with large prompts.
     "fosved-free": [
+        ("kimi", ["kimi-k3"]),
+        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("deepseek", ["deepseek-chat"]),
     ],
     "fosved-standard": [
         ("kimi", ["kimi-k3"]),
-        ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6", "glm-4-plus"]),
+        ("deepseek", ["deepseek-chat"]),
         ("groq", ["llama-3.3-70b-versatile"]),
         ("cerebras", ["gpt-oss-120b"]),
     ],
     "fosved-deep": [
         ("kimi", ["kimi-k3"]),
+        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("deepseek", ["deepseek-chat"]),
-        ("zai", ["glm-4.6"]),
         ("groq", ["llama-3.3-70b-versatile"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
     "fosved-fusion": [
         ("kimi", ["kimi-k3"]),
+        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("deepseek", ["deepseek-chat"]),
-        ("zai", ["glm-4.6"]),
         ("groq", ["llama-3.3-70b-versatile"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
@@ -405,8 +409,10 @@ def _compress_messages(messages, dept='yana'):
     ]
 
     try:
-        # Use cheap provider for compression
+        # Try groq first (short prompt, no 413 risk), fallback to kimi
         summary_result = _call_single_provider("groq", "llama-3.3-70b-versatile", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
+        if not summary_result or not summary_result.get("reply"):
+            summary_result = _call_single_provider("kimi", "kimi-k3", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
         if summary_result and summary_result.get("reply"):
             summary_msg = {"role": "system", "content": f"[Earlier conversation summary]: {summary_result['reply'][:2000]}"}
             compressed = system_msgs + [summary_msg] + to_keep
