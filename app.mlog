@@ -848,6 +848,41 @@ pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> Strin
   return "ok"
 }
 
+// ── MemoryStatus — /memory command for Admin ──────────────────
+// Shows Metalogos memory stats + Phase 4/6 readiness.
+// Uses recall_top_k() to test search; Python FosvedMemory status via HTTP.
+pattern MemoryStatus() -> String {
+  // Test Metalogos memory recall
+  let test_results = try recall_top_k("test query", 3)
+  let metalogos_count = len(to_string(test_results))
+
+  // Test Python FosvedMemory via HTTP
+  let python_ok = "unknown"
+  let body = json_encode({query: "test", top_k: 1, chat_id: "monitor"})
+  let python_resp = try http_post("http://127.0.0.1:4000/memory/recall", body, "application/json")
+  let parsed = try parse_json(python_resp)
+  let python_mem_count = json_get(parsed, "total_memories", "?")
+  if to_string(python_mem_count) != "?" then {
+    let python_ok = "online"
+  }
+
+  // Build status message
+  let msg = "Memory System Status\n"
+  let msg = msg + "━━━━━━━━━━━━━━━━━━━\n"
+  let msg = msg + "\nMetalogos (Rust builtin):\n"
+  let msg = msg + "  Recall test: " + to_string(metalogos_count) + " results\n"
+  let msg = msg + "  Mode: parallel accumulator\n"
+  let msg = msg + "\nPython FosvedMemory (HTTP):\n"
+  let msg = msg + "  Status: " + python_ok + "\n"
+  let msg = msg + "  Memories: " + to_string(python_mem_count) + "\n"
+  let msg = msg + "  Mode: PRIMARY\n"
+  let msg = msg + "\nPhase readiness:\n"
+  let msg = msg + "  Phase 4 (L2): accumulating data\n"
+  let msg = msg + "  Phase 6 (L3): waiting for Phase 4\n"
+  let msg = msg + "\nFor full dashboard: scripts/memory_monitor.py"
+  return msg
+}
+
 pattern YanaCalendar() -> String {
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_1_before_query','ok')")
   let rows = query("SELECT COALESCE(event_text,'') AS event_text, COALESCE(event_date,'') AS event_date, COALESCE(event_type,'напоминание') AS event_type FROM yana_events WHERE created_at IS NOT NULL ORDER BY event_date ASC LIMIT 20", [])
@@ -1214,7 +1249,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected)\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected)\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /memory /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -1222,6 +1257,13 @@ mlogserver {
     if text == "/status" then {
       let _ = SendTelegramReply(chat_id, "Fosved Office v2 — Status\n\nDepartments: yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya, admin\nAll 14 online.\nVoice: " + kv_get("voice_enabled") + "\nArchive: " + kv_get("auto_archive"))
       let _ = AuditLog("status_check", "system", "status requested")
+      return respond("200 ok")
+    }
+
+    // /memory — memory system status (Metalogos + Python FosvedMemory)
+    if text == "/memory" then {
+      let _ = SendTelegramReply(chat_id, MemoryStatus())
+      let _ = AuditLog("memory_status", "admin", "memory dashboard requested")
       return respond("200 ok")
     }
 
