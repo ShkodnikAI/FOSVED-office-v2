@@ -4938,6 +4938,22 @@ _tts_voice = "ru-RU-SvetlanaNeural"
 
 @app.post("/webhook/telegram")
 def telegram_webhook():
+    try:
+        return _telegram_webhook_impl()
+    except Exception as e:
+        import traceback as _tb
+        log.error(f"[WEBHOOK CRASH] {type(e).__name__}: {e}\n{_tb.format_exc()}")
+        # Try to notify owner even on crash
+        try:
+            data = request.get_json(force=True, silent=True) or {}
+            chat_id = str(data.get("message", {}).get("chat", {}).get("id", ""))
+            if chat_id:
+                _tg_send_message(chat_id, f"⚠️ Ошибка обработки: {type(e).__name__}")
+        except Exception:
+            pass
+        return "ok", 200  # Return 200 to prevent Telegram retry storm
+
+def _telegram_webhook_impl():
     # Verify Telegram webhook secret
     if not _verify_webhook_secret():
         log.warning("Webhook secret verification failed")
@@ -5544,6 +5560,19 @@ def get_night_news_digest():
 
 
 if __name__ == "__main__":
+    # Global error handlers — log full traceback instead of silent 500
+    @app.errorhandler(500)
+    def _handle_500(e):
+        import traceback as _tb
+        log.error(f"[500] {e}\n{_tb.format_exc()}")
+        return "internal error", 500
+
+    @app.errorhandler(Exception)
+    def _handle_exception(e):
+        import traceback as _tb
+        log.error(f"[UNHANDLED] {type(e).__name__}: {e}\n{_tb.format_exc()}")
+        return "internal error", 500
+
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
