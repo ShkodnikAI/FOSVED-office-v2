@@ -15,7 +15,7 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
 # Routes that go to LLM Proxy (Mini App + dashboards + archive + scheduler + learning)
 LLM_ROUTES_PREFIXES = [
-    "/webhook/telegram",  # Python webhook handler — bypasses Metalogos for full control
+    # "/webhook/telegram",  # WH-1: returned to Metalogos after fixing app.mlog:2251
     "/webhook/miniapp-action",  # Mini App action bar → LLM Proxy (must precede generic mlog routing)
     "/cron/collect-news",  # registered in LLM Proxy, not in Metalogos; guarded by CRON_SECRET
     "/news/stats",         # read-only counters, used by the smoke script,
