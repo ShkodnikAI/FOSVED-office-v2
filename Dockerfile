@@ -8,9 +8,9 @@ RUN apt-get update && apt-get install -y \
 # Python deps
 RUN pip3 install flask requests edge-tts aliens-eye pymupdf openpyxl --break-system-packages
 
-# Metalogos
+# Metalogos v0.12.0 — WH-1: force cache invalidation to ensure latest binary
 COPY bin/mlog /usr/local/bin/mlog
-RUN chmod +x /usr/local/bin/mlog
+RUN chmod +x /usr/local/bin/mlog && /usr/local/bin/mlog --version
 
 WORKDIR /office
 COPY entrypoint.sh /office/entrypoint.sh
