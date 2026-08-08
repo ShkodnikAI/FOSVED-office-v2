@@ -102,6 +102,9 @@ pattern InitDB() -> String {
   let _ = try db_execute("ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
   let _ = try db_execute("ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
 
+  // Webhook dedup — time-windowed (WH-3): replaces eternal kv-flag
+  db_execute("CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT DEFAULT (datetime('now')))")
+
   return "ok"
 }
 
@@ -1035,12 +1038,14 @@ mlogserver {
     // Owner check — ignore non-owner
     if user_id != owner_id then { return respond("200 ok") }
 
-    // Idempotency: игнорируем повторную доставку того же update (ретрай Telegram)
+    // Idempotency: игнорируем быстрый повтор (в пределах 90 с), пропускаем медленный ретрай (WH-3)
     let update_id = to_string(json_get(data, "update_id", ""))
     if update_id != "" then {
-      let seen = kv_get("upd_" + update_id)
-      if seen == "1" then { return respond("200 ok") }
-      kv_set("upd_" + update_id, "1")
+      let recent = query("SELECT COUNT(*) AS c FROM webhook_dedup WHERE update_id = ? AND seen_at > datetime('now', '-90 seconds')", [update_id])
+      let recent_count = to_float(json_get(recent[0], "c", "0"))
+      if recent_count > 0.0 then { return respond("200 ok") }
+      let _ = try db_execute("INSERT OR REPLACE INTO webhook_dedup (update_id, seen_at) VALUES (?, datetime('now'))", [update_id])
+      let _ = try db_execute("DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
     }
 
     // Lockdown check
