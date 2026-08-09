@@ -364,21 +364,62 @@ pattern ReadDeptProfile(dept: String) -> String {
   return "Department: " + dept + ". Act professionally."
 }
 
+// Skill loading for non-OSP departments — two-phase approach (WH-4):
+// Phase 1: core skills (first 3 in index) always loaded — guarantees dept always has guidance
+// Phase 2: remaining skills matched by query keywords appearing in skill content
+// Budget: 80000 chars (was 2000), per-skill limit: 15000 chars (was 500)
 pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
   let index_content = read_file("skills_index/" + dept + ".txt")
   if index_content == "" then { return "No skills loaded." }
   let _nl = "\n"
+  let _sp = " "
   let skills_list = split(trim(index_content), _nl)
   let result = ""
+  let budget = 80000.0
+  let skill_limit = 15000.0
+  let core_count = 3.0
+  let i = 0.0
+
+  // Extract up to 6 significant keywords (>= 4 chars) from query for matching
+  let t = lower(query)
+  let words = split(t, _sp)
+  let kw0 = ""
+  let kw1 = ""
+  let kw2 = ""
+  let kw3 = ""
+  let kw4 = ""
+  let kw5 = ""
+  let wi = 0.0
+  each w in words {
+    if len(w) >= 4.0 then {
+      if wi == 0.0 then { let kw0 = w }
+      if wi == 1.0 then { let kw1 = w }
+      if wi == 2.0 then { let kw2 = w }
+      if wi == 3.0 then { let kw3 = w }
+      if wi == 4.0 then { let kw4 = w }
+      if wi == 5.0 then { let kw5 = w }
+      let wi = wi + 1.0
+    }
+  }
+
   each skill in skills_list {
-    if len(result) < 2000.0 then {
-      let skill_content = read_file("skills/" + trim(skill) + "/SKILL.md")
+    if len(result) < budget then {
+      let skill_name = trim(skill)
+      let skill_content = read_file("skills/" + skill_name + "/SKILL.md")
       if skill_content != "" then {
-        if contains(lower(skill_content), lower(substring(query, 0.0, 50.0))) then {
-          let result = result + "\n--- " + trim(skill) + " ---\n" + substring(skill_content, 0.0, 500.0)
+        if i < core_count then {
+          // Phase 1: core skills always loaded
+          let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
+        } else {
+          // Phase 2: match by any query keyword appearing in skill content
+          let sc = lower(skill_content)
+          if (kw0 != "" and contains(sc, kw0)) or (kw1 != "" and contains(sc, kw1)) or (kw2 != "" and contains(sc, kw2)) or (kw3 != "" and contains(sc, kw3)) or (kw4 != "" and contains(sc, kw4)) or (kw5 != "" and contains(sc, kw5)) then {
+            let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
+          }
         }
       }
     }
+    let i = i + 1.0
   }
   if result == "" then { return "Skills available for " + dept + ": " + index_content }
   return result
