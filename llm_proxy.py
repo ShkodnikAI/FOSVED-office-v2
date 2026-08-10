@@ -791,6 +791,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS news_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, title TEXT NOT NULL, summary TEXT, url TEXT, category TEXT DEFAULT 'general', language TEXT DEFAULT 'ru', published TIMESTAMP, collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, relevance_score REAL DEFAULT 0, hash TEXT UNIQUE);
         CREATE INDEX IF NOT EXISTS idx_news_category ON news_cache (category, collected DESC);
         CREATE INDEX IF NOT EXISTS idx_news_hash ON news_cache (hash);
+        -- WH-3: Webhook dedup table (90s window)
+        CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_webhook_dedup_seen ON webhook_dedup(seen_at);
         """)
         for col_sql, col_name in [
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
@@ -803,7 +806,83 @@ def init_db():
                 pass
         c.commit(); c.close()
 
+    # Periodic cleanup: remove dedup entries older than 1 day
+    try:
+        with db_lock:
+            c2 = _db()
+            c2.execute("DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
+            c2.commit(); c2.close()
+    except Exception:
+        pass
+
 init_db()
+
+# ──────────────────────────── WEBHOOK DEDUP (WH-3) ────────────────────────────
+_DEDUP_WINDOW_SEC = 90  # Telegram retries ~60s, so 90s window blocks fresh dupes
+
+def _webhook_dedup_check(update_id: str) -> bool:
+    """Return True if this update_id should be processed (not a fresh dupe).
+    
+    Logic:
+    - If update_id not seen → INSERT, return True (process it)
+    - If seen within 90s → it's a Telegram retry, block it (return False)
+    - If seen but >90s ago → it's a slow retry (processing took >90s), allow it
+    """
+    if not update_id:
+        return True  # Can't dedup without an ID
+    try:
+        with db_lock:
+            c = _db()
+            now_iso = datetime.utcnow().isoformat()
+            
+            # Check if we've seen this update_id
+            row = c.execute(
+                "SELECT seen_at FROM webhook_dedup WHERE update_id = ?",
+                (str(update_id),)
+            ).fetchone()
+            
+            if row is None:
+                # First time seeing this update_id → process it
+                c.execute(
+                    "INSERT INTO webhook_dedup (update_id, seen_at) VALUES (?, ?)",
+                    (str(update_id), now_iso)
+                )
+                c.commit(); c.close()
+                return True
+            
+            seen_at = row[0]
+            c.close()
+            
+            # Parse seen_at and check if within dedup window
+            try:
+                from datetime import timezone as _tz
+                seen_dt = datetime.fromisoformat(seen_at).replace(tzinfo=_tz.utc)
+                now_dt = datetime.utcnow().replace(tzinfo=_tz.utc)
+                age_sec = (now_dt - seen_dt).total_seconds()
+            except Exception:
+                age_sec = 999  # If we can't parse, treat as old → allow
+            
+            if age_sec < _DEDUP_WINDOW_SEC:
+                # Fresh dupe — Telegram retry within 90s → block
+                log.info(f"[DEDUP] blocking update_id={update_id} (age={age_sec:.0f}s < {_DEDUP_WINDOW_SEC}s)")
+                return False
+            else:
+                # Old entry — slow retry (processing took >90s) → allow
+                log.info(f"[DEDUP] allowing slow retry update_id={update_id} (age={age_sec:.0f}s >= {_DEDUP_WINDOW_SEC}s)")
+                # Update seen_at so future retries within 90s are blocked
+                with db_lock:
+                    c2 = _db()
+                    c2.execute(
+                        "INSERT OR REPLACE INTO webhook_dedup (update_id, seen_at) VALUES (?, ?)",
+                        (str(update_id), now_iso)
+                    )
+                    c2.commit(); c2.close()
+                return True
+    except Exception as e:
+        # If dedup DB is broken, don't block processing
+        log.warning(f"[DEDUP] error checking update_id={update_id}: {e}")
+        return True
+
 
 def _query(sql, params=(), fetch=False):
     with db_lock:
@@ -4961,6 +5040,12 @@ def _telegram_webhook_impl():
 
     global _voice_enabled, _tts_voice
     data = request.get_json(force=True, silent=True) or {}
+
+    # WH-3: Webhook dedup — block Telegram retries within 90s window
+    update_id = data.get("update_id")
+    if update_id and not _webhook_dedup_check(str(update_id)):
+        return "ok", 200  # Duplicate — silently acknowledge, don't process
+
     msg = data.get("message", {})
     if not msg:
         return "ok", 200
