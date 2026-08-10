@@ -3634,6 +3634,65 @@ def api_narad_reject(nid):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+# ──────────────────── SEC-6: INTEGRATIONS SCREEN ENDPOINTS ────────────────────
+
+def _has_db_override(name):
+    """Check whether a secret has a DB override (vs just an env var)."""
+    try:
+        rows = _query("SELECT 1 FROM secrets_store WHERE name = ?", (name,), fetch=True)
+        return bool(rows)
+    except Exception:
+        return False
+
+
+@app.get("/api/integrations")
+@require_telegram
+def api_integrations_list():
+    """List known integrations with connection status (masked, never the real value)."""
+    out = []
+    for item in INTEGRATIONS_REGISTRY:
+        current = get_secret(item["env_key"])
+        out.append({
+            "id": item["env_key"],
+            "label": item["label"],
+            "kind": item["kind"],
+            "connected": bool(current),
+            "masked": secrets_crypto.mask_value(current) if current else None,
+            "source": "db" if _has_db_override(item["env_key"]) else ("env" if current else "none"),
+        })
+    return jsonify({"status": "ok", "integrations": out})
+
+
+@app.post("/api/integrations/<env_key>")
+@require_telegram
+def api_integrations_set(env_key):
+    """Set or update a secret. Value is never echoed back in full."""
+    known = {item["env_key"] for item in INTEGRATIONS_REGISTRY}
+    if env_key not in known:
+        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
+    d = request.get_json(force=True)
+    value = d.get("value", "").strip()
+    if not value:
+        return jsonify({"status": "error", "message": "значение не может быть пустым"}), 400
+    ok = set_secret(env_key, value)
+    if not ok:
+        return jsonify({"status": "error", "message": "SECRETS_MASTER_KEY не настроен на сервере"}), 200
+    _log_audit("integration_key_set", {"env_key": env_key})
+    return jsonify({"status": "ok", "masked": secrets_crypto.mask_value(value)})
+
+
+@app.route("/api/integrations/<env_key>", methods=["DELETE"])
+@require_telegram
+def api_integrations_delete(env_key):
+    """Delete a DB override for a secret. Falls back to env var."""
+    known = {item["env_key"] for item in INTEGRATIONS_REGISTRY}
+    if env_key not in known:
+        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
+    delete_secret(env_key)
+    _log_audit("integration_key_deleted", {"env_key": env_key})
+    return jsonify({"status": "ok"})
+
+
 @app.get("/api/archive")
 def api_archive():
     """Search archive. Accepts ?q= query param, optional ?dept= filter."""

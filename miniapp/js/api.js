@@ -506,6 +506,41 @@ async archive(q,dept) {
     return API.get('/api/admin/status');
   },
 
+  // ── SEC-6: Integrations Screen ──
+  async integrations() {
+    if (USE_MOCKS) {
+      await mockDelay();
+      return {
+        status: 'ok',
+        integrations: [
+          { id:'ZAI_API_KEY', label:'Z.ai (GLM)', kind:'model', connected:true, masked:'zai-…a3f7', source:'env' },
+          { id:'DEEPSEEK_API_KEY', label:'DeepSeek', kind:'model', connected:true, masked:'sk-…9b2c', source:'db' },
+          { id:'GROQ_API_KEY', label:'Groq', kind:'model', connected:true, masked:'gsk_…4d1e', source:'env' },
+          { id:'CEREBRAS_API_KEY', label:'Cerebras', kind:'model', connected:false, masked:null, source:'none' },
+          { id:'KIMI_API_KEY', label:'Kimi (Moonshot)', kind:'model', connected:true, masked:'sk-…7f8a', source:'db' },
+          { id:'ANTHROPIC_API_KEY', label:'Anthropic (Claude)', kind:'model', connected:true, masked:'sk-ant-…3c5b', source:'env' },
+          { id:'OPENAI_API_KEY', label:'OpenAI', kind:'model', connected:false, masked:null, source:'none' },
+          { id:'GROK_API_KEY', label:'Grok (xAI)', kind:'model', connected:false, masked:null, source:'none' },
+          { id:'NVIDIA_API_KEY', label:'NVIDIA', kind:'model', connected:false, masked:null, source:'none' },
+          { id:'APODEX_API_KEY', label:'Apodex', kind:'model', connected:false, masked:null, source:'none' },
+          { id:'TAVILY_API_KEY', label:'Tavily (веб-поиск)', kind:'service', connected:true, masked:'tvly-…2e9d', source:'env' },
+          { id:'GITHUB_TOKEN_METALOGOS', label:'GitHub (трекинг)', kind:'service', connected:true, masked:'ghp_…8a4c', source:'db' },
+        ]
+      };
+    }
+    return API.get('/api/integrations');
+  },
+
+  async integrationSet(envKey, value) {
+    if (USE_MOCKS) { await mockDelay(); return { status:'ok', masked: value.substring(0,3) + '…' + value.substring(value.length-4) }; }
+    return API.post('/api/integrations/' + encodeURIComponent(envKey), { value });
+  },
+
+  async integrationDelete(envKey) {
+    if (USE_MOCKS) { await mockDelay(); return { status:'ok' }; }
+    return API.delete('/api/integrations/' + encodeURIComponent(envKey));
+  },
+
   async sendChatMessage(dept, message, attachments) {
     if (USE_MOCKS) { await mockDelay(); return { status:'ok', messageId: 'msg-'+Date.now() }; }
     return API.post('/api/chat/'+encodeURIComponent(dept)+'/message', { message, attachments });

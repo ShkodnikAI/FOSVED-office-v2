@@ -8,6 +8,7 @@ const ROUTE_MAP = {
   '/archive': 'Архив',
   '/chat': 'Чат',
   '/models': 'Модели',
+  '/integrations': 'Интеграции',
   '/settings': 'Настройки',
   '/narads': 'Наряды',
   '/economics': 'Экономика',

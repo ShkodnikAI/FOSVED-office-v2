@@ -62,6 +62,7 @@ const ROUTES = {
   '/': 'dashboard',
   '/settings': 'settings',
   '/models': 'models',
+  '/integrations': 'integrations',
   '/economics': 'economics',
   '/narads': 'narads',
   '/archive': 'archive',
