@@ -5056,8 +5056,8 @@ def _telegram_webhook_impl():
     text = msg.get("text", "").strip()
     voice = msg.get("voice")
     
-    # Owner check
-    if OWNER_ID and user_id != OWNER_ID:
+    # Owner check (fail-closed: if OWNER_ID not set, block everyone)
+    if not OWNER_ID or user_id != OWNER_ID:
         return "ok", 200
     
     # Voice → STT
