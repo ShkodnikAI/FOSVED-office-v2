@@ -219,6 +219,24 @@ PROVIDERS = {
     "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
 }
 
+# INT-1: Single source of truth for the Integrations screen (SEC-6) and
+# for future get_secret() consumers. Kind: "model" (LLM provider, wired
+# into PROVIDERS/COMBO_CHAINS) or "service" (external tool, e.g. search).
+INTEGRATIONS_REGISTRY = [
+    {"env_key": "ZAI_API_KEY", "label": "Z.ai (GLM)", "kind": "model"},
+    {"env_key": "DEEPSEEK_API_KEY", "label": "DeepSeek", "kind": "model"},
+    {"env_key": "GROQ_API_KEY", "label": "Groq", "kind": "model"},
+    {"env_key": "CEREBRAS_API_KEY", "label": "Cerebras", "kind": "model"},
+    {"env_key": "KIMI_API_KEY", "label": "Kimi (Moonshot)", "kind": "model"},
+    {"env_key": "ANTHROPIC_API_KEY", "label": "Anthropic (Claude)", "kind": "model"},
+    {"env_key": "OPENAI_API_KEY", "label": "OpenAI", "kind": "model"},
+    {"env_key": "GROK_API_KEY", "label": "Grok (xAI)", "kind": "model"},
+    {"env_key": "NVIDIA_API_KEY", "label": "NVIDIA", "kind": "model"},
+    {"env_key": "APODEX_API_KEY", "label": "Apodex", "kind": "model"},
+    {"env_key": "TAVILY_API_KEY", "label": "Tavily (веб-поиск)", "kind": "service"},
+    {"env_key": "GITHUB_TOKEN_METALOGOS", "label": "GitHub (трекинг репозиториев)", "kind": "service"},
+]
+
 # Some providers require a specific temperature value;
 # list only providers that differ from the default (0.7).
 PROVIDER_TEMPERATURE = {
