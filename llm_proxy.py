@@ -6,6 +6,7 @@ TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
 import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid, base64
 import doc_extract
+import secrets_crypto
 import html as html_lib
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -431,7 +432,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     prov = PROVIDERS.get(provider_name)
     if not prov:
         return None
-    api_key = os.environ.get(prov["env_key"])
+    api_key = get_secret(prov["env_key"])
     if not api_key:
         return None
     if not _breaker.can_call(provider_name):
@@ -794,6 +795,12 @@ def init_db():
         -- WH-3: Webhook dedup table (90s window)
         CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_webhook_dedup_seen ON webhook_dedup(seen_at);
+        -- SEC-5: Encrypted secrets store
+        CREATE TABLE IF NOT EXISTS secrets_store (
+            name TEXT PRIMARY KEY,
+            encrypted_value TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
         """)
         for col_sql, col_name in [
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
@@ -896,6 +903,43 @@ def _query(sql, params=(), fetch=False):
             if "no such table" in str(e):
                 return [] if fetch else None
             raise
+
+# ──────────────────────────── SEC-5: ENCRYPTED SECRETS ────────────────────────────
+
+def get_secret(name: str) -> str:
+    """Resolve a secret by name: DB override (encrypted) first, then env var.
+
+    This is the single choke point for both model-provider keys and
+    external service keys (Tavily, GitHub, etc.) going forward.
+    """
+    try:
+        rows = _query("SELECT encrypted_value FROM secrets_store WHERE name = ?", (name,), fetch=True)
+        if rows:
+            decrypted = secrets_crypto.decrypt_value(rows[0]["encrypted_value"])
+            if decrypted:
+                return decrypted
+    except Exception as e:
+        log.error(f"get_secret({name}) DB lookup failed: {e}")
+    return os.environ.get(name, "")
+
+
+def set_secret(name: str, plain_value: str) -> bool:
+    """Store a secret in the DB, encrypted. Returns False if master key missing."""
+    if not secrets_crypto.is_configured():
+        return False
+    encrypted = secrets_crypto.encrypt_value(plain_value)
+    _query(
+        "INSERT INTO secrets_store (name, encrypted_value, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(name) DO UPDATE SET encrypted_value = excluded.encrypted_value, updated_at = excluded.updated_at",
+        (name, encrypted),
+    )
+    return True
+
+
+def delete_secret(name: str) -> None:
+    """Remove a DB override — falls back to env var again."""
+    _query("DELETE FROM secrets_store WHERE name = ?", (name,))
+
 
 def _get_setting(key, default=""):
     """Read a value from system_settings (shared kv with Metalogos)."""
