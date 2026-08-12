@@ -235,6 +235,8 @@ INTEGRATIONS_REGISTRY = [
     {"env_key": "APODEX_API_KEY", "label": "Apodex", "kind": "model"},
     {"env_key": "TAVILY_API_KEY", "label": "Tavily (веб-поиск)", "kind": "service"},
     {"env_key": "GITHUB_TOKEN_METALOGOS", "label": "GitHub (трекинг репозиториев)", "kind": "service"},
+    {"env_key": "SMTP_EMAIL", "label": "SMTP (email для отправки)", "kind": "service"},
+    {"env_key": "SMTP_PASSWORD", "label": "SMTP (пароль/app-password)", "kind": "service"},
 ]
 
 # Some providers require a specific temperature value;
@@ -3691,6 +3693,277 @@ def api_integrations_delete(env_key):
     delete_secret(env_key)
     _log_audit("integration_key_deleted", {"env_key": env_key})
     return jsonify({"status": "ok"})
+
+
+# ──────────────────── QUEST-1: DOSSIER/QUEST API ────────────────────
+
+@app.get("/api/quests")
+@require_telegram
+def api_quests_list():
+    """List all quests with status and progress."""
+    try:
+        rows = _query(
+            "SELECT id, title, quest_type, status, current_step, total_steps, deadline, created_at "
+            "FROM quests ORDER BY created_at DESC LIMIT 50", fetch=True
+        )
+        quests = []
+        for r in rows:
+            quests.append({
+                "id": r["id"], "title": r["title"], "type": r["quest_type"],
+                "status": r["status"], "currentStep": r["current_step"],
+                "totalSteps": r["total_steps"], "deadline": r["deadline"] or "",
+                "createdAt": r["created_at"],
+            })
+        return jsonify({"status": "ok", "quests": quests})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/quests/<qid>")
+@require_telegram
+def api_quest_detail(qid):
+    """Get quest detail with checkpoints and files."""
+    try:
+        rows = _query("SELECT * FROM quests WHERE id = ?", (qid,), fetch=True)
+        if not rows:
+            return jsonify({"status": "error", "message": "не найдено"}), 404
+        q = rows[0]
+        checkpoints = _query(
+            "SELECT step_num, step_label, status, approved_by, approved_at "
+            "FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", (qid,), fetch=True
+        )
+        files = _query(
+            "SELECT filename, file_type, version, created_at "
+            "FROM quest_files WHERE quest_id = ? ORDER BY id", (qid,), fetch=True
+        )
+        return jsonify({
+            "status": "ok",
+            "quest": {k: q[k] for k in q.keys()},
+            "checkpoints": [dict(c) for c in checkpoints],
+            "files": [dict(f) for f in files],
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/quest/generate")
+@require_telegram
+def api_quest_generate():
+    """Generate a document from template for a quest (docx/pdf).
+    Delegates to python-docx / reportlab.
+    """
+    d = request.get_json(force=True)
+    qid = d.get("quest_id", "")
+    template = d.get("template", "")
+    data = d.get("data", {})
+
+    if not qid or not template:
+        return jsonify({"status": "error", "message": "quest_id and template required"}), 400
+
+    try:
+        from docx import Document
+        from docx.shared import Pt, Inches
+        import tempfile, os
+
+        doc = Document()
+        doc.add_heading(data.get("title", template), level=1)
+
+        # Template-specific content
+        if template == "cover_letter":
+            doc.add_paragraph(data.get("recipient", ""))
+            doc.add_paragraph("")
+            p = doc.add_paragraph(data.get("body", ""))
+        elif template == "project_description":
+            for section in data.get("sections", []):
+                doc.add_heading(section.get("title", ""), level=2)
+                doc.add_paragraph(section.get("content", ""))
+        else:
+            # Generic: dump all data keys as paragraphs
+            for k, v in data.items():
+                doc.add_heading(k, level=2)
+                doc.add_paragraph(str(v))
+
+        # Save to temp, then store
+        tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
+        doc.save(tmp.name)
+        tmp.close()
+
+        # Store in quest_files directory
+        quest_dir = os.path.join("data", "quests", qid)
+        os.makedirs(quest_dir, exist_ok=True)
+        filename = f"{template}.docx"
+        dest = os.path.join(quest_dir, filename)
+        os.rename(tmp.name, dest)
+
+        # Register in DB
+        _query(
+            "INSERT INTO quest_files (quest_id, filename, file_type, version, storage_path) "
+            "VALUES (?, ?, 'docx', 1, ?)",
+            (qid, filename, dest),
+        )
+        _log_audit("quest_doc_generated", {"quest_id": qid, "template": template, "filename": filename})
+
+        return jsonify({"status": "ok", "filename": filename, "file_type": "docx", "storage_path": dest})
+    except ImportError:
+        return jsonify({"status": "error", "message": "python-docx not installed"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/quest/send-package")
+@require_telegram
+def api_quest_send_package():
+    """Send quest package via email (MAIL-1 minimal)."""
+    d = request.get_json(force=True)
+    qid = d.get("quest_id", "")
+    recipient = d.get("recipient", "")
+    subject = d.get("subject", "")
+    quest_title = d.get("quest_title", "")
+
+    if not recipient:
+        return jsonify({"status": "error", "message": "recipient required"}), 400
+
+    # Check if email sending is configured
+    smtp_email = get_secret("SMTP_EMAIL")
+    smtp_password = get_secret("SMTP_PASSWORD")
+    if not smtp_email or not smtp_password:
+        return jsonify({"status": "error", "message": "SMTP не настроен. Добавьте SMTP_EMAIL и SMTP_PASSWORD в Интеграции."}), 200
+
+    try:
+        import yagmail
+        yag = yagmail.SMTP(smtp_email, smtp_password)
+        body = f"Добрый день!\n\nНаправляю пакет документов: {quest_title} (досье {qid}).\n\nС уважением."
+        yag.send(to=recipient, subject=subject or quest_title, contents=body)
+        _log_audit("quest_email_sent", {"quest_id": qid, "recipient": recipient, "subject": subject})
+        return jsonify({"status": "ok", "message": f"Отправлено на {recipient}"})
+    except ImportError:
+        return jsonify({"status": "error", "message": "yagmail not installed. pip install yagmail"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/email/send")
+@require_telegram
+def api_email_send():
+    """General-purpose email sending (MAIL-1 minimal). Two-step: caller must confirm."""
+    d = request.get_json(force=True)
+    to = d.get("to", "")
+    subject = d.get("subject", "")
+    body = d.get("body", "")
+    if not to or not subject:
+        return jsonify({"status": "error", "message": "to и subject обязательны"}), 400
+
+    smtp_email = get_secret("SMTP_EMAIL")
+    smtp_password = get_secret("SMTP_PASSWORD")
+    if not smtp_email or not smtp_password:
+        return jsonify({"status": "error", "message": "SMTP не настроен"}), 200
+
+    try:
+        import yagmail
+        yag = yagmail.SMTP(smtp_email, smtp_password)
+        yag.send(to=to, subject=subject, contents=body)
+        _log_audit("email_sent", {"to": to, "subject": subject})
+        return jsonify({"status": "ok"})
+    except ImportError:
+        return jsonify({"status": "error", "message": "yagmail not installed"}), 500
+    except Exception as e:
+        _log_audit("email_send_error", {"to": to, "error": str(e)[:200]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ──────────────────── QUEST-1: MLOG HELPERS (formatting, checkpoint creation) ─────
+
+@app.post("/api/quest/create-checkpoints")
+def api_quest_create_checkpoints():
+    """Create checkpoint rows for a quest (called from Metalogos — no loop construct)."""
+    d = request.get_json(force=True)
+    qid = d.get("quest_id", "")
+    total_steps = int(d.get("total_steps", 0))
+    if not qid or total_steps <= 0:
+        return jsonify({"status": "error", "message": "quest_id and total_steps required"}), 400
+    try:
+        for i in range(total_steps):
+            step_label = f"Шаг {i + 1}"
+            _query(
+                "INSERT INTO quest_checkpoints (quest_id, step_num, step_label, status) VALUES (?, ?, ?, 'pending')",
+                (qid, i, step_label),
+            )
+        return jsonify({"status": "ok", "created": total_steps})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/quest/format-list")
+def api_quest_format_list():
+    """Format quest list for Telegram (called from Metalogos — no loop construct)."""
+    d = request.get_json(force=True)
+    rows = d.get("rows", [])
+    if not rows:
+        return "Нет активных задач."
+    lines = [f"Активные задачи ({len(rows)}):"]
+    for i, r in enumerate(rows):
+        qid = r.get("id", "?")
+        title = r.get("title", "?")
+        qtype = r.get("quest_type", "?")
+        cstep = r.get("current_step", "0")
+        tstep = r.get("total_steps", "0")
+        dl = r.get("deadline", "")
+        line = f'{i + 1}. {title} [{qtype}] {cstep}/{tstep}'
+        if dl:
+            line += f" дедлайн={dl}"
+        line += f"\n  id: {qid}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@app.post("/api/quest/format-status")
+def api_quest_format_status():
+    """Format quest status for Telegram (called from Metalogos — no loop construct)."""
+    d = request.get_json(force=True)
+    qid = d.get("quest_id", "")
+    try:
+        q_rows = _query("SELECT * FROM quests WHERE id = ?", (qid,), fetch=True)
+        if not q_rows:
+            return f"Задача {qid} не найдена."
+        q = q_rows[0]
+        title = q["title"]
+        qtype = q["quest_type"]
+        qstatus = q["status"]
+        cstep = q["current_step"]
+        tstep = q["total_steps"]
+        dl = q["deadline"] or ""
+
+        lines = [f"*Досье: {title}*"]
+        info = f"Тип: {qtype} | Статус: {qstatus} | Шаг: {cstep}/{tstep}"
+        if dl:
+            info += f" | Дедлайн: {dl}"
+        lines.append(info)
+        lines.append("\nЧекпоинты:")
+
+        cp_rows = _query(
+            "SELECT step_num, step_label, status, approved_by, approved_at "
+            "FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", (qid,), fetch=True
+        )
+        markers = {"approved": "[OK]", "in_progress": "[>>]", "skipped": "[--]", "pending": "[ ]"}
+        for cp in cp_rows:
+            marker = markers.get(cp["status"], "[ ]")
+            line = f"  {marker} {cp['step_num']}. {cp['step_label']}"
+            if cp["status"] == "approved":
+                line += f" ({cp['approved_by'] or ''} {cp['approved_at'] or ''})"
+            lines.append(line)
+
+        f_rows = _query(
+            "SELECT filename, file_type, version FROM quest_files WHERE quest_id = ? ORDER BY id",
+            (qid,), fetch=True
+        )
+        if f_rows:
+            lines.append("\nФайлы:")
+            for f in f_rows:
+                lines.append(f"  - {f['filename']} ({f['file_type']} v{f['version']})")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Ошибка: {e}"
 
 
 @app.get("/api/archive")

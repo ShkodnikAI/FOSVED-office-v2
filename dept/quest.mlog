@@ -1,0 +1,198 @@
+// Fosved Office v2 — Quest/Dossier Module (QUEST-1)
+// Multi-step task management: grants, contracts, reports, outreach
+// All state in SQLite (quests, quest_files, quest_checkpoints).
+// Document generation & email sending delegate to Python :4000.
+
+// ---------------------------------------------------------------------------
+// 1. QuestCreate — create a new dossier with N steps
+//    Returns quest_id for subsequent operations
+//    Checkpoints created via Python helper (Metalogos has no loop construct)
+// ---------------------------------------------------------------------------
+pattern QuestCreate(title: String, quest_type: String, total_steps: String, deadline: String, chat_id: String) -> String {
+  let qid = "Q-" + to_string(now())
+
+  db_execute("INSERT INTO quests (id, title, quest_type, status, current_step, total_steps, deadline, owner_chat_id, updated_at) VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5, ?6, datetime('now'))",
+    [qid, title, quest_type, total_steps, deadline, chat_id])
+
+  // Create checkpoints via Python endpoint (Metalogos has no loop)
+  let payload = json_encode({quest_id: qid, total_steps: total_steps})
+  let _ = try http_post("http://127.0.0.1:4000/api/quest/create-checkpoints", payload, "application/json")
+
+  let _ = AuditLog("quest_create", "quest", "id=" + qid + " title=" + title + " type=" + quest_type)
+  return qid
+}
+
+// ---------------------------------------------------------------------------
+// 2. QuestList — list active quests for owner
+//    Returns formatted text for Telegram
+// ---------------------------------------------------------------------------
+pattern QuestList(chat_id: String) -> String {
+  let rows = query("SELECT id, title, quest_type, status, current_step, total_steps, deadline FROM quests WHERE status = 'active' ORDER BY created_at DESC LIMIT 20", [])
+  let count = len(rows)
+  if count == 0.0 then {
+    return "Net aktivnyh zadach."
+  }
+
+  // Delegate formatting to Python for loop-based rendering
+  let payload = json_encode({rows: rows})
+  let resp = try http_post("http://127.0.0.1:4000/api/quest/format-list", payload, "application/json")
+  if to_string(resp) != "()" and to_string(resp) != "" then {
+    return to_string(resp)
+  }
+
+  // Fallback: just return JSON
+  return json_encode(rows)
+}
+
+// ---------------------------------------------------------------------------
+// 3. QuestStatus — detailed status of one quest with all checkpoints
+//    Delegates formatting to Python
+// ---------------------------------------------------------------------------
+pattern QuestStatus(qid: String) -> String {
+  let payload = json_encode({quest_id: qid})
+  let resp = try http_post("http://127.0.0.1:4000/api/quest/format-status", payload, "application/json")
+  if to_string(resp) != "()" and to_string(resp) != "" then {
+    return to_string(resp)
+  }
+  return "Status request failed for " + qid
+}
+
+// ---------------------------------------------------------------------------
+// 4. QuestAdvanceStep — move to next step (mark current as in_progress)
+// ---------------------------------------------------------------------------
+pattern QuestAdvanceStep(qid: String) -> String {
+  let rows = query("SELECT current_step, total_steps FROM quests WHERE id = ?1", [qid])
+  if len(rows) == 0.0 then { return "Zadacha ne najdena." }
+
+  let r = rows[0]
+  let cstep = to_float(json_get(to_string(r), "current_step", "0"))
+  let tstep = to_float(json_get(to_string(r), "total_steps", "0"))
+
+  if cstep >= tstep then {
+    db_execute("UPDATE quests SET status = 'completed', updated_at = datetime('now') WHERE id = ?1", [qid])
+    return "Vse shagi vypolneny. Zadacha " + qid + " zavershena."
+  }
+
+  // Mark current step as in_progress
+  db_execute("UPDATE quest_checkpoints SET status = 'in_progress' WHERE quest_id = ?1 AND step_num = ?2", [qid, to_string(cstep)])
+  db_execute("UPDATE quests SET current_step = ?1, updated_at = datetime('now') WHERE id = ?2", [to_string(cstep), qid])
+
+  let _ = AuditLog("quest_advance", "quest", "id=" + qid + " step=" + to_string(cstep) + "/" + to_string(tstep))
+  return "Shag " + to_string(cstep + 1.0) + "/" + to_string(tstep) + " in progress."
+}
+
+// ---------------------------------------------------------------------------
+// 5. QuestApproveStep — owner approves current step, advance to next
+// ---------------------------------------------------------------------------
+pattern QuestApproveStep(qid: String, approved_by: String) -> String {
+  let rows = query("SELECT current_step, total_steps FROM quests WHERE id = ?1", [qid])
+  if len(rows) == 0.0 then { return "Zadacha ne najdena." }
+
+  let r = rows[0]
+  let cstep = json_get(to_string(r), "current_step", "0")
+  let tstep = to_float(json_get(to_string(r), "total_steps", "0"))
+
+  // Approve current step
+  db_execute("UPDATE quest_checkpoints SET status = 'approved', approved_by = ?1, approved_at = datetime('now') WHERE quest_id = ?2 AND step_num = ?3",
+    [approved_by, qid, cstep])
+
+  // Advance to next step
+  let next_step = to_float(cstep) + 1.0
+  if next_step >= tstep then {
+    db_execute("UPDATE quests SET status = 'completed', updated_at = datetime('now') WHERE id = ?1", [qid])
+    let _ = AuditLog("quest_approve_complete", "quest", "id=" + qid + " all steps approved")
+    return "Poslednij shag odobren. Zadacha " + qid + " zavershena."
+  }
+
+  db_execute("UPDATE quests SET current_step = ?1, updated_at = datetime('now') WHERE id = ?2", [to_string(next_step), qid])
+  db_execute("UPDATE quest_checkpoints SET status = 'in_progress' WHERE quest_id = ?1 AND step_num = ?2", [qid, to_string(next_step)])
+
+  let _ = AuditLog("quest_approve_step", "quest", "id=" + qid + " step=" + cstep + " approved_by=" + approved_by)
+  return "Shag " + cstep + " odobren. Perehodim k shagu " + to_string(next_step + 1.0) + "."
+}
+
+// ---------------------------------------------------------------------------
+// 6. QuestAddFile — register a file in the dossier
+// ---------------------------------------------------------------------------
+pattern QuestAddFile(qid: String, filename: String, file_type: String, storage_path: String) -> String {
+  // Check version: increment if same filename exists
+  let vrows = query("SELECT MAX(version) as max_v FROM quest_files WHERE quest_id = ?1 AND filename = ?2", [qid, filename])
+  let ver = 1.0
+  if len(vrows) > 0.0 then {
+    let max_v = to_float(json_get(to_string(vrows[0]), "max_v", "0"))
+    if max_v > 0.0 then {
+      let ver = max_v + 1.0
+    }
+  }
+
+  db_execute("INSERT INTO quest_files (quest_id, filename, file_type, version, storage_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+    [qid, filename, file_type, to_string(ver), storage_path])
+
+  let _ = AuditLog("quest_add_file", "quest", "id=" + qid + " file=" + filename + " v" + to_string(ver))
+  return "Fajl " + filename + " v" + to_string(ver) + " dobavlen v dosse " + qid + "."
+}
+
+// ---------------------------------------------------------------------------
+// 7. QuestSetStepLabel — rename a checkpoint step
+// ---------------------------------------------------------------------------
+pattern QuestSetStepLabel(qid: String, step_num: String, label: String) -> String {
+  db_execute("UPDATE quest_checkpoints SET step_label = ?1 WHERE quest_id = ?2 AND step_num = ?3", [label, qid, step_num])
+  return "Shag " + step_num + " pereimenovan v: " + label
+}
+
+// ---------------------------------------------------------------------------
+// 8. QuestClose — mark quest as closed/cancelled
+// ---------------------------------------------------------------------------
+pattern QuestClose(qid: String) -> String {
+  db_execute("UPDATE quests SET status = 'closed', updated_at = datetime('now') WHERE id = ?1", [qid])
+  let _ = AuditLog("quest_close", "quest", "id=" + qid)
+  return "Zadacha " + qid + " zakryta."
+}
+
+// ---------------------------------------------------------------------------
+// 9. QuestSendPackage — compile all files and send via Python email endpoint
+// ---------------------------------------------------------------------------
+pattern QuestSendPackage(qid: String, recipient: String, subject: String) -> String {
+  let f_rows = query("SELECT filename, storage_path, file_type, version FROM quest_files WHERE quest_id = ?1 ORDER BY id", [qid])
+  let f_json = json_encode(f_rows)
+
+  let q_rows = query("SELECT title, quest_type FROM quests WHERE id = ?1", [qid])
+  let q_title = json_get(to_string(q_rows[0]), "title", "Bez nazvanija")
+
+  let payload = json_encode({
+    quest_id: qid,
+    recipient: recipient,
+    subject: subject,
+    quest_title: q_title,
+    files: f_json
+  })
+
+  let resp = try http_post("http://127.0.0.1:4000/api/quest/send-package", payload, "application/json")
+  let _ = AuditLog("quest_send_package", "quest", "id=" + qid + " to=" + recipient)
+  return "Paket otpravlen na " + recipient + "."
+}
+
+// ---------------------------------------------------------------------------
+// 10. QuestGenerateDocument — ask Python to generate a docx/pdf from template
+// ---------------------------------------------------------------------------
+pattern QuestGenerateDocument(qid: String, template: String, data: String) -> String {
+  let payload = json_encode({
+    quest_id: qid,
+    template: template,
+    data: data
+  })
+
+  let resp = try http_post("http://127.0.0.1:4000/api/quest/generate", payload, "application/json")
+
+  // If Python returns a filename, register it in quest_files
+  let resp_str = to_string(resp)
+  if contains(resp_str, "filename") then {
+    let fname = json_get(resp_str, "filename", "generated.docx")
+    let ftype = json_get(resp_str, "file_type", "docx")
+    let fpath = json_get(resp_str, "storage_path", "")
+    let _ = QuestAddFile(qid, fname, ftype, fpath)
+  }
+
+  let _ = AuditLog("quest_generate_doc", "quest", "id=" + qid + " template=" + template)
+  return resp_str
+}
