@@ -1,0 +1,97 @@
+services:
+  # ── Main Web Service (existing) ──────────────────────────────────────
+  - type: web
+    name: fosved-office-v2
+    runtime: docker
+    plan: free
+    region: frankfurt
+    envVars:
+      - fromGroup: fosved-secrets
+    # Render free tier: spins down after 15 min inactivity
+    # Cron jobs below will keep it alive and collect data
+
+  # ── Cron: Collect News (RSS + GDELT) — каждый час ──────────────────
+  - type: cron
+    name: collect-news
+    runtime: docker
+    plan: free
+    region: frankfurt
+    schedule: "0 * * * *"   # каждый час в :00
+    buildCommand: "echo 'cron ready'"
+    startCommand: >
+      curl -sf
+      "https://fosved-office-v2.onrender.com/cron/collect-news?secret=${CRON_SECRET}"
+      || echo "collect-news failed (server may be spinning up)"
+    envVars:
+      - fromGroup: fosved-secrets
+
+  # ── Cron: LZ Daily (GitHub scan) — раз в день 06:00 UTC (09:00 Минск) ─
+  - type: cron
+    name: lz-daily
+    runtime: docker
+    plan: free
+    region: frankfurt
+    schedule: "0 6 * * *"   # 06:00 UTC = 09:00 Минск
+    buildCommand: "echo 'cron ready'"
+    startCommand: >
+      curl -sf -X POST
+      -H "Content-Type: application/json"
+      -d '{"dry_run":false}'
+      "https://fosved-office-v2.onrender.com/scheduler/lz-daily"
+      || echo "lz-daily failed"
+    envVars:
+      - fromGroup: fosved-secrets
+
+  # ── Cron: Morning Brief — будни 04:20 UTC (07:20 Минск) ─────────────
+  - type: cron
+    name: morning-brief
+    runtime: docker
+    plan: free
+    region: frankfurt
+    schedule: "20 4 * * 1-5"   # будни 04:20 UTC = 07:20 Минск
+    buildCommand: "echo 'cron ready'"
+    startCommand: >
+      curl -sf -X POST
+      -H "Content-Type: application/json"
+      -d '{"owner_id":"${OWNER_TELEGRAM_ID}"}'
+      "https://fosved-office-v2.onrender.com/scheduler/morning-brief"
+      || echo "morning-brief failed"
+    envVars:
+      - fromGroup: fosved-secrets
+
+  # ── Cron: Keep-Alive (пинговать сервер каждые 14 мин) ──────────────
+  # Render free tier: спит после 15 мин неактивности.
+  # Этот крон не даёт серверу уснуть, чтобы другие кроны работали.
+  - type: cron
+    name: keep-alive
+    runtime: docker
+    plan: free
+    region: frankfurt
+    schedule: "*/14 * * * *"   # каждые 14 минут
+    buildCommand: "echo 'cron ready'"
+    startCommand: >
+      curl -sf "https://fosved-office-v2.onrender.com/health"
+      || echo "keep-alive ping failed"
+    envVars:
+      - fromGroup: fosved-secrets
+
+# ── Env Group (все секреты в одном месте) ──────────────────────────────
+envVarGroups:
+  - name: fosved-secrets
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: OWNER_TELEGRAM_ID
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ZAI_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN_METALOGOS
+        sync: false
+      - key: PORT
+        value: "10000"

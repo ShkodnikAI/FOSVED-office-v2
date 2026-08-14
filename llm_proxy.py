@@ -6060,6 +6060,109 @@ def get_night_news_digest():
 
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  INTERNAL SCHEDULER — background thread for periodic tasks
+#  Works even without Render cron / external ping services.
+# ══════════════════════════════════════════════════════════════════════════
+
+_INTERNAL_SCHEDULER_RUNNING = False
+
+def _internal_scheduler():
+    """Background thread: periodically calls collect-news and lz-daily internally."""
+    global _INTERNAL_SCHEDULER_RUNNING
+    _INTERNAL_SCHEDULER_RUNNING = True
+
+    # Configurable intervals (minutes)
+    NEWS_INTERVAL = int(os.environ.get("SCHED_NEWS_INTERVAL", "60"))    # default: every 60 min
+    LZ_INTERVAL = int(os.environ.get("SCHED_LZ_INTERVAL", "1440"))      # default: once per day
+    MORNING_HOUR_UTC = int(os.environ.get("SCHED_MORNING_HOUR", "4"))   # 04:xx UTC = 07:xx Minsk
+    MORNING_MIN_UTC = int(os.environ.get("SCHED_MORNING_MIN", "20"))    # :20
+
+    last_news = 0
+    last_lz = 0
+    last_morning_date = ""
+
+    log.info(f"Internal scheduler started: news every {NEWS_INTERVAL}min, LZ every {LZ_INTERVAL}min, morning at {MORNING_HOUR_UTC}:{MORNING_MIN_UTC:02d} UTC")
+
+    while True:
+        try:
+            time.sleep(60)  # check every minute
+            now = time.time()
+            now_dt = datetime.utcnow()
+
+            # ── News collection ──
+            if (now - last_news) > NEWS_INTERVAL * 60:
+                log.info("Scheduler: collecting news (RSS + GDELT)...")
+                try:
+                    rss_count = collect_rss()
+                    gdelt_count = collect_gdelt_themes()
+                    _log_audit("scheduler_news", {"rss": rss_count, "gdelt": gdelt_count}, "scheduler")
+                    log.info(f"Scheduler: news collected — RSS={rss_count}, GDELT={gdelt_count}")
+                    last_news = now
+                except Exception as e:
+                    log.error(f"Scheduler news error: {e}")
+
+            # ── LZ daily scan ──
+            if (now - last_lz) > LZ_INTERVAL * 60:
+                log.info("Scheduler: running LZ daily (GitHub scan)...")
+                try:
+                    # Call internally (not via HTTP) — we have the functions
+                    lz_token = os.environ.get("GITHUB_TOKEN_METALOGOS", os.environ.get("GITHUB_TOKEN", ""))
+                    all_repos = []
+                    seen = set()
+                    for q in _build_github_queries():
+                        repos = _github_search(q, per_page=3)
+                        time.sleep(1)
+                        for r in repos:
+                            if r["name"] not in seen:
+                                seen.add(r["name"])
+                                all_repos.append(r)
+                    all_releases = []
+                    for repo in GITHUB_WATCH_RELEASES:
+                        releases = _github_releases(repo)
+                        time.sleep(1)
+                        all_releases.extend(releases)
+                    _log_audit("scheduler_lz", {"repos": len(all_repos), "releases": len(all_releases)}, "scheduler")
+                    log.info(f"Scheduler: LZ scan done — {len(all_repos)} repos, {len(all_releases)} releases")
+                    # Save to memory
+                    try:
+                        memory.remember(
+                            f"LZ Daily {now_dt.isoformat()[:10]}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
+                            "observation", 0.7, "lz_daily"
+                        )
+                    except Exception:
+                        pass
+                    last_lz = now
+                except Exception as e:
+                    log.error(f"Scheduler LZ error: {e}")
+
+            # ── Morning brief ──
+            today_str = now_dt.strftime("%Y-%m-%d")
+            if (today_str != last_morning_date
+                and now_dt.weekday() < 5  # Mon-Fri
+                and now_dt.hour == MORNING_HOUR_UTC
+                and now_dt.minute == MORNING_MIN_UTC):
+                owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
+                if owner_id:
+                    log.info("Scheduler: sending morning brief...")
+                    try:
+                        # Call via internal HTTP to go through the full pipeline
+                        import urllib.request
+                        url = f"http://127.0.0.1:{PORT}/scheduler/morning-brief"
+                        body = json.dumps({"owner_id": owner_id}).encode()
+                        req = urllib.request.Request(url, data=body, method="POST")
+                        req.add_header("Content-Type", "application/json")
+                        with urllib.request.urlopen(req, timeout=120) as resp:
+                            log.info(f"Scheduler: morning brief sent — {resp.status}")
+                        last_morning_date = today_str
+                    except Exception as e:
+                        log.error(f"Scheduler morning brief error: {e}")
+
+        except Exception as e:
+            log.error(f"Internal scheduler error: {e}")
+            time.sleep(60)
+
+
 if __name__ == "__main__":
     # Global error handlers — log full traceback instead of silent 500
     @app.errorhandler(500)
@@ -6133,6 +6236,16 @@ if __name__ == "__main__":
         log.warning(f"⚠️ {_cred_scan['total_missing']} credentials missing! Call /admin/missing-keys for details.")
     else:
         log.info("✅ All required credentials configured.")
+
+    # ── Start internal scheduler (background thread) ──────────────────
+    _sched_enabled = os.environ.get("SCHED_ENABLED", "true").lower() != "false"
+    if _sched_enabled:
+        _sched_thread = threading.Thread(target=_internal_scheduler, daemon=True, name="fosved-scheduler")
+        _sched_thread.start()
+        log.info("Internal scheduler started (background thread)")
+    else:
+        log.info("Internal scheduler disabled (SCHED_ENABLED=false)")
+
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
              f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*, admin/missing-keys, admin/set-key")
