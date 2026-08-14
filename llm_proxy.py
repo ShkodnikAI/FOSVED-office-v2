@@ -7,6 +7,11 @@ TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid, base64
 import doc_extract
 import secrets_crypto
+from credential_manager import (
+    scan_missing_keys, format_missing_for_telegram,
+    format_missing_for_morning_brief, format_missing_for_json,
+    set_key_in_env, auto_generate_key, CREDENTIAL_MANIFEST
+)
 import html as html_lib
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -2639,16 +2644,33 @@ def scheduler_morning_brief():
             {"role": "user", "content": user_prompt},
         ]
 
+        # ── 5. Missing credentials check ──
+        cred_scan = scan_missing_keys()
+        cred_block = ""
+        if cred_scan["total_missing"] > 0:
+            cred_block = format_missing_for_morning_brief(cred_scan)
+            # Append to user prompt so LLM includes it in the brief
+            user_prompt += f"\n\n=== НЕДОСТАЮЩИЕ КЛЮЧИ ===\n{cred_block}\n\n⚠️ Включи в отчёт секцию 🔑 Ключи — перечисли какие ключи не хватает, кратко зачем. Не расписывай шаги — просто перечисли."
+
         result = call_llm("yana", messages)
         if result is None or not result.get("reply"):
             log.error(f"morning_brief: call_llm failed or empty reply")
             return jsonify({"status": "error", "message": "LLM call failed"}), 503
         brief = result["reply"]
 
-        msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
-        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
+        # If missing keys, send a follow-up with details + links
+        if cred_scan["total_missing"] > 0:
+            cred_msg = format_missing_for_telegram(cred_scan)
+            if len(cred_msg) > 100:
+                try:
+                    _tg_send_message(owner_id, cred_msg, parse_mode="Markdown")
+                except Exception as e:
+                    log.warning(f"Failed to send credential request: {e}")
 
-        return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
+        msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
+        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id, "missing_keys": cred_scan["total_missing"]})
+
+        return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id, "missing_keys": cred_scan["total_missing"]})
 
     except Exception as e:
         log.error(f"morning_brief error: {e}")
@@ -6052,10 +6074,68 @@ if __name__ == "__main__":
         log.error(f"[UNHANDLED] {type(e).__name__}: {e}\n{_tb.format_exc()}")
         return "internal error", 500
 
+    # ── Credential Manager endpoints ─────────────────────────────────
+    @app.route("/admin/missing-keys", methods=["GET"])
+    def admin_missing_keys():
+        """Return all missing credentials with step-by-step instructions."""
+        scan = scan_missing_keys()
+        return jsonify(format_missing_for_json(scan))
+
+    @app.route("/admin/missing-keys/telegram", methods=["POST"])
+    def admin_missing_keys_telegram():
+        """Send missing credentials request to owner via Telegram."""
+        d = request.get_json(force=True) or {}
+        owner_id = d.get("owner_id", os.environ.get("OWNER_TELEGRAM_ID", ""))
+        if not owner_id:
+            return jsonify({"status": "error", "message": "OWNER_TELEGRAM_ID not set"}), 400
+        scan = scan_missing_keys()
+        if scan["total_missing"] == 0:
+            _tg_send_message(owner_id, "✅ Все ключи настроены! Офис боеготов.")
+            return jsonify({"status": "ok", "message": "all keys set"})
+        msg = format_missing_for_telegram(scan)
+        msg_id = _tg_send_message(owner_id, msg, parse_mode="Markdown")
+        _log_audit("credential_request_sent", {"owner_id": owner_id, "missing": scan["total_missing"], "msg_id": msg_id})
+        return jsonify({"status": "ok", "missing": scan["total_missing"], "msg_id": msg_id})
+
+    @app.route("/admin/set-key", methods=["POST"])
+    def admin_set_key():
+        """Set a credential value. Body: {"key": "DEEPSEEK_API_KEY", "value": "sk-xxx..."}"""
+        d = request.get_json(force=True) or {}
+        env_key = d.get("key", "").strip().upper()
+        value = d.get("value", "").strip()
+        if not env_key or not value:
+            return jsonify({"status": "error", "message": "Need 'key' and 'value' fields"}), 400
+        success, msg = set_key_in_env(env_key, value)
+        if success:
+            # Reload into current process env for immediate effect
+            os.environ[env_key] = value
+            # Reload module-level vars that depend on this key
+            if env_key == "TELEGRAM_BOT_TOKEN":
+                global TELEGRAM_BOT_TOKEN
+                TELEGRAM_BOT_TOKEN = value
+            _log_audit("credential_set", {"key": env_key, "len": len(value)})
+        return jsonify({"status": "ok" if success else "error", "message": msg})
+
+    @app.route("/admin/auto-key/<env_key>", methods=["POST"])
+    def admin_auto_key(env_key):
+        """Auto-generate a key (for CRON_SECRET etc)."""
+        env_key = env_key.upper()
+        success, msg = auto_generate_key(env_key)
+        if success:
+            os.environ[env_key] = os.environ.get(env_key, "")  # reload
+            _log_audit("credential_auto_generated", {"key": env_key})
+        return jsonify({"status": "ok" if success else "error", "message": msg})
+
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
+    # Startup credential check
+    _cred_scan = scan_missing_keys()
+    if _cred_scan["total_missing"] > 0:
+        log.warning(f"⚠️ {_cred_scan['total_missing']} credentials missing! Call /admin/missing-keys for details.")
+    else:
+        log.info("✅ All required credentials configured.")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
-             f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
+             f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*, admin/missing-keys, admin/set-key")
     app.run(host="127.0.0.1", port=PORT, threaded=True)
 
 
