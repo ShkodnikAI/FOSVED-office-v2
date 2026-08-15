@@ -3155,6 +3155,187 @@ mlogserver {
   }
 
   // ============================================================
+  // P3-MINI: ADDITIONAL MIGRATED ENDPOINTS
+  // ============================================================
+
+  // P3-1: /api/archive — search archive with optional q + dept filter
+  route "/api/archive" method=GET {
+    let q = query_param("q")
+    let dept_filter = query_param("dept")
+
+    let rows = []
+    if q != "" then {
+      let search_term = "%" + q + "%"
+      if dept_filter != "" then {
+        let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) AND dept=? ORDER BY created_at DESC LIMIT 50", [search_term, search_term, dept_filter])
+      } else {
+        let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE raw_text LIKE ? OR title LIKE ? ORDER BY created_at DESC LIMIT 50", [search_term, search_term])
+      }
+    } else {
+      if dept_filter != "" then {
+        let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE dept=? ORDER BY created_at DESC LIMIT 50", [dept_filter])
+      } else {
+        let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses ORDER BY created_at DESC LIMIT 50", [])
+      }
+    }
+
+    let out = "["
+    let i = 0
+    each row in rows {
+      if i > 0 then { let out = out + "," }
+      let id = to_string(json_get(row, "id", ""))
+      let dept = to_string(json_get(row, "dept", ""))
+      let title = to_string(json_get(row, "title", ""))
+      let created = to_string(json_get(row, "created_at", ""))
+      let out = out + "{\"id\":" + id + ",\"dept\":\"" + dept + "\",\"title\":\"" + title + "\",\"created\":\"" + created + "\"}"
+      let i = i + 1
+    }
+    let out = out + "]"
+
+    return respond("200 {\"status\":\"ok\",\"results\":" + out + ",\"count\":" + to_string(i) + "}")
+  }
+
+  // P3-2: /api/admin/status — admin stats (graph, issues, proposals, reports)
+  route "/api/admin/status" method=GET {
+    let r_nodes = query("SELECT COUNT(*) as c FROM knowledge_graph", [])
+    let r_edges = query("SELECT COUNT(*) as c FROM knowledge_edges", [])
+    let r_reports = query("SELECT COUNT(*) as c FROM admin_reports", [])
+    let nodes = to_string(json_get(r_nodes[0], "c", "0"))
+    let edges = to_string(json_get(r_edges[0], "c", "0"))
+    let reports = to_string(json_get(r_reports[0], "c", "0"))
+
+    // Open issues (top 10)
+    let issue_rows = query("SELECT id, severity, file_path, issue, status FROM admin_findings WHERE status='open' ORDER BY id DESC LIMIT 10", [])
+    let issues = "["
+    let ii = 0
+    each row in issue_rows {
+      if ii > 0 then { let issues = issues + "," }
+      let id = to_string(json_get(row, "id", ""))
+      let sev = to_string(json_get(row, "severity", ""))
+      let fp = to_string(json_get(row, "file_path", ""))
+      let iss = to_string(json_get(row, "issue", ""))
+      let issues = issues + "{\"id\":" + id + ",\"severity\":\"" + sev + "\",\"file\":\"" + fp + "\",\"issue\":\"" + iss + "\"}"
+      let ii = ii + 1
+    }
+    let issues = issues + "]"
+
+    // Pending proposals (top 10)
+    let prop_rows = query("SELECT id, content, status FROM admin_proposals WHERE status='pending' ORDER BY id DESC LIMIT 10", [])
+    let props = "["
+    let pi = 0
+    each row in prop_rows {
+      if pi > 0 then { let props = props + "," }
+      let id = to_string(json_get(row, "id", ""))
+      let content = to_string(json_get(row, "content", ""))
+      let st = to_string(json_get(row, "status", ""))
+      let props = props + "{\"id\":" + id + ",\"content\":\"" + content + "\",\"status\":\"" + st + "\"}"
+      let pi = pi + 1
+    }
+    let props = props + "]"
+
+    return respond("200 {\"status\":\"ok\",\"graph\":{\"nodes\":" + nodes + ",\"edges\":" + edges + "},\"issues\":" + issues + ",\"proposals\":" + props + ",\"reports_count\":" + reports + "}")
+  }
+
+  // P3-3: /api/quest/create-checkpoints — loop INSERT for quest checkpoints
+  route "/api/quest/create-checkpoints" method=POST {
+    let data = json_body()
+    let qid = to_string(json_get(data, "quest_id", ""))
+    let total_steps = to_int(json_get(data, "total_steps", "0"))
+    if qid == "" then { return respond("400 {\"status\":\"error\",\"message\":\"quest_id required\"}") }
+    if total_steps < 1.0 then { return respond("400 {\"status\":\"error\",\"message\":\"total_steps must be > 0\"}") }
+
+    let si = 0
+    while si < total_steps {
+      let step_label = "Шаг " + to_string(si + 1)
+      let _ = db_execute("INSERT INTO quest_checkpoints (quest_id, step_num, step_label, status) VALUES (?, ?, ?, 'pending')", [qid, to_string(si), step_label])
+      let si = si + 1
+    }
+
+    return respond("200 {\"status\":\"ok\",\"created\":" + to_string(total_steps) + "}")
+  }
+
+  // P3-4: /api/quest/format-list — format quest list for Telegram
+  route "/api/quest/format-list" method=POST {
+    let data = json_body()
+    let rows = json_get(data, "rows", [])
+
+    if len(rows) == 0.0 then { return respond("200 Нет активных задач.") }
+
+    let out = "Активные задачи (" + to_string(len(rows)) + "):"
+    let i = 0
+    each r in rows {
+      let qid = to_string(json_get(r, "id", "?"))
+      let title = to_string(json_get(r, "title", "?"))
+      let qtype = to_string(json_get(r, "quest_type", "?"))
+      let cstep = to_string(json_get(r, "current_step", "0"))
+      let tstep = to_string(json_get(r, "total_steps", "0"))
+      let dl = to_string(json_get(r, "deadline", ""))
+      let line = to_string(i + 1) + ". " + title + " [" + qtype + "] " + cstep + "/" + tstep
+      if dl != "" then { let line = line + " дедлайн=" + dl }
+      let line = line + "\n  id: " + qid
+      let out = out + "\n" + line
+      let i = i + 1
+    }
+
+    return respond("200 " + out)
+  }
+
+  // P3-5: /api/quest/format-status — format quest detail for Telegram
+  route "/api/quest/format-status" method=POST {
+    let data = json_body()
+    let qid = to_string(json_get(data, "quest_id", ""))
+
+    let q_rows = query("SELECT * FROM quests WHERE id = ?", [qid])
+    if len(q_rows) == 0.0 then { return respond("200 Задача " + qid + " не найдена.") }
+
+    let q = q_rows[0]
+    let title = to_string(json_get(q, "title", ""))
+    let qtype = to_string(json_get(q, "quest_type", ""))
+    let qstatus = to_string(json_get(q, "status", ""))
+    let cstep = to_string(json_get(q, "current_step", "0"))
+    let tstep = to_string(json_get(q, "total_steps", "0"))
+    let dl = to_string(json_get(q, "deadline", ""))
+
+    let out = "*Досье: " + title + "*"
+    let info = "Тип: " + qtype + " | Статус: " + qstatus + " | Шаг: " + cstep + "/" + tstep
+    if dl != "" then { let info = info + " | Дедлайн: " + dl }
+    let out = out + "\n" + info + "\n\nЧекпоинты:"
+
+    // Checkpoints
+    let cp_rows = query("SELECT step_num, step_label, status, approved_by, approved_at FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", [qid])
+    each cp in cp_rows {
+      let cp_status = to_string(json_get(cp, "status", "pending"))
+      let marker = "[ ]"
+      if cp_status == "approved" then { let marker = "[OK]" }
+      if cp_status == "in_progress" then { let marker = "[>>]" }
+      if cp_status == "skipped" then { let marker = "[--]" }
+      let sn = to_string(json_get(cp, "step_num", ""))
+      let sl = to_string(json_get(cp, "step_label", ""))
+      let line = "  " + marker + " " + sn + ". " + sl
+      if cp_status == "approved" then {
+        let ab = to_string(json_get(cp, "approved_by", ""))
+        let aa = to_string(json_get(cp, "approved_at", ""))
+        let line = line + " (" + ab + " " + aa + ")"
+      }
+      let out = out + "\n" + line
+    }
+
+    // Files
+    let f_rows = query("SELECT filename, file_type, version FROM quest_files WHERE quest_id = ? ORDER BY id", [qid])
+    if len(f_rows) > 0.0 then {
+      let out = out + "\n\nФайлы:"
+      each f in f_rows {
+        let fn = to_string(json_get(f, "filename", ""))
+        let ft = to_string(json_get(f, "file_type", ""))
+        let fv = to_string(json_get(f, "version", ""))
+        let out = out + "\n  - " + fn + " (" + ft + " v" + fv + ")"
+      }
+    }
+
+    return respond("200 " + out)
+  }
+
+  // ============================================================
   // CRON ENDPOINTS (8) — all require CRON_SECRET
   // ============================================================
 

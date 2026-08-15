@@ -25,7 +25,8 @@ LLM_ROUTES_PREFIXES = [
     "/miniapp-spa",
     "/api/integrations",   # P1-4: /api/dashboard + /api/dept migrated to Metalogos
     # P2-3: /api/narads, /api/quests migrated to Metalogos
-    "/api/quest/",  # quest generate (docx/pdf) still Python
+    "/api/quest/generate",    # docx/pdf generation → Python
+    "/api/quest/send-package",  # email + file → Python
     "/api/email/",
     "/api/admin/",
     "/dept-dashboard/",
@@ -87,6 +88,11 @@ MLOG_ROUTES_PREFIXES = [
     "/learning/stats", # P2-5: Learning stats in Metalogos
     "/rate_cmd",       # P2-6: Rate in Metalogos
     "/context_cmd",    # P2-6: Context in Metalogos
+    "/api/archive",    # P3-1: Archive search in Metalogos
+    "/api/admin/status",  # P3-2: Admin status in Metalogos
+    "/api/quest/create-checkpoints",  # P3-3.5: Quest helpers in Metalogos
+    "/api/quest/format-list",
+    "/api/quest/format-status",
     "/cron/",
     "/health",
     "/",
