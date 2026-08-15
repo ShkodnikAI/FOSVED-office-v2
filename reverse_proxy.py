@@ -78,7 +78,7 @@ MLOG_ROUTES_PREFIXES = [
     "/audit/",     # P1-2: /audit/recent in Metalogos
     "/search",     # P1-3: /search (SQLite LIKE) in Metalogos (but /search/web → Python)
     "/api/dashboard",  # P1-4: Dashboard KPIs in Metalogos
-    "/api/dept/",      # P1-5: Dept details in Metalogos
+    "/api/dept",       # P1-5: Dept details in Metalogos (query_param slug)
     "/api/models",     # P2-1: Model list in Metalogos (future)
     "/api/economics",  # P2-1: Token economics in Metalogos (future)
     "/cron/",
