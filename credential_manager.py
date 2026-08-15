@@ -250,6 +250,67 @@ CREDENTIAL_MANIFEST = [
         "sanctions_ok": False,
         "set_via": None,
     },
+    # ── ДОПОЛНИТЕЛЬНЫЕ (уже в PROVIDERS, не в манифесте) ─────────────
+    {
+        "env_key": "KIMI_API_KEY",
+        "label": "Kimi (Moonshot)",
+        "emoji": "🌙",
+        "priority": "P2",
+        "required": False,
+        "category": "llm",
+        "why": "Korean/Chinese LLM, хороший fallback. Уже в combo chains как kimi-k3.",
+        "how_steps": [
+            "1. Откройте https://platform.moonshot.cn",
+            "2. Зарегистрируйтесь",
+            "3. API Keys → Create",
+            "4. Скопируйте ключ",
+        ],
+        "how_link": "https://platform.moonshot.cn/console/api-keys",
+        "how_link_text": "Moonshot API Keys",
+        "example": "sk-xxxxxxxxxxxxxxxx",
+        "sanctions_ok": True,
+        "set_via": "/admin/set-key KIMI_API_KEY <значение>",
+    },
+    {
+        "env_key": "CEREBRAS_API_KEY",
+        "label": "Cerebras (бесплатный inference)",
+        "emoji": "⚡",
+        "priority": "P2",
+        "required": False,
+        "category": "llm",
+        "why": "Бесплатный быстрый inference Llama 3.1. Rate-limited, но для быстрых задач — идеален.",
+        "how_steps": [
+            "1. Откройте https://cloud.cerebras.ai",
+            "2. Зарегистрируйтесь (бесплатно)",
+            "3. Dashboard → API Keys → Create",
+            "4. Скопируйте ключ",
+        ],
+        "how_link": "https://cloud.cerebras.ai",
+        "how_link_text": "Cerebras Cloud",
+        "example": "sk-xxxxxxxxxxxxxxxx",
+        "sanctions_ok": True,
+        "set_via": "/admin/set-key CEREBRAS_API_KEY <значение>",
+    },
+    {
+        "env_key": "NVIDIA_API_KEY",
+        "label": "NVIDIA NIM (бесплатный tier)",
+        "emoji": "🟢",
+        "priority": "P3",
+        "required": False,
+        "category": "llm",
+        "why": "Бесплатный inference через build.nvidia.com. Llama, Mistral, и др.",
+        "how_steps": [
+            "1. Откройте https://build.nvidia.com",
+            "2. Зарегистрируйтесь (бесплатно)",
+            "3. API Keys → Get Key",
+            "4. Скопируйте ключ (вида nvapi-xxx)",
+        ],
+        "how_link": "https://build.nvidia.com",
+        "how_link_text": "NVIDIA NIM",
+        "example": "nvapi-xxxxxxxxxxxxxxxx",
+        "sanctions_ok": True,
+        "set_via": "/admin/set-key NVIDIA_API_KEY <значение>",
+    },
 ]
 
 
@@ -564,6 +625,33 @@ PROVIDER_REGISTRY = {
         "balance_url": None,
         "balance_format": None,
     },
+    "kimi": {
+        "env_key": "KIMI_API_KEY",
+        "name": "Kimi (Moonshot)",
+        "emoji": "🌙",
+        "model": "kimi-k3",
+        "pricing": "$0.6/1M input, $2.5/1M output",
+        "balance_url": "https://api.moonshot.ai/v1/users/me/balance",
+        "balance_format": "moonshot",
+    },
+    "cerebras": {
+        "env_key": "CEREBRAS_API_KEY",
+        "name": "Cerebras",
+        "emoji": "⚡",
+        "model": "llama3.1-8b",
+        "pricing": "Бесплатный inference (rate-limited)",
+        "balance_url": None,
+        "balance_format": None,
+    },
+    "nvidia": {
+        "env_key": "NVIDIA_API_KEY",
+        "name": "NVIDIA NIM",
+        "emoji": "🟢",
+        "model": "meta/llama3-70b",
+        "pricing": "Бесплатный tier (build.nvidia.com)",
+        "balance_url": None,
+        "balance_format": None,
+    },
     "anthropic": {
         "env_key": "ANTHROPIC_API_KEY",
         "name": "Anthropic (Claude)",
@@ -633,6 +721,27 @@ def check_deepseek_balance(api_key):
     return {"status": "ok", "balances": [], "raw": data}
 
 
+def check_kimi_balance(api_key):
+    """Check Kimi/Moonshot balance. Returns dict with balance info."""
+    data = _http_get_json(
+        "https://api.moonshot.ai/v1/users/me/balance",
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+    )
+    if not data:
+        return {"status": "error", "message": "API unavailable or invalid key"}
+    # Moonshot returns: {"data": {"available_balance": 1.23, ...}}
+    d = data.get("data", {})
+    if d:
+        return {
+            "status": "ok",
+            "balances": [{
+                "currency": "CNY",
+                "total": str(d.get("available_balance", "?")),
+            }],
+        }
+    return {"status": "ok", "balances": [], "raw": data}
+
+
 def check_github_rate_limit(token=None):
     """Check GitHub API rate limit. Returns remaining/limit."""
     headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "fosved-credential-checker"}
@@ -698,6 +807,21 @@ def check_all_balances():
     if grok_key and not grok_key.startswith("["):
         results["grok"] = {"status": "ok", "note": "Key set (balance API not available)"}
 
+    # Kimi/Moonshot
+    kimi_key = os.environ.get("KIMI_API_KEY", "")
+    if kimi_key and not kimi_key.startswith("["):
+        results["kimi"] = check_kimi_balance(kimi_key)
+
+    # Cerebras — no balance API
+    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "")
+    if cerebras_key and not cerebras_key.startswith("["):
+        results["cerebras"] = {"status": "ok", "note": "Free inference (rate-limited)"}
+
+    # NVIDIA — no balance API
+    nvidia_key = os.environ.get("NVIDIA_API_KEY", "")
+    if nvidia_key and not nvidia_key.startswith("["):
+        results["nvidia"] = {"status": "ok", "note": "Free tier (build.nvidia.com)"}
+
     return results
 
 
@@ -729,6 +853,10 @@ def format_provider_status(balances=None, scan_result=None):
             if bal.get("status") == "ok":
                 # DeepSeek — show balance
                 if pid == "deepseek" and bal.get("balances"):
+                    for b in bal["balances"]:
+                        lines.append(f"  {pinfo['emoji']} *{pinfo['name']}* — {b['total']} {b['currency']} ({pinfo['pricing']})")
+                # Kimi — show balance in CNY
+                elif pid == "kimi" and bal.get("balances"):
                     for b in bal["balances"]:
                         lines.append(f"  {pinfo['emoji']} *{pinfo['name']}* — {b['total']} {b['currency']} ({pinfo['pricing']})")
                 # Groq — show models
