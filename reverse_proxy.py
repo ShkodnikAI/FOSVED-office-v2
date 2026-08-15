@@ -15,7 +15,7 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
 # Routes that go to LLM Proxy (Mini App + dashboards + archive + scheduler + learning)
 LLM_ROUTES_PREFIXES = [
-    # "/webhook/telegram",  # WH-1: returned to Metalogos after fixing app.mlog:2251
+    # "/webhook/telegram",  # WH-1: in Metalogos (app.mlog:1078)
     "/webhook/miniapp-action",  # Mini App action bar → LLM Proxy (must precede generic mlog routing)
     "/cron/collect-news",  # registered in LLM Proxy, not in Metalogos; guarded by CRON_SECRET
     "/news/stats",         # read-only counters, used by the smoke script,
@@ -23,12 +23,20 @@ LLM_ROUTES_PREFIXES = [
     "/miniapp",
     "/miniapp-spa/",
     "/miniapp-spa",
-    "/api/",
+    "/api/integrations",   # P1-4: /api/dashboard + /api/dept migrated to Metalogos
+    "/api/narads",
+    "/api/quests",
+    "/api/quest/",
+    "/api/email/",
+    "/api/admin/",
     "/dept-dashboard/",
     "/dept-dashboard",
     "/office-dashboard",
     "/archive/browse",
-    "/audit/",
+    # P1-2: /audit/recent migrated to Metalogos — removed from here
+    # P1-3: /search migrated to Metalogos — removed from INTERNAL_ONLY
+    # P1-4: /api/dashboard migrated to Metalogos
+    # P1-5: /api/dept/<slug> migrated to Metalogos
 ]
 
 # Called by Metalogos directly on 127.0.0.1:4000 — must never be reachable
@@ -40,7 +48,7 @@ INTERNAL_ONLY_PREFIXES = [
     "/learning/",
     "/memory/",
     "/lz/",
-    "/search",
+    "/search/web",      # P1-3: /search now in mlog, but /search/web still Python (Tavily)
     "/tts",
     "/stt",
     "/voice-set",
@@ -66,7 +74,13 @@ def is_internal_only(path):
 
 # Routes that go to Metalogos
 MLOG_ROUTES_PREFIXES = [
-    # "/webhook/" removed — Telegram webhook now handled by Python (llm_proxy:4000)
+    "/webhook/",   # P1-1: Telegram webhook in Metalogos (app.mlog:1078)
+    "/audit/",     # P1-2: /audit/recent in Metalogos
+    "/search",     # P1-3: /search (SQLite LIKE) in Metalogos (but /search/web → Python)
+    "/api/dashboard",  # P1-4: Dashboard KPIs in Metalogos
+    "/api/dept/",      # P1-5: Dept details in Metalogos
+    "/api/models",     # P2-1: Model list in Metalogos (future)
+    "/api/economics",  # P2-1: Token economics in Metalogos (future)
     "/cron/",
     "/health",
     "/",

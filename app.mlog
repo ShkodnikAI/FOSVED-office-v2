@@ -2634,6 +2634,158 @@ mlogserver {
   }
 
   // ============================================================
+  // API ENDPOINTS (migrated from Python — P1 migration)
+  // ============================================================
+
+  // P1-2: /audit/recent — was Flask @app.get("/audit/recent")
+  route "/audit/recent" method=GET {
+    let limit_str = query_param("limit")
+    let limit_val = 20
+    if limit_str != "" then { let limit_val = to_float(limit_str) }
+    if limit_val > 200.0 then { let limit_val = 200.0 }
+    if limit_val < 1.0 then { let limit_val = 1.0 }
+    let limit_int = to_string(limit_val)
+
+    let rows = query("SELECT id, action, details, timestamp FROM audit_log ORDER BY id DESC LIMIT " + limit_int, [])
+
+    let entries = "["
+    let i = 0
+    each row in rows {
+      if i > 0 then { let entries = entries + "," }
+      let id = to_string(json_get(row, "id", ""))
+      let action = to_string(json_get(row, "action", ""))
+      let ts = to_string(json_get(row, "timestamp", ""))
+      let details_raw = to_string(json_get(row, "details", "{}"))
+      let entries = entries + "{\"id\":" + id + ",\"action\":\"" + action + "\",\"created\":\"" + ts + "\",\"details\":" + details_raw + "}"
+      let i = i + 1
+    }
+    let entries = entries + "]"
+
+    return respond("200 {\"status\":\"ok\",\"entries\":" + entries + ",\"count\":" + to_string(i) + "}")
+  }
+
+  // P1-3: /search — was Flask @app.post("/search")
+  route "/search" method=POST {
+    let data = json_body()
+    let query_text = to_string(json_get(data, "query", ""))
+    if query_text == "" then { return respond("400 {\"status\":\"error\",\"message\":\"query is required\"}") }
+
+    let search_term = "%" + query_text + "%"
+    let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) ORDER BY id DESC LIMIT 50", [search_term, search_term])
+
+    let results = "["
+    let i = 0
+    each row in rows {
+      if i > 0 then { let results = results + "," }
+      let id = to_string(json_get(row, "id", ""))
+      let dept = to_string(json_get(row, "dept", ""))
+      let title = to_string(json_get(row, "title", ""))
+      let created = to_string(json_get(row, "created_at", ""))
+      let results = results + "{\"id\":\"" + id + "\",\"dept\":\"" + dept + "\",\"title\":\"" + title + "\",\"created\":\"" + created + "\"}"
+      let i = i + 1
+    }
+    let results = results + "]"
+
+    return respond("200 {\"status\":\"ok\",\"results\":" + results + ",\"count\":" + to_string(i) + "}")
+  }
+
+  // P1-4: /api/dashboard — KPIs, dept cards, admin status
+  // Uses SQL datetime() instead of Python datetime arithmetic
+  route "/api/dashboard" method=GET {
+    // KPIs
+    let r_today = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now')", [])
+    let r_week = query("SELECT COUNT(*) as c FROM dialog_history WHERE created_at >= date('now', '-7 days')", [])
+    let r_cost_today = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now')", [])
+    let r_cost_month = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days')", [])
+    let r_reports = query("SELECT COUNT(*) as c FROM miniapp_responses WHERE created_at >= date('now')", [])
+    let r_avg = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE created_at >= date('now', '-7 days')", [])
+
+    let tasks_today = to_string(json_get(r_today[0], "c", "0"))
+    let tasks_week = to_string(json_get(r_week[0], "c", "0"))
+    let cost_today = to_string(json_get(r_cost_today[0], "t", "0"))
+    let cost_month = to_string(json_get(r_cost_month[0], "t", "0"))
+    let reports_today = to_string(json_get(r_reports[0], "c", "0"))
+    let avg_rating = to_string(json_get(r_avg[0], "a", "0"))
+
+    // Dept cards — 13 departments (excl. admin)
+    let dept_slugs = "yana,osp,lz,expert,marketing,finance,legal,dev,design,qa,visual,engineering,kavalnya"
+    let dept_names = "Yana,OSP,LZ,Expert,Marketing,Finance,Legal,Dev,Design,QA,Visual,Engineering,Kavalnya"
+    let dept_colors = "#3d4a4d,#dc2626,#0891b2,#4f46e5,#ea580c,#16a34a,#64748b,#2563eb,#ec4899,#65a30d,#a855f7,#78716c,#d97706"
+
+    let dept_cards = "["
+    let di = 0
+    let d_slugs = split(dept_slugs, ",")
+    let d_names = split(dept_names, ",")
+    each slug in d_slugs {
+      let d_name = d_names[di]
+      let r_calls = query("SELECT COUNT(*) as c FROM token_usage WHERE dept = ? AND created_at >= date('now', '-7 days')", [slug])
+      let r_drating = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept = ? AND created_at >= date('now', '-7 days')", [slug])
+      let calls = to_string(json_get(r_calls[0], "c", "0"))
+      let rating = to_string(json_get(r_drating[0], "a", "0"))
+      let status = "inactive"
+      if to_float(calls) > 5.0 then { let status = "active" }
+      if to_float(calls) > 0.0 then { if to_float(calls) <= 5.0 then { let status = "idle" } }
+
+      if di > 0 then { let dept_cards = dept_cards + "," }
+      let dept_cards = dept_cards + "{\"slug\":\"" + slug + "\",\"name\":\"" + d_name + "\",\"calls\":" + calls + ",\"rating\":" + rating + ",\"status\":\"" + status + "\"}"
+      let di = di + 1
+    }
+    let dept_cards = dept_cards + "]"
+
+    // Admin status
+    let r_nodes = query("SELECT COUNT(*) as c FROM knowledge_graph", [])
+    let r_edges = query("SELECT COUNT(*) as c FROM knowledge_edges", [])
+    let r_issues = query("SELECT COUNT(*) as c FROM admin_findings WHERE status='open'", [])
+    let r_proposals = query("SELECT COUNT(*) as c FROM admin_proposals WHERE status='pending'", [])
+    let nodes = to_string(json_get(r_nodes[0], "c", "0"))
+    let edges = to_string(json_get(r_edges[0], "c", "0"))
+    let issues = to_string(json_get(r_issues[0], "c", "0"))
+    let proposals = to_string(json_get(r_proposals[0], "c", "0"))
+
+    let kpis = "{\"tasks\":" + tasks_today + ",\"tasks_week\":" + tasks_week + ",\"cost_today\":" + cost_today + ",\"cost_month\":" + cost_month + ",\"rating\":" + avg_rating + ",\"reports\":" + reports_today + "}"
+    let admin = "{\"nodes\":" + nodes + ",\"edges\":" + edges + ",\"issues\":" + issues + ",\"proposals\":" + proposals + ",\"code_health\":" + avg_rating + "}"
+
+    return respond("200 {\"status\":\"ok\",\"kpis\":" + kpis + ",\"depts\":" + dept_cards + ",\"admin\":" + admin + "}")
+  }
+
+  // P1-5: /api/dept/<slug> — department details
+  route "/api/dept/:slug" method=GET {
+    let slug = lower(path_param("slug"))
+    let week_ago = "now"  // SQL will handle date math
+
+    let r_calls = query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
+    let r_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
+    let r_tokens_in = query("SELECT COALESCE(SUM(CAST(input_tokens AS REAL)),0) as t FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
+    let r_tokens_out = query("SELECT COALESCE(SUM(CAST(output_tokens AS REAL)),0) as t FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
+    let r_avg_rating = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
+    let r_reports = query("SELECT COUNT(*) as c FROM miniapp_responses WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
+    let r_last_model = kv_get("last_model_" + slug)
+
+    let calls = to_string(json_get(r_calls[0], "c", "0"))
+    let cost = to_string(json_get(r_cost[0], "t", "0"))
+    let tokens_in = to_string(json_get(r_tokens_in[0], "t", "0"))
+    let tokens_out = to_string(json_get(r_tokens_out[0], "t", "0"))
+    let rating = to_string(json_get(r_avg_rating[0], "a", "0"))
+    let reports = to_string(json_get(r_reports[0], "c", "0"))
+    let last_model = to_string(r_last_model)
+
+    // Recent queries (last 5)
+    let recent_rows = query("SELECT query, created_at FROM dialog_history WHERE dept=? ORDER BY id DESC LIMIT 5", [slug])
+    let recent = "["
+    let ri = 0
+    each row in recent_rows {
+      if ri > 0 then { let recent = recent + "," }
+      let q = to_string(json_get(row, "query", ""))
+      let ca = to_string(json_get(row, "created_at", ""))
+      let recent = recent + "{\"query\":\"" + q + "\",\"created\":\"" + ca + "\"}"
+      let ri = ri + 1
+    }
+    let recent = recent + "]"
+
+    return respond("200 {\"status\":\"ok\",\"slug\":\"" + slug + "\",\"calls\":" + calls + ",\"cost\":" + cost + ",\"tokens_in\":" + tokens_in + ",\"tokens_out\":" + tokens_out + ",\"rating\":" + rating + ",\"reports\":" + reports + ",\"last_model\":\"" + last_model + "\",\"recent\":" + recent + "}")
+  }
+
+  // ============================================================
   // CRON ENDPOINTS (8) — all require CRON_SECRET
   // ============================================================
 

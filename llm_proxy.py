@@ -3251,6 +3251,127 @@ def search_endpoint():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ══════════════════════════════════════════════════════════════════════
+#  MEGA-3.5: TAVILY WEB SEARCH
+# ══════════════════════════════════════════════════════════════════════
+
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+
+def _tavily_search(query, search_depth="advanced", max_results=8, topic="general", include_answer=True):
+    """Call Tavily Search API. Returns list of result dicts or empty list on failure.
+
+    Args:
+        query: search query string
+        search_depth: "basic" (fast, cheap) or "advanced" (deeper, more tokens)
+        max_results: 1–10 results
+        topic: "general" or "news"
+        include_answer: return an LLM-generated answer summary
+
+    Returns:
+        {"answer": str|None, "results": [{"title","url","content","score"}], "query": str}
+    """
+    if not TAVILY_API_KEY:
+        log.warning("TAVILY_API_KEY not set — web search unavailable")
+        return {"answer": None, "results": [], "query": query, "error": "TAVILY_API_KEY not configured"}
+
+    try:
+        body = {
+            "api_key": TAVILY_API_KEY,
+            "query": query,
+            "search_depth": search_depth,
+            "max_results": min(max_results, 10),
+            "topic": topic,
+            "include_answer": include_answer,
+            "include_raw_content": False,  # save tokens — content field is enough
+        }
+        resp = http_requests.post(
+            "https://api.tavily.com/search",
+            json=body,
+            timeout=30 if search_depth == "basic" else 60
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        results = []
+        for r in data.get("results", []):
+            results.append({
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "content": r.get("content", ""),
+                "score": r.get("score", 0),
+            })
+
+        answer = data.get("answer") if include_answer else None
+
+        log.info(f"Tavily search: query='{query[:60]}' depth={search_depth} topic={topic} → {len(results)} results")
+        return {"answer": answer, "results": results, "query": query}
+
+    except Exception as e:
+        log.error(f"Tavily search error: {e}")
+        return {"answer": None, "results": [], "query": query, "error": str(e)}
+
+
+def _tavily_results_to_context(search_data, max_chars=4000):
+    """Convert Tavily search results to a text block for LLM context injection."""
+    if not search_data or not search_data.get("results"):
+        return ""
+
+    parts = []
+    if search_data.get("answer"):
+        parts.append(f"TL;DR: {search_data['answer']}\n")
+
+    parts.append("Web search results:")
+    for i, r in enumerate(search_data["results"][:8], 1):
+        title = r.get("title", "Untitled")
+        url = r.get("url", "")
+        content = r.get("content", "")
+        score = r.get("score", 0)
+        # Truncate each result to keep total under max_chars
+        entry = f"\n{i}. [{title}]({url}) (relevance: {score:.2f})\n   {content}"
+        parts.append(entry)
+
+    text = "\n".join(parts)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n[...truncated]"
+    return text
+
+
+@app.post("/search/web")
+def search_web_endpoint():
+    """Tavily-powered web search. Returns structured results suitable for LZ and general use.
+
+    Body: {
+        "query": str,           — required
+        "search_depth": str,    — "basic" | "advanced" (default: "advanced")
+        "max_results": int,     — 1-10 (default: 8)
+        "topic": str,           — "general" | "news" (default: "general")
+        "include_answer": bool  — include TL;DR (default: true)
+    }
+    """
+    d = request.get_json(force=True)
+    query = d.get("query", "")
+    if not query:
+        return jsonify({"status": "error", "message": "query is required"}), 400
+
+    search_depth = d.get("search_depth", "advanced")
+    max_results = d.get("max_results", 8)
+    topic = d.get("topic", "general")
+    include_answer = d.get("include_answer", True)
+
+    result = _tavily_search(query, search_depth=search_depth, max_results=max_results,
+                            topic=topic, include_answer=include_answer)
+
+    _log_audit("web_search", {
+        "query": query[:100], "depth": search_depth, "topic": topic,
+        "results": len(result.get("results", [])), "had_answer": bool(result.get("answer"))
+    })
+
+    if result.get("error"):
+        return jsonify({"status": "error", "message": result["error"], "results": []}), 503
+
+    return jsonify({"status": "ok", **result})
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  MEGA-4: LZ DEEP RESEARCH (APODEX)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -3282,7 +3403,13 @@ def _tg_send_chat_action(chat_id, action):
 
 @app.post("/lz/deep-research")
 def lz_deep_research():
-    """Apodex-powered deep research endpoint with typing indicator refresh."""
+    """Deep research endpoint: Tavily web search → context enrichment → LLM (Apodex/fallback).
+
+    Flow:
+    1. (Optional) Tavily web search for real web data
+    2. Inject search results as context into the user message
+    3. Call Apodex or fallback LLM for deep analysis
+    """
     d = request.get_json(force=True)
     query_text = d.get("query", "")
     dept = d.get("dept", "lz")
@@ -3290,6 +3417,8 @@ def lz_deep_research():
     model = d.get("model", "apodex-1.0-mini")
     system_context = d.get("system_context", "")
     chat_id = d.get("chat_id", "")
+    use_web_search = d.get("use_web_search", True)  # default ON for LZ
+    web_search_depth = d.get("web_search_depth", "advanced")
 
     if not query_text:
         return jsonify({"status": "error", "message": "query is required"}), 400
@@ -3299,6 +3428,26 @@ def lz_deep_research():
         stop_typing = _send_chat_action_loop(chat_id, "typing", 5)
 
     try:
+        # ── Phase 0: Tavily web search (real web data) ──────────
+        web_context = ""
+        web_search_meta = {}
+        if use_web_search and TAVILY_API_KEY:
+            log.info(f"LZ deep-research: running Tavily search for '{query_text[:60]}'")
+            search_data = _tavily_search(
+                query_text, search_depth=web_search_depth,
+                max_results=8, topic="general", include_answer=True
+            )
+            web_context = _tavily_results_to_context(search_data, max_chars=6000)
+            web_search_meta = {
+                "web_results": len(search_data.get("results", [])),
+                "web_has_answer": bool(search_data.get("answer")),
+                "web_error": search_data.get("error"),
+            }
+            if web_context:
+                log.info(f"LZ deep-research: injected {len(web_context)} chars of web context")
+        elif use_web_search and not TAVILY_API_KEY:
+            web_search_meta = {"web_results": 0, "web_error": "TAVILY_API_KEY not configured"}
+
         # Build LZ prompt for deep research
         lz_prompt = system_context or get_dept_prompt("lz")
 
@@ -3318,9 +3467,20 @@ Requirements:
 8. Language: Russian
 9. Format: layers (like OSP), with evidence graph at end"""
 
+        # Build user content: inject web context before the query
+        user_content = query_text
+        if web_context:
+            user_content = (
+                f"Я провёл веб-поиск по твоему запросу. Вот реальные данные из интернета:\n\n"
+                f"{web_context}\n\n"
+                f"---\n"
+                f"Теперь на основе ЭТИХ реальных данных + своих знаний выполни глубокий анализ запроса:\n\n"
+                f"{query_text}"
+            )
+
         messages = [
             {"role": "system", "content": lz_prompt},
-            {"role": "user", "content": query_text}
+            {"role": "user", "content": user_content}
         ]
 
         # Call Apodex (or fallback to default provider)
@@ -3364,7 +3524,8 @@ Requirements:
         _log_audit("lz_deep_research", {
             "dept": dept, "provider": used_provider, "model": used_model,
             "query": query_text[:100], "tokens_in": t_in, "tokens_out": t_out,
-            "verified": used_provider == "apodex"
+            "verified": used_provider == "apodex",
+            **web_search_meta
         })
 
         return jsonify({
@@ -3373,7 +3534,8 @@ Requirements:
             "model": used_model,
             "verified": used_provider == "apodex",
             "tokens_in": t_in,
-            "tokens_out": t_out
+            "tokens_out": t_out,
+            "web_search": web_search_meta
         })
 
     except Exception as e:
@@ -4887,7 +5049,7 @@ def _github_releases(repo_full_name):
 @app.post("/scheduler/lz-daily")
 def scheduler_lz_daily():
     """
-    LZ Daily Report: scan GitHub → LLM analysis → save to memory → return report.
+    LZ Daily Report: GitHub scan → Tavily web search → LLM analysis → memory → report.
     Called by /cron/lz-daily or manually.
     """
     d = request.get_json(force=True) or {}
@@ -4926,11 +5088,40 @@ def scheduler_lz_daily():
         except Exception:
             pass  # Table may not exist yet (created by mlog InitDB)
 
+        # ── Phase 1b: Tavily web search (real web data supplement) ───
+        web_search_context = ""
+        web_search_count = 0
+        tavily_queries = [
+            "latest AI agent frameworks 2025 2026",
+            "new LLM tools and libraries this week",
+            "multi-agent orchestration systems updates",
+        ]
+        # Add custom monitor topics as Tavily queries
+        for topic in monitor_topics[:3]:
+            tavily_queries.append(topic)
+
+        if TAVILY_API_KEY:
+            log.info(f"LZ Daily: running {len(tavily_queries)} Tavily searches")
+            for q in tavily_queries:
+                search_data = _tavily_search(q, search_depth="basic", max_results=5, topic="news", include_answer=False)
+                if search_data.get("results"):
+                    web_search_count += len(search_data["results"])
+                    for r in search_data["results"][:3]:
+                        web_search_context += f"- [{r['title']}]({r['url']}) — {r['content'][:200]}\n"
+                time.sleep(0.5)  # Rate limit courtesy
+
+            if web_search_context:
+                web_search_context = f"\n=== ВЕБ-ПОИСК TAVILY ({web_search_count} результатов) ===\n{web_search_context}"
+                log.info(f"LZ Daily: Tavily found {web_search_count} web results")
+        else:
+            log.info("LZ Daily: TAVILY_API_KEY not set, skipping web search")
+
         scan_summary = {
             "repos_found": len(all_repos),
             "releases_found": len(all_releases),
             "monitors_active": len(monitor_topics),
             "github_api_ok": github_ok,
+            "tavily_results": web_search_count,
         }
 
         # ── Phase 2: LLM Analysis ─────────────────────────────
@@ -4950,13 +5141,14 @@ def scheduler_lz_daily():
 
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub.\n\n"
+                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub + веб-поиск.\n\n"
                  "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ, которые Админ должен изучить для применения в офисе.\n\n"
                  "Структура отчёта:\n"
                  "1. 🔥 TOP-3 находки (с disrupting potential 1-10) — что полезно для Фосвед Офиса\n"
                  "2. 📦 Новые релизы — что обновилось в ключевых проектах\n"
-                 "3. 💡 Рекомендации — что Админу стоит изучить и почему\n"
-                 "4. 📊 Статистика скана\n\n"
+                 "3. 🌐 Веб-находки — важное из интернета (если есть данные Tavily)\n"
+                 "4. 💡 Рекомендации — что Админу стоит изучить и почему\n"
+                 "5. 📊 Статистика скана\n\n"
                  "Фильтруй: только релевантное для AI-офиса, multi-agent систем, Telegram ботов, DSL, memory systems.\n"
                  "Язык: русский."},
                 {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
@@ -4964,7 +5156,8 @@ def scheduler_lz_daily():
                  f"{repos_text}\n\n"
                  f"=== НОВЫЕ РЕЛИЗЫ ({len(all_releases)}) ===\n"
                  f"{releases_text}\n\n"
-                 f"{monitors_text}"}
+                 f"{monitors_text}\n"
+                 f"{web_search_context}"}
             ]
         else:
             # GitHub API failed — LLM researches directly
@@ -4989,7 +5182,8 @@ def scheduler_lz_daily():
                 {"role": "user", "content": f"Сделай ежедневный обзор новинок на GitHub за последнюю неделю.\n"
                  f"Дата: {datetime.utcnow().isoformat()[:10]}\n"
                  f"Фокус: AI agents, LLM, Telegram bots, memory systems, MCP, RAG.\n\n"
-                 f"Для каждого проекта укажи: название, URL, что нового, почему релевантно Фосвед Офису."}
+                 f"Для каждого проекта укажи: название, URL, что нового, почему релевантно Фосвед Офису.\n"
+                 f"{web_search_context}"}
             ]
 
         result = call_llm("lz", analysis_messages)
@@ -5015,7 +5209,7 @@ def scheduler_lz_daily():
         report += f"{'=' * 40}\n\n"
         report += analysis
         report += f"\n\n{'─' * 40}\n"
-        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {len(monitor_topics)} monitors\n"
+        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {web_search_count} web, {len(monitor_topics)} monitors\n"
         report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
 
         # ── Phase 5: Send to Owner (Admin) ────────────────────
@@ -5028,7 +5222,8 @@ def scheduler_lz_daily():
 
         _log_audit("lz_daily_report", {
             "repos": len(all_repos), "releases": len(all_releases),
-            "monitors": len(monitor_topics), "provider": result.get("provider"),
+            "monitors": len(monitor_topics), "tavily": web_search_count,
+            "provider": result.get("provider"),
             "msg_id": msg_id, "dry_run": dry_run
         })
 
@@ -5439,364 +5634,13 @@ RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("RENDER_URL", 
 _voice_enabled = False
 _tts_voice = "ru-RU-SvetlanaNeural"
 
-@app.post("/webhook/telegram")
-def telegram_webhook():
-    try:
-        return _telegram_webhook_impl()
-    except Exception as e:
-        import traceback as _tb
-        log.error(f"[WEBHOOK CRASH] {type(e).__name__}: {e}\n{_tb.format_exc()}")
-        # Try to notify owner even on crash
-        try:
-            data = request.get_json(force=True, silent=True) or {}
-            chat_id = str(data.get("message", {}).get("chat", {}).get("id", ""))
-            if chat_id:
-                _tg_send_message(chat_id, f"⚠️ Ошибка обработки: {type(e).__name__}")
-        except Exception:
-            pass
-        return "ok", 200  # Return 200 to prevent Telegram retry storm
-
-def _telegram_webhook_impl():
-    # Verify Telegram webhook secret
-    if not _verify_webhook_secret():
-        log.warning("Webhook secret verification failed")
-        return "forbidden", 403
-
-    global _voice_enabled, _tts_voice
-    data = request.get_json(force=True, silent=True) or {}
-
-    # WH-3: Webhook dedup — block Telegram retries within 90s window
-    update_id = data.get("update_id")
-    if update_id and not _webhook_dedup_check(str(update_id)):
-        return "ok", 200  # Duplicate — silently acknowledge, don't process
-
-    msg = data.get("message", {})
-    if not msg:
-        return "ok", 200
-    
-    chat_id = str(msg.get("chat", {}).get("id", ""))
-    user_id = str(msg.get("from", {}).get("id", ""))
-    user_name = msg.get("from", {}).get("first_name", "")
-    text = msg.get("text", "").strip()
-    voice = msg.get("voice")
-    
-    # Owner check (fail-closed: if OWNER_ID not set, block everyone)
-    if not OWNER_ID or user_id != OWNER_ID:
-        return "ok", 200
-    
-    # Voice → STT
-    if voice and not text:
-        file_id = voice.get("file_id", "")
-        if file_id:
-            try:
-                stt_resp = http_requests.post(f"http://127.0.0.1:4000/stt",
-                    json={"file_id": file_id, "chat_id": chat_id}, timeout=60)
-                stt_data = stt_resp.json()
-                text = stt_data.get("text", "")
-                if text:
-                    _tg_send_message(chat_id, f"🎤 Распознано: {text}")
-            except Exception as e:
-                log.error(f"STT failed: {e}")
-                _tg_send_message(chat_id, "Ошибка распознавания голоса")
-                return "ok", 200
-    
-    if not text:
-        return "ok", 200
-    
-    log.info(f"[WEBHOOK] from={user_name} text={text[:80]}")
-    
-    # ── Simple commands ──
-    if text.lower() in ("/start", "/help"):
-        _tg_send_message(chat_id, "Fosved Office v2\n\nОтделы: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge /admin\n\nУтилиты: /brief /digest /audit /learning /review /cost /good /fix\nГолос: /voice on|off|male|female\nОценка: /rate <1-10>\nМодель: /model auto|cheap|best|fusion\n\nПросто напиши сообщение — маршрутизация автоматическая.")
-        return "ok", 200
-    
-    if text.lower() == "/status":
-        _tg_send_message(chat_id, f"Fosved Office v2 — online\nVoice: {'on' if _voice_enabled else 'off'}\nWebhook: Python (direct)")
-        return "ok", 200
-    
-    if text.lower().startswith("/voice"):
-        parts = text.split()
-        if len(parts) > 1:
-            cmd = parts[1].lower()
-            if cmd == "on": _voice_enabled = True; _tg_send_message(chat_id, "Голос включён 🎙")
-            elif cmd == "off": _voice_enabled = False; _tg_send_message(chat_id, "Голос выключен")
-            elif cmd == "male": _tts_voice = "ru-RU-SvetlanaNeural"; _tg_send_message(chat_id, "Голос: мужской")
-            elif cmd == "female": _tts_voice = "ru-RU-SvetlanaNeural"; _tg_send_message(chat_id, "Голос: женский")
-        else:
-            _tg_send_message(chat_id, f"Voice: {'on' if _voice_enabled else 'off'}\n/voice on|off|male|female")
-        return "ok", 200
-    
-    if text.lower().startswith("/rate "):
-        try:
-            score = int(text.split()[1])
-            _query("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES ('yana','owner_feedback',?,?,?)",
-                   (str(score), 'manual', datetime.utcnow().isoformat()))
-            _tg_send_message(chat_id, f"Оценка записана: {score}/10")
-        except: _tg_send_message(chat_id, "Формат: /rate <1-10>")
-        return "ok", 200
-
-    # ── Manual trigger commands (MEGA-3) ──
-    if text.lower() == "/brief":
-        action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
-        try:
-            r = http_requests.post("http://127.0.0.1:4000/ask",
-                json={"dept": "yana", "messages": [
-                    {"role": "system", "content": get_dept_prompt("yana")},
-                    {"role": "user", "content": "Сделай утренний brief: что произошло за ночь, что на сегодня запланировано, что критично."}
-                ]}, timeout=120)
-            action_stop.set()
-            reply = r.json().get("reply", "Не удалось получить brief")
-            _tg_send_message(chat_id, reply)
-        except Exception as e:
-            _tg_send_message(chat_id, f"Ошибка /brief: {e}")
-        return "ok", 200
-
-    if text.lower() == "/digest":
-        action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
-        try:
-            r = http_requests.post("http://127.0.0.1:4000/ask",
-                json={"dept": "yana", "messages": [
-                    {"role": "system", "content": get_dept_prompt("yana")},
-                    {"role": "user", "content": "Сделай вечерний свод: что сделано за день, что перенесено, на чём акцент завтра."}
-                ]}, timeout=120)
-            action_stop.set()
-            reply = r.json().get("reply", "Не удалось получить digest")
-            _tg_send_message(chat_id, reply)
-        except Exception as e:
-            _tg_send_message(chat_id, f"Ошибка /digest: {e}")
-        return "ok", 200
-
-    if text.lower() == "/audit":
-        try:
-            rows = _query("SELECT dept, COUNT(*) as c FROM dialog_history WHERE created_at >= datetime('now', '-7 days') AND role='user' GROUP BY dept ORDER BY c DESC", fetch=True)
-            dept_activity = "\n".join([f"  {r['dept']}: {r['c']} запросов" for r in rows]) if rows else "Нет данных"
-            costs = _query("SELECT dept, SUM(cost_usd) as total FROM token_usage WHERE created_at >= datetime('now', '-7 days') GROUP BY dept ORDER BY total DESC", fetch=True)
-            cost_lines = "\n".join([f"  {r['dept']}: ${float(r['total'] or 0):.4f}" for r in costs]) if costs else "Нет данных"
-            _tg_send_message(chat_id, f"📋 Аудит за 7 дней\n\nАктивность по отделам:\n{dept_activity}\n\nРасходы по отделам:\n{cost_lines}")
-        except Exception as e:
-            _tg_send_message(chat_id, f"Ошибка /audit: {e}")
-        return "ok", 200
-
-    if text.lower() == "/learning":
-        try:
-            corrections = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days')", fetch=True)
-            positives = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days') AND corr_type='positive'", fetch=True)
-            errors = _query("SELECT COUNT(*) as c FROM error_patterns WHERE created_at >= datetime('now', '-7 days')", fetch=True)
-            c_count = corrections[0]['c'] if corrections else 0
-            p_count = positives[0]['c'] if positives else 0
-            e_count = errors[0]['c'] if errors else 0
-            _tg_send_message(chat_id, f"📊 Обучение за 7 дней\n\nКорректировок: {c_count}\nПозитивных примеров: {p_count}\nОшибок зафиксировано: {e_count}")
-        except Exception as e:
-            _tg_send_message(chat_id, f"Ошибка /learning: {e}")
-        return "ok", 200
-
-    if text.lower() == "/review":
-        try:
-            now = datetime.utcnow()
-            week_ago = (now - timedelta(days=7)).isoformat()
-            tasks = _query("SELECT COUNT(*) as c FROM dialog_history WHERE created_at >= ? AND role='user'", (week_ago,), fetch=True)
-            metrics = _query("SELECT metric_name, metric_value, created_at FROM dept_metrics WHERE created_at >= ? ORDER BY created_at DESC LIMIT 10", (week_ago,), fetch=True)
-            msg = f"📊 Обзор за 7 дней\n\nВсего запросов: {tasks[0]['c'] if tasks else 0}\n\nПоследние метрики:\n"
-            for m in (metrics or []):
-                msg += f"  [{m['dept'] or '?'}] {m['metric_name']}: {m['metric_value']}\n"
-            _tg_send_message(chat_id, msg)
-        except Exception as e:
-            _tg_send_message(chat_id, f"Ошибка /review: {e}")
-        return "ok", 200
-
-    if text.lower() == "/good":
-        try:
-            rows = _query("SELECT dept, content FROM dialog_history WHERE chat_id=? AND role='assistant' ORDER BY id DESC LIMIT 1", (chat_id,), fetch=True)
-            u_rows = _query("SELECT content FROM dialog_history WHERE chat_id=? AND role='user' ORDER BY id DESC LIMIT 1", (chat_id,), fetch=True)
-            if rows and u_rows:
-                _query("INSERT INTO adapt_corrections (dept, original_query, correction, created_at, corr_type) VALUES (?,?,?,?,?)",
-                       (rows[0]['dept'], u_rows[0]['content'][:500], rows[0]['content'][:2000], datetime.utcnow().isoformat(), "positive"))
-                _tg_send_message(chat_id, "✅ Последний ответ отмечен как хороший пример.")
-            else:
-                _tg_send_message(chat_id, "Нет предыдущего ответа для оценки.")
-        except Exception as e:
-            _tg_send_message(chat_id, f"Ошибка /good: {e}")
-        return "ok", 200
-
-    if text.lower() == "/cost":
-        try:
-            rows = _query("SELECT provider, model, SUM(cost_usd) as total, SUM(input_tokens + output_tokens) as tokens FROM token_usage WHERE created_at >= datetime('now', '-7 days') GROUP BY provider, model ORDER BY total DESC", fetch=True)
-            msg = "💰 Расходы за 7 дней\n\n"
-            total_cost = 0
-            for r in (rows or []):
-                cost = float(r['total'] or 0)
-                total_cost += cost
-                msg += f"  {r['provider']}/{r['model']}: ${cost:.4f} ({r['tokens']} tokens)\n"
-            msg += f"\nИтого: ${total_cost:.4f}"
-            _tg_send_message(chat_id, msg)
-        except Exception as e:
-            _tg_send_message(chat_id, f"Ошибка /cost: {e}")
-        return "ok", 200
-
-    # ── Department detection ──
-    dept = detect_dept(text)
-    
-    # Extract query (remove command prefix)
-    query = text
-    for prefix in [f"/{dept}", "/analyze", "/scan", "/deep", "/forge", "/calc", "/simulate",
-                   "/quickanalyze", "/wargame", "/market-research", "/segment", "/competitors", "/campaign"]:
-        if text.lower().startswith(prefix):
-            query = text[len(prefix):].strip() or text
-            break
-    
-    log.info(f"[WEBHOOK] dept={dept} query={query[:80]}")
-    
-    # ── Build prompt ──
-    system_prompt = get_dept_prompt(dept)
-    # Inject current time for ALL departments (was yana-only — root cause of OSP date bug)
-    try:
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo("Europe/Minsk")
-        now_local = datetime.now(tz)
-        months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня",
-                      "июля", "августа", "сентября", "октября", "ноября", "декабря"]
-        weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-        human_time = f"Сейчас: {now_local.day} {months_ru[now_local.month-1]} {now_local.year}, {weekdays_ru[now_local.weekday()]}, {now_local.strftime('%H:%M')} (Europe/Minsk, UTC+3)"
-        system_prompt += f"\n\n=== Current Time & Date ===\n{human_time}"
-        if dept == "osp":
-            system_prompt += f"\n\nКРИТИЧНО: используй ТОЛЬКО дату выше как текущую. Дату в шапке отчёта («Дата препарирования», «Сейчас», ID) копируй ПОСИМВОЛЬНО из значения выше. Игнорируй любые другие даты, включая упомянутые в архиве/памяти/примерах."
-    except Exception:
-        pass
-    
-    # Record user message
-    _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
-           (chat_id, "user", dept, text[:2000], datetime.utcnow().isoformat()))
-
-    # ── Typing indicator while LLM processes ──
-    action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
-
-    # ── Call LLM ──
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": query}
-    ]
-    
-    log.info(f"[WEBHOOK] LLM call dept={dept} sys_len={len(system_prompt)} has_format={'ФОРМАТ ОТВЕТА' in system_prompt}")
-    
-    result = call_llm(dept, messages)
-    action_stop.set()  # stop typing indicator
-
-    # Guard: call_llm can return None if all providers fail or circuit breaker is open
-    if result is None:
-        log.error(f"[WEBHOOK] call_llm returned None for dept={dept} — all providers dead or circuit breaker open")
-        _tg_send_message(chat_id, "⏱ Все провайдеры перегружены. Попробуйте через 30 сек.")
-        return "ok", 200
-
-    reply = result.get("reply", "")
-    if not reply:
-        log.error(f"[WEBHOOK] Empty reply from provider={result.get('provider')} model={result.get('model')}")
-        _tg_send_message(chat_id, "Пустой ответ от модели. Попробуйте ещё раз.")
-        return "ok", 200
-
-    provider = result.get("provider", "?")
-    
-    log.info(f"[WEBHOOK] reply_len={len(reply)} provider={provider}")
-    
-    # Record assistant message
-    _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
-           (chat_id, "assistant", dept, reply[:2000], datetime.utcnow().isoformat()))
-    
-    # ── Send response ──
-    msg_delivered = False
-    if dept in ("yana", "admin"):
-        # Formatted text with MarkdownV2 (bold, italic, underline via __text__)
-        msg_id = _tg_send_formatted(chat_id, reply, dept=dept)
-        if msg_id is not None:
-            msg_delivered = True
-        else:
-            log.error(f"[WEBHOOK] _tg_send_formatted returned None for dept={dept} — Telegram delivery failed")
-    elif len(reply) > 800:
-        # Mini App report for long responses
-        doc_id = f"doc-{int(datetime.utcnow().timestamp())}"
-        try:
-            css = (BASE_DIR / "report_css.txt").read_text() if (BASE_DIR / "report_css.txt").exists() else ""
-            c = DEPT_COLORS.get(dept, DEPT_COLORS["admin"])
-            name = DEPT_NAMES.get(dept, dept)
-            
-            # Format badges in reply
-            body_html = reply.replace("\n", "<br>")
-            body_html = body_html.replace("[ФАКТ]", '<span class="badge badge-fact">✓</span>')
-            body_html = body_html.replace("[ИНТЕРПРЕТАЦИЯ]", '<span class="badge badge-interp">◈</span>')
-            body_html = body_html.replace("[СПЕКУЛЯЦИЯ]", '<span class="badge badge-spec">⚡</span>')
-            body_html = body_html.replace("[FACT]", '<span class="badge badge-fact">✓</span>')
-            body_html = body_html.replace("[INTERPRETATION]", '<span class="badge badge-interp">◈</span>')
-            body_html = body_html.replace("[SPECULATION]", '<span class="badge badge-spec">⚡</span>')
-            
-            html = f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<style>{css}</style></head><body>
-<div class="report-container">
-<div class="report-header" style="background:linear-gradient(135deg,{c['start']},{c['end']})">
-<h1>{name}</h1><div class="subtitle">{query[:100]}</div></div>
-<div class="report-meta"><span>ID: {doc_id}</span><span>{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}</span></div>
-<div class="report-body">{body_html}</div>
-{_build_action_bar(dept, doc_id)}
-</div></body></html>'''
-            
-            _query("INSERT INTO miniapp_responses (id,dept,title,query,raw_text,html,confidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
-                   (doc_id, dept, query[:200], query[:200], reply, html, "2.0", datetime.utcnow().isoformat()))
-            
-            miniapp_url = f"{RENDER_URL}/miniapp/{doc_id}"
-            short = reply[:200] + "..."
-            
-            # Send with Mini App button
-            payload = {
-                "chat_id": chat_id,
-                "text": short,
-                "reply_markup": {"inline_keyboard": [[{
-                    "text": f"📂 Открыть отчёт: {name}",
-                    "web_app": {"url": miniapp_url}
-                }]]}
-            }
-            mini_resp = http_requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                             json=payload, timeout=30)
-            if mini_resp.status_code == 200 and mini_resp.json().get("ok"):
-                msg_delivered = True
-            else:
-                log.warning(f"Mini App send failed: status={mini_resp.status_code} body={mini_resp.text[:200]}")
-                # Fallback: send as plain text
-                fb_id = _tg_send_message(chat_id, reply)
-                if fb_id is not None:
-                    msg_delivered = True
-        except Exception as e:
-            log.error(f"Mini App report failed: {e}")
-            fb_id = _tg_send_message(chat_id, reply)
-            if fb_id is not None:
-                msg_delivered = True
-    else:
-        # Short response — plain text
-        msg_id = _tg_send_message(chat_id, reply)
-        if msg_id is not None:
-            msg_delivered = True
-        else:
-            log.error(f"[WEBHOOK] _tg_send_message returned None — Telegram delivery failed")
-
-    if not msg_delivered:
-        log.error(f"[WEBHOOK] CRITICAL: response NOT delivered to chat_id={chat_id} dept={dept} reply_len={len(reply)}")
-    
-    # ── Voice response (TTS) — clean text for natural speech ──
-    if _voice_enabled and len(reply) > 5:
-        tts_text = _clean_text_for_tts(reply)
-        if dept not in ("yana", "admin") and len(tts_text) > 1000:
-            tts_text = tts_text[:500] + ". Продолжение в текстовом отчёте."
-        if len(tts_text) < 5:
-            tts_text = reply  # fallback to raw if cleaning was too aggressive
-        try:
-            voice = "ru-RU-DmitryNeural" if dept == "admin" else _tts_voice
-            http_requests.post("http://127.0.0.1:4000/tts",
-                json={"text": tts_text, "voice": voice, "chat_id": chat_id}, timeout=60)
-        except Exception as e:
-            log.error(f"TTS failed: {e}")
-    
-    return "ok", 200
+# ── NOTE: /webhook/telegram REMOVED (P1-1 migration).
+#    The primary Telegram webhook handler is in Metalogos (app.mlog:1078).
+#    reverse_proxy routes /webhook/telegram → Metalogos :10001.
+#    This Python duplicate was ~355 lines of dead code.
 
 
-
+# ── Cron endpoint ──
 # ── Cron endpoint ──
 @app.route("/cron/collect-news", methods=["GET"])
 def cron_collect_news():

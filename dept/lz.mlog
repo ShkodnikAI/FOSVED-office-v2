@@ -1,5 +1,5 @@
 // Fosved Office v2 — LZ Dispatcher (MEGA-4)
-// 9 scan sources, Apodex deep research, LZ compare, channel management, monitoring
+// 9 scan sources, Tavily web search, Apodex deep research, LZ compare, channel management, monitoring
 
 // ── HandleLZ — standard LLM query ────────────────────────────────
 pattern HandleLZ(query: String, chat_id: String) -> String {
@@ -52,14 +52,15 @@ pattern LZDeepResearch(query: String, chat_id: String) -> String {
   let lz_profile = read_file("library/lz.md")
   let research_context = lz_profile + "\n\nIMPORTANT: This is a DEEP RESEARCH request via Apodex. Each fact must be verified. Mark: [FACT verified], [FACT unverified], [CONFLICT]. Include disruption potential (1-10). Russian language."
 
-  // Call proxy endpoint for Apodex deep research
+  // Call proxy endpoint for Apodex deep research (with Tavily web search)
   let body = json_encode({
     query: query,
     dept: "lz",
     provider: "apodex",
     model: "apodex-1.0-mini",
     system_context: research_context,
-    chat_id: chat_id
+    chat_id: chat_id,
+    use_web_search: true
   })
   let result = try http_post("http://127.0.0.1:4000/lz/deep-research", body, "application/json")
   if to_string(result) == "()" then { return "Deep research unavailable (proxy down)." }
@@ -109,6 +110,55 @@ pattern LZCompare(query: String, chat_id: String) -> String {
 }
 
 // ── Scan individual sources ───────────────────────────────────────
+
+// ── TavilySearch — real web search via Tavily API ──────────────────
+// Returns structured web results, then LLM analyzes them.
+pattern TavilySearch(query: String, chat_id: String) -> String {
+  let _ = AuditLog("lz_tavily_search", "lz", "query: " + substring(query, 0, 100))
+
+  // Call proxy /search/web endpoint (Tavily-powered)
+  let body = json_encode({
+    query: query,
+    search_depth: "advanced",
+    max_results: 8,
+    topic: "general",
+    include_answer: true
+  })
+  let search_result = try http_post("http://127.0.0.1:4000/search/web", body, "application/json")
+
+  // Check if search returned results
+  let status = json_get(parse_json(search_result), "status", "error")
+  if status != "ok" then {
+    // Fallback: LLM-only scan (no real web data)
+    let lz_profile = read_file("library/lz.md")
+    let messages = json_encode([{role: "system", content: lz_profile + "\n\nTavily web search unavailable. LLM-only mode."}, {role: "user", content: "Web scan: " + query}])
+    let result = CallLLMProxy("lz", messages)
+    if to_string(result) == "()" then { return "Веб-поиск недоступен (Tavily не настроен или proxy down)." }
+    return json_get(parse_json(result), "reply", "Web scan failed.")
+  }
+
+  // We have real web data — now let LZ LLM analyze it
+  let answer = json_get(parse_json(search_result), "answer", "")
+  let results_count = to_string(json_get(parse_json(search_result), "results", []))
+
+  // Build context from search results for LLM
+  let lz_profile = read_file("library/lz.md")
+  let web_data = to_string(search_result)
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nТы получил РЕАЛЬНЫЕ данные из интернета через Tavily. Проанализируй их с точки зрения Лаборатории Загадок. Оцени disruption potential (1-10). Язык: русский."}, {role: "user", content: "Результаты веб-поиска по запросу: " + query + "\n\n" + substring(web_data, 0, 3000)}])
+
+  let analysis = CallLLMProxy("lz", messages)
+  if to_string(analysis) == "()" then {
+    // At least return the raw search results
+    return "Tavily нашёл данные, но LLM-анализ недоступен.\n\nRaw results:\n" + substring(web_data, 0, 2000)
+  }
+
+  let reply = json_get(parse_json(analysis), "reply", "Analysis failed.")
+  let _ = RecordAssistantMessage(chat_id, "lz", reply)
+  let _ = AuditLog("lz_tavily_done", "lz", "Tavily search + LLM analysis completed")
+
+  return reply
+}
+
 pattern ScanWeb(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
   let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan the web (Google Scholar, arXiv, tech blogs) for: " + query + "\nFind latest articles, papers, blog posts. Cite sources."}, {role: "user", content: "Web scan: " + query}])
@@ -173,16 +223,19 @@ pattern ScanDarknet(query: String) -> String {
   return json_get(parse_json(result), "reply", "Darknet scan failed.")
 }
 
-// ── LZ All — scan + deep (full pipeline) ──────────────────────────
+// ── LZ All — Tavily + scan + deep (full pipeline) ──────────────────
 pattern LZAllScan(query: String, chat_id: String) -> String {
-  let _ = SendTelegramReply(chat_id, "Running full LZ pipeline: 9-source scan + Apodex deep research. This will take 5-8 minutes.")
+  let _ = SendTelegramReply(chat_id, "Running full LZ pipeline: Tavily web search + 9-source scan + Apodex deep research. This will take 5-8 minutes.")
+
+  // Phase 0: Tavily web search (real data)
+  let tavily_result = TavilySearch(query, chat_id)
 
   // Phase 1: Deep Scan (9 sources)
   let scan_result = LZDeepScan(query, chat_id)
 
-  // Phase 2: Apodex Deep Research with scan results as context
+  // Phase 2: Apodex Deep Research with scan results + Tavily as context
   let lz_profile = read_file("library/lz.md")
-  let research_context = lz_profile + "\n\nFULL RESEARCH mode. Use these preliminary scan results as context:\n" + substring(scan_result, 0, 2000) + "\n\nNow perform deep verified research. Each fact: [FACT verified] or [FACT unverified]. Include evidence graph. Russian language."
+  let research_context = lz_profile + "\n\nFULL RESEARCH mode. Preliminary findings:\n\nTavily web data:\n" + substring(tavily_result, 0, 1500) + "\n\n9-source scan:\n" + substring(scan_result, 0, 2000) + "\n\nNow perform deep verified research. Each fact: [FACT verified] or [FACT unverified]. Include evidence graph. Russian language."
 
   let body = json_encode({
     query: query,
@@ -190,7 +243,8 @@ pattern LZAllScan(query: String, chat_id: String) -> String {
     provider: "apodex",
     model: "apodex-1.0-mini",
     system_context: research_context,
-    chat_id: chat_id
+    chat_id: chat_id,
+    use_web_search: true
   })
   let result = try http_post("http://127.0.0.1:4000/lz/deep-research", body, "application/json")
   if to_string(result) == "()" then { return "Full scan unavailable (proxy down)." }
