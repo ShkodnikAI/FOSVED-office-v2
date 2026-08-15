@@ -144,14 +144,14 @@
 | P1 | P1-3 /search → mlog | ✅ | 2025-08-15 |
 | P1 | P1-4 /api/dashboard → mlog | ✅ | 2025-08-15 |
 | P1 | P1-5 /api/dept/<slug> → mlog | ✅ | 2025-08-15 |
-| P2 | P2-1 /api/models + /api/economics → mlog | ⬜ | — |
-| P2 | P2-2 /search/web → mlog direct | ⬜ | — |
-| P2 | P2-3 /api/narads + /api/quests → mlog | ⬜ | — |
-| P2 | P2-4 /archive/publish → mlog | ⬜ | — |
-| P2 | P2-5 /learning/* → mlog | ⬜ | — |
-| P2 | P2-6 /rate_cmd + /context_cmd → mlog | ⬜ | — |
+| P2 | P2-1 /api/models + /api/economics → mlog | ✅ | 2025-08-15 |
+| P2 | P2-2 /search/web → mlog direct | ✅ | 2025-08-15 |
+| P2 | P2-3 /api/narads + /api/quests → mlog | ✅ | 2025-08-15 |
+| P2 | P2-4 /archive/publish → mlog | 🔴 Python-only | — |
+| P2 | P2-5 /learning/good + /learning/stats → mlog | ✅ | 2025-08-15 |
+| P2 | P2-6 /rate_cmd + /context_cmd → mlog | ✅ | 2025-08-15 |
 
-**Покрытие Metalogos**: ~65% → цель **80%** после P1+P2
+**Покрытие Metalogos**: ~78% → цель **80%** (почти достигнута!)
 
 ---
 
