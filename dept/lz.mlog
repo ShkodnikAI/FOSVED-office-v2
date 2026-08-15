@@ -1,44 +1,10 @@
-// Fosved Office v2 — LZ Dispatcher (MEGA-4 ENRICHED)
-// 12 Transition Pack skills + expanded domains (politics, economics, events) + Tavily + Telegram + API
-// From tech-only scanner to full world intelligence: technology + geopolitics + economy + events
+// Fosved Office v2 — LZ Dispatcher (MEGA-4)
+// 9 scan sources, Apodex deep research, LZ compare, channel management, monitoring
 
-// ═══════════════════════════════════════════════════════════════════════
-// MAIN DISPATCHER — routes sub-commands within LZ
-// ═══════════════════════════════════════════════════════════════════════
+// ── HandleLZ — standard LLM query ────────────────────────────────
 pattern HandleLZ(query: String, chat_id: String) -> String {
   let dept = "lz"
-  let t = lower(query)
-
-  // ── Domain-specific scans ──
-  if starts_with(t, "/lz politics") then {
-    let q = substring(query, 12.0, 300.0)
-    return LZPoliticsScan(q, chat_id)
-  }
-  if starts_with(t, "/lz economics") or starts_with(t, "/lz economy") then {
-    let q = substring(query, 13.0, 300.0)
-    return LZEconomicsScan(q, chat_id)
-  }
-  if starts_with(t, "/lz event") then {
-    let q = substring(query, 10.0, 300.0)
-    return LZEventsScan(q, chat_id)
-  }
-  if starts_with(t, "/lz geopolitics") or starts_with(t, "/lz geopol") then {
-    let q = substring(query, 15.0, 300.0)
-    return LZGeopoliticsScan(q, chat_id)
-  }
-  // ── Tavily real web search ──
-  if starts_with(t, "/lz tavily") then {
-    let q = substring(query, 10.0, 300.0)
-    return LZTavilySearch(q, chat_id)
-  }
-  // ── Telegram channel search ──
-  if starts_with(t, "/lz tg") or starts_with(t, "/lz telegram") then {
-    let q = substring(query, 7.0, 300.0)
-    return LZTelegramSearch(q, chat_id)
-  }
-  // ── Domain classification + enriched context ──
-  let domain = LZClassifyDomain(query)
-  let context = BuildLZContext(query, domain, chat_id)
+  let context = BuildContext(dept, query, chat_id)
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy(dept, messages)
   if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
@@ -47,306 +13,18 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
   kv_set("last_model_" + dept, used_provider + " / " + used_model)
   let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "domain=" + domain + " query: " + substring(query, 0, 100))
+  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0, 100))
   return reply
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// DOMAIN CLASSIFIER — determines which world domain the query belongs to
-// ═══════════════════════════════════════════════════════════════════════
-pattern LZClassifyDomain(query: String) -> String {
-  let t = lower(query)
-  // Politics keywords
-  if contains(t, "президент") or contains(t, "правительств") or contains(t, "выбор") or contains(t, "парламент") or contains(t, "закон") or contains(t, "санкци") or contains(t, "дипломат") or contains(t, "политик") or contains(t, "конгресс") or contains(t, "сенат") or contains(t, "geopolitic") or contains(t, "войн") or contains(t, "конфликт") or contains(t, "NATO") or contains(t, "НАТО") or contains(t, "ООН") or contains(t, "UN") then { return "politics" }
-  // Economics keywords
-  if contains(t, "экономик") or contains(t, "ВВП") or contains(t, "GDP") or contains(t, "инфляци") or contains(t, "процентн") or contains(t, "ставк") or contains(t, "безработ") or contains(t, "бюджет") or contains(t, "дефицит") or contains(t, "торгов") or contains(t, "экспорт") or contains(t, "импорт") or contains(t, "нефт") or contains(t, "газ") or contains(t, "курс") or contains(t, "рубл") or contains(t, "доллар") or contains(t, "центробанк") or contains(t, "fed ") or contains(t, "ФРС") then { return "economics" }
-  // Events keywords
-  if contains(t, "событ") or contains(t, "происшеств") or contains(t, "катастроф") or contains(t, "теракт") or contains(t, "забастовк") or contains(t, "протест") or contains(t, "революци") or contains(t, "переворот") or contains(t, "кризис") or contains(t, "пандем") or contains(t, "наводнени") or contains(t, "землетряс") or contains(t, "авари") then { return "events" }
-  // Technology keywords (default for LZ)
-  if contains(t, "технолог") or contains(t, "AI") or contains(t, "квант") or contains(t, "fusion") or contains(t, "батаре") or contains(t, "робот") or contains(t, "биотех") or contains(t, "nanomat") or contains(t, "blockchain") or contains(t, "дрон") or contains(t, "hyperloop") or contains(t, "quantum") or contains(t, "LLM") or contains(t, "disrupt") or contains(t, "startup") then { return "technology" }
-  // Default: broad intelligence
-  return "general"
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// LZ CONTEXT BUILDER — enriched with domain KB + skills
-// ═══════════════════════════════════════════════════════════════════════
-pattern BuildLZContext(query: String, domain: String, chat_id: String) -> String {
-  let profile = ReadDeptProfile("lz")
-  let skills = LoadLZSkills(query, domain)
-  let corrections = GetCorrections("lz")
-  let dialog = GetRecentDialog(chat_id, "10")
-  let memories = YanaRecallMemories(query)
-  let now_info = YanaNowInfo()
-  let world_kb = LZWorldKB(domain)
-
-  // Fresh news for LZ (always)
-  let news = ""
-  let news_body = json_encode({query: query, dept: "lz", limit: 5})
-  let news_result = try http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json")
-  if to_string(news_result) != "()" then {
-    let news_parsed = parse_json(news_result)
-    let news = json_get(news_parsed, "news", "")
-  }
-
-  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Domain: " + domain + " ===\n" + world_kb + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Fresh News ===\n" + news + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Recent Dialog ===\n" + dialog
-  return context
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// WORLD KNOWLEDGE BASE — multi-domain intelligence
-// ═══════════════════════════════════════════════════════════════════════
-pattern LZWorldKB(domain: String) -> String {
-  let kb = ""
-
-  // ── TECHNOLOGY domain (original) ──
-  let kb = kb + "ТЕХНОЛОГИИ — 10 сфер мониторинга:\n"
-  let kb = kb + "1. Computational (AI, quantum, новые архитектуры)\n2. Биотех и медицина (gene editing, longevity, drug discovery)\n3. Energy (fusion, batteries, solar/wind)\n4. Materials science (superconductors, nanomaterials)\n5. Военные технологии (drones, EW, hypersonics)\n6. Transport (autonomous, electric, space)\n7. Communications (satellite, quantum comms)\n8. Финтех (blockchain, CBDC, DeFi)\n9. Robotics (humanoid, industrial, surgical)\n10. Climate tech (carbon capture, geoengineering)\n\n"
-
-  // ── POLITICS domain (NEW) ──
-  let kb = kb + "ПОЛИТИКА — сферы мониторинга:\n"
-  let kb = kb + "- Геополитические сдвиги: смена альянсов, договоры, разрывы отношений\n- Внутренняя политика ключевых стран: США, Китай, Россия, ЕС, Индия, Ближний Восток\n- Выборы и смены власти: предстоящие выборы, прогнозы, последствия\n- Санкции и торговые войны: новые пакеты, исключения, обходные схемы\n- Военные конфликты: эскалация, деэскалация, перемирие, мирные договоры\n- Международные организации: НАТО, ООН, БРИКС, ШОС, G7/G20 — решения и позиции\n- Ядерная политика: договоры, расширение, пороговые государства\n- Кибервойна: атрибуция атак, ответные меры, нормы\n- Права человека и миграция: кризисы, потоки, политика\n- Регуляторные изменения: законы затрагивающие бизнес, технологии, финансы\n\n"
-
-  // ── ECONOMICS domain (NEW) ──
-  let kb = kb + "ЭКОНОМИКА — сферы мониторинга:\n"
-  let kb = kb + "- Макроиндикаторы: ВВП, инфляция, безработица, торговый баланс ключевых экономик\n- Монетарная политика: ФРС, ЕЦБ, Банк России, PBoC — ставки, QE/QT, forward guidance\n- Фискальная политика: бюджеты, дефициты, госдолг, стимулы\n- Валютные рынки: USD/EUR/RUB/CNY, курсовые движения, интервенции\n- Товарные рынки: нефть (Brent/WTI/Urals), газ, золото, медь, литий, уран\n- Финансовые рынки: акции, облигации, кредитные спреды, VIX\n- Капитальные потоки: FDI, портфельные инвестиции, оттоки/притоки\n- Кризисные сигналы: инверсия yield curve, credit stress, bank runs, sovereign defaults\n- Структурные сдвиги: дедолларизация, reshoring, демография, AI и labour market\n- Российская экономика: санкционное давление, импортозамещение, параллельный импорт, бюджетное правило\n\n"
-
-  // ── EVENTS domain (NEW) ──
-  let kb = kb + "ВАЖНЫЕ СОБЫТИЯ — мониторинг:\n"
-  let kb = kb + "- Катастрофы и ЧС: природные (землетрясения, наводнения, ураганы), техногенные\n- Теракты и безопасность: инциденты, уровень угрозы, последствия\n- Массовые протесты и забастовки: где, почему, масштаб, последствия\n- Политические кризисы: отставки, перевороты, импичменты, революции\n- Пандемии и эпидемии: новые вспышки, штаммы, меры, экономическое влияние\n- Крупные корпоративные события: банкротства, M&A, IPO, скандалы\n- Научные прорывы с практическим влиянием: не только tech — медицина, климат, космос\n- Инфраструктурные события: крупные проекты, стройки, ввод мощностей\n- Культурные/социальные тренды: влияющие на экономику или политику\n\n"
-
-  let kb = kb + "ИСТОЧНИКИ ПО УРОВНЯМ:\n"
-  let kb = kb + "Default: arXiv, Nature, Science, Crunchbase, TechCrunch, MIT Tech Review, Reuters, Bloomberg, FT\n"
-  let kb = kb + "Politics: Reuters, AP, TASS, RBC, Meduza, DW, BBC, Al Jazeera, SCMP, Foreign Affairs, Economist\n"
-  let kb = kb + "Economics: Bloomberg, FT, WSJ, RBC, Ведомости, Коммерсантъ, Central Bank reports, IMF, World Bank\n"
-  let kb = kb + "Events: Reuters, AP, TASS, RBC, Telegram channels, Twitter/X, Reddit\n"
-  let kb = kb + "Escalated: leaked roadmaps, OSINT, dark web tech forums, insider reports\n"
-  let kb = kb + "Tools: TAVILY (real-time web search), Telegram channels (monitored posts)"
-
-  return kb
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// TIER-BASED SKILL LOADING
-// ═══════════════════════════════════════════════════════════════════════
-pattern LoadLZSkills(query: String, domain: String) -> String {
-  let t = lower(query)
-  let result = ""
-  let budget = 25000.0
-
-  // ── Tier 1: Methodological core (always) ──
-  let s = read_file("skills/hype-cycle-mapping/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- hype-cycle-mapping ---\n" + s }
-  let s = read_file("skills/disruption-scoring/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- disruption-scoring ---\n" + s }
-  let s = read_file("skills/inflection-detection/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- inflection-detection ---\n" + s }
-  let s = read_file("skills/cross-domain-transfer/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- cross-domain-transfer ---\n" + s }
-  let s = read_file("skills/competing-alternatives/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- competing-alternatives ---\n" + s }
-
-  // ── Tier 2: Domain depth (by trigger) ──
-  // Trigger: patent/патент
-  let need_patent = contains(t, "патент") or contains(t, "patent") or contains(t, "IP") or domain == "technology"
-  if need_patent then {
-    let s = read_file("skills/patent-prosecution-analysis/SKILL.md")
-    if s != "" and len(result) < budget then { let result = result + "\n--- patent-prosecution-analysis ---\n" + s }
-  }
-  // Trigger: talent/исследоват
-  let need_talent = contains(t, "талант") or contains(t, "исследоват") or contains(t, "talent") or contains(t, "researcher") or contains(t, "инженер")
-  if need_talent then {
-    let s = read_file("skills/talent-flow-tracking/SKILL.md")
-    if s != "" and len(result) < budget then { let result = result + "\n--- talent-flow-tracking ---\n" + s }
-  }
-  // Trigger: VC/инвестиц
-  let need_vc = contains(t, "инвестиц") or contains(t, "VC") or contains(t, "венчур") or contains(t, "funding") or contains(t, "раунд")
-  if need_vc then {
-    let s = read_file("skills/vc-tracking/SKILL.md")
-    if s != "" and len(result) < budget then { let result = result + "\n--- vc-tracking ---\n" + s }
-  }
-  // Trigger: OOB/порядок/конкурент
-  let need_oob = contains(t, "OOB") or contains(t, "order of battle") or contains(t, "расклад") or contains(t, "сил")
-  if need_oob then {
-    let s = read_file("skills/technology-OOB/SKILL.md")
-    if s != "" and len(result) < budget then { let result = result + "\n--- technology-OOB ---\n" + s }
-  }
-
-  // ── Tier 3: Special techniques (explicit triggers) ──
-  let need_leak = contains(t, "утечк") or contains(t, "leak") or contains(t, "roadmap") or contains(t, "дорожн")
-  if need_leak then {
-    let s = read_file("skills/leaked-roadmap-analysis/SKILL.md")
-    if s != "" and len(result) < budget then { let result = result + "\n--- leaked-roadmap-analysis ---\n" + s }
-  }
-  let need_dark = contains(t, "dark web") or contains(t, "darknet") or contains(t, "OSINT") or contains(t, "разведк")
-  if need_dark then {
-    let s = read_file("skills/dark-web-tech-research/SKILL.md")
-    if s != "" and len(result) < budget then { let result = result + "\n--- dark-web-tech-research ---\n" + s }
-  }
-  let need_profile = contains(t, "профил") or contains(t, "исследовател") or contains(t, "учёный") or contains(t, "scientist")
-  if need_profile then {
-    let s = read_file("skills/deep-researcher-profiling/SKILL.md")
-    if s != "" and len(result) < budget then { let result = result + "\n--- deep-researcher-profiling ---\n" + s }
-  }
-
-  // ── Domain-specific skills injection ──
-  if domain == "politics" then {
-    let ds = "ПОЛИТИЧЕСКИЙ АНАЛИЗ — активные навыки:\n- Cantillon effect: who benefits from policy changes\n- Narrative vs flows: compare official claims with actual capital/people flows\n- Cycle position: where in the political cycle (pre-election, post-election, crisis)\n- Cross-jurisdiction comparison: how same event affects different legal systems\n- iw-watchlist: early warning indicators for political scenarios"
-    if len(result) < budget then { let result = result + "\n--- politics-domain ---\n" + ds }
-  }
-  if domain == "economics" then {
-    let ds = "ЭКОНОМИЧЕСКИЙ АНАЛИЗ — активные навыки:\n- Macro regime identification: inflationary/stagflation/deflationary/disinflationary\n- Cross-asset divergence: bonds vs equities vs commodities vs currencies signals\n- Cashflow forecasting: 30/60/90 day projections\n- Narrative vs flows: compare central bank statements with actual data\n- Cantillon: who benefits from monetary/fiscal policy changes"
-    if len(result) < budget then { let result = result + "\n--- economics-domain ---\n" + ds }
-  }
-  if domain == "events" then {
-    let ds = "АНАЛИЗ СОБЫТИЙ — активные навыки:\n- Rapid domain immersion: structured understanding of event context\n- Failure modes mapping: what could escalate/mitigate\n- Adjacent field cross-check: how event affects other domains (economy, tech, politics)\n- Forces and potentials: who benefits, who loses, what are the power shifts\n- I&W watchlist: indicators for escalation/de-escalation"
-    if len(result) < budget then { let result = result + "\n--- events-domain ---\n" + ds }
-  }
-
-  if result == "" then { return "LZ skills: hype-cycle-mapping, disruption-scoring, inflection-detection, cross-domain-transfer, competing-alternatives, patent-prosecution-analysis, talent-flow-tracking, vc-tracking, technology-OOB, leaked-roadmap-analysis, dark-web-tech-research, deep-researcher-profiling + domains: technology, politics, economics, events" }
-  return result
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// DOMAIN-SPECIFIC SCANS
-// ═══════════════════════════════════════════════════════════════════════
-pattern LZPoliticsScan(query: String, chat_id: String) -> String {
-  let context = BuildLZContext(query, "politics", chat_id)
-  let prompt = context + "\n\nРЕЖИМ: ПОЛИТИЧЕСКИЙ АНАЛИЗ\nСтруктура ответа:\n1. Суть события/тенденции\n2. Контекст (предыстория, ключевые игроки)\n3. Силовой анализ: кто выигрывает, кто проигрывает, потоки капитала/влияния\n4. Кантильон: кто первый получатель выгод от изменений\n5. Нарратив vs реальность: что заявляют vs что видно по потокам\n6. Сценарии: базовый, позитивный, негативный (с вероятностями)\n7. Красные флаги: что может резко изменить ситуацию\n8. Связь с ОСП: какие стратегические последствия\n\nОбязательно конкретные цифры, имена, даты. Без воды."
-  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Политический анализ: " + query}])
-  let proxy_result = CallLLMProxy("lz", messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error")
-  let _ = RecordAssistantMessage(chat_id, "lz", reply)
-  let _ = AuditLog("lz_politics", "lz", "query: " + substring(query, 0, 100))
-  return reply
-}
-
-pattern LZEconomicsScan(query: String, chat_id: String) -> String {
-  let context = BuildLZContext(query, "economics", chat_id)
-  let prompt = context + "\n\nРЕЖИМ: ЭКОНОМИЧЕСКИЙ АНАЛИЗ\nСтруктура ответа:\n1. Макро-режим: какой сейчас (инфляционный рост/стагфляция/рецессия/дезинфляция)\n2. Ключевые индикаторы: ВВП, инфляция, ставки, безработица, торговый баланс\n3. Монетарная политика: что делают ЦБ, что сигналят, рынок ожидает\n4. Фискальная политика: бюджеты, дефициты, стимулы\n5. Перекрёстные сигналы: bonds vs equities vs commodities vs FX — где расхождение\n6. Кантильон: кто первый получатель эмиссии/стимула, кто платит инфляцию\n7. Российская специфика: санкции, импортозамещение, параллельный импорт, бюджет\n8. Сценарии с вероятностями\n9. Инвестиционные последствия\n\nОбязательно цифры, графики данных, конкретные источники."
-  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Экономический анализ: " + query}])
-  let proxy_result = CallLLMProxy("lz", messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error")
-  let _ = RecordAssistantMessage(chat_id, "lz", reply)
-  let _ = AuditLog("lz_economics", "lz", "query: " + substring(query, 0, 100))
-  return reply
-}
-
-pattern LZEventsScan(query: String, chat_id: String) -> String {
-  let context = BuildLZContext(query, "events", chat_id)
-  let prompt = context + "\n\nРЕЖИМ: АНАЛИЗ ВАЖНОГО СОБЫТИЯ\nСтруктура ответа:\n1. Что произошло (факты, без интерпретации)\n2. Масштаб: локальное/региональное/глобальное, население/экономика затронуты\n3. Непосредственные последствия (24-72 часа)\n4. Среднесрочные последствия (1-6 месяцев)\n5. Долгосрочные последствия (6+ месяцев)\n6. Каскадные эффекты: как это событие влияет на другие домены (экономика, политика, технологии)\n7. Силовой анализ: кто выигрывает, кто проигрывает от этого события\n8. Индикаторы эскалации/деэскалации: что смотреть чтобы понять направление\n9. Исторические аналоги (если уместно)\n\nКонкретика. Цифры затронутых, экономический ущерб, имена ключевых фигур."
-  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Анализ события: " + query}])
-  let proxy_result = CallLLMProxy("lz", messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error")
-  let _ = RecordAssistantMessage(chat_id, "lz", reply)
-  let _ = AuditLog("lz_events", "lz", "query: " + substring(query, 0, 100))
-  return reply
-}
-
-pattern LZGeopoliticsScan(query: String, chat_id: String) -> String {
-  let context = BuildLZContext(query, "politics", chat_id)
-  let prompt = context + "\n\nРЕЖИМ: ГЕОПОЛИТИЧЕСКИЙ АНАЛИЗ\nСпецифика: долгосрочные структурные сдвиги, альянсы, сферы влияния, военный баланс, торговые маршруты, контроль ресурсов.\n\nСтруктура:\n1. Геополитический контекст (карта сил, ключевые игроки)\n2. Структурные интересы сторон (не заявления — реальные интересы)\n3. Баланс сил и его изменение\n4. Экономические связи (торговля, энергия, цепочки поставок)\n5. Военный баланс в регионе\n6. Потенциальные триггеры эскалации\n7. Сценарии развития\n8. Влияние на Россию/СНГ/БРИКС\n9. Инвестиционные последствия"
-  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Геополитический анализ: " + query}])
-  let proxy_result = CallLLMProxy("lz", messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error")
-  let _ = RecordAssistantMessage(chat_id, "lz", reply)
-  let _ = AuditLog("lz_geopolitics", "lz", "query: " + substring(query, 0, 100))
-  return reply
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// TAVILY REAL WEB SEARCH
-// ═══════════════════════════════════════════════════════════════════════
-pattern LZTavilySearch(query: String, chat_id: String) -> String {
-  let tavily_key = env("TAVILY_API_KEY")
-  if tavily_key == "" then {
-    // Fallback: delegate to Python proxy
-    let body = json_encode({query: query, dept: "lz", chat_id: chat_id})
-    let result = try http_post("http://127.0.0.1:4000/lz/tavily", body, "application/json")
-    if to_string(result) == "()" then { return "Tavily недоступен. Установите TAVILY_API_KEY." }
-    let reply = json_get(parse_json(result), "response", "Tavily search failed.")
-    let _ = RecordAssistantMessage(chat_id, "lz", reply)
-    return reply
-  }
-
-  // Direct Tavily API call
-  let search_body = json_encode({query: query, search_depth: "advanced", include_answer: true, max_results: 10, api_key: tavily_key})
-  let result = try http_post("https://api.tavily.com/search", search_body, "application/json", 30.0)
-
-  if to_string(result) == "()" then { return "Tavily search timed out or failed." }
-
-  let parsed = parse_json(result)
-  let answer = json_get(parsed, "answer", "")
-  let results = json_get(parsed, "results", [])
-
-  // Format results for user
-  let output = ""
-  if answer != "" then {
-    let output = "=== Tavily Answer ===\n" + answer + "\n\n"
-  }
-  let output = output + "=== Sources ===\n"
-  let output = output + to_string(results)
-
-  let _ = RecordAssistantMessage(chat_id, "lz", output)
-  let _ = AuditLog("lz_tavily", "lz", "query: " + substring(query, 0, 100))
-  return output
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// TELEGRAM CHANNEL SEARCH — search posts from monitored channels
-// ═══════════════════════════════════════════════════════════════════════
-pattern LZTelegramSearch(query: String, chat_id: String) -> String {
-  // Search in lz_telegram_posts table
-  let rows = query("SELECT channel_name, text, date FROM lz_telegram_posts WHERE text LIKE ? ORDER BY date DESC LIMIT 20", ["%" + query + "%"])
-
-  let output = "Результаты поиска по Telegram-каналам: " + query + "\n\n"
-  let count = 0.0
-  each row in rows {
-    let ch = json_get(to_string(row), "channel_name", "?")
-    let txt = json_get(to_string(row), "text", "")
-    let dt = json_get(to_string(row), "date", "?")
-    let output = output + "[" + to_string(ch) + "] " + to_string(dt) + "\n" + substring(to_string(txt), 0, 200) + "\n\n"
-    let count = count + 1.0
-  }
-
-  if count == 0.0 then {
-    let output = "По запросу '" + query + "' в отслеживаемых Telegram-каналах ничего не найдено.\nДобавьте каналы: /lz_channel add <channel_id> <category>"
-  }
-
-  let _ = AuditLog("lz_tg_search", "lz", "query: " + substring(query, 0, 100) + " results: " + to_string(count))
-  return output
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// ORIGINAL SCAN PATTERNS (preserved, enriched with domain awareness)
-// ═══════════════════════════════════════════════════════════════════════
-
-// ── HandleLZ original kept for backward compat ── (replaced by enriched version above)
-
-// ── LZ Deep Scan — 9 sources + expanded domains ──────────────────
+// ── LZ Deep Scan — 9 sources via LLM aggregation ──────────────────
 pattern LZDeepScan(query: String, chat_id: String) -> String {
   let _ = AuditLog("lz_deep_scan", "lz", "query: " + substring(query, 0, 100))
 
-  let domain = LZClassifyDomain(query)
   let lz_profile = read_file("library/lz.md")
-  let world_kb = LZWorldKB(domain)
 
-  let domain_sources = ""
-  if domain == "politics" then {
-    let domain_sources = "\n10. Policy institutes (Brookings, CSIS, RAND, Valdai, RIAC)\n11. Government press services\n12. Election monitoring (OSCE, Carter Center)"
-  }
-  if domain == "economics" then {
-    let domain_sources = "\n10. Central banks (Fed, ECB, CBR, PBoC)\n11. IMF, World Bank, BIS reports\n12. Bloomberg Terminal, Reuters Eikon"
-  }
-  if domain == "events" then {
-    let domain_sources = "\n10. News wires (Reuters, AP, TASS)\n11. Emergency tracking (GDACS, EM-DAT)\n12. Social media monitoring (Twitter/X trending)"
-  }
-
-  let scan_prompt = lz_profile + "\n\n" + world_kb + "\n\nDEEP SCAN mode. Domain: " + domain + "\n\nAggregate findings from these sources:\n1. Web (Google Scholar, arXiv, tech blogs, Reuters, Bloomberg)\n2. YouTube (tech channels, conferences, political analysis)\n3. Reddit (r/technology, r/science, r/Futurology, r/geopolitics, r/economics)\n4. Science (Nature, Science, IEEE, arXiv)\n5. GitHub (trending repos, releases)\n6. Social (Twitter/X, LinkedIn)\n7. Telegram (monitored channels, developer/political groups)\n8. Darknet (hacker forums, security disclosures)\n9. Academic (citations, patents)" + domain_sources + "\n\nFor each source indicate: found/not found, key findings.\nStructure: Signal -> Impact -> Opportunity.\nMark facts: [FACT verified] or [FACT unverified]."
+  // Aggregate scan results from 9 sources via LLM
+  let scan_prompt = lz_profile + "\n\nDEEP SCAN mode. Aggregate findings from these 9 sources:\n1. Web (Google Scholar, arXiv, tech blogs)\n2. YouTube (tech channels, conferences)\n3. Reddit (r/technology, r/science, r/Futurology)\n4. Science (Nature, Science, IEEE)\n5. GitHub (trending repos, releases)\n6. Social (Twitter/X tech, LinkedIn)\n7. Telegram (tech channels, developer groups)\n8. Darknet (hacker forums, security disclosures)\n9. Academic (citations, patents)\n\nFor each source indicate: found/not found, key findings.\nStructure: Signal -> Impact -> Opportunity.\nMark facts: [FACT verified] or [FACT unverified]."
 
   let messages = json_encode([{role: "system", content: scan_prompt}, {role: "user", content: "Deep scan: " + query}])
   let proxy_result = CallLLMProxy("lz", messages)
@@ -360,60 +38,88 @@ pattern LZDeepScan(query: String, chat_id: String) -> String {
   return reply
 }
 
-// ── LZ Deep Research via Apodex — preserved ─────────────────────
+// ── LZ Deep Research via Apodex — proxy call ─────────────────────
 pattern LZDeepResearch(query: String, chat_id: String) -> String {
   let _ = AuditLog("lz_deep_research", "lz", "Apodex query: " + substring(query, 0, 100))
+
+  // Send initial message
   let _ = SendTelegramReply(chat_id, "Launching Apodex deep research. This will take 2-5 minutes. Each fact will be verified.")
+
+  // Send typing indicator
   let _ = SendTyping(chat_id)
 
+  // Build research prompt for LZ context
   let lz_profile = read_file("library/lz.md")
-  let domain = LZClassifyDomain(query)
-  let research_context = lz_profile + "\n\nDomain: " + domain + "\n\nIMPORTANT: This is a DEEP RESEARCH request via Apodex. Each fact must be verified. Mark: [FACT verified], [FACT unverified], [CONFLICT]. Include disruption potential (1-10). Russian language."
+  let research_context = lz_profile + "\n\nIMPORTANT: This is a DEEP RESEARCH request via Apodex. Each fact must be verified. Mark: [FACT verified], [FACT unverified], [CONFLICT]. Include disruption potential (1-10). Russian language."
 
-  let body = json_encode({query: query, dept: "lz", provider: "apodex", model: "apodex-1.0-mini", system_context: research_context, chat_id: chat_id})
+  // Call proxy endpoint for Apodex deep research
+  let body = json_encode({
+    query: query,
+    dept: "lz",
+    provider: "apodex",
+    model: "apodex-1.0-mini",
+    system_context: research_context,
+    chat_id: chat_id
+  })
   let result = try http_post("http://127.0.0.1:4000/lz/deep-research", body, "application/json")
   if to_string(result) == "()" then { return "Deep research unavailable (proxy down)." }
   let answer = json_get(parse_json(result), "response", "Deep research failed. Apodex may be unavailable.")
+
   let _ = RecordAssistantMessage(chat_id, "lz", answer)
-  let _ = AuditLog("lz_deep_research_done", "lz", "Apodex completed for: " + substring(query, 0, 50))
+  let _ = AuditLog("lz_deep_research_done", "lz", "Apodex research completed for: " + substring(query, 0, 50))
+
   return answer
 }
 
 // ── LZ Compare — side-by-side LLM vs Apodex ──────────────────────
 pattern LZCompare(query: String, chat_id: String) -> String {
   let _ = AuditLog("lz_compare", "lz", "compare query: " + substring(query, 0, 100))
+
   let _ = SendTelegramReply(chat_id, "Running comparison: LLM vs Apodex. This will take 3-5 minutes.")
+
   let lz_profile = read_file("library/lz.md")
 
+  // 1. Fast LLM call
   let fast_messages = json_encode([{role: "system", content: lz_profile}, {role: "user", content: query}])
   let fast_result = CallLLMProxy("lz", fast_messages)
   if to_string(fast_result) == "()" then { return "Сервис временно недоступен." }
   let fast_reply = to_string(json_get(parse_json(fast_result), "reply", "Fast LLM failed."))
 
+  // 2. Apodex deep research
   let apodex_context = lz_profile + "\n\nDeep research with verification. Mark: [FACT verified], [FACT unverified], [CONFLICT]. Russian language."
-  let apodex_body = json_encode({query: query, dept: "lz", provider: "apodex", model: "apodex-1.0-mini", system_context: apodex_context, chat_id: chat_id})
+  let apodex_body = json_encode({
+    query: query,
+    dept: "lz",
+    provider: "apodex",
+    model: "apodex-1.0-mini",
+    system_context: apodex_context,
+    chat_id: chat_id
+  })
   let apodex_result = try http_post("http://127.0.0.1:4000/lz/deep-research", apodex_body, "application/json")
   if to_string(apodex_result) == "()" then { let apodex_result = "{\"response\": \"Apodex unavailable (proxy down).\"}" }
   let deep_reply = to_string(json_get(parse_json(apodex_result), "response", "Apodex failed."))
 
+  // 3. Build comparison
   let comparison = "=== FAST LLM (10 sec) ===\n" + fast_reply + "\n\n=== APODEX VERIFIED (3-5 min) ===\n" + deep_reply
   let _ = RecordAssistantMessage(chat_id, "lz", comparison)
+
   let _ = AuditLog("lz_compare_done", "lz", "comparison completed")
+
   return comparison
 }
 
 // ── Scan individual sources ───────────────────────────────────────
 pattern ScanWeb(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
-  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan the web (Google Scholar, arXiv, Reuters, Bloomberg, FT) for: " + query}, {role: "user", content: "Web scan: " + query}])
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan the web (Google Scholar, arXiv, tech blogs) for: " + query + "\nFind latest articles, papers, blog posts. Cite sources."}, {role: "user", content: "Web scan: " + query}])
   let result = CallLLMProxy("lz", messages)
-  if to_string(result) == "()" then { return "Web scan unavailable." }
+  if to_string(result) == "()" then { return "Web scan unavailable (proxy down)." }
   return json_get(parse_json(result), "reply", "Web scan failed.")
 }
 
 pattern ScanYouTube(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
-  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan YouTube (tech channels, conferences, political analysis) for: " + query}, {role: "user", content: "YouTube scan: " + query}])
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan YouTube tech channels for: " + query + "\nFind relevant videos, channels, conferences."}, {role: "user", content: "YouTube scan: " + query}])
   let result = CallLLMProxy("lz", messages)
   if to_string(result) == "()" then { return "Сервис временно недоступен." }
   return json_get(parse_json(result), "reply", "YouTube scan failed.")
@@ -421,7 +127,7 @@ pattern ScanYouTube(query: String) -> String {
 
 pattern ScanReddit(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
-  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan Reddit (r/technology, r/geopolitics, r/economics, r/Futurology) for: " + query}, {role: "user", content: "Reddit scan: " + query}])
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan Reddit (r/technology, r/science, r/Futurology) for: " + query + "\nFind relevant discussions, opinions, AMAs."}, {role: "user", content: "Reddit scan: " + query}])
   let result = CallLLMProxy("lz", messages)
   if to_string(result) == "()" then { return "Сервис временно недоступен." }
   return json_get(parse_json(result), "reply", "Reddit scan failed.")
@@ -429,7 +135,7 @@ pattern ScanReddit(query: String) -> String {
 
 pattern ScanScience(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
-  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan scientific sources (Nature, Science, IEEE, arXiv) for: " + query}, {role: "user", content: "Science scan: " + query}])
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan scientific sources (Nature, Science, IEEE, arXiv) for: " + query + "\nFind papers, citations, breakthroughs."}, {role: "user", content: "Science scan: " + query}])
   let result = CallLLMProxy("lz", messages)
   if to_string(result) == "()" then { return "Сервис временно недоступен." }
   return json_get(parse_json(result), "reply", "Science scan failed.")
@@ -437,7 +143,7 @@ pattern ScanScience(query: String) -> String {
 
 pattern ScanGitHub(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
-  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan GitHub (trending repos, releases) for: " + query}, {role: "user", content: "GitHub scan: " + query}])
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan GitHub (trending repos, releases, issues) for: " + query + "\nFind repositories, releases, developer activity."}, {role: "user", content: "GitHub scan: " + query}])
   let result = CallLLMProxy("lz", messages)
   if to_string(result) == "()" then { return "Сервис временно недоступен." }
   return json_get(parse_json(result), "reply", "GitHub scan failed.")
@@ -445,7 +151,7 @@ pattern ScanGitHub(query: String) -> String {
 
 pattern ScanSocial(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
-  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan social media (Twitter/X, LinkedIn) for: " + query}, {role: "user", content: "Social scan: " + query}])
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan social media (Twitter/X, LinkedIn) for: " + query + "\nFind relevant posts, expert opinions, trends."}, {role: "user", content: "Social scan: " + query}])
   let result = CallLLMProxy("lz", messages)
   if to_string(result) == "()" then { return "Сервис временно недоступен." }
   return json_get(parse_json(result), "reply", "Social scan failed.")
@@ -453,7 +159,7 @@ pattern ScanSocial(query: String) -> String {
 
 pattern ScanTelegram(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
-  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan Telegram channels (tech, political, economic) for: " + query}, {role: "user", content: "Telegram scan: " + query}])
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan Telegram tech channels and groups for: " + query + "\nFind relevant discussions, channels, posts."}, {role: "user", content: "Telegram scan: " + query}])
   let result = CallLLMProxy("lz", messages)
   if to_string(result) == "()" then { return "Сервис временно недоступен." }
   return json_get(parse_json(result), "reply", "Telegram scan failed.")
@@ -461,7 +167,7 @@ pattern ScanTelegram(query: String) -> String {
 
 pattern ScanDarknet(query: String) -> String {
   let lz_profile = read_file("library/lz.md")
-  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan darknet and security sources for: " + query + "\nOnly publicly known information."}, {role: "user", content: "Darknet/security scan: " + query}])
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nScan darknet and security sources for: " + query + "\nFind security disclosures, vulnerability reports, hacker discussions. Caution: only publicly known information."}, {role: "user", content: "Darknet/security scan: " + query}])
   let result = CallLLMProxy("lz", messages)
   if to_string(result) == "()" then { return "Сервис временно недоступен." }
   return json_get(parse_json(result), "reply", "Darknet scan failed.")
@@ -469,25 +175,36 @@ pattern ScanDarknet(query: String) -> String {
 
 // ── LZ All — scan + deep (full pipeline) ──────────────────────────
 pattern LZAllScan(query: String, chat_id: String) -> String {
-  let _ = SendTelegramReply(chat_id, "Running full LZ pipeline: 9+ source scan + Apodex deep research. Domain auto-detected. This will take 5-8 minutes.")
+  let _ = SendTelegramReply(chat_id, "Running full LZ pipeline: 9-source scan + Apodex deep research. This will take 5-8 minutes.")
+
+  // Phase 1: Deep Scan (9 sources)
   let scan_result = LZDeepScan(query, chat_id)
 
+  // Phase 2: Apodex Deep Research with scan results as context
   let lz_profile = read_file("library/lz.md")
-  let domain = LZClassifyDomain(query)
-  let research_context = lz_profile + "\n\nDomain: " + domain + "\n\nFULL RESEARCH mode. Preliminary scan results:\n" + substring(scan_result, 0, 2000) + "\n\nNow perform deep verified research. Each fact: [FACT verified] or [FACT unverified]. Russian language."
+  let research_context = lz_profile + "\n\nFULL RESEARCH mode. Use these preliminary scan results as context:\n" + substring(scan_result, 0, 2000) + "\n\nNow perform deep verified research. Each fact: [FACT verified] or [FACT unverified]. Include evidence graph. Russian language."
 
-  let body = json_encode({query: query, dept: "lz", provider: "apodex", model: "apodex-1.0-mini", system_context: research_context, chat_id: chat_id})
+  let body = json_encode({
+    query: query,
+    dept: "lz",
+    provider: "apodex",
+    model: "apodex-1.0-mini",
+    system_context: research_context,
+    chat_id: chat_id
+  })
   let result = try http_post("http://127.0.0.1:4000/lz/deep-research", body, "application/json")
-  if to_string(result) == "()" then { return "Full scan unavailable." }
+  if to_string(result) == "()" then { return "Full scan unavailable (proxy down)." }
   let answer = json_get(parse_json(result), "response", "Full scan failed.")
+
   let _ = RecordAssistantMessage(chat_id, "lz", answer)
-  let _ = AuditLog("lz_all_scan_done", "lz", "full pipeline completed, domain=" + domain)
+  let _ = AuditLog("lz_all_scan_done", "lz", "full pipeline completed")
+
   return answer
 }
 
 // ── LZ Channel Management ────────────────────────────────────────
 pattern LZChannelAdd(channel_id: String, category: String) -> String {
-  db_execute("INSERT INTO lz_telegram_channels (channel_id, channel_name, category) VALUES ('" + escape_json(channel_id) + "', '" + escape_json(channel_id) + "', '" + escape_json(category) + "')")
+  db_execute("INSERT INTO lz_telegram_channels (channel_id, channel_name, category) VALUES (?1, ?1, ?2)", [channel_id, category])
   let _ = AuditLog("lz_channel_add", "lz", "channel=" + channel_id + " category=" + category)
   return "Channel " + channel_id + " added to monitoring (category: " + category + ")."
 }
@@ -501,12 +218,14 @@ pattern LZChannels() -> String {
     let category = json_get(to_string(row), "category", "")
     let output = output + "- " + to_string(ch_id) + " [" + to_string(category) + "]\n"
   }
-  if output == "Monitored channels:\n" then { return "No channels being monitored. Use /lz_channel add <channel_id> <category>" }
+  if output == "Monitored channels:\n" then {
+    return "No channels being monitored. Use /lz_channel add <channel_id> <category>"
+  }
   return output
 }
 
 pattern LZMonitor(query: String) -> String {
-  db_execute("INSERT INTO lz_monitors (query, sources, frequency, last_scan, created_at) VALUES ('" + escape_json(query) + "', 'all', 'daily', '', datetime('now'))")
+  db_execute("INSERT INTO lz_monitors (query, sources, frequency, last_scan, created_at) VALUES (?1, 'all', 'daily', '', datetime('now'))", [query])
   let _ = AuditLog("lz_monitor_add", "lz", "topic=" + substring(query, 0, 100))
   return "Topic added to daily monitoring: " + query + "\nWill be scanned daily via cron."
 }
@@ -520,48 +239,48 @@ pattern LZMonitorList() -> String {
     let freq = json_get(to_string(row), "frequency", "")
     let output = output + "- " + to_string(topic) + " [" + to_string(freq) + ", " + to_string(sources) + "]\n"
   }
-  if output == "Active monitors:\n" then { return "No active monitors. Use /lz_monitor <topic>" }
+  if output == "Active monitors:\n" then {
+    return "No active monitors. Use /lz_monitor <topic>"
+  }
   return output
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// API ROUTES — served at /api/lz/*
-// ═══════════════════════════════════════════════════════════════════════
+// ── Tavily Search — native mlog HTTP call (MIGRATED from Python /search/web) ──
+// Direct Tavily API call — no Python proxy needed
+pattern TavilySearch(query: String, chat_id: String) -> String {
+  let api_key = env("TAVILY_API_KEY")
+  if api_key == "" then { return "Tavily search unavailable: TAVILY_API_KEY not set." }
 
-// GET /api/lz/search?query=<q>&domain=<domain>
-serve /api/lz/search -> String {
-  let q = query_param("query")
-  let d = query_param("domain")
-  if q == "" then { return json_encode({error: "query param required"}) }
-  if d == "" then { let d = LZClassifyDomain(q) }
-  let context = BuildLZContext(q, d, "api")
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: q}])
+  let body = json_encode({
+    api_key: api_key,
+    query: query,
+    search_depth: "advanced",
+    max_results: 8,
+    topic: "general",
+    include_answer: true
+  })
+  let result = try http_post("https://api.tavily.com/search", body, "application/json")
+  if to_string(result) == "()" then { return "Tavily search unavailable (API error)." }
+
+  let parsed = parse_json(result)
+  let answer = json_get(parsed, "answer", "")
+  let results_list = json_get(parsed, "results", "[]")
+
+  // Build context from results for LLM analysis
+  let search_context = ""
+  if answer != "" then {
+    let search_context = "Tavily Answer: " + answer + "\n\nSources:\n"
+  }
+  let search_context = search_context + to_string(results_list)
+
+  // LLM analysis of search results
+  let lz_profile = read_file("library/lz.md")
+  let messages = json_encode([{role: "system", content: lz_profile + "\n\nAnalyze these web search results. Extract key findings, verify facts, identify opportunities. Mark: [FACT verified] or [FACT unverified]. Language: Russian."}, {role: "user", content: "Query: " + query + "\n\n" + substring(search_context, 0, 4000)}])
   let proxy_result = CallLLMProxy("lz", messages)
-  if to_string(proxy_result) == "()" then { return json_encode({error: "service unavailable"}) }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error")
-  return json_encode({domain: d, query: q, response: reply})
-}
+  if to_string(proxy_result) == "()" then { return search_context }
+  let reply = json_get(parse_json(proxy_result), "reply", search_context)
 
-// GET /api/lz/tavily?query=<q>
-serve /api/lz/tavily -> String {
-  let q = query_param("query")
-  if q == "" then { return json_encode({error: "query param required"}) }
-  return LZTavilySearch(q, "api")
-}
-
-// GET /api/lz/telegram?query=<q>
-serve /api/lz/telegram -> String {
-  let q = query_param("query")
-  if q == "" then { return json_encode({error: "query param required"}) }
-  return LZTelegramSearch(q, "api")
-}
-
-// GET /api/lz/channels
-serve /api/lz/channels -> String {
-  return LZChannels()
-}
-
-// GET /api/lz/monitors
-serve /api/lz/monitors -> String {
-  return LZMonitorList()
+  let _ = RecordAssistantMessage(chat_id, "lz", reply)
+  let _ = AuditLog("tavily_search", "lz", "query: " + substring(query, 0, 100))
+  return reply
 }

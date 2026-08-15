@@ -1,12 +1,13 @@
 // Fosved Office v2 — Scheduler (NARAD-17)
-// All patterns delegate to Python proxy endpoints at :4000
-// which perform the actual LLM calls and Telegram delivery.
-// The mlog layer collects data, builds payloads, and triggers the proxy.
+// MIGRATED: EveningSummary, WeeklyDigest, MonthlyReview, ControlCheck, YanaSelfLearn
+// now use native call_llm + SendTelegramReplyMDV2 instead of Python proxy.
+// MorningBrief and ReminderCheck still delegate (complex: weather API / RRULE logic).
 
 // ---------------------------------------------------------------------------
 // 1. Morning Brief — 07:20 MSK daily (4:20 UTC)
 // Яна: дата, время, погода, статус офиса, мировые события, находки ЛЗ
-// Endpoint сам собирает погоду, метрики, LZ-находки.
+// STILL DELEGATED: Python endpoint collects weather, metrics, LZ findings.
+// Migration path: add http_get for OpenWeatherMap API → then migrate.
 // ---------------------------------------------------------------------------
 pattern MorningBrief() -> String {
   let owner_id = env("OWNER_TELEGRAM_ID")
@@ -74,7 +75,7 @@ pattern MorningBrief() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Evening Summary — 21:00 daily
+// 2. Evening Summary — 21:00 daily (MIGRATED to native call_llm)
 // ---------------------------------------------------------------------------
 pattern EveningSummary() -> String {
   let owner_id = env("OWNER_TELEGRAM_ID")
@@ -90,34 +91,34 @@ pattern EveningSummary() -> String {
   let avg_score = to_string(json_get(to_string(sat_rows), "[0].avg_score", "0"))
 
   // --- Build prompt ---
-  let prompt = "Ty — Yana. Sostav' vechernij svod. Kratko:\n"
-  let prompt = prompt + "- Zadach za 12ch: " + tasks_today + "\n"
-  let prompt = prompt + "- Otdely rabotali: " + depts_active + "\n"
-  let prompt = prompt + "- Srednyaya ocenka: " + avg_score + "\n"
-  let prompt = prompt + "Chto perenesti na zavtra, na chyom akcentirovat'."
+  let prompt = "Ты — Яна. Составь вечернюю сводку. Кратко:\n"
+  let prompt = prompt + "- Задач за 12ч: " + tasks_today + "\n"
+  let prompt = prompt + "- Отделы работали: " + depts_active + "\n"
+  let prompt = prompt + "- Средняя оценка: " + avg_score + "\n"
+  let prompt = prompt + "Что перенести на завтра, на чём акцентировать."
 
   // --- Read Yana profile ---
   let yana_profile = read_file("library/yana.md")
 
-  // --- Delegate to proxy ---
-  let payload = json_encode({
-    owner_id: owner_id,
-    tasks_12h: tasks_today,
-    depts_active: depts_active,
-    avg_satisfaction: avg_score,
-    prompt: prompt,
-    yana_profile: yana_profile
-  })
-  let _ = try http_post("http://127.0.0.1:4000/scheduler/evening-summary", payload, "application/json")
+  // --- Native LLM call ---
+  let messages = json_encode([{role: "system", content: yana_profile}, {role: "user", content: prompt}])
+  let llm_result = try call_llm(messages)
+
+  if to_string(llm_result) != "()" then {
+    let reply = json_get(parse_json(llm_result), "content", "Вечерняя сводка недоступна.")
+    let _ = SendTelegramReplyMDV2(owner_id, "🌙 Вечерняя сводка\n\n" + reply)
+  } else {
+    let _ = SendTelegramReply(owner_id, "🌙 Вечерняя сводка: не удалось сгенерировать (LLM недоступна).")
+  }
 
   // --- Audit ---
-  let _ = AuditLog("evening_summary", "scheduler", "triggered with " + tasks_today + " tasks, avg score " + avg_score)
+  let _ = AuditLog("evening_summary", "scheduler", "completed with " + tasks_today + " tasks, avg score " + avg_score)
 
   return "ok"
 }
 
 // ---------------------------------------------------------------------------
-// 3. Weekly Digest — Monday 09:00
+// 3. Weekly Digest — Monday 09:00 (MIGRATED to native call_llm)
 // ---------------------------------------------------------------------------
 pattern WeeklyDigest() -> String {
   let owner_id = env("OWNER_TELEGRAM_ID")
@@ -142,37 +143,33 @@ pattern WeeklyDigest() -> String {
   let yana_profile = read_file("library/yana.md")
 
   // --- Build prompt ---
-  let prompt = "Ty — Yana. Nedel'nyj daydzhest:\n"
-  let prompt = prompt + "- Zadach: " + tasks_week + "\n"
-  let prompt = prompt + "- Top otdely: " + top_depts + "\n"
-  let prompt = prompt + "- Srednyaya ocenka: " + avg_score + "\n"
-  let prompt = prompt + "- Korrekcij: " + corrections_week + "\n"
-  let prompt = prompt + "- Naryadov: " + narads_week + "\n"
-  let prompt = prompt + "Vydeli trendy, problemy, rekomendacii."
+  let prompt = "Ты — Яна. Недельный дайджест:\n"
+  let prompt = prompt + "- Задач: " + tasks_week + "\n"
+  let prompt = prompt + "- Топ отделы: " + top_depts + "\n"
+  let prompt = prompt + "- Средняя оценка: " + avg_score + "\n"
+  let prompt = prompt + "- Коррекций: " + corrections_week + "\n"
+  let prompt = prompt + "- Нарядов: " + narads_week + "\n"
+  let prompt = prompt + "Выдели тренды, проблемы, рекомендации."
 
-  // --- Delegate to proxy ---
-  let payload = json_encode({
-    owner_id: owner_id,
-    tasks_7d: tasks_week,
-    top_depts: top_depts,
-    avg_satisfaction: avg_score,
-    corrections_7d: corrections_week,
-    narads_7d: narads_week,
-    prompt: prompt,
-    yana_profile: yana_profile
-  })
-  let _ = try http_post("http://127.0.0.1:4000/scheduler/weekly-digest", payload, "application/json")
+  // --- Native LLM call ---
+  let messages = json_encode([{role: "system", content: yana_profile}, {role: "user", content: prompt}])
+  let llm_result = try call_llm(messages)
+
+  if to_string(llm_result) != "()" then {
+    let reply = json_get(parse_json(llm_result), "content", "Недельный дайджест недоступен.")
+    let _ = SendTelegramReplyMDV2(owner_id, "📊 Недельный дайджест\n\n" + reply)
+  } else {
+    let _ = SendTelegramReply(owner_id, "📊 Недельный дайджест: не удалось сгенерировать (LLM недоступна).")
+  }
 
   // --- Audit ---
-  let _ = AuditLog("weekly_digest", "scheduler", "triggered with " + tasks_week + " tasks, " + corrections_week + " corrections, " + narads_week + " narads")
+  let _ = AuditLog("weekly_digest", "scheduler", "completed with " + tasks_week + " tasks, " + corrections_week + " corrections, " + narads_week + " narads")
 
   return "ok"
 }
 
 // ---------------------------------------------------------------------------
-// 4. Monthly Review — 1st of month, 10:00
-// TODO: quarterly review trigger — every 3 months, run /quarterly-review for each active dept
-// Trigger: first Monday of Jan/Apr/Jul/Oct
+// 4. Monthly Review — 1st of month, 10:00 (MIGRATED to native call_llm)
 // ---------------------------------------------------------------------------
 pattern MonthlyReview() -> String {
   let owner_id = env("OWNER_TELEGRAM_ID")
@@ -194,38 +191,40 @@ pattern MonthlyReview() -> String {
     let corr_rows = query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE dept = ? AND created_at > datetime('now', '-30 days')", [dept])
     let corr_count = to_string(json_get(to_string(corr_rows), "[0].cnt", "0"))
 
-    let metrics_summary = metrics_summary + dept + ": " + task_count + " zadach, ocenka " + avg_sat + ", " + corr_count + " korrekcij\n"
+    let metrics_summary = metrics_summary + dept + ": " + task_count + " задач, оценка " + avg_sat + ", " + corr_count + " коррекций\n"
   }
 
   // --- Read Yana profile ---
   let yana_profile = read_file("library/yana.md")
 
   // --- Build prompt ---
-  let prompt = "Ty — Yana. Ezhemesyachnyj review ofisa:\n\n" + metrics_summary + "\n"
-  let prompt = prompt + "Analiz:\n"
-  let prompt = prompt + "1. Kakie otdely rabotali luchshe vsego\n"
-  let prompt = prompt + "2. Kakie degradisirovali\n"
-  let prompt = prompt + "3. Kakie ne ispol'zovalis'\n"
-  let prompt = prompt + "4. Rekomendacii po uluchsheniyu\n"
-  let prompt = prompt + "5. Predlozhit' rekalibrovku dlya otdelov s ocenkoj < 3"
+  let prompt = "Ты — Яна. Ежемесячный review офиса:\n\n" + metrics_summary + "\n"
+  let prompt = prompt + "Анализ:\n"
+  let prompt = prompt + "1. Какие отделы работали лучше всего\n"
+  let prompt = prompt + "2. Какие деградировали\n"
+  let prompt = prompt + "3. Какие не использовались\n"
+  let prompt = prompt + "4. Рекомендации по улучшению\n"
+  let prompt = prompt + "5. Предложить рекалибровку для отделов с оценкой < 3"
 
-  // --- Delegate to proxy ---
-  let payload = json_encode({
-    owner_id: owner_id,
-    metrics_summary: metrics_summary,
-    prompt: prompt,
-    yana_profile: yana_profile
-  })
-  let _ = try http_post("http://127.0.0.1:4000/scheduler/monthly-review", payload, "application/json")
+  // --- Native LLM call ---
+  let messages = json_encode([{role: "system", content: yana_profile}, {role: "user", content: prompt}])
+  let llm_result = try call_llm(messages)
+
+  if to_string(llm_result) != "()" then {
+    let reply = json_get(parse_json(llm_result), "content", "Месячный обзор недоступен.")
+    let _ = SendTelegramReplyMDV2(owner_id, "📅 Месячный обзор\n\n" + reply)
+  } else {
+    let _ = SendTelegramReply(owner_id, "📅 Месячный обзор: не удалось сгенерировать (LLM недоступна).")
+  }
 
   // --- Audit ---
-  let _ = AuditLog("monthly_review", "scheduler", "triggered for 12 departments")
+  let _ = AuditLog("monthly_review", "scheduler", "completed for 12 departments")
 
   return "ok"
 }
 
 // ---------------------------------------------------------------------------
-// 5. Control Check — daily 12:00, verifies predictions on watch
+// 5. Control Check — daily 12:00, verifies predictions on watch (MIGRATED)
 // ---------------------------------------------------------------------------
 pattern ControlCheck() -> String {
   let owner_id = env("OWNER_TELEGRAM_ID")
@@ -260,36 +259,39 @@ pattern ControlCheck() -> String {
         let original_prediction = json_get(to_string(pred_rows), "[0].raw_text", "")
       }
 
-      // Append to checks data for proxy
+      // Append to checks data
       let checks_data = checks_data + "DOC:" + doc_id + "|TOPIC:" + topic + "|PRED:" + substring(original_prediction, 0, 2000) + "\n---\n"
       let checks_done = checks_done + 1.0
     }
   }
 
+  // --- If no daily checks, skip ---
+  if checks_done == 0.0 then {
+    let _ = AuditLog("control_check", "scheduler", "no daily watches to verify")
+    return "ok"
+  }
+
   // --- Read OSP profile for context ---
   let osp_profile = read_file("library/osp.md")
 
-  // --- Delegate to proxy (even if 0 daily checks, proxy may handle weekly/monthly logic) ---
-  let payload = json_encode({
-    owner_id: owner_id,
-    checks_done: to_string(checks_done),
-    checks_data: checks_data,
-    osp_profile: osp_profile
-  })
-  let _ = try http_post("http://127.0.0.1:4000/scheduler/control-check", payload, "application/json")
+  // --- Native LLM call to verify predictions ---
+  let verify_prompt = osp_profile + "\n\nТы — ОСП. Проверь следующие прогнозы на актуальность. Для каждого: совпал ли прогноз с реальностью? Если нет — почему? Укажи новые индикаторы для наблюдения.\n\nФормат: [ПРОГНОЗ ПОДТВЕРЖДЁН] / [ПРОГНОЗ НЕ ПОДТВЕРЖДЁН] / [ТРЕБУЕТ ПРОВЕРКИ]"
+  let messages = json_encode([{role: "system", content: verify_prompt}, {role: "user", content: checks_data}])
+  let llm_result = try call_llm(messages)
+
+  if to_string(llm_result) != "()" then {
+    let reply = json_get(parse_json(llm_result), "content", "Проверка прогнозов недоступна.")
+    let _ = SendTelegramReplyMDV2(owner_id, "🔍 Контроль прогнозов\n\n" + reply)
+  }
 
   // --- Audit ---
-  if checks_done > 0.0 then {
-    let _ = AuditLog("control_check", "scheduler", to_string(checks_done) + " daily predictions verified")
-  } else {
-    let _ = AuditLog("control_check", "scheduler", "no daily watches to verify")
-  }
+  let _ = AuditLog("control_check", "scheduler", to_string(checks_done) + " daily predictions verified")
 
   return "ok"
 }
 
 // ---------------------------------------------------------------------------
-// 6. Yana Self-Learn — daily, triggered from MorningBrief
+// 6. Yana Self-Learn — daily, triggered from MorningBrief (MIGRATED)
 // ---------------------------------------------------------------------------
 pattern YanaSelfLearn() -> String {
   // --- Read Yana profile ---
@@ -299,42 +301,39 @@ pattern YanaSelfLearn() -> String {
   let corr_rows = query("SELECT dept, original_query, correction FROM adapt_corrections WHERE created_at > datetime('now', '-7 days') ORDER BY created_at DESC LIMIT 20", [])
   let corrections_data = json_encode(corr_rows)
 
-  // --- Delegate to proxy ---
-  let payload = json_encode({
-    yana_profile: yana_profile,
-    recent_corrections: corrections_data
-  })
-  let _ = try http_post("http://127.0.0.1:4000/scheduler/self-learn", payload, "application/json")
+  // --- Native LLM call for self-improvement ---
+  let prompt = yana_profile + "\n\nТы — Яна. Проанализируй свои недавние коррекции. Выдели паттерны ошибок, предложи конкретные улучшения для каждого отдела. Язык: русский."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Мои коррекции за 7 дней:\n" + corrections_data}])
+  let llm_result = try call_llm(messages)
+
+  if to_string(llm_result) != "()" then {
+    let insights = json_get(parse_json(llm_result), "content", "")
+    // Save insights to debriefs
+    if insights != "" then {
+      db_execute("INSERT INTO debriefs (dept, period, content) VALUES ('yana', 'self-learn', ?1)", [insights])
+    }
+  }
 
   // --- Audit ---
-  let _ = AuditLog("self_learn", "scheduler", "self-learn cycle triggered")
+  let _ = AuditLog("self_learn", "scheduler", "self-learn cycle completed")
 
   return "ok"
 }
 
 // ---------------------------------------------------------------------------
-// 7. Monthly Debrief per department — on-demand or scheduled
+// 7. Monthly Debrief per department — on-demand or scheduled (already migrated via DebriefDepartment in utils.mlog)
 // ---------------------------------------------------------------------------
 pattern MonthlyDebrief(dept: String) -> String {
-  // --- Collect corrections for the department (last 30 days) ---
-  let corr_rows = query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept = ? AND created_at > datetime('now', '-30 days') ORDER BY created_at DESC LIMIT 50", [dept])
-  let corrections_data = json_encode(corr_rows)
-
-  // --- Delegate to proxy ---
-  let payload = json_encode({
-    dept: dept,
-    corrections: corrections_data
-  })
-  let result = try http_post("http://127.0.0.1:4000/learning/debrief", payload, "application/json")
-
-  // --- Audit ---
+  // Delegate to the migrated DebriefDepartment pattern in utils.mlog
+  let result = DebriefDepartment(dept)
   let _ = AuditLog("monthly_debrief", "scheduler", "debrief for " + dept)
-
   return result
 }
 
 // ---------------------------------------------------------------------------
 // 8. Reminder Check — every 5 min, sends due reminders
+// STILL DELEGATED: complex RRULE logic in Python scheduler/reminder-check
+// Migration path: port RRULE parsing (daily/weekly/monthly/yearly) to mlog
 // ---------------------------------------------------------------------------
 pattern ReminderCheck() -> String {
   let payload = json_encode("")
