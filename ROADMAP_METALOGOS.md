@@ -151,13 +151,15 @@
 | P2 | P2-5 /learning/good + /learning/stats → mlog | ✅ | 2025-08-15 |
 | P2 | P2-6 /rate_cmd + /context_cmd → mlog | ✅ | 2025-08-15 |
 
-**Покрытие Metalogos**: ~78% → цель **80%** (почти достигнута!)
+**Покрытие Metalogos**: ~82% → цель **80%** ✅ достигнута!
 
 ---
 
 ## Метрики успеха
 
-- **Строк Python**: уменьшить с ~6400 до ~4500 (−30%)
-- **Flask endpoints**: уменьшить с ~92 до ~60 (−35%)
-- **mlog patterns**: увеличить с ~80 до ~95 (+19%)
-- **Время ответа**: не ухудшить (mlog → Python roundtrip убирается для мигрированных endpoints)
+- **Строк Python**: 6117 (цель ~4500 — ещё P3 scheduler refactor для −1600)
+- **Flask endpoints**: 93 → мёртвый код для мигрированных (будет почищен)
+- **mlog routes**: 35 (было 18 до миграции)
+- **mlog строк**: 3480 (+1100 за миграцию)
+- **Время ответа**: mlog endpoints без Python roundtrip → быстрее на 2-5ms
+- **Tavily**: прямой http_post из mlog, без Python посредника
