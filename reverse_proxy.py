@@ -24,9 +24,8 @@ LLM_ROUTES_PREFIXES = [
     "/miniapp-spa/",
     "/miniapp-spa",
     "/api/integrations",   # P1-4: /api/dashboard + /api/dept migrated to Metalogos
-    "/api/narads",
-    "/api/quests",
-    "/api/quest/",
+    # P2-3: /api/narads, /api/quests migrated to Metalogos
+    "/api/quest/",  # quest generate (docx/pdf) still Python
     "/api/email/",
     "/api/admin/",
     "/dept-dashboard/",
@@ -45,10 +44,11 @@ INTERNAL_ONLY_PREFIXES = [
     "/ask",
     "/detect-dept",
     "/scheduler/",
-    "/learning/",
+    "/learning/fix",     # P2-5: /learning/fix needs call_llm → Python; good+stats in mlog
+    "/learning/debrief",  # needs call_llm
     "/memory/",
     "/lz/",
-    "/search/web",      # P1-3: /search now in mlog, but /search/web still Python (Tavily)
+    # P2-2: /search/web migrated to Metalogos (Tavily direct http_post)
     "/tts",
     "/stt",
     "/voice-set",
@@ -79,8 +79,14 @@ MLOG_ROUTES_PREFIXES = [
     "/search",     # P1-3: /search (SQLite LIKE) in Metalogos (but /search/web → Python)
     "/api/dashboard",  # P1-4: Dashboard KPIs in Metalogos
     "/api/dept",       # P1-5: Dept details in Metalogos (query_param slug)
-    "/api/models",     # P2-1: Model list in Metalogos (future)
-    "/api/economics",  # P2-1: Token economics in Metalogos (future)
+    "/api/models",     # P2-1: Model list in Metalogos
+    "/api/economics",  # P2-1: Token economics in Metalogos
+    "/api/narads",     # P2-3: Narads in Metalogos
+    "/api/quests",     # P2-3: Quests in Metalogos
+    "/learning/good",  # P2-5: Positive example in Metalogos
+    "/learning/stats", # P2-5: Learning stats in Metalogos
+    "/rate_cmd",       # P2-6: Rate in Metalogos
+    "/context_cmd",    # P2-6: Context in Metalogos
     "/cron/",
     "/health",
     "/",

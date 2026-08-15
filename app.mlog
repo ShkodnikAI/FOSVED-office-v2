@@ -2787,6 +2787,374 @@ mlogserver {
   }
 
   // ============================================================
+  // P2: MIGRATED ENDPOINTS (from Python)
+  // ============================================================
+
+  // P2-1a: /api/models — model list with usage stats
+  // (static model info + SQL usage; no path_param or Python deps)
+  route "/api/models" method=GET {
+    // Static model registry (mirrors llm_proxy.py PROVIDERS)
+    let model_keys = "zai,deepseek,groq,grok,anthropic,openai,apodex"
+    let model_names = "GLM 4.6,DeepSeek Chat,Llama 3.3 70B,Grok 3,Claude Sonnet 4,GPT-4o,Apodex 1.0"
+    let model_labels = "Z.ai,DeepSeek,Groq,xAI,Anthropic,OpenAI,Apodex"
+    let model_tiers = "priority,cheap,free,free_limit,paid,paid,special"
+
+    let mk = split(model_keys, ",")
+    let mn = split(model_names, ",")
+    let ml = split(model_labels, ",")
+    let mt = split(model_tiers, ",")
+
+    let models_json = "["
+    let mi = 0
+    each key in mk {
+      let m_name = mn[mi]
+      let m_label = ml[mi]
+      let m_tier = mt[mi]
+
+      let r_calls = query("SELECT COUNT(*) as c FROM token_usage WHERE provider=? AND created_at >= date('now', '-30 days')", [key])
+      let r_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE provider=? AND created_at >= date('now', '-30 days')", [key])
+      let calls = to_string(json_get(r_calls[0], "c", "0"))
+      let cost = to_string(json_get(r_cost[0], "t", "0"))
+
+      let status = "active"
+      // Grok rate limit check
+      if key == "grok" then { if to_float(calls) > 500.0 then { let status = "limited" } }
+      // Check env key — each provider has a known env var name
+      let env_key = ""
+      if key == "zai" then { let env_key = "ZAI_API_KEY" }
+      if key == "deepseek" then { let env_key = "DEEPSEEK_API_KEY" }
+      if key == "groq" then { let env_key = "GROQ_API_KEY" }
+      if key == "grok" then { let env_key = "GROK_API_KEY" }
+      if key == "anthropic" then { let env_key = "ANTHROPIC_API_KEY" }
+      if key == "openai" then { let env_key = "OPENAI_API_KEY" }
+      if key == "apodex" then { let env_key = "APODEX_API_KEY" }
+      let has_key = env(env_key)
+      if to_string(has_key) == "" then { let status = "no_key" }
+
+      if mi > 0 then { let models_json = models_json + "," }
+      let models_json = models_json + "{\"key\":\"" + key + "\",\"name\":\"" + m_name + "\",\"label\":\"" + m_label + "\",\"tier\":\"" + m_tier + "\",\"status\":\"" + status + "\",\"calls\":" + calls + ",\"cost\":" + cost + "}"
+      let mi = mi + 1
+    }
+    let models_json = models_json + "]"
+
+    // Today analytics
+    let r_today = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now')", [])
+    let r_today_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now')", [])
+    let r_active = query("SELECT COUNT(DISTINCT provider) as c FROM token_usage WHERE created_at >= date('now')", [])
+    let analytics = "{\"requests_today\":" + to_string(json_get(r_today[0], "c", "0")) + ",\"cost_today\":" + to_string(json_get(r_today_cost[0], "t", "0")) + ",\"active_providers\":" + to_string(json_get(r_active[0], "c", "0")) + "}"
+
+    return respond("200 {\"status\":\"ok\",\"models\":" + models_json + ",\"analytics\":" + analytics + "}")
+  }
+
+  // P2-1b: /api/economics — token costs by dept/provider/period
+  route "/api/economics" method=GET {
+    // Period costs (today, week, month)
+    let r_today = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now')", [])
+    let r_week = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-7 days')", [])
+    let r_month = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days')", [])
+    let periods = "{\"today\":" + to_string(json_get(r_today[0], "t", "0")) + ",\"week\":" + to_string(json_get(r_week[0], "t", "0")) + ",\"month\":" + to_string(json_get(r_month[0], "t", "0")) + "}"
+
+    // By dept (month)
+    let dept_rows = query("SELECT dept, COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days') GROUP BY dept ORDER BY t DESC", [])
+    let by_dept = "["
+    let di = 0
+    each row in dept_rows {
+      let d = to_string(json_get(row, "dept", ""))
+      let c = to_string(json_get(row, "t", "0"))
+      if di > 0 then { let by_dept = by_dept + "," }
+      let by_dept = by_dept + "{\"dept\":\"" + d + "\",\"cost\":" + c + "}"
+      let di = di + 1
+    }
+    let by_dept = by_dept + "]"
+
+    // By provider (month)
+    let prov_rows = query("SELECT provider, COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days') GROUP BY provider ORDER BY t DESC", [])
+    let by_prov = "["
+    let pi = 0
+    each row in prov_rows {
+      let p = to_string(json_get(row, "provider", ""))
+      let c = to_string(json_get(row, "t", "0"))
+      if pi > 0 then { let by_prov = by_prov + "," }
+      let by_prov = by_prov + "{\"provider\":\"" + p + "\",\"cost\":" + c + "}"
+      let pi = pi + 1
+    }
+    let by_prov = by_prov + "]"
+
+    // Budget from system_settings
+    let budget_rows = query("SELECT value FROM system_settings WHERE key='daily_budget'", [])
+    let budget = to_string(json_get(budget_rows[0], "value", "10"))
+
+    return respond("200 {\"status\":\"ok\",\"periods\":" + periods + ",\"by_dept\":" + by_dept + ",\"by_provider\":" + by_prov + ",\"budget\":\"" + budget + "\"}")
+  }
+
+  // P2-2: /search/web — Tavily direct call from mlog (no Python roundtrip)
+  route "/search/web" method=POST {
+    let data = json_body()
+    let q = to_string(json_get(data, "query", ""))
+    if q == "" then { return respond("400 {\"status\":\"error\",\"message\":\"query is required\"}") }
+
+    let depth = to_string(json_get(data, "search_depth", "advanced"))
+    let max_res = to_string(json_get(data, "max_results", "8"))
+    let topic = to_string(json_get(data, "topic", "general"))
+    let tavily_key = env("TAVILY_API_KEY")
+
+    if to_string(tavily_key) == "" then {
+      return respond("503 {\"status\":\"error\",\"message\":\"TAVILY_API_KEY not configured\"}")
+    }
+
+    // Build Tavily API request body
+    let body = json_encode({
+      api_key: tavily_key,
+      query: q,
+      search_depth: depth,
+      max_results: max_res,
+      topic: topic,
+      include_answer: true,
+      include_raw_content: false
+    })
+
+    let result = try http_post("https://api.tavily.com/search", body, "application/json")
+    if to_string(result) == "()" then {
+      return respond("503 {\"status\":\"error\",\"message\":\"Tavily API call failed\"}")
+    }
+
+    // Parse and reformat results
+    let parsed = parse_json(result)
+    let answer = to_string(json_get(parsed, "answer", ""))
+    let raw_results = json_get(parsed, "results", [])
+
+    let out = "["
+    let ri = 0
+    each r in raw_results {
+      let title = to_string(json_get(r, "title", ""))
+      let url = to_string(json_get(r, "url", ""))
+      let content = to_string(json_get(r, "content", ""))
+      let score = to_string(json_get(r, "score", "0"))
+      if ri > 0 then { let out = out + "," }
+      let out = out + "{\"title\":\"" + title + "\",\"url\":\"" + url + "\",\"content\":\"" + content + "\",\"score\":" + score + "}"
+      let ri = ri + 1
+    }
+    let out = out + "]"
+
+    return respond("200 {\"status\":\"ok\",\"answer\":\"" + answer + "\",\"results\":" + out + ",\"query\":\"" + q + "\"}")
+  }
+
+  // P2-3a: /api/narads — list narads
+  route "/api/narads" method=GET {
+    let rows = query("SELECT id, title, description, risk_level, status, created_at, approved_at FROM narads ORDER BY id DESC LIMIT 20", [])
+    let out = "["
+    let i = 0
+    each row in rows {
+      if i > 0 then { let out = out + "," }
+      let id = to_string(json_get(row, "id", ""))
+      let title = to_string(json_get(row, "title", ""))
+      let desc = to_string(json_get(row, "description", ""))
+      let risk = to_string(json_get(row, "risk_level", ""))
+      let status = to_string(json_get(row, "status", ""))
+      let created = to_string(json_get(row, "created_at", ""))
+      let approved = to_string(json_get(row, "approved_at", ""))
+      let out = out + "{\"id\":" + id + ",\"title\":\"" + title + "\",\"description\":\"" + desc + "\",\"risk\":\"" + risk + "\",\"status\":\"" + status + "\",\"created\":\"" + created + "\",\"approved\":\"" + approved + "\"}"
+      let i = i + 1
+    }
+    let out = out + "]"
+    return respond("200 {\"status\":\"ok\",\"narads\":" + out + "}")
+  }
+
+  // P2-3b: /api/narads/approve?id=N — approve a narad
+  route "/api/narads/approve" method=POST {
+    let data = json_body()
+    let nid = to_string(json_get(data, "id", ""))
+    if nid == "" then { return respond("400 {\"status\":\"error\",\"message\":\"id is required\"}") }
+    let _ = db_execute("UPDATE narads SET status='approved', approved_at=datetime('now') WHERE id=?", [nid])
+    return respond("200 {\"status\":\"ok\"}")
+  }
+
+  // P2-3c: /api/narads/reject?id=N — reject a narad
+  route "/api/narads/reject" method=POST {
+    let data = json_body()
+    let nid = to_string(json_get(data, "id", ""))
+    if nid == "" then { return respond("400 {\"status\":\"error\",\"message\":\"id is required\"}") }
+    let _ = db_execute("UPDATE narads SET status='rejected' WHERE id=?", [nid])
+    return respond("200 {\"status\":\"ok\"}")
+  }
+
+  // P2-3d: /api/quests — list quests
+  route "/api/quests" method=GET {
+    let rows = query("SELECT id, title, quest_type, status, current_step, total_steps, deadline, created_at FROM quests ORDER BY created_at DESC LIMIT 50", [])
+    let out = "["
+    let i = 0
+    each row in rows {
+      if i > 0 then { let out = out + "," }
+      let id = to_string(json_get(row, "id", ""))
+      let title = to_string(json_get(row, "title", ""))
+      let qtype = to_string(json_get(row, "quest_type", ""))
+      let status = to_string(json_get(row, "status", ""))
+      let cur = to_string(json_get(row, "current_step", "0"))
+      let tot = to_string(json_get(row, "total_steps", "0"))
+      let dl = to_string(json_get(row, "deadline", ""))
+      let ca = to_string(json_get(row, "created_at", ""))
+      let out = out + "{\"id\":" + id + ",\"title\":\"" + title + "\",\"type\":\"" + qtype + "\",\"status\":\"" + status + "\",\"currentStep\":" + cur + ",\"totalSteps\":" + tot + ",\"deadline\":\"" + dl + "\",\"createdAt\":\"" + ca + "\"}"
+      let i = i + 1
+    }
+    let out = out + "]"
+    return respond("200 {\"status\":\"ok\",\"quests\":" + out + "}")
+  }
+
+  // P2-3e: /api/quests/detail?id=N — quest detail with checkpoints + files
+  route "/api/quests/detail" method=GET {
+    let qid = query_param("id")
+    if qid == "" then { return respond("400 {\"status\":\"error\",\"message\":\"id is required\"}") }
+
+    let rows = query("SELECT * FROM quests WHERE id = ?", [qid])
+    if len(rows) == 0.0 then { return respond("404 {\"status\":\"error\",\"message\":\"quest not found\"}") }
+
+    // Quest fields
+    let q = rows[0]
+
+    // Checkpoints
+    let cp_rows = query("SELECT step_num, step_label, status, approved_by, approved_at FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", [qid])
+    let cps = "["
+    let ci = 0
+    each row in cp_rows {
+      if ci > 0 then { let cps = cps + "," }
+      let sn = to_string(json_get(row, "step_num", ""))
+      let sl = to_string(json_get(row, "step_label", ""))
+      let st = to_string(json_get(row, "status", ""))
+      let ab = to_string(json_get(row, "approved_by", ""))
+      let aa = to_string(json_get(row, "approved_at", ""))
+      let cps = cps + "{\"step\":" + sn + ",\"label\":\"" + sl + "\",\"status\":\"" + st + "\",\"approved_by\":\"" + ab + "\",\"approved_at\":\"" + aa + "\"}"
+      let ci = ci + 1
+    }
+    let cps = cps + "]"
+
+    // Files
+    let f_rows = query("SELECT filename, file_type, version, created_at FROM quest_files WHERE quest_id = ? ORDER BY id", [qid])
+    let fs = "["
+    let fi = 0
+    each row in f_rows {
+      if fi > 0 then { let fs = fs + "," }
+      let fn = to_string(json_get(row, "filename", ""))
+      let ft = to_string(json_get(row, "file_type", ""))
+      let fv = to_string(json_get(row, "version", ""))
+      let fc = to_string(json_get(row, "created_at", ""))
+      let fs = fs + "{\"filename\":\"" + fn + "\",\"type\":\"" + ft + "\",\"version\":" + fv + ",\"created\":\"" + fc + "\"}"
+      let fi = fi + 1
+    }
+    let fs = fs + "]"
+
+    // Serialize quest row as JSON (simplified — key fields)
+    let qid_s = to_string(json_get(q, "id", ""))
+    let qtitle = to_string(json_get(q, "title", ""))
+    let qtype = to_string(json_get(q, "quest_type", ""))
+    let qstatus = to_string(json_get(q, "status", ""))
+    let qcur = to_string(json_get(q, "current_step", "0"))
+    let qtot = to_string(json_get(q, "total_steps", "0"))
+    let qdl = to_string(json_get(q, "deadline", ""))
+    let qca = to_string(json_get(q, "created_at", ""))
+    let quest_json = "{\"id\":" + qid_s + ",\"title\":\"" + qtitle + "\",\"quest_type\":\"" + qtype + "\",\"status\":\"" + qstatus + "\",\"current_step\":" + qcur + ",\"total_steps\":" + qtot + ",\"deadline\":\"" + qdl + "\",\"created_at\":\"" + qca + "\"}"
+
+    return respond("200 {\"status\":\"ok\",\"quest\":" + quest_json + ",\"checkpoints\":" + cps + ",\"files\":" + fs + "}")
+  }
+
+  // P2-5a: /learning/good — save positive example (SQL only)
+  route "/learning/good" method=POST {
+    let data = json_body()
+    let dept = to_string(json_get(data, "dept", "yana"))
+    let q = to_string(json_get(data, "query", ""))
+    let r = to_string(json_get(data, "response", ""))
+    if q == "" then { return respond("400 {\"status\":\"error\",\"message\":\"query is required\"}") }
+    if r == "" then { return respond("400 {\"status\":\"error\",\"message\":\"response is required\"}") }
+
+    let _ = db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, created_at, corr_type) VALUES (?,?,?,datetime('now'),'positive')", [dept, q, r])
+    return respond("200 {\"status\":\"ok\"}")
+  }
+
+  // P2-5b: /learning/stats — learning statistics (SQL only)
+  route "/learning/stats" method=GET {
+    // Corrections 7d (non-positive)
+    let r_corr = query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= date('now', '-7 days') AND corr_type != 'positive'", [])
+    let corr_7d = to_string(json_get(r_corr[0], "c", "0"))
+
+    // Positive total
+    let r_pos = query("SELECT COUNT(*) as c FROM adapt_corrections WHERE corr_type = 'positive'", [])
+    let pos_total = to_string(json_get(r_pos[0], "c", "0"))
+
+    // Error pattern breakdown
+    let pattern_rows = query("SELECT error_type, COUNT(*) as c FROM error_patterns GROUP BY error_type ORDER BY c DESC", [])
+    let breakdown = "{"
+    let bi = 0
+    each row in pattern_rows {
+      let et = to_string(json_get(row, "error_type", ""))
+      let ec = to_string(json_get(row, "c", "0"))
+      if bi > 0 then { let breakdown = breakdown + "," }
+      let breakdown = breakdown + "\"" + et + "\":" + ec
+      let bi = bi + 1
+    }
+    let breakdown = breakdown + "}"
+
+    // Per-dept corrections 7d
+    let dept_rows = query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created_at >= date('now', '-7 days') AND corr_type != 'positive' GROUP BY dept ORDER BY c DESC", [])
+    let dept_corr = "{"
+    let dci = 0
+    each row in dept_rows {
+      let d = to_string(json_get(row, "dept", ""))
+      let c = to_string(json_get(row, "c", "0"))
+      if dci > 0 then { let dept_corr = dept_corr + "," }
+      let dept_corr = dept_corr + "\"" + d + "\":" + c
+      let dci = dci + 1
+    }
+    let dept_corr = dept_corr + "}"
+
+    return respond("200 {\"status\":\"ok\",\"corrections_7d\":" + corr_7d + ",\"positive_examples\":" + pos_total + ",\"error_breakdown\":" + breakdown + ",\"dept_corrections\":" + dept_corr + "}")
+  }
+
+  // P2-6a: /rate_cmd — rate a dept response
+  route "/rate_cmd" method=POST {
+    let data = json_body()
+    let dept = to_string(json_get(data, "dept", "yana"))
+    let rating = to_string(json_get(data, "rating", "0"))
+    let _ = db_execute("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES (?,'satisfaction',?,'daily',datetime('now'))", [dept, rating])
+    return respond("200 {\"status\":\"ok\"}")
+  }
+
+  // P2-6b: /context_cmd — get recent dialog + corrections for a dept
+  route "/context_cmd" method=POST {
+    let data = json_body()
+    let dept = to_string(json_get(data, "dept", "yana"))
+    let chat_id = to_string(json_get(data, "chat_id", "0"))
+
+    // Recent dialog (last 20)
+    let d_rows = query("SELECT role, content, created_at FROM dialog_history WHERE dept=? AND chat_id=? ORDER BY id DESC LIMIT 20", [dept, chat_id])
+    let dialog = "["
+    let di = 0
+    each row in d_rows {
+      if di > 0 then { let dialog = dialog + "," }
+      let role = to_string(json_get(row, "role", ""))
+      let content = to_string(json_get(row, "content", ""))
+      let ts = to_string(json_get(row, "created_at", ""))
+      let dialog = dialog + "{\"role\":\"" + role + "\",\"content\":\"" + content + "\",\"ts\":\"" + ts + "\"}"
+      let di = di + 1
+    }
+    let dialog = dialog + "]"
+
+    // Recent corrections
+    let c_rows = query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 10", [dept])
+    let corrs = "["
+    let ci = 0
+    each row in c_rows {
+      if ci > 0 then { let corrs = corrs + "," }
+      let oq = to_string(json_get(row, "original_query", ""))
+      let cr = to_string(json_get(row, "correction", ""))
+      let ts = to_string(json_get(row, "created_at", ""))
+      let corrs = corrs + "{\"original\":\"" + oq + "\",\"corrected\":\"" + cr + "\",\"ts\":\"" + ts + "\"}"
+      let ci = ci + 1
+    }
+    let corrs = corrs + "]"
+
+    return respond("200 {\"dialog\":" + dialog + ",\"corrections\":" + corrs + "}")
+  }
+
+  // ============================================================
   // CRON ENDPOINTS (8) — all require CRON_SECRET
   // ============================================================
 
