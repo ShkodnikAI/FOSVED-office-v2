@@ -10,6 +10,7 @@ import secrets_crypto
 from credential_manager import (
     scan_missing_keys, format_missing_for_telegram,
     format_missing_for_morning_brief, format_missing_for_json,
+    format_provider_status, check_all_balances,
     set_key_in_env, auto_generate_key, CREDENTIAL_MANIFEST
 )
 import html as html_lib
@@ -2644,13 +2645,20 @@ def scheduler_morning_brief():
             {"role": "user", "content": user_prompt},
         ]
 
-        # ── 5. Missing credentials check ──
+        # ── 5. Missing credentials + provider status ──
         cred_scan = scan_missing_keys()
         cred_block = ""
         if cred_scan["total_missing"] > 0:
             cred_block = format_missing_for_morning_brief(cred_scan)
             # Append to user prompt so LLM includes it in the brief
             user_prompt += f"\n\n=== НЕДОСТАЮЩИЕ КЛЮЧИ ===\n{cred_block}\n\n⚠️ Включи в отчёт секцию 🔑 Ключи — перечисли какие ключи не хватает, кратко зачем. Не расписывай шаги — просто перечисли."
+
+        # Provider status + balances (always include, even if all keys set)
+        try:
+            provider_block = format_provider_status(scan_result=cred_scan)
+            user_prompt += f"\n\n=== ПРОВАЙДЕРЫ И БАЛАНСЫ ===\n{provider_block}\n\nВключи в отчёт секцию 📊 Провайдеры — покажи какие LLM провайдеры активны, их балансы/лимиты, и GitHub rate limit. Кратко, в одну-две строки на провайдер."
+        except Exception as e:
+            log.warning(f"Failed to get provider status: {e}")
 
         result = call_llm("yana", messages)
         if result is None or not result.get("reply"):
@@ -6183,6 +6191,17 @@ if __name__ == "__main__":
         """Return all missing credentials with step-by-step instructions."""
         scan = scan_missing_keys()
         return jsonify(format_missing_for_json(scan))
+
+    @app.route("/admin/providers", methods=["GET"])
+    def admin_providers():
+        """Return active providers with balances/rate-limits."""
+        balances = check_all_balances()
+        scan = scan_missing_keys()
+        return jsonify({
+            "status": "ok",
+            "balances": balances,
+            "provider_text": format_provider_status(balances, scan),
+        })
 
     @app.route("/admin/missing-keys/telegram", methods=["POST"])
     def admin_missing_keys_telegram():

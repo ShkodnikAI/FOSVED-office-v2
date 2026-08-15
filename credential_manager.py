@@ -16,6 +16,8 @@ import os
 import re
 import json
 import logging
+import urllib.request
+import urllib.error
 
 log = logging.getLogger("fosved.credentials")
 
@@ -522,8 +524,247 @@ def auto_generate_key(env_key):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  SELF-TEST
+#  PROVIDER REGISTRY — метаданные провайдеров для отчёта
 # ══════════════════════════════════════════════════════════════════════════
+
+PROVIDER_REGISTRY = {
+    "deepseek": {
+        "env_key": "DEEPSEEK_API_KEY",
+        "name": "DeepSeek",
+        "emoji": "🧠",
+        "model": "deepseek-chat",
+        "pricing": "~$0.14/1M input, $0.28/1M output",
+        "balance_url": "https://api.deepseek.com/user/balance",
+        "balance_format": "deepseek",
+    },
+    "groq": {
+        "env_key": "GROQ_API_KEY",
+        "name": "Groq",
+        "emoji": "⚡",
+        "model": "llama-3.3-70b-versatile",
+        "pricing": "Бесплатный tier (rate-limited)",
+        "balance_url": None,
+        "balance_format": None,
+    },
+    "zai": {
+        "env_key": "ZAI_API_KEY",
+        "name": "Z.ai (GLM)",
+        "emoji": "🔮",
+        "model": "glm-4",
+        "pricing": "~$0.10/1M tokens",
+        "balance_url": None,
+        "balance_format": None,
+    },
+    "grok": {
+        "env_key": "GROK_API_KEY",
+        "name": "Grok (xAI)",
+        "emoji": "🌀",
+        "model": "grok-2",
+        "pricing": "$5/1M input",
+        "balance_url": None,
+        "balance_format": None,
+    },
+    "anthropic": {
+        "env_key": "ANTHROPIC_API_KEY",
+        "name": "Anthropic (Claude)",
+        "emoji": "🚫",
+        "model": "claude-sonnet-4-20250514",
+        "pricing": "$3/1M input (заблокирован санкциями)",
+        "balance_url": None,
+        "balance_format": None,
+        "sanctions_blocked": True,
+    },
+    "openai": {
+        "env_key": "OPENAI_API_KEY",
+        "name": "OpenAI (GPT)",
+        "emoji": "🚫",
+        "model": "gpt-4o",
+        "pricing": "$5/1M input (заблокирован санкциями)",
+        "balance_url": None,
+        "balance_format": None,
+        "sanctions_blocked": True,
+    },
+    "apodex": {
+        "env_key": "APODEX_API_KEY",
+        "name": "Apodex",
+        "emoji": "🔹",
+        "model": "—",
+        "pricing": "—",
+        "balance_url": None,
+        "balance_format": None,
+    },
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  BALANCE CHECKER — проверка балансов и rate limits
+# ══════════════════════════════════════════════════════════════════════════
+
+def _http_get_json(url, headers=None, timeout=10):
+    """Simple HTTP GET returning JSON, or None on error."""
+    try:
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def check_deepseek_balance(api_key):
+    """Check DeepSeek balance. Returns dict with balance info."""
+    data = _http_get_json(
+        "https://api.deepseek.com/user/balance",
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+    )
+    if not data:
+        return {"status": "error", "message": "API unavailable or invalid key"}
+    # DeepSeek returns: {"balance_infos": [{"currency": "USD", "total_balance": "1.23", ...}]}
+    infos = data.get("balance_infos", [])
+    if infos:
+        result = {"status": "ok", "balances": []}
+        for info in infos:
+            result["balances"].append({
+                "currency": info.get("currency", "?"),
+                "total": info.get("total_balance", "?"),
+                "granted": info.get("granted_balance", "?"),
+                "topped_up": info.get("topped_up_balance", "?"),
+            })
+        return result
+    return {"status": "ok", "balances": [], "raw": data}
+
+
+def check_github_rate_limit(token=None):
+    """Check GitHub API rate limit. Returns remaining/limit."""
+    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "fosved-credential-checker"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+    data = _http_get_json("https://api.github.com/rate_limit", headers=headers)
+    if not data:
+        return {"status": "error", "message": "GitHub API unavailable"}
+    resources = data.get("resources", {})
+    return {
+        "status": "ok",
+        "core": {
+            "remaining": resources.get("core", {}).get("remaining", "?"),
+            "limit": resources.get("core", {}).get("limit", "?"),
+        },
+        "search": {
+            "remaining": resources.get("search", {}).get("remaining", "?"),
+            "limit": resources.get("search", {}).get("limit", "?"),
+        },
+    }
+
+
+def check_all_balances():
+    """
+    Check balances/rate-limits for all configured providers.
+    Returns dict keyed by provider name.
+    """
+    results = {}
+
+    # DeepSeek
+    ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if ds_key and not ds_key.startswith("["):
+        results["deepseek"] = check_deepseek_balance(ds_key)
+
+    # GitHub rate limit
+    gh_key = os.environ.get("GITHUB_TOKEN_METALOGOS", os.environ.get("GITHUB_TOKEN", ""))
+    results["github"] = check_github_rate_limit(gh_key if gh_key and not gh_key.startswith("[") else None)
+
+    # Groq — no public balance API, but we can check if key is valid
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    if groq_key and not groq_key.startswith("["):
+        try:
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {groq_key}", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                models = json.loads(resp.read())
+                model_count = len(models.get("data", []))
+                results["groq"] = {"status": "ok", "models_available": model_count, "note": "Free tier (rate-limited)"}
+        except urllib.error.HTTPError as e:
+            results["groq"] = {"status": "error", "message": f"HTTP {e.code}"}
+        except Exception as e:
+            results["groq"] = {"status": "error", "message": str(e)[:100]}
+
+    # ZAI — check models endpoint
+    zai_key = os.environ.get("ZAI_API_KEY", "")
+    if zai_key and not zai_key.startswith("["):
+        results["zai"] = {"status": "ok", "note": "Key set (balance API not available)"}
+
+    # Grok
+    grok_key = os.environ.get("GROK_API_KEY", "")
+    if grok_key and not grok_key.startswith("["):
+        results["grok"] = {"status": "ok", "note": "Key set (balance API not available)"}
+
+    return results
+
+
+def format_provider_status(balances=None, scan_result=None):
+    """
+    Format active providers with balances for Telegram message.
+    This is what goes into the morning report.
+    """
+    if balances is None:
+        balances = check_all_balances()
+    if scan_result is None:
+        scan_result = scan_missing_keys()
+
+    lines = []
+
+    # ── Active LLM providers ──
+    active_providers = []
+    for pid, pinfo in PROVIDER_REGISTRY.items():
+        if pinfo.get("sanctions_blocked"):
+            continue
+        key = os.environ.get(pinfo["env_key"], "")
+        if key and not key.startswith("[") and key.lower() not in ("xxx", "todo"):
+            active_providers.append((pid, pinfo))
+
+    if active_providers:
+        lines.append("📊 *Активные провайдеры:*")
+        for pid, pinfo in active_providers:
+            bal = balances.get(pid, {})
+            if bal.get("status") == "ok":
+                # DeepSeek — show balance
+                if pid == "deepseek" and bal.get("balances"):
+                    for b in bal["balances"]:
+                        lines.append(f"  {pinfo['emoji']} *{pinfo['name']}* — {b['total']} {b['currency']} ({pinfo['pricing']})")
+                # Groq — show models
+                elif pid == "groq" and bal.get("models_available"):
+                    lines.append(f"  {pinfo['emoji']} *{pinfo['name']}* — {bal['models_available']} моделей, {bal.get('note', pinfo['pricing'])}")
+                else:
+                    note = bal.get("note", pinfo["pricing"])
+                    lines.append(f"  {pinfo['emoji']} *{pinfo['name']}* — {note}")
+            else:
+                lines.append(f"  {pinfo['emoji']} *{pinfo['name']}* — ⚠️ {bal.get('message', 'не удалось проверить')}")
+    else:
+        lines.append("📊 LLM провайдеры: ❌ ни один не настроен")
+
+    # ── GitHub ──
+    gh = balances.get("github", {})
+    if gh.get("status") == "ok":
+        core = gh.get("core", {})
+        search = gh.get("search", {})
+        gh_key = os.environ.get("GITHUB_TOKEN_METALOGOS", os.environ.get("GITHUB_TOKEN", ""))
+        has_token = bool(gh_key and not gh_key.startswith("["))
+        token_label = "с токеном" if has_token else "без токена (60/час)"
+        lines.append(f"  🐙 *GitHub* — {core.get('remaining', '?')}/{core.get('limit', '?')} core, {search.get('remaining', '?')}/{search.get('limit', '?')} search ({token_label})")
+
+    # ── Blocked by sanctions ──
+    blocked = [p for p in PROVIDER_REGISTRY.values() if p.get("sanctions_blocked")]
+    if blocked:
+        blocked_str = ", ".join(p["emoji"] + p["name"] for p in blocked)
+        lines.append(f"  🚫 Заблокировано: {blocked_str}")
+
+    # ── Missing keys (compact) ──
+    missing = scan_result.get("missing", [])
+    if missing:
+        lines.append("")
+        lines.append("🔑 *Не хватает:* " + ", ".join(f"{c['emoji']}{c['label']}" for c in missing))
+
+    return "\n".join(lines)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -539,4 +780,10 @@ if __name__ == "__main__":
     print(f"  Blocked: {result['total_blocked']} keys (sanctions)")
     print(f"  LLM OK:  {'✅' if result['llm_group_ok'] else '❌'}")
 
-    print("\n" + format_missing_for_telegram(result))
+    if result['total_missing'] > 0:
+        print("\n" + format_missing_for_telegram(result))
+
+    print("\n" + "=" * 60)
+    print("  PROVIDER STATUS + BALANCES")
+    print("=" * 60)
+    print(format_provider_status(scan_result=result))
