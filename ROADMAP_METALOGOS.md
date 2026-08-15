@@ -54,84 +54,55 @@
 
 ---
 
-## 🟡 P1: EASY WINS (следующий спринт — быстро, без риска)
+## 🟡 P1: EASY WINS ✅ DONE
 
-### P1-1: Удалить дублирующий Python `/webhook/telegram` ⏱️ 5 мин
-- **Почему**: mlog-версия — основная (reverse_proxy рулит туда). Python-версия — legacy fallback.
-- **Что сделать**: Удалить `@app.post("/webhook/telegram")` из llm_proxy.py (строка ~5637). Это ~400 строк мёртвого кода.
-- **Риск**: Низкий — reverse_proxy уже направляет на mlog.
-- **Статус**: ⬜ TODO
-
-### P1-2: Мигрировать `/audit/recent` → mlog route ⏱️ 10 мин
-- **Почему**: Это просто `SELECT * FROM audit_log ORDER BY id DESC LIMIT N` + JSON.
-- **Что сделать**: Добавить GET `/audit/recent` в app.mlog с `query()` + `respond()`.
-- **Риск**: Нулевой.
-- **Статус**: ⬜ TODO
-
-### P1-3: Мигрировать `/search` (SQLite LIKE) → mlog route ⏱️ 15 мин
-- **Почему**: `SELECT ... WHERE raw_text LIKE ? OR title LIKE ?` — mlog `query()` это умеет.
-- **Что сделать**: Добавить POST `/search` в app.mlog.
-- **Риск**: Нулевой.
-- **Статус**: ⬜ TODO
-
-### P1-4: Мигрировать `/api/dashboard` KPIs → mlog route ⏱️ 30 мин
-- **Почему**: Чистая SQL-агрегация + JSON. mlog может `query()` + `json_encode()` + `respond()`.
-- **Что сделать**: Добавить GET `/api/dashboard` в app.mlog. SQL-запросы те же.
-- **Риск**: Низкий — SQL тот же, формат ответа тот же.
-- **Статус**: ⬜ TODO
-
-### P1-5: Мигрировать `/api/dept/<slug>` → mlog route ⏱️ 20 мин
-- **Почему**: SQL SELECT + formatting. Аналогично /api/dashboard.
-- **Что сделать**: Добавить GET `/api/dept/<slug>` в app.mlog.
-- **Риск**: Низкий.
-- **Статус**: ⬜ TODO
+### P1-1: Удалить дублирующий Python `/webhook/telegram` ✅
+### P1-2: Мигрировать `/audit/recent` → mlog route ✅
+### P1-3: Мигрировать `/search` (SQLite LIKE) → mlog route ✅
+### P1-4: Мигрировать `/api/dashboard` KPIs → mlog route ✅
+### P1-5: Мигрировать `/api/dept/<slug>` → mlog route ✅
 
 ---
 
-## 🟠 P2: MEDIUM (после P1 — больше работы, но всё ещё чётко)
+## 🟠 P2: MEDIUM ✅ DONE (кроме P2-4)
 
-### P2-1: Мигрировать `/api/models` + `/api/economics` → mlog routes ⏱️ 30 мин
-- **Почему**: SQL token_usage aggregation. mlog может.
-- **Статус**: ⬜ TODO
-
-### P2-2: Мигрировать `/search/web` (Tavily) → mlog direct call ⏱️ 20 мин
-- **Почему**: Tavily API — обычный `http_post` с API key в body. mlog может вызвать напрямую вместо делегации в Python.
-- **Примечание**: Оставить Python `_tavily_search()` как fallback для `/lz/deep-research`.
-- **Статус**: ⬜ TODO
-
-### P2-3: Мигрировать `/api/narads` + `/api/quests` → mlog routes ⏱️ 25 мин
-- **Почему**: SQL SELECT. quest.mlog уже имеет все паттерны.
-- **Статус**: ⬜ TODO
-
-### P2-4: Мигрировать `/archive/publish` → mlog с StripHtml ⏱️ 30 мин
-- **Почему**: utils.mlog уже имеет `StripHtml()`. Отправка в Telegram — `send_message()`.
-- **Риск**: Средний — нужно проверить HTML-форматирование для archive channel.
-- **Статус**: ⬜ TODO
-
-### P2-5: Мигрировать `/learning/fix` + `/learning/good` + `/learning/stats` → mlog ⏱️ 30 мин
-- **Почему**: utils.mlog уже имеет `ClassifyCorrection()`, `RecordPositiveExample()`, `GetLearningStats()`.
-- **Статус**: ⬜ TODO
-
-### P2-6: Мигрировать `/rate_cmd` + `/context_cmd` → mlog ⏱️ 15 мин
-- **Почему**: Простые SQL INSERT/SELECT. mlog может.
-- **Статус**: ⬜ TODO
+### P2-1: Мигрировать `/api/models` + `/api/economics` → mlog routes ✅
+### P2-2: Мигрировать `/search/web` (Tavily) → mlog direct call ✅
+### P2-3: Мигрировать `/api/narads` + `/api/quests` → mlog routes ✅
+### P2-4: Мигрировать `/archive/publish` → mlog 🔴 Python-only (TBD)
+### P2-5: Мигрировать `/learning/good` + `/learning/stats` → mlog ✅
+### P2-6: Мигрировать `/rate_cmd` + `/context_cmd` → mlog ✅
 
 ---
 
-## 🔵 P3: HARD (будущее — когда будет время и тесты)
+## 🔵 P3: HARD ✅ DONE
 
-### P3-1: Мигрировать scheduler data assembly → больше mlog, меньше Python payload
-- **Почему**: MorningBrief, EveningSummary уже частично в mlog (scheduler.mlog). Python всё ещё строит payload.
-- **Барьер**: Credential scanning + weather fetching + provider balances — Python-only.
-- **Подход**: Разделить — mlog собирает SQL-данные, Python добавляет Python-only данные, mlog финализирует.
+### P3-1: Мигрировать scheduler data assembly → mlog собирает SQL-данные ✅
+- **Что сделано**: MorningBrief() в scheduler.mlog теперь собирает 6 SQL-запросов
+  (dialog_24h, active_depts, narads_pending, corrections_24h, calls_yesterday, cost_yesterday, top_depts)
+  и передаёт в payload Python. Python morning-brief использует предсобранные данные
+  из payload если они есть, иначе fallback на локальные SQL-запросы.
+- **Результат**: Python экономит 4 SQL-запроса на каждый morning-brief вызов.
+- **Дата**: 2025-08-16
 
-### P3-2: Мигрировать `/dept-dashboard/<slug>` + `/office-dashboard` → mlog HTML
-- **Барьер**: Полные HTML страницы с inline CSS/JS — очень много строкового конкатена в mlog.
-- **Подход**: Шаблонизация — mlog генерирует JSON, frontend рендерит.
+### P3-2: Мигрировать `/dept-dashboard/<slug>` + `/office-dashboard` → mlog JSON API ✅
+- **Что сделано**: Новые маршруты `/api/dept-dashboard?slug=X` и `/api/office-dashboard`
+  в app.mlog возвращают JSON вместо HTML. Python HTML-версии остаются как fallback.
+  Frontend (Mini App) может рендерить JSON клиент-side.
+- **Данные dept-dashboard**: slug, name, color, calls_7d, cost_7d, tokens, avg_rating,
+  model_override, priority_provider, corrections (5 recent)
+- **Данные office-dashboard**: calls_today/week/month, cost_month, priority_provider/model,
+  departments[] (13 depts с calls, rating, level, model), audit (10 recent), providers[]
+- **Дата**: 2025-08-16
 
-### P3-3: Мигрировать `/archive/browse` → mlog
-- **Барьер**: Многоуровневый HTML-навигатор (year→month→dept→docs).
-- **Подход**: Переписать как JSON API + фронтенд.
+### P3-3: Мигрировать `/archive/browse` → mlog JSON API ✅
+- **Что сделано**: Новый маршрут `/api/archive/browse` с drill-down через query params:
+  - Без params → list years
+  - ?year=2025 → list months
+  - ?year=2025&month=08 → list departments
+  - ?year=2025&month=08&dept=lz → list documents
+- **Месяцы**: Русские названия (Январь-Декабрь) через lookup table
+- **Дата**: 2025-08-16
 
 ---
 
@@ -150,16 +121,20 @@
 | P2 | P2-4 /archive/publish → mlog | 🔴 Python-only | — |
 | P2 | P2-5 /learning/good + /learning/stats → mlog | ✅ | 2025-08-15 |
 | P2 | P2-6 /rate_cmd + /context_cmd → mlog | ✅ | 2025-08-15 |
+| P3 | P3-1 MorningBrief SQL assembly → mlog | ✅ | 2025-08-16 |
+| P3 | P3-2 /api/dept-dashboard + /api/office-dashboard → mlog JSON | ✅ | 2025-08-16 |
+| P3 | P3-3 /api/archive/browse → mlog JSON | ✅ | 2025-08-16 |
 
-**Покрытие Metalogos**: ~82% → цель **80%** ✅ достигнута!
+**Покрытие Metalogos**: ~87% → цель **80%** ✅ достигнута и превышена!
 
 ---
 
 ## Метрики успеха
 
-- **Строк Python**: 6117 (цель ~4500 — ещё P3 scheduler refactor для −1600)
-- **Flask endpoints**: 93 → мёртвый код для мигрированных (будет почищен)
-- **mlog routes**: 35 (было 18 до миграции)
-- **mlog строк**: 3480 (+1100 за миграцию)
-- **Время ответа**: mlog endpoints без Python roundtrip → быстрее на 2-5ms
+- **Строк Python**: ~6120 (morning-brief экономит 4 SQL при вызове из mlog)
+- **Flask endpoints**: 93 → Python HTML dashboards теперь опциональны (JSON API в mlog)
+- **mlog routes**: 38 (+3 за P3: /api/dept-dashboard, /api/office-dashboard, /api/archive/browse)
+- **mlog строк**: ~3745 (+265 за P3)
+- **Время ответа**: mlog JSON API быстрее HTML Python — нет шаблонизации
 - **Tavily**: прямой http_post из mlog, без Python посредника
+- **Scheduler**: MorningBrief экономит 4 SQL-запроса (собраны в mlog, переданы в payload)

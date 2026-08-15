@@ -11,12 +11,64 @@
 pattern MorningBrief() -> String {
   let owner_id = env("OWNER_TELEGRAM_ID")
 
-  // Delegate to proxy — endpoint collects weather, metrics, LZ findings itself
-  let payload = json_encode({owner_id: owner_id})
+  // --- P3-1: mlog collects SQL data, Python adds weather + credentials + LLM ---
+  // Dialog count (24h)
+  let dialog_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", [])
+  let dialog_24h = to_string(json_get(dialog_rows[0], "cnt", "0"))
+
+  // Active departments (24h)
+  let dept_rows = query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", [])
+  let active_depts = "["
+  let adi = 0
+  each row in dept_rows {
+    if adi > 0 then { let active_depts = active_depts + "," }
+    let d = to_string(json_get(row, "dept", ""))
+    let active_depts = active_depts + "\"" + d + "\""
+    let adi = adi + 1
+  }
+  let active_depts = active_depts + "]"
+
+  // Pending narads
+  let narad_rows = query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", [])
+  let narads_pending = to_string(json_get(narad_rows[0], "cnt", "0"))
+
+  // Recent corrections (24h)
+  let corr_rows = query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", [])
+  let corrections_24h = to_string(json_get(corr_rows[0], "cnt", "0"))
+
+  // Token usage yesterday (calls + cost)
+  let usage_rows = query("SELECT COUNT(*) as cnt, COALESCE(SUM(cost_usd),0) as cost FROM token_usage WHERE created_at >= date('now', '-1 day')", [])
+  let calls_yesterday = to_string(json_get(usage_rows[0], "cnt", "0"))
+  let cost_yesterday = to_string(json_get(usage_rows[0], "cost", "0"))
+
+  // Top departments by usage (24h)
+  let top_dept_rows = query("SELECT dept, COUNT(*) as cnt FROM token_usage WHERE created_at > datetime('now', '-24 hours') GROUP BY dept ORDER BY cnt DESC LIMIT 5", [])
+  let top_depts = "["
+  let tdi = 0
+  each row in top_dept_rows {
+    if tdi > 0 then { let top_depts = top_depts + "," }
+    let td = to_string(json_get(row, "dept", ""))
+    let tc = to_string(json_get(row, "cnt", "0"))
+    let top_depts = top_depts + "{\"dept\":\"" + td + "\",\"calls\":" + tc + "}"
+    let tdi = tdi + 1
+  }
+  let top_depts = top_depts + "]"
+
+  // Delegate to proxy with pre-collected SQL data
+  let payload = json_encode({
+    owner_id: owner_id,
+    dialog_24h: dialog_24h,
+    active_depts: active_depts,
+    narads_pending: narads_pending,
+    corrections_24h: corrections_24h,
+    calls_yesterday: calls_yesterday,
+    cost_yesterday: cost_yesterday,
+    top_depts: top_depts
+  })
   let _ = try http_post("http://127.0.0.1:4000/scheduler/morning-brief", payload, "application/json")
 
   // Audit
-  let _ = AuditLog("morning_brief", "scheduler", "morning brief triggered (weather + office + world events + LZ)")
+  let _ = AuditLog("morning_brief", "scheduler", "morning brief triggered (mlog SQL: " + dialog_24h + " dialogs, " + narads_pending + " pending narads)")
 
   return "ok"
 }

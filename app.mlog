@@ -3155,6 +3155,270 @@ mlogserver {
   }
 
   // ============================================================
+  // P3: HARD MIGRATIONS (JSON API — no HTML generation in mlog)
+  // ============================================================
+
+  // P3-2a: /api/dept-dashboard — dept dashboard data as JSON
+  // Replaces Python /dept-dashboard/<slug> HTML page with JSON API
+  // Frontend (Mini App) renders the HTML client-side
+  route "/api/dept-dashboard" method=GET {
+    let slug = query_param("slug")
+    if slug == "" then { return respond("400 {\"status\":\"error\",\"message\":\"slug is required\"}") }
+    let dept = lower(slug)
+
+    // Known departments (mirrors DEPT_NAMES in llm_proxy.py)
+    let known_depts = "yana,osp,lz,expert,marketing,finance,legal,dev,design,qa,visual,engineering,kavalnya,admin"
+    let dept_names = "Yana — Shef de kabinet,OSP — Strategicheskiy analiz,LZ — Laboratoriya znanii,Ekspert — Tekhnicheskiy preparator,Marketing,Finansy,Yurist,Dev — Razrabotka,Design — UI/UX,QA — Testirovanie,Visual — Vizualizatsiya,Engineering — Inzhenernyi,Kavalnya — Metodologiya,Admin — Sistemnyi agent"
+    let dept_colors = "#C9A84C,#4A90D9,#7B68EE,#2ECC71,#E74C3C,#27AE60,#8E44AD,#3498DB,#E91E63,#F39C12,#9B59B6,#1ABC9C,#95A5A6,#34495E"
+    let dk = split(known_depts, ",")
+    let dn = split(dept_names, ",")
+    let dc = split(dept_colors, ",")
+
+    // Find dept index
+    let dept_idx = -1
+    let ki = 0
+    each k in dk {
+      if k == dept then { let dept_idx = ki }
+      let ki = ki + 1
+    }
+    if dept_idx < 0.0 then { return respond("404 {\"status\":\"error\",\"message\":\"unknown department\"}") }
+
+    let dept_name = dn[to_int(dept_idx)]
+    let dept_color = dc[to_int(dept_idx)]
+
+    // Calls 7d
+    let r_calls = query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
+    let calls_7d = to_string(json_get(r_calls[0], "c", "0"))
+
+    // Cost 7d
+    let r_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
+    let cost_7d = to_string(json_get(r_cost[0], "t", "0"))
+
+    // Tokens 7d
+    let r_tok = query("SELECT COALESCE(SUM(tokens_in),0) as ti, COALESCE(SUM(tokens_out),0) as to2 FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
+    let tokens_in_7d = to_string(json_get(r_tok[0], "ti", "0"))
+    let tokens_out_7d = to_string(json_get(r_tok[0], "to2", "0"))
+
+    // Average rating 7d
+    let r_rat = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
+    let avg_rating = to_string(to_int(json_get(r_rat[0], "a", "0") * 10.0) / 10.0)
+
+    // Recent corrections (5)
+    let corr_rows = query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", [dept])
+    let corrs = "["
+    let ci = 0
+    each row in corr_rows {
+      if ci > 0 then { let corrs = corrs + "," }
+      let oq = to_string(json_get(row, "original_query", ""))
+      let cr = to_string(json_get(row, "correction", ""))
+      let ca = to_string(json_get(row, "created_at", ""))
+      let corrs = corrs + "{\"original\":\"" + oq + "\",\"correction\":\"" + cr + "\",\"created_at\":\"" + ca + "\"}"
+      let ci = ci + 1
+    }
+    let corrs = corrs + "]"
+
+    // Config override
+    let r_cfg = query("SELECT value FROM system_settings WHERE key = ?", ["model_override_" + dept])
+    let model_override = "default"
+    if len(r_cfg) > 0.0 then {
+      let ov = to_string(json_get(r_cfg[0], "value", ""))
+      if ov != "" then { let model_override = ov }
+    }
+
+    // Priority provider
+    let r_prov = query("SELECT value FROM system_settings WHERE key = 'priority_provider'", [])
+    let priority_provider = "auto"
+    if len(r_prov) > 0.0 then {
+      let pv = to_string(json_get(r_prov[0], "value", ""))
+      if pv != "" then { let priority_provider = pv }
+    }
+
+    return respond("200 {\"status\":\"ok\",\"slug\":\"" + dept + "\",\"name\":\"" + dept_name + "\",\"color\":\"" + dept_color + "\",\"calls_7d\":" + calls_7d + ",\"cost_7d\":" + cost_7d + ",\"tokens_in_7d\":" + tokens_in_7d + ",\"tokens_out_7d\":" + tokens_out_7d + ",\"avg_rating\":" + avg_rating + ",\"model_override\":\"" + model_override + "\",\"priority_provider\":\"" + priority_provider + "\",\"corrections\":" + corrs + "}")
+  }
+
+  // P3-2b: /api/office-dashboard — office dashboard data as JSON
+  // Replaces Python /office-dashboard HTML page with JSON API
+  route "/api/office-dashboard" method=GET {
+    // Today/week/month counts
+    let r_today = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now')", [])
+    let r_week = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now', '-7 days')", [])
+    let r_month = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now', '-30 days')", [])
+    let r_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days')", [])
+    let n_today = to_string(json_get(r_today[0], "c", "0"))
+    let n_week = to_string(json_get(r_week[0], "c", "0"))
+    let n_month = to_string(json_get(r_month[0], "c", "0"))
+    let cost_month = to_string(to_int(json_get(r_cost[0], "t", "0") * 100.0) / 100.0)
+
+    // Priority provider + model
+    let r_prov = query("SELECT value FROM system_settings WHERE key = 'priority_provider'", [])
+    let priority_provider = "auto"
+    if len(r_prov) > 0.0 then {
+      let pv = to_string(json_get(r_prov[0], "value", ""))
+      if pv != "" then { let priority_provider = pv }
+    }
+    let r_mod = query("SELECT value FROM system_settings WHERE key = 'priority_model'", [])
+    let priority_model = "auto"
+    if len(r_mod) > 0.0 then {
+      let mv = to_string(json_get(r_mod[0], "value", ""))
+      if mv != "" then { let priority_model = mv }
+    }
+
+    // Departments summary
+    let known_depts = "yana,osp,lz,expert,marketing,finance,legal,dev,design,qa,visual,engineering,kavalnya"
+    let dept_names = "Yana — Shef,OSP — Strategiya,LZ — Laboratoriya,Ekspert,Marketing,Finansy,Yurist,Dev,Design,QA,Visual,Engineering,Kavalnya"
+    let dept_colors = "#C9A84C,#4A90D9,#7B68EE,#2ECC71,#E74C3C,#27AE60,#8E44AD,#3498DB,#E91E63,#F39C12,#9B59B6,#1ABC9C,#95A5A6"
+    let dk = split(known_depts, ",")
+    let dn = split(dept_names, ",")
+    let dc = split(dept_colors, ",")
+
+    let depts_json = "["
+    let di = 0
+    each dept in dk {
+      // Calls 7d
+      let r_d = query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
+      let calls = to_string(json_get(r_d[0], "c", "0"))
+
+      // Avg rating 7d
+      let r_m = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
+      let rating = to_string(to_int(json_get(r_m[0], "a", "0") * 10.0) / 10.0)
+
+      // Level
+      let level = "low"
+      if to_int(calls) > 10 then { let level = "high" }
+      if to_int(calls) > 0 then {
+        if to_int(calls) <= 10 then { let level = "medium" }
+      }
+
+      // Config override
+      let r_ov = query("SELECT value FROM system_settings WHERE key = ?", ["model_override_" + dept])
+      let model_override = "default"
+      if len(r_ov) > 0.0 then {
+        let ov = to_string(json_get(r_ov[0], "value", ""))
+        if ov != "" then { let model_override = ov }
+      }
+
+      let d_name = dn[di]
+      let d_color = dc[di]
+
+      if di > 0 then { let depts_json = depts_json + "," }
+      let depts_json = depts_json + "{\"slug\":\"" + dept + "\",\"name\":\"" + d_name + "\",\"color\":\"" + d_color + "\",\"calls_7d\":" + calls + ",\"avg_rating\":" + rating + ",\"level\":\"" + level + "\",\"model\":\"" + model_override + "\"}"
+      let di = di + 1
+    }
+    let depts_json = depts_json + "]"
+
+    // Audit log (10 recent)
+    let audit_rows = query("SELECT action, details, timestamp FROM audit_log ORDER BY id DESC LIMIT 10", [])
+    let audit_json = "["
+    let ai = 0
+    each row in audit_rows {
+      if ai > 0 then { let audit_json = audit_json + "," }
+      let act = to_string(json_get(row, "action", ""))
+      let det = to_string(json_get(row, "details", ""))
+      let ts = to_string(json_get(row, "timestamp", ""))
+      let audit_json = audit_json + "{\"action\":\"" + act + "\",\"details\":\"" + det + "\",\"timestamp\":\"" + ts + "\"}"
+      let ai = ai + 1
+    }
+    let audit_json = audit_json + "]"
+
+    // Provider stats (month)
+    let prov_rows = query("SELECT provider, COUNT(*) as c, COALESCE(SUM(cost_usd),0) as cost FROM token_usage WHERE created_at >= date('now', '-30 days') GROUP BY provider", [])
+    let prov_json = "["
+    let pi = 0
+    each row in prov_rows {
+      if pi > 0 then { let prov_json = prov_json + "," }
+      let prov = to_string(json_get(row, "provider", ""))
+      let pc = to_string(json_get(row, "c", "0"))
+      let pcost = to_string(to_int(json_get(row, "cost", "0") * 100.0) / 100.0)
+      let prov_json = prov_json + "{\"provider\":\"" + prov + "\",\"calls\":" + pc + ",\"cost\":" + pcost + "}"
+      let pi = pi + 1
+    }
+    let prov_json = prov_json + "]"
+
+    return respond("200 {\"status\":\"ok\",\"calls_today\":" + n_today + ",\"calls_week\":" + n_week + ",\"calls_month\":" + n_month + ",\"cost_month\":" + cost_month + ",\"priority_provider\":\"" + priority_provider + "\",\"priority_model\":\"" + priority_model + "\",\"departments\":" + depts_json + ",\"audit\":" + audit_json + ",\"providers\":" + prov_json + "}")
+  }
+
+  // P3-3: /api/archive/browse — archive navigator as JSON
+  // Replaces Python /archive/browse HTML page with JSON API
+  // Drill-down: year → month → dept → documents
+  route "/api/archive/browse" method=GET {
+    let year = query_param("year")
+    let month = query_param("month")
+    let dept = query_param("dept")
+
+    // Level 0: list years
+    if year == "" then {
+      let rows = query("SELECT substr(created_at,1,4) AS y, COUNT(*) AS n FROM miniapp_responses WHERE created_at IS NOT NULL AND created_at != '' GROUP BY y ORDER BY y DESC", [])
+      let out = "["
+      let yi = 0
+      each row in rows {
+        if yi > 0 then { let out = out + "," }
+        let y = to_string(json_get(row, "y", ""))
+        let n = to_string(json_get(row, "n", "0"))
+        let out = out + "{\"year\":\"" + y + "\",\"count\":" + n + "}"
+        let yi = yi + 1
+      }
+      let out = out + "]"
+      return respond("200 {\"level\":\"years\",\"items\":" + out + "}")
+    }
+
+    // Level 1: list months for year
+    if month == "" then {
+      let rows = query("SELECT substr(created_at,6,2) AS m, COUNT(*) AS n FROM miniapp_responses WHERE substr(created_at,1,4) = ? GROUP BY m ORDER BY m DESC", [year])
+      let month_names = "Январь,Февраль,Март,Апрель,Май,Июнь,Июль,Август,Сентябрь,Октябрь,Ноябрь,Декабрь"
+      let mn = split(month_names, ",")
+      let out = "["
+      let mi = 0
+      each row in rows {
+        if mi > 0 then { let out = out + "," }
+        let m = to_string(json_get(row, "m", ""))
+        let n = to_string(json_get(row, "n", "0"))
+        // Month name lookup (m is "01"-"12")
+        let m_idx = to_int(m) - 1
+        let m_name = ""
+        if m_idx >= 0.0 then {
+          if m_idx < 12.0 then { let m_name = mn[to_int(m_idx)] }
+        }
+        if m_name == "" then { let m_name = m }
+        let out = out + "{\"month\":\"" + m + "\",\"name\":\"" + m_name + "\",\"count\":" + n + "}"
+        let mi = mi + 1
+      }
+      let out = out + "]"
+      return respond("200 {\"level\":\"months\",\"year\":\"" + year + "\",\"items\":" + out + "}")
+    }
+
+    // Level 2: list depts for year+month
+    if dept == "" then {
+      let rows = query("SELECT dept, COUNT(*) AS n FROM miniapp_responses WHERE substr(created_at,1,4) = ? AND substr(created_at,6,2) = ? GROUP BY dept ORDER BY n DESC", [year, month])
+      let out = "["
+      let di = 0
+      each row in rows {
+        if di > 0 then { let out = out + "," }
+        let d = to_string(json_get(row, "dept", ""))
+        let n = to_string(json_get(row, "n", "0"))
+        let out = out + "{\"dept\":\"" + d + "\",\"count\":" + n + "}"
+        let di = di + 1
+      }
+      let out = out + "]"
+      return respond("200 {\"level\":\"departments\",\"year\":\"" + year + "\",\"month\":\"" + month + "\",\"items\":" + out + "}")
+    }
+
+    // Level 3: list documents for year+month+dept
+    let rows = query("SELECT id, title, created_at FROM miniapp_responses WHERE substr(created_at,1,4) = ? AND substr(created_at,6,2) = ? AND dept = ? ORDER BY created_at DESC", [year, month, dept])
+    let out = "["
+    let ri = 0
+    each row in rows {
+      if ri > 0 then { let out = out + "," }
+      let id = to_string(json_get(row, "id", ""))
+      let title = to_string(json_get(row, "title", ""))
+      let created = to_string(json_get(row, "created_at", ""))
+      let out = out + "{\"id\":" + id + ",\"title\":\"" + title + "\",\"created_at\":\"" + created + "\"}"
+      let ri = ri + 1
+    }
+    let out = out + "]"
+    return respond("200 {\"level\":\"documents\",\"year\":\"" + year + "\",\"month\":\"" + month + "\",\"dept\":\"" + dept + "\",\"items\":" + out + "}")
+  }
+
+  // ============================================================
   // P3-MINI: ADDITIONAL MIGRATED ENDPOINTS
   // ============================================================
 

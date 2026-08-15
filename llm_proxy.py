@@ -2572,21 +2572,27 @@ def scheduler_morning_brief():
         metrics = _collect_metrics_for_period(yesterday, today)
         metrics_text = _format_metrics_text(metrics)
 
-        # Dialog count (24h)
-        dialog_rows = _query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
-        dialog_24h = dialog_rows[0]["cnt"] if dialog_rows else 0
+        # P3-1: Use pre-collected SQL data from mlog payload if available
+        # mlog MorningBrief() now queries dialog_24h, active_depts, narads_pending,
+        # corrections_24h, calls_yesterday, cost_yesterday, top_depts before calling Python
+        if "dialog_24h" in d:
+            dialog_24h = int(d.get("dialog_24h", 0))
+            active_depts = d.get("active_depts", [])
+            narads_pending = int(d.get("narads_pending", 0))
+            corrections_24h = int(d.get("corrections_24h", 0))
+        else:
+            # Fallback: query locally (legacy path when called without mlog payload)
+            dialog_rows = _query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+            dialog_24h = dialog_rows[0]["cnt"] if dialog_rows else 0
 
-        # Active departments (24h)
-        dept_rows = _query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
-        active_depts = [r["dept"] for r in dept_rows] if dept_rows else []
+            dept_rows = _query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+            active_depts = [r["dept"] for r in dept_rows] if dept_rows else []
 
-        # Pending narads
-        narad_rows = _query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", fetch=True)
-        narads_pending = narad_rows[0]["cnt"] if narad_rows else 0
+            narad_rows = _query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", fetch=True)
+            narads_pending = narad_rows[0]["cnt"] if narad_rows else 0
 
-        # Recent corrections
-        corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
-        corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
+            corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+            corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
 
         # ── 3. LZ daily findings (from memory) ──
         lz_findings = ""

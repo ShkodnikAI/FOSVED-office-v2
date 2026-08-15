@@ -89,7 +89,10 @@ MLOG_ROUTES_PREFIXES = [
     "/rate_cmd",       # P2-6: Rate in Metalogos
     "/context_cmd",    # P2-6: Context in Metalogos
     "/api/archive",    # P3-1: Archive search in Metalogos
+    "/api/archive/browse",  # P3-3: Archive browse navigator in Metalogos
     "/api/admin/status",  # P3-2: Admin status in Metalogos
+    "/api/dept-dashboard",  # P3-2a: Dept dashboard JSON in Metalogos
+    "/api/office-dashboard",  # P3-2b: Office dashboard JSON in Metalogos
     "/api/quest/create-checkpoints",  # P3-3.5: Quest helpers in Metalogos
     "/api/quest/format-list",
     "/api/quest/format-status",
