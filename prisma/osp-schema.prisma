@@ -1,0 +1,208 @@
+// ОСП Prisma5 Schema — Analysis Archive + Verification + Calibration
+// Part of Fosved Office V2, OSP Enrichment V3.1
+// Date: 2026-08-17
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CORE: Analysis (archive of all deconstructions)
+// ═══════════════════════════════════════════════════════════════
+
+model Analysis {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // ── Идентификация ──
+  topic           String
+  slug            String   @unique
+  depthLevel      Int
+  domain          String
+
+  // ── Статус ──
+  status          AnalysisStatus @default(DRAFTED)
+  publishedAt     DateTime?
+  verifiedAt      DateTime?
+  supersededById  String?
+  supersededBy    Analysis?  @relation("SupersededBy", fields: [supersededById], references: [id])
+
+  // ── Phase 1: Reconnaissance ──
+  awarenessFrame  String
+  subject         String
+  macroPhase      String
+  eventPhase      String
+
+  // ── Phase 2: Preparation ──
+  layers          Json
+  topology        Json
+  rootCauseMap    String
+
+  // ── Phase 3: Staff Block ──
+  forcesAndPotentials  Json
+  strategicManeuvers   Json
+  twoPaths             Json
+  systemHealth         Json?
+
+  // ──0 Phase 4: Forecast ──
+  decisionTreeForecast  Json
+  investmentImplications Json
+
+  // ── Verification ──
+  verificationDate      DateTime
+  brierScore            Float?
+  actualOutcome         String?
+  errorCategory         String?
+
+  // ── Confidence ──
+  overallConfidence     ConfidenceLevel
+  kentProbability       String?
+
+  // ── Meta ──
+  chatSummary           String
+  chatSummaryLines      Int
+  sources               Json
+  newsContextUsed       Boolean @default(false)
+  modelUsed             String?
+  providerUsed          String?
+  tokenBudgetUsed      Int?
+  durationSeconds      Int?
+
+  // ── Relations ──
+  indicators     Indicator[]
+  watchlistItems WatchlistItem[]
+
+  // ── Audit ──
+  autoEscalationTriggers Json?
+  qualityGatesPassed     Json
+  qualityGatesFailed     Json?
+
+  @@index([topic])
+  @@index([status])
+  @@index([domain])
+  @@index([verificationDate])
+  @@index([createdAt])
+}
+
+enum AnalysisStatus {
+  DRAFTED
+  PUBLISHED
+  WATCHING
+  VERIFIED
+  MISSED
+  PARTIAL
+  SUPERSEDED
+}
+
+enum ConfidenceLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Indicator {
+  id          String   @id @default(cuid())
+  analysisId  String
+  analysis    Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  description String
+  verifyDate  DateTime
+  isBinary    Boolean  @default(true)
+  result      Boolean?
+  verifiedAt  DateTime?
+  confirmsWhat String
+
+  preVerifyReminderSent Boolean @default(false)
+  scheduledJobId        String?
+
+  @@index([verifyDate])
+  @@index([analysisId])
+}
+
+model WatchlistItem {
+  id          String   @id @default(cuid())
+  analysisId  String
+  analysis    Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  topic       String
+  frequency   WatchFrequency @default(DAILY)
+  lastCheckAt DateTime?
+  nextCheckAt DateTime?
+  active      Boolean  @default(true)
+
+  lastDelta   String?
+  deltaCount  Int     @default(0)
+
+  @@index([nextCheckAt])
+  @@index([active])
+}
+
+enum WatchFrequency {
+  DAILY
+  WEEKLY
+  BIWEEKLY
+}
+
+model BrierScoreLog {
+  id          String   @id @default(cuid())
+  analysisId  String
+  date        DateTime @default(now())
+
+  forecastProbability  Float
+  actualOutcome        Float
+  brierScore          Float
+  cumulativeBrier     Float
+  totalForecasts      Int
+
+  @@index([analysisId])
+  @@index([date])
+}
+
+model CalibrationCurvePoint {
+  id          String   @id @default(cuid())
+  date        DateTime @default(now())
+
+  binLabel    String
+  binCenter   Float
+  forecastsInBin Int
+  actualRate    Float
+  deviation     Float
+
+  @@index([date])
+}
+
+model AsymmetricBet {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+
+  thesis      String
+  probability String
+  boundedDownside  String
+  potentialUpside  String
+  upsideDownsideRatio Float?
+  exitConditions   String
+  timeHorizon  String
+  executionMechanism String
+
+  status      BetStatus @default(OPEN)
+  closedAt    DateTime?
+  resultPnl   Float?
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum BetStatus {
+  OPEN
+  WATCHING
+  CLOSED_PROFIT
+  CLOSED_LOSS
+  CLOSED_NEUTRAL
+  SUPERSEDED
+}
