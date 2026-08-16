@@ -1,4 +1,10 @@
 services:
+  # ── PostgreSQL (OSP data: Analysis, Indicator, Watchlist, Brier, Bets) ──
+  - type: pserv
+    name: osp-db
+    plan: free
+    region: frankfurt
+
   # ── Main Web Service (existing) ──────────────────────────────────────
   - type: web
     name: fosved-office-v2
@@ -7,6 +13,10 @@ services:
     region: frankfurt
     envVars:
       - fromGroup: fosved-secrets
+      - key: DATABASE_URL
+        fromDatabase:
+          name: osp-db
+          property: connectionString
     # Render free tier: spins down after 15 min inactivity
     # Cron jobs below will keep it alive and collect data
 
@@ -56,6 +66,41 @@ services:
       -d '{"owner_id":"${OWNER_TELEGRAM_ID}"}'
       "https://fosved-office-v2.onrender.com/scheduler/morning-brief"
       || echo "morning-brief failed"
+    envVars:
+      - fromGroup: fosved-secrets
+
+  # ── Cron: Watch Sweep — ежедневно 06:00 UTC (09:00 Минск) ────────────
+  # Sweeps all active WatchlistItems, checks for deltas, updates lastCheckAt/nextCheckAt
+  - type: cron
+    name: watch-sweep
+    runtime: docker
+    plan: free
+    region: frankfurt
+    schedule: "0 6 * * *"   # 06:00 UTC = 09:00 Минск
+    buildCommand: "echo 'cron ready'"
+    startCommand: >
+      curl -sf -X POST
+      -H "Content-Type: application/json"
+      "https://fosved-office-v2.onrender.com/scheduler/watch-sweep"
+      || echo "watch-sweep failed"
+    envVars:
+      - fromGroup: fosved-secrets
+
+  # ── Cron: Indicator Pre-Reminders — ежедневно 03:00 UTC (06:00 Минск) ─
+  # Finds indicators with verifyDate within 7 days, sends pre-reminder to owner
+  - type: cron
+    name: indicator-pre-reminders
+    runtime: docker
+    plan: free
+    region: frankfurt
+    schedule: "0 3 * * *"   # 03:00 UTC = 06:00 Минск (before morning brief)
+    buildCommand: "echo 'cron ready'"
+    startCommand: >
+      curl -sf -X POST
+      -H "Content-Type: application/json"
+      -d '{"days_ahead":7}'
+      "https://fosved-office-v2.onrender.com/scheduler/indicator-pre-reminders"
+      || echo "indicator-pre-reminders failed"
     envVars:
       - fromGroup: fosved-secrets
 

@@ -22,6 +22,14 @@ fi
 
 python3 scripts/migrate_schema.py "${DATABASE_PATH:-./data}/fosved.db"
 
+# 0. Prisma migrate deploy (PostgreSQL OSP schema) — runs only if DATABASE_URL is a PG connection string
+if echo "$DATABASE_URL" | grep -q "^postgres"; then
+  echo "--- Prisma migrate deploy (PostgreSQL) ---"
+  npx prisma migrate deploy 2>&1 || echo "Prisma migrate failed (may already be up-to-date)"
+else
+  echo "--- Skipping Prisma (DATABASE_URL is not PostgreSQL) ---"
+fi
+
 # 1. LLM Proxy (native circuit breaker + combo chains + compression)
 if ! python3 -c "import llm_proxy" 2>/tmp/llm_import_err.log; then
   echo "FATAL: llm_proxy import error"; cat /tmp/llm_import_err.log | tail -10; exit 1

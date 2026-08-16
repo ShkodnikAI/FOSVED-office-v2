@@ -19,6 +19,10 @@ LLM_ROUTES_PREFIXES = [
     "/webhook/miniapp-action",  # Mini App action bar → LLM Proxy (must precede generic mlog routing)
     "/cron/collect-news",  # registered in LLM Proxy, not in Metalogos; guarded by CRON_SECRET
     "/news/stats",         # read-only counters, used by the smoke script,
+    "/scheduler/morning-brief",   # cron-accessible
+    "/scheduler/lz-daily",        # cron-accessible
+    "/scheduler/watch-sweep",     # cron-accessible (OSP watch sweep)
+    "/scheduler/indicator-pre-reminders",  # cron-accessible (OSP pre-reminders)
     "/miniapp/",
     "/miniapp",
     "/miniapp-spa/",
@@ -36,7 +40,15 @@ LLM_ROUTES_PREFIXES = [
 INTERNAL_ONLY_PREFIXES = [
     "/ask",
     "/detect-dept",
-    "/scheduler/",
+    # /scheduler/ endpoints: crons need public access, but internal sub-routes stay blocked
+    "/scheduler/admin-morning-reply",
+    "/scheduler/admin-daily",
+    "/scheduler/evening-summary",
+    "/scheduler/weekly-digest",
+    "/scheduler/monthly-review",
+    "/scheduler/control-check",
+    "/scheduler/self-learn",
+    "/scheduler/reminder-check",
     "/learning/",
     "/memory/",
     "/lz/",

@@ -5479,6 +5479,179 @@ def get_night_news_digest():
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  WATCH SWEEP — daily sweep of WatchlistItem table
+#  Checks all active items, updates lastCheckAt/nextCheckAt, detects deltas
+#  Called by Render cron at 06:00 UTC = 09:00 MSK
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/scheduler/watch-sweep")
+def scheduler_watch_sweep():
+    """Sweep all active WatchlistItems, check for deltas, update timestamps.
+    For each item:
+      1. Query news/LLM for recent changes on the topic
+      2. Compare with lastDelta — if new information, increment deltaCount
+      3. Update lastCheckAt, compute nextCheckAt from frequency
+      4. If delta detected, send brief notification to owner
+    """
+    owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
+    if not owner_id:
+        return jsonify({"status": "error", "message": "OWNER_TELEGRAM_ID not set"}), 400
+
+    try:
+        now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Get all active watchlist items
+        items = _query("""
+            SELECT w.id, w.analysis_id, w.topic, w.frequency, w.last_delta, w.delta_count,
+                   a.topic AS analysis_topic
+            FROM watchlist_item w
+            LEFT JOIN analysis a ON a.id = w.analysis_id
+            WHERE w.active = 1
+            ORDER BY w.next_check_at ASC
+        """, fetch=True)
+
+        if not items:
+            return jsonify({"status": "ok", "swept": 0, "message": "no active watchlist items"})
+
+        swept = 0
+        deltas = 0
+        notifications = []
+
+        for item in items:
+            wid, analysis_id, topic, frequency, last_delta, delta_count, analysis_topic = item
+
+            # Query LLM for recent developments on this topic
+            sweep_prompt = f"""Ты мониторинг-аналитик ОСП. Проверь тему на предмет новых событий за последние 24 часа.
+
+Тема: {topic}
+Контекст анализа: {analysis_topic or 'N/A'}
+Предыдущий дельта: {last_delta or 'нет'}
+
+Если есть новые существенные изменения (не шум, не повтор), опиши кратко (1-2 предложения).
+Если изменений нет — ответь ровно одним словом: NO_DELTA"""
+
+            llm_result = _call_llm_with_failover(sweep_prompt, 'osp')
+            reply = llm_result.get('reply', '') if isinstance(llm_result, dict) else str(llm_result)
+            new_delta = None if 'NO_DELTA' in reply.upper()[:50] else reply.strip()
+
+            # Compute nextCheckAt based on frequency
+            freq_days = {'DAILY': 1, 'WEEKLY': 7, 'BIWEEKLY': 14}.get(frequency, 1)
+            next_check = (datetime.utcnow() + timedelta(days=freq_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            if new_delta:
+                # Delta detected
+                new_count = (delta_count or 0) + 1
+                _query("UPDATE watchlist_item SET last_check_at=?, next_check_at=?, last_delta=?, delta_count=? WHERE id=?",
+                       (now_iso, next_check, new_delta[:500], new_count, wid))
+                deltas += 1
+                notifications.append(f"▸ {topic}: {new_delta[:150]}")
+            else:
+                # No delta — just update timestamps
+                _query("UPDATE watchlist_item SET last_check_at=?, next_check_at=? WHERE id=?",
+                       (now_iso, next_check, wid))
+
+            swept += 1
+
+        # Send consolidated notification if any deltas found
+        if notifications:
+            msg = "🔍 Watch Sweep — обнаружены дельты:\n\n" + "\n".join(notifications[:10])
+            if len(notifications) > 10:
+                msg += f"\n\n...и ещё {len(notifications) - 10}"
+            _send_telegram_message(owner_id, msg)
+
+        _log_audit('watch_sweep', {'swept': swept, 'deltas': deltas}, 'osp')
+        log.info(f"Watch sweep: {swept} items, {deltas} deltas")
+        return jsonify({"status": "ok", "swept": swept, "deltas": deltas})
+
+    except Exception as e:
+        log.error(f"watch_sweep error: {e}")
+        _log_audit("watch_sweep_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  INDICATOR PRE-REMINDERS — 7-day pre-verification reminders
+#  Finds indicators with verifyDate within N days, sends reminder to owner
+#  Called by Render cron at 03:00 UTC = 06:00 MSK (before morning brief)
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/scheduler/indicator-pre-reminders")
+def scheduler_indicator_pre_reminders():
+    """Find indicators with verifyDate within `days_ahead` days.
+    Send a consolidated pre-reminder to owner with:
+      - Indicator description + verifyDate
+      - How many days until verification
+      - What the indicator confirms
+    Marks pre_verify_reminder_sent = 1 so we don't re-notify.
+    """
+    owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
+    if not owner_id:
+        return jsonify({"status": "error", "message": "OWNER_TELEGRAM_ID not set"}), 400
+
+    d = request.get_json(force=True, silent=True) or {}
+    days_ahead = int(d.get("days_ahead", 7))
+
+    try:
+        cutoff = (datetime.utcnow() + timedelta(days=days_ahead)).strftime("%Y-%m-%dT23:59:59Z")
+        now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Find unverified indicators with verifyDate within N days that haven't been pre-reminded
+        indicators = _query("""
+            SELECT i.id, i.description, i.verify_date, i.is_binary, i.confirms_what,
+                   i.pre_verify_reminder_sent, a.topic AS analysis_topic
+            FROM indicator i
+            LEFT JOIN analysis a ON a.id = i.analysis_id
+            WHERE i.verified_at IS NULL
+              AND i.verify_date <= ?
+              AND i.verify_date >= ?
+              AND i.pre_verify_reminder_sent = 0
+            ORDER BY i.verify_date ASC
+        """, (cutoff, now_iso), fetch=True)
+
+        if not indicators:
+            return jsonify({"status": "ok", "reminders": 0, "message": f"no indicators due within {days_ahead}d"})
+
+        # Build reminder message
+        lines = []
+        for ind in indicators:
+            iid, desc, vdate, is_binary, confirms, pre_sent, analysis_topic = ind
+            # Compute days until verification
+            try:
+                verify_dt = datetime.strptime(vdate[:10], "%Y-%m-%d")
+                days_left = (verify_dt - datetime.utcnow()).days
+                days_str = f"{days_left}д" if days_left > 0 else "СЕГОДНЯ" if days_left == 0 else "ПРОСРОЧЕН"
+            except Exception:
+                days_str = "?"
+
+            line = f"▸ {desc[:100]}\n  Верификация: {vdate[:10]} ({days_str})\n  Подтверждает: {confirms[:80]}"
+            if analysis_topic:
+                line += f"\n  Анализ: {analysis_topic[:60]}"
+            lines.append(line)
+
+            # Mark as pre-reminded
+            _query("UPDATE indicator SET pre_verify_reminder_sent = 1 WHERE id = ?", (iid,))
+
+        # Send consolidated message
+        msg = f"⏰ I&W Пред-напоминания ({days_ahead}д до верификации):\n\n"
+        msg += "\n\n".join(lines[:8])
+        if len(lines) > 8:
+            msg += f"\n\n...и ещё {len(lines) - 8} индикаторов"
+
+        msg += "\n\n/osp verify <id> — верифицировать индикатор"
+
+        _send_telegram_message(owner_id, msg)
+
+        _log_audit('indicator_pre_reminders', {'count': len(indicators), 'days_ahead': days_ahead}, 'osp')
+        log.info(f"Indicator pre-reminders: {len(indicators)} indicators within {days_ahead}d")
+        return jsonify({"status": "ok", "reminders": len(indicators), "days_ahead": days_ahead})
+
+    except Exception as e:
+        log.error(f"indicator_pre_reminders error: {e}")
+        _log_audit("indicator_pre_reminders_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  EXPERT CHART ENDPOINT
 #  Called by mlog via http_post to generate PNG charts (residual value,
 #  operation cost, TCO comparison) using scripts/expert_charts.py
@@ -5533,7 +5706,8 @@ if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
-             f"expert/chart, tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
+             f"expert/chart, tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*, "
+             f"scheduler/watch-sweep, scheduler/indicator-pre-reminders")
     app.run(host="127.0.0.1", port=PORT, threaded=True)
 
 
