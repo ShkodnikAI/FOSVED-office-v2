@@ -1,9 +1,92 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// Fosved Office v2 — OSP Dispatcher (ENRICHED v2)
+// Full strategic analysis engine: 24 skills (3 tiers) + domain classification + depth routing
+// + Tavily/Telegram search + structured analysis modes + verification + calibration
 
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN DISPATCHER — routes sub-commands within OSP
+// ═══════════════════════════════════════════════════════════════════════
 pattern HandleOSP(query: String, chat_id: String) -> String {
   let dept = "osp"
-  let context = BuildContext(dept, query, chat_id)
+  let t = lower(query)
+
+  // ── Depth routing ──
+  if starts_with(t, "/osp quick") or starts_with(t, "/osp fast") then {
+    let q = substring(query, 10.0, 300.0)
+    return OSPQuickAnalyze(q, chat_id)
+  }
+  if starts_with(t, "/osp deep") then {
+    let q = substring(query, 9.0, 300.0)
+    return OSPDeepAnalyze(q, chat_id)
+  }
+  if starts_with(t, "/osp full") then {
+    let q = substring(query, 9.0, 300.0)
+    return OSPFullAnalyze(q, chat_id)
+  }
+  if starts_with(t, "/osp wargame") then {
+    let q = substring(query, 12.0, 300.0)
+    return OSPWargame(q, chat_id)
+  }
+
+  // ── Domain-specific modes ──
+  if starts_with(t, "/osp regime") then {
+    let q = substring(query, 11.0, 300.0)
+    return OSPRegimeScan(q, chat_id)
+  }
+  if starts_with(t, "/osp cantillon") then {
+    let q = substring(query, 13.0, 300.0)
+    return OSPCantillonScan(q, chat_id)
+  }
+  if starts_with(t, "/osp narrative") then {
+    let q = substring(query, 13.0, 300.0)
+    return OSPNarrativeScan(q, chat_id)
+  }
+
+  // ── Verification & calibration ──
+  if starts_with(t, "/osp verify") then {
+    let q = substring(query, 11.0, 300.0)
+    return OSPVerify(q, chat_id)
+  }
+  if starts_with(t, "/osp score") or starts_with(t, "/osp brier") then {
+    return OSPCalibrationScore(chat_id)
+  }
+  if starts_with(t, "/osp recalibrate") then {
+    return OSPRecalibrate(chat_id)
+  }
+  if starts_with(t, "/osp bet") then {
+    let q = substring(query, 8.0, 300.0)
+    return OSPRegisterBet(q, chat_id)
+  }
+
+  // ── Red team ──
+  if starts_with(t, "/osp redteam") or starts_with(t, "/osp red-team") then {
+    let q = substring(query, 12.0, 300.0)
+    return OSPRedteam(q, chat_id)
+  }
+
+  // ── I&W Watchlist ──
+  if starts_with(t, "/osp watch") then {
+    let q = substring(query, 10.0, 300.0)
+    return OSPWatch(q, chat_id)
+  }
+  if starts_with(t, "/osp unwatch") then {
+    let q = substring(query, 12.0, 300.0)
+    return OSPUnwatch(q, chat_id)
+  }
+
+  // ── Tavily real web search ──
+  if starts_with(t, "/osp tavily") then {
+    let q = substring(query, 10.0, 300.0)
+    return OSPTavilySearch(q, chat_id)
+  }
+  // ── Telegram channel search ──
+  if starts_with(t, "/osp tg") or starts_with(t, "/osp telegram") then {
+    let q = substring(query, 7.0, 300.0)
+    return OSPTelegramSearch(q, chat_id)
+  }
+
+  // ── Domain classification + enriched context (default) ──
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy(dept, messages)
   if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
@@ -12,6 +95,493 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
   kv_set("last_model_" + dept, used_provider + " / " + used_model)
   let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
+  let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=auto query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DOMAIN CLASSIFIER — determines strategic domain
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPClassifyDomain(query: String) -> String {
+  let t = lower(query)
+  // Financial / market
+  if contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "золот") or contains(t, "gold") or contains(t, "спред") or contains(t, "доходност") or contains(t, "vix") then { return "financial" }
+  // Monetary / macro
+  if contains(t, "ставк") or contains(t, "инфляци") or contains(t, "рецесси") or contains(t, "стагфляци") or contains(t, "эмисси") or contains(t, "центробанк") or contains(t, "фрс") or contains(t, "есб") or contains(t, "qe") or contains(t, "qt") or contains(t, "ввп") or contains(t, "gdp") or contains(t, "безработ") or contains(t, "монетарн") then { return "monetary" }
+  // Geopolitical
+  if contains(t, "геополитик") or contains(t, "альянс") or contains(t, "санкци") or contains(t, "nato") or contains(t, "нато") or contains(t, "брикс") or contains(t, "шос") or contains(t, "войн") or contains(t, "конфликт") or contains(t, "эскалац") or contains(t, "дипломат") or contains(t, "суверенитет") or contains(t, "сфер влия") then { return "geopolitical" }
+  // Military
+  if contains(t, "армия") or contains(t, "вооружен") or contains(t, "фронт") or contains(t, "наступлен") or contains(t, "оборон") or contains(t, "ракет") or contains(t, "дрон") or contains(t, "гиперзвук") or contains(t, "ядерн") or contains(t, "oob") or contains(t, "порядок боя") then { return "military" }
+  // Corporate / business
+  if contains(t, "компани") or contains(t, "корпорац") or contains(t, "бизнес") or contains(t, "стратег") or contains(t, "конкурент") or contains(t, "рыночн дол") or contains(t, "m&a") or contains(t, "слиян") or contains(t, "поглощен") then { return "corporate" }
+  // Political
+  if contains(t, "президент") or contains(t, "выбор") or contains(t, "парламент") or contains(t, "правительств") or contains(t, "оппозиц") or contains(t, "протест") or contains(t, "переворот") or contains(t, "импичмент") then { return "political" }
+  // Default
+  return "general"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OSP CONTEXT BUILDER — enriched with domain KB + skills + temporal anchor
+// ═══════════════════════════════════════════════════════════════════════
+pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile("osp")
+  let skills = LoadOSPEnrichedSkills(query, domain)
+  let corrections = GetCorrections("osp")
+  let dialog = GetRecentDialog(chat_id, "10")
+  let memories = YanaRecallMemories(query)
+  let now_info = YanaNowInfo()
+  let domain_kb = OSPDomainKB(domain)
+
+  // Fresh news for OSP
+  let news = ""
+  let news_body = json_encode({query: query, dept: "osp", limit: 5})
+  let news_result = try http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json")
+  if to_string(news_result) != "()" then {
+    let news_parsed = parse_json(news_result)
+    let news = json_get(news_parsed, "news", "")
+  }
+
+  // Guard against Unit from try
+  let s_memories = to_string(memories)
+  if s_memories == "()" then { let s_memories = "" }
+  let s_corrections = to_string(corrections)
+  if s_corrections == "()" then { let s_corrections = "" }
+  let s_dialog = to_string(dialog)
+  if s_dialog == "()" then { let s_dialog = "" }
+  let s_now = to_string(now_info)
+  if s_now == "()" then { let s_now = "" }
+  let s_skills = to_string(skills)
+  if s_skills == "()" then { let s_skills = "" }
+
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Fresh News ===\n" + news + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
+
+  // CRITICAL: Temporal anchor — duplicate date at end of context so LLM doesn't forget
+  let context = context + "\n\n=== ПОВТОР: ТЕКУЩАЯ ДАТА ===\n" + s_now + "\nВНИМАНИЕ: Все даты в препарировании, ID, прогнозы и индикаторы должны привязываться к этой дате. Запрещено использовать любые другие даты как текущие. Если в АРХИВЕ ПРОШЛЫХ СЕССИЙ есть похожее препарирование — это НЕ образец для переписывания. Проведи НОВЫЙ анализ на текущую дату с актуальными событиями. Дата в шапке, ID, все индикаторы и даты проверки — считай ТОЛЬКО от текущей даты, никогда от даты старого отчёта. КРИТИЧНО: дату в шапке отчёта копируй ПОСИМВОЛЬНО из значения выше, точь-в-точь, без округления, без сдвига на дни, без «примерно»."
+
+  // News instruction
+  if news != "" then {
+    let context = context + "\n\nУчитывай эти свежие события в своём анализе. Ссылайся на них если релевантны."
+  }
+
+  return context
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DOMAIN KNOWLEDGE BASE — strategic domain KB
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPDomainKB(domain: String) -> String {
+  let kb = ""
+
+  let kb = kb + "ОСП ТОПОЛОГИЧЕСКАЯ МОДЕЛЬ:\n"
+  let kb = kb + "5 уровней: Корни (Roots) → Стебель (Stem) → Ветви (Branches) → Плоды (Fruits) → Семена (Seeds)\n"
+  let kb = kb + "Формула: P = A × R × S × L × E_modifier\n"
+  let kb = kb + "Маркировка: [ФАКТ] / [ИНТЕРПРЕТАЦИЯ] / [СПЕКУЛЯЦИЯ]\n"
+  let kb = kb + "Шкала Шермана Кента: 1c→7d для вероятностей\n"
+  let kb = kb + "Two-paths synthesis: базовый vs альтернативный → вероятности → синтез\n\n"
+
+  // ── FINANCIAL domain ──
+  if domain == "financial" then {
+    let kb = kb + "ФИНАНСОВЫЙ АНАЛИЗ — фокус:\n"
+    let kb = kb + "- Перекрёстные сигналы: bonds vs equities vs commodities vs FX\n"
+    let kb = kb + "- Cross-asset divergence: где расхождение → один ошибается → торговый сигнал\n"
+    let kb = kb + "- Asymmetric bet: bounded downside + large upside\n"
+    let kb = kb + "- Antifragility: позиция должна усиливаться от волатильности\n"
+    let kb = kb + "- Cantillon: первый получатель эмиссии vs последний платит инфляцию\n"
+    let kb = kb + "- Кризисные сигналы: yield curve inversion, credit stress, bank runs\n\n"
+  }
+
+  // ── MONETARY domain ──
+  if domain == "monetary" then {
+    let kb = kb + "МОНЕТАРНЫЙ АНАЛИЗ — фокус:\n"
+    let kb = kb + "- Macro regime: инфляционный рост / стагфляция / рецессия / дезинфляция\n"
+    let kb = kb + "- ЦБ действия: ставки, QE/QT, forward guidance, интервенции\n"
+    let kb = kb + "- Cantillon: порядок получения эмиссии → распределение богатства\n"
+    let kb = kb + "- Narrative vs flows: что ЦБ говорит vs что данные показывают\n"
+    let kb = kb + "- Cycle position: Kondratieff / Juglar / Kitchin — где сейчас\n"
+    let kb = kb + "- I&W: индикаторы смены режима (30/60/90/180 дней)\n\n"
+  }
+
+  // ── GEOPOLITICAL domain ──
+  if domain == "geopolitical" then {
+    let kb = kb + "ГЕОПОЛИТИЧЕСКИЙ АНАЛИЗ — фокус:\n"
+    let kb = kb + "- Баланс сил и его изменение\n"
+    let kb = kb + "- Санкции: эффективность, обходные схемы, unintended consequences\n"
+    let kb = kb + "- Альянсы: БРИКС, ШОС, НАТО, ООН — сдвиги, новые члены\n"
+    let kb = kb + "- Сферы влияния: торговые маршруты, контроль ресурсов, военные базы\n"
+    let kb = kb + "- Narrative vs flows: что заявляют лидеры vs реальные потоки\n"
+    let kb = kb + "- Order of battle: военный баланс в регионе\n"
+    let kb = kb + "- I&W: индикаторы эскалации/деэскалации\n\n"
+  }
+
+  // ── MILITARY domain ──
+  if domain == "military" then {
+    let kb = kb + "ВОЕННЫЙ АНАЛИЗ — фокус:\n"
+    let kb = kb + "- Order of battle: силы сторон, техника, логистика, мораль\n"
+    let kb = kb + "- Phase transition detection: признаки смены фазы конфликта\n"
+    let kb = kb + "- Schelling points: точки естественного соглашения\n"
+    let kb = kb + "- Red team: встречный анализ — что если противник прав?\n"
+    let kb = kb + "- Каскадные эффекты: эскалация → смежные фронты → глобальные последствия\n"
+    let kb = kb + "- I&W: индикаторы наступления/отступления/переговоров\n\n"
+  }
+
+  // ── CORPORATE domain ──
+  if domain == "corporate" then {
+    let kb = kb + "КОРПОРАТИВНЫЙ АНАЛИЗ — фокус:\n"
+    let kb = kb + "- Стратегические манёвры: M&A, pivot, vertical integration\n"
+    let kb = kb + "- Forces and potentials: P=A×R×S×L — мотивация, ресурсы, задача, рычаг\n"
+    let kb = kb + "- Reflexive impact: наше действие меняет поле противника\n"
+    let kb = kb + "- Конкурентная позиция: доля рынка, moat, switching costs\n"
+    let kb = kb + "- Decision tree: решения → вероятности → исходы → ожидаемая ценность\n\n"
+  }
+
+  // ── POLITICAL domain ──
+  if domain == "political" then {
+    let kb = kb + "ПОЛИТИЧЕСКИЙ АНАЛИЗ — фокус:\n"
+    let kb = kb + "- Deep profiling: ключевые фигуры, мотивация, рычаги\n"
+    let kb = kb + "- Narrative vs flows: заявления vs реальные действия/потоки\n"
+    let kb = kb + "- Cycle position: предвыборный / поствыборный / кризисный период\n"
+    let kb = kb + "- Cantillon: кто получает выгоду от политических решений\n"
+    let kb = kb + "- I&W: индикаторы политических изменений\n\n"
+  }
+
+  return kb
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ENRICHED SKILL LOADING — 3-tier with expanded triggers
+// ═══════════════════════════════════════════════════════════════════════
+pattern LoadOSPEnrichedSkills(query: String, domain: String) -> String {
+  let t = lower(query)
+  let result = ""
+  let budget = 25000.0
+
+  // ── Tier 1: Methodological core (always) ──
+  let s = read_file("skills/deconstruct/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- deconstruct ---\n" + s }
+  let s = read_file("skills/awareness-frame/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- awareness-frame ---\n" + s }
+  let s = read_file("skills/root-cause-mapping/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- root-cause-mapping ---\n" + s }
+  let s = read_file("skills/forces-and-potentials/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- forces-and-potentials ---\n" + s }
+  let s = read_file("skills/strategic-maneuvers/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- strategic-maneuvers ---\n" + s }
+  let s = read_file("skills/two-paths-synthesis/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- two-paths-synthesis ---\n" + s }
+  let s = read_file("skills/decision-tree-forecast/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- decision-tree-forecast ---\n" + s }
+  let s = read_file("skills/reflexive-impact/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- reflexive-impact ---\n" + s }
+  let s = read_file("skills/calibration/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- calibration ---\n" + s }
+  let s = read_file("skills/system-health-diagnostics/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- system-health-diagnostics ---\n" + s }
+
+  // ── Tier 2: Domain depth (expanded triggers) ──
+  // Finance / markets (expanded: +фондов, +бирж, +портфель)
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "gold") or contains(t, "золот") or contains(t, "фондов") or contains(t, "бирж") or contains(t, "портфель") or domain == "financial") and len(result) < budget then {
+    let s = read_file("skills/cross-asset-divergence/SKILL.md")
+    if s != "" then { let result = result + "\n--- cross-asset-divergence ---\n" + s }
+  }
+  // Monetary / macro (expanded: +эмисси, +инфляци, +центробанк, +ФРС, +ЕЦБ)
+  if (contains(t, "ставк") or contains(t, "инвестиц") or contains(t, "риск") or contains(t, "инфляци") or contains(t, "эмисси") or contains(t, "центробанк") or contains(t, "фрс") or contains(t, "есб") or contains(t, "монетарн") or contains(t, "рецесси") or contains(t, "стагфляци") or contains(t, "рынок") or contains(t, "валют") or domain == "monetary") and len(result) < budget then {
+    let s = read_file("skills/macro-regime-id/SKILL.md")
+    if s != "" then { let result = result + "\n--- macro-regime-id ---\n" + s }
+    let s = read_file("skills/cantillon/SKILL.md")
+    if s != "" then { let result = result + "\n--- cantillon ---\n" + s }
+    let s = read_file("skills/asymmetric-bet-structure/SKILL.md")
+    if s != "" then { let result = result + "\n--- asymmetric-bet-structure ---\n" + s }
+    let s = read_file("skills/antifragility-design/SKILL.md")
+    if s != "" then { let result = result + "\n--- antifragility-design ---\n" + s }
+  }
+  // Person / leader (expanded: +министр, +губернатор, +цб, +председатель)
+  if (contains(t, "персона") or contains(t, "лидер") or contains(t, "президент") or contains(t, "глава") or contains(t, "министр") or contains(t, "губернатор") or contains(t, "ceo") or contains(t, "исчез") or contains(t, "председатель") or contains(t, "канцлер") or contains(t, "премьер")) and len(result) < budget then {
+    let s = read_file("skills/deep-profiling/SKILL.md")
+    if s != "" then { let result = result + "\n--- deep-profiling ---\n" + s }
+  }
+  // Narrative / media (expanded: +поток, +движени, +расход, +финансов — для narrative-vs-flows)
+  if (contains(t, "нарратив") or contains(t, "пропаганд") or contains(t, "заявлен") or contains(t, "сми") or contains(t, "media") or contains(t, "информаци") or contains(t, "поток") or contains(t, "движени") or contains(t, "расход") or contains(t, "финпоток") or contains(t, "отток") or contains(t, "приток")) and len(result) < budget then {
+    let s = read_file("skills/narrative-vs-flows/SKILL.md")
+    if s != "" then { let result = result + "\n--- narrative-vs-flows ---\n" + s }
+  }
+  // Sources / verification
+  if (contains(t, "источник") or contains(t, "проверь") or contains(t, "правда") or contains(t, "фактчек") or contains(t, "верифи")) and len(result) < budget then {
+    let s = read_file("skills/source-triangulation/SKILL.md")
+    if s != "" then { let result = result + "\n--- source-triangulation ---\n" + s }
+  }
+  // Cycles (expanded: +волна, +фаза, +перелом)
+  if (contains(t, "цикл") or contains(t, "фаза") or contains(t, "перелом") or contains(t, "кондратьев") or contains(t, "juglar") or contains(t, "волна") or contains(t, "kondratieff")) and len(result) < budget then {
+    let s = read_file("skills/cycle-position/SKILL.md")
+    if s != "" then { let result = result + "\n--- cycle-position ---\n" + s }
+  }
+  // I&W (expanded: +ранн, +предсказ, +триггер)
+  if (contains(t, "индикатор") or contains(t, "наблюден") or contains(t, "watch") or contains(t, "тревог") or contains(t, "ранн") or contains(t, "предсказ") or contains(t, "триггер") or contains(t, "i&w") or contains(t, "iw ")) and len(result) < budget then {
+    let s = read_file("skills/iw-watchlist/SKILL.md")
+    if s != "" then { let result = result + "\n--- iw-watchlist ---\n" + s }
+  }
+
+  // ── Tier 3: Special techniques (expanded triggers) ──
+  if (contains(t, "война") or contains(t, "армия") or contains(t, "фронт") or contains(t, "наступлен") or contains(t, "воен") or contains(t, "оборон") or contains(t, "ракет") or domain == "military") and len(result) < budget then {
+    let s = read_file("skills/order-of-battle/SKILL.md")
+    if s != "" then { let result = result + "\n--- order-of-battle ---\n" + s }
+  }
+  if (contains(t, "коллапс") or contains(t, "обвал") or contains(t, "транзит") or contains(t, "фазов") or contains(t, "перелом") or contains(t, "инфлекци")) and len(result) < budget then {
+    let s = read_file("skills/phase-transition-detection/SKILL.md")
+    if s != "" then { let result = result + "\n--- phase-transition-detection ---\n" + s }
+  }
+  if (contains(t, "переговор") or contains(t, "коалиц") or contains(t, "консенсус") or contains(t, "сделк") or contains(t, "компромисс")) and len(result) < budget then {
+    let s = read_file("skills/schelling-points/SKILL.md")
+    if s != "" then { let result = result + "\n--- schelling-points ---\n" + s }
+  }
+  if (contains(t, "контр") or contains(t, "redteam") or contains(t, "red-team") or contains(t, "слеп") or contains(t, "оппонент") or contains(t, "критик") or contains(t, "контраргумент")) and len(result) < budget then {
+    let s = read_file("skills/red-team/SKILL.md")
+    if s != "" then { let result = result + "\n--- red-team ---\n" + s }
+  }
+
+  // ── Domain auto-injection ──
+  if domain == "financial" then {
+    let ds = "ФИНАНСОВЫЙ ДОМЕН — дополнительно:\n- Cross-asset divergence: bonds vs equities vs commodities vs currencies\n- Asymmetric bet: downside bounded, upside large/unbounded\n- Antifragility: position benefits from volatility"
+    if len(result) < budget then { let result = result + "\n--- financial-domain ---\n" + ds }
+  }
+  if domain == "monetary" then {
+    let ds = "МОНЕТАРНЫЙ ДОМЕН — дополнительно:\n- Macro regime identification: which regime are we in?\n- Cantillon: order of receipt determines wealth distribution\n- Cycle position: Kondratieff/Juglar/Kitchin — where now?"
+    if len(result) < budget then { let result = result + "\n--- monetary-domain ---\n" + ds }
+  }
+  if domain == "geopolitical" then {
+    let ds = "ГЕОПОЛИТИЧЕСКИЙ ДОМЕН — дополнительно:\n- Narrative vs flows: compare official statements with actual capital/military flows\n- I&W watchlist: early warning indicators for scenario triggers\n- Source triangulation: verify claims through independent sources"
+    if len(result) < budget then { let result = result + "\n--- geopolitical-domain ---\n" + ds }
+  }
+
+  if result == "" then { return "No OSP skills loaded." }
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DEPTH-ROUTED ANALYSIS MODES
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Quick: depth=0, 2-3 key insights, ~200 words ──
+pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: БЫСТРЫЙ АНАЛИЗ (depth=0)\nОграничения: 200-300 слов, 2-3 ключевых инсайта.\nФормат:\n1. Суть (1 предложение)\n2. Главный риск\n3. Главное действие\nБез слоёв, без развёрнутой топологии. Суть — риск — действие."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_quick", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ── Deep: depth=3, full 4-phase deconstruct, 8-10 слоёв ──
+pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: ГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3)\nПолный протокол deconstruct: 4 фазы (Reconnaissance → 12-Layer Preparation → Staff Block → Forecast).\n8-10 слоёв топологического анализа.\nВсе утверждения маркированы: [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ].\nВероятности по шкале Шермана Кента.\nTwo-paths synthesis обязателен.\nИндикаторы для наблюдения (30/60/90/180/365 дней).\nНе менее 2000 символов."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_deep", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ── Full: depth=4, deep + red team + I&W + verification dates ──
+pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: ПОЛНЫЙ АНАЛИЗ (depth=4)\nВсё что в depth=3, плюс:\n- Red team: встречный анализ — аргументы за альтернативную позицию\n- I&W Watchlist: индикаторы раннего предупреждения для каждого сценария\n- Verification dates: конкретные даты когда проверять прогноз\n- Asymmetric bet identification: bounded downside + large upside\n- Calibrated probabilities: Brier-score compatible\nНе менее 3000 символов."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_full", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ── Wargame: depth=2, structured conflict/negotiation simulation ──
+pattern OSPWargame(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: WARGAME (depth=2)\nСтруктурированная конфликтная симуляция:\n1. Стороны и их интересы (реальные, не заявленные)\n2. Силы и ресурсы каждой стороны (P=A×R×S×L)\n3. Возможные ходы каждой стороны\n4. Дерево решений: ход → реакция → исход\n5. Schelling points: точки естественного соглашения\n6. Равновесие Нэша (если есть)\n7. Наша оптимальная стратегия\n8. Красные флаги и неожиданные ходы противника\nМинимум 1500 символов."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_wargame", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DOMAIN-SPECIFIC STRUCTURED SCANS
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern OSPRegimeScan(query: String, chat_id: String) -> String {
+  let context = BuildOSPContext(query, "monetary", chat_id)
+  let prompt = context + "\n\nРЕЖИМ: ИДЕНТИФИКАЦИЯ МАКРО-РЕЖИМА\nСтруктура:\n1. Текущий режим: инфляционный рост / стагфляция / рецессия / дезинфляция\n2. Ключевые индикаторы: ВВП, инфляция, ставки, безработица, yield curve\n3. Действия ЦБ: что делают, что сигналят, что рынок ожидает\n4. Перекрёстные сигналы: bonds vs equities vs commodities vs FX\n5. Кантильон: первый получатель текущей политики, кто платит\n6. Нарратив vs реальность: что заявляют ЦБ vs что данные\n7. Сдвиг режима: индикаторы перехода в другой режим (I&W)\n8. Инвестиционные последствия каждого сценария\n\nЦифры, графики данных, конкретные источники."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Macro regime: " + query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_regime", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+pattern OSPCantillonScan(query: String, chat_id: String) -> String {
+  let context = BuildOSPContext(query, "monetary", chat_id)
+  let prompt = context + "\n\nРЕЖИМ: АНАЛИЗ КАНТИЛЬОНА\nСтруктура:\n1. Что создаёт новые деньги/ресурсы? (эмиссия, дефицит, кредит)\n2. Порядок получения: кто первый → кто последний\n3. Первый получатель: выгода (покупает по старым ценам)\n4. Последний получатель: платит инфляцию (покупает по новым ценам)\n5. Перекрёстные эффекты: как это влияет на активы, зарплаты, долги\n6. Кто выигрывает, кто проигрывает — конкретные группы/секторы\n7. Исторические аналоги этого распределения\n8. Стратегические последствия: как позиционироваться\n\nИмена, цифры, конкретика."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Cantillon: " + query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_cantillon", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+pattern OSPNarrativeScan(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: НАРРАТИВ vs ПОТОКИ\nСтруктура:\n1. Нарратив: что заявляют официально (правительство, ЦБ, корпорации, СМИ)\n2. Реальные потоки: куда идут деньги, люди, ресурсы, информация\n3. Расхождения: где нарратив и потоки противоречат друг другу\n4. Почему расхождение: намеренная дезинформация / самообман / лаг данных\n5. Сигнал: расхождение = самый сильный сигнал в анализе\n6. Прогноз по нарративу vs прогноз по потокам\n7. Какой прогноз правильнее (и почему)\n8. Действия на основе реальных потоков\n\nКонкретные заявления + конкретные цифры потоков."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Narrative vs flows: " + query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_narrative", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// VERIFICATION & CALIBRATION
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern OSPVerify(query: String, chat_id: String) -> String {
+  // query = analysis ID or topic
+  let rows = query("SELECT id, topic, confidence, verification_date, created_at FROM analysis WHERE status = 'drafted' AND topic LIKE ? ORDER BY created_at DESC LIMIT 5", ["%" + query + "%"])
+  if len(rows) == 0.0 then {
+    return "Нет найденных анализов для верификации по запросу: " + query + "\nИспользуйте /archive osp чтобы посмотреть архив."
+  }
+  let context = BuildOSPContext(query, "general", chat_id)
+  let prompt = context + "\n\nРЕЖИМ: ВЕРИФИКАЦИЯ ПРОГНОЗА\nНайди прошлый анализ по этой теме в архиве.\nСравни прогноз с реальностью:\n1. Что предсказали (вероятности, индикаторы, сроки)\n2. Что произошло на самом деле\n3. MAPE (mean absolute percentage error) если есть численные прогнозы\n4. Систематическая ошибка: завышение/занижение вероятностей\n5. Что сработало в анализе\n6. Что не сработало и почему\n7. Corrigendum: что нужно исправить в методологии\n8. Brier score для калибровки"
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Верифицируй: " + query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_verify", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+pattern OSPCalibrationScore(chat_id: String) -> String {
+  // Count verified vs unverified analyses
+  let total = query("SELECT COUNT(*) as c FROM analysis", [])
+  let verified = query("SELECT COUNT(*) as c FROM analysis WHERE status = 'verified'", [])
+  let t_count = get(get(total, 0.0), "c")
+  let v_count = get(get(verified, 0.0), "c")
+  let context = BuildOSPContext("калибровка Brier score", "general", chat_id)
+  let prompt = context + "\n\nРЕЖИМ: КАЛИБРОВОЧНЫЙ СКОР\nВсего анализов: " + to_string(t_count) + "\nВерифицировано: " + to_string(v_count) + "\n\nСтруктура:\n1. Количество верифицированных прогнозов\n2. Brier score: средний (forecast - outcome)^2 по всем прогнозам\n3. Calibration curve: predicted probability vs actual frequency\n4. Систематические смещения: завышение/занижение confidence\n5. Рекомендации по улучшению калибровки\n\nЕсли данных мало — так и скажи. Не выдумывай цифры."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Покажи калибровочный скор ОСП"}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_score", "osp", "calibration check")
+  return reply
+}
+
+pattern OSPRecalibrate(chat_id: String) -> String {
+  let context = BuildOSPContext("рекалибровка методологии", "general", chat_id)
+  let prompt = context + "\n\nРЕЖИМ: РЕКАЛИБРОВКА\nЕжемесячный пересмотр методологии ОСП:\n1. Какие ошибки повторяются\n2. Какие навыки недоиспользуются\n3. Где калибровка系统性 смещена\n4. Какие домены требуют обновления KB\n5. 3 конкретных изменения для следующего месяца\n\nОпиши конкретно. Не общими словами."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Рекалибровка ОСП"}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_recalibrate", "osp", "monthly review")
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RED TEAM & ASYMMETRIC BETS
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern OSPRedteam(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: RED TEAM\nВстречный анализ. Твоя задача — найти слабые места в доминирующем нарративе:\n1. Сформулируй доминирующий тезис\n2. Найди 5 аргументов ПРОТИВ (даже если ты лично с ними не согласен)\n3. Для каждого: насколько он вероятен, что бы это значило если он прав\n4. Асимметрия: если прав доминирующий тезис — выигрыш X, если прав контраргумент — потеря Y\n5. Рекомендация: учитывать контраргумент или нет, и как захеджировать\n\nБудь жёстким. Красная команда не соглашается — она ищет дыры."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Red team: " + query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_redteam", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+pattern OSPRegisterBet(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: АСИММЕТРИЧНАЯ СТАВКА\nСтруктурируй тезис как асимметричную ставку:\n1. Тезис (что ты считаешь верным)\n2. Верхняя граница убытка (bounded downside): максимум сколько можно потерять\n3. Потенциальный выигрыш (upside): насколько большим может быть выигрыш\n4. Соотношение upside/downside\n5. Условия при которых тезис неверен (выход из ставки)\n6. Временной горизонт: когда проверить\n7. Механизм исполнения: как именно реализовать эту позицию\n\nБез абстракции — конкретные цифры и инструменты."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Ставка: " + query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_bet", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// I&W WATCHLIST
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern OSPWatch(query: String, chat_id: String) -> String {
+  // Register an indicator to watch
+  let _ = db_execute("INSERT INTO lz_monitors (query, sources, frequency, last_scan) VALUES (?, 'osp-iw', 'daily', '')", [query])
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: I&W WATCHLIST — ДОБАВИТЬ ИНДИКАТОР\nДля указанного сценария/риска определи:\n1. Индикаторы на 30 дней (ранний сигнал)\n2. Индикаторы на 60 дней\n3. Индикаторы на 90 дней\n4. Индикаторы на 180 дней\n5. Индикаторы на 365 дней\n6. Порог срабатывания: при каком значении индикатор считается активированным\n7. Действие при активации: что делать\n\nФормат: каждый индикатор — конкретный, измеримый, с источником данных."
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Watch: " + query}])
+  let proxy_result = CallLLMProxy("osp", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_watch", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+pattern OSPUnwatch(query: String, chat_id: String) -> String {
+  let _ = db_execute("DELETE FROM lz_monitors WHERE query = ? AND sources = 'osp-iw'", [query])
+  let _ = AuditLog("osp_unwatch", "osp", "removed: " + substring(query, 0, 100))
+  return "Индикатор удалён из I&W watchlist: " + query
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TAVILY & TELEGRAM SEARCH (same pattern as LZ)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern OSPTavilySearch(query: String, chat_id: String) -> String {
+  let body = json_encode({query: query, dept: "osp", chat_id: chat_id})
+  let result = try http_post("http://127.0.0.1:4000/lz/tavily", body, "application/json")
+  if to_string(result) == "()" then { return "Tavily недоступен. Установите TAVILY_API_KEY." }
+  let reply = json_get(parse_json(result), "response", "Tavily search failed.")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_tavily", "osp", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+pattern OSPTelegramSearch(query: String, chat_id: String) -> String {
+  let body = json_encode({query: query, dept: "osp", chat_id: chat_id})
+  let result = try http_post("http://127.0.0.1:4000/lz/telegram", body, "application/json")
+  if to_string(result) == "()" then { return "Telegram search недоступен." }
+  let reply = json_get(parse_json(result), "response", "Telegram search failed.")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_tg", "osp", "query: " + substring(query, 0, 100))
   return reply
 }
