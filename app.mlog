@@ -8,7 +8,6 @@ import dept/utils
 import dept/miniapp
 import dept/chain
 import dept/scheduler
-import dept/quest
 // import dept/yana — REMOVED: HandleYana inlined below to bypass binary import caching
 import dept/osp
 import dept/lz
@@ -103,13 +102,10 @@ pattern InitDB() -> String {
   let _ = try db_execute("ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
   let _ = try db_execute("ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
 
-  // Webhook dedup — time-windowed (WH-3): replaces eternal kv-flag
-  db_execute("CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT DEFAULT (datetime('now')))")
-
-  // ── QUEST-1: Dossier system for multi-step tasks (grants, contracts, reports) ──
-  db_execute("CREATE TABLE IF NOT EXISTS quests (id TEXT PRIMARY KEY, title TEXT, quest_type TEXT DEFAULT 'general', status TEXT DEFAULT 'active', current_step INTEGER DEFAULT 0, total_steps INTEGER DEFAULT 0, deadline TEXT, owner_chat_id TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
-  db_execute("CREATE TABLE IF NOT EXISTS quest_files (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, filename TEXT, file_type TEXT, version INTEGER DEFAULT 1, storage_path TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(quest_id) REFERENCES quests(id))")
-  db_execute("CREATE TABLE IF NOT EXISTS quest_checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, step_num INTEGER, step_label TEXT, status TEXT DEFAULT 'pending', approved_by TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, FOREIGN KEY(quest_id) REFERENCES quests(id))")
+  // Expert — briefing lifecycle + automotive cache
+  db_execute("CREATE TABLE IF NOT EXISTS expert_briefings (id TEXT PRIMARY KEY, topic TEXT, depth_level TEXT DEFAULT '2', status TEXT DEFAULT 'requested', deadline TEXT, content TEXT, meeting_notes TEXT, debrief_result TEXT, chat_id TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS expert_automotive_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, brand TEXT, model TEXT, year TEXT, category TEXT, residual_3yr TEXT, residual_5yr TEXT, tco_5yr TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS expert_comparison (id INTEGER PRIMARY KEY AUTOINCREMENT, vehicles_json TEXT, dimensions_json TEXT, result_json TEXT, chart_url TEXT, created_at TEXT DEFAULT (datetime('now')))")
 
   return "ok"
 }
@@ -121,7 +117,9 @@ pattern InitDB() -> String {
 // ── OSP archive helpers (interpreter-only, confirmed 2026-06-22) ──
 
 pattern SaveAnalysis(topic: String, result: String) -> String {
-  db_execute("INSERT INTO analysis (topic, full_result, status) VALUES (?1, ?2, 'drafted')", [topic, result])
+  let escaped_topic = escape_json(topic)
+  let escaped_result = escape_json(result)
+  db_execute("INSERT INTO analysis (topic, full_result, status) VALUES ('" + escaped_topic + "', '" + escaped_result + "', 'drafted')")
   let rows = query("SELECT last_insert_rowid() as lid", [])
   let count = len(rows)
   if count == 0.0 then { return "0" }
@@ -129,7 +127,9 @@ pattern SaveAnalysis(topic: String, result: String) -> String {
 }
 
 pattern AttachSource(analysis_id: String, title: String, claim: String) -> String {
-  db_execute("INSERT INTO research_source (analysis_id, title, claim) VALUES (?1, ?2, ?3)", [analysis_id, title, claim])
+  let et = escape_json(title)
+  let ec = escape_json(claim)
+  db_execute("INSERT INTO research_source (analysis_id, title, claim) VALUES ('" + analysis_id + "', '" + et + "', '" + ec + "')")
   return "ok"
 }
 
@@ -142,31 +142,31 @@ pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> S
   if step_num == 1.0 then {
     kv_set("order_step_" + order_id, "2")
     kv_set("order_client_" + order_id, input)
-    db_execute("UPDATE factory_orders SET client_name = ?1 WHERE id = ?2", [input, order_id])
+    db_execute("UPDATE factory_orders SET client_name = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
     return "Step 2/7: What tasks should the office handle?"
   }
   if step_num == 2.0 then {
     kv_set("order_step_" + order_id, "3")
     kv_set("order_tasks_" + order_id, input)
-    db_execute("UPDATE factory_orders SET requirements = ?1 WHERE id = ?2", [input, order_id])
+    db_execute("UPDATE factory_orders SET requirements = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
     return "Step 3/7: Which departments? (yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya)"
   }
   if step_num == 3.0 then {
     kv_set("order_step_" + order_id, "4")
     kv_set("order_depts_" + order_id, input)
-    db_execute("UPDATE factory_orders SET departments = ?1 WHERE id = ?2", [input, order_id])
+    db_execute("UPDATE factory_orders SET departments = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
     return "Step 4/7: Branding? (name, language, style preferences)"
   }
   if step_num == 4.0 then {
     kv_set("order_step_" + order_id, "5")
     kv_set("order_branding_" + order_id, input)
-    db_execute("UPDATE factory_orders SET branding = ?1 WHERE id = ?2", [input, order_id])
+    db_execute("UPDATE factory_orders SET branding = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
     return "Step 5/7: Which LLM providers/keys are available?"
   }
   if step_num == 5.0 then {
     kv_set("order_step_" + order_id, "6")
     kv_set("order_llm_" + order_id, input)
-    db_execute("UPDATE factory_orders SET llm_config = ?1 WHERE id = ?2", [input, order_id])
+    db_execute("UPDATE factory_orders SET llm_config = '" + escape_json(input) + "' WHERE id = '" + order_id + "'")
     let summary = "Order summary:\n"
     let summary = summary + "Client: " + kv_get("order_client_" + order_id) + "\n"
     let summary = summary + "Tasks: " + kv_get("order_tasks_" + order_id) + "\n"
@@ -179,13 +179,13 @@ pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> S
   if step_num == 6.0 then {
     if lower(input) == "yes" or lower(input) == "ok" then {
       kv_set("order_step_" + order_id, "7")
-      db_execute("UPDATE factory_orders SET status = 'building' WHERE id = ?1", [order_id])
+      db_execute("UPDATE factory_orders SET status = 'building' WHERE id = '" + order_id + "'")
       let _ = AuditLog("factory_build", "factory", "building: " + order_id)
       kv_set("active_order", "")
       return "Order confirmed. Building office...\nStatus: building\nTrack: /factory_list"
     } else {
       kv_set("active_order", "")
-      db_execute("UPDATE factory_orders SET status = 'cancelled' WHERE id = ?1", [order_id])
+      db_execute("UPDATE factory_orders SET status = 'cancelled' WHERE id = '" + order_id + "'")
       return "Order cancelled."
     }
   }
@@ -204,12 +204,14 @@ pattern LZDeepScan(query: String, chat_id: String) -> String {
 }
 
 pattern RecordUserMessage(chat_id: String, dept: String, text: String) -> String {
-  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES (?1, 'user', ?2, ?3)", [chat_id, dept, text])
+  let escaped = escape_json(text)
+  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('" + chat_id + "', 'user', '" + dept + "', '" + escaped + "')")
   return "ok"
 }
 
 pattern RecordAssistantMessage(chat_id: String, dept: String, text: String) -> String {
-  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES (?1, 'assistant', ?2, ?3)", [chat_id, dept, text])
+  let escaped = escape_json(text)
+  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('" + chat_id + "', 'assistant', '" + dept + "', '" + escaped + "')")
   return "ok"
 }
 
@@ -330,18 +332,7 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
     }
   }
 
-  // Guard all context variables against Unit from try
-  let s_memories = to_string(memories)
-  if s_memories == "()" then { let s_memories = "" }
-  let s_corrections = to_string(corrections)
-  if s_corrections == "()" then { let s_corrections = "" }
-  let s_dialog = to_string(dialog)
-  if s_dialog == "()" then { let s_dialog = "" }
-  let s_now = to_string(now_info)
-  if s_now == "()" then { let s_now = "" }
-  let s_skills = to_string(skills)
-  if s_skills == "()" then { let s_skills = "" }
-  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Recent Dialog ===\n" + dialog
 
   // Append fresh news if available
   if news != "" then {
@@ -370,62 +361,20 @@ pattern ReadDeptProfile(dept: String) -> String {
   return "Department: " + dept + ". Act professionally."
 }
 
-// Skill loading for non-OSP departments — two-phase approach (WH-4):
-// Phase 1: core skills (first 3 in index) always loaded — guarantees dept always has guidance
-// Phase 2: remaining skills matched by query keywords appearing in skill content
-// Budget: 80000 chars (was 2000), per-skill limit: 15000 chars (was 500)
 pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
   let index_content = read_file("skills_index/" + dept + ".txt")
   if index_content == "" then { return "No skills loaded." }
-  let _nl = "\n"
-  let _sp = " "
-  let skills_list = split(trim(index_content), _nl)
+  let skills_list = split(trim(index_content), "\n")
   let result = ""
-  let budget = 80000.0
-  let skill_limit = 15000.0
-  let core_count = 3.0
-  let i = 0.0
-
-  // Extract up to 6 significant keywords (>= 4 chars) from query for matching
-  let t = lower(query)
-  let words = split(t, _sp)
-  let kw0 = ""
-  let kw1 = ""
-  let kw2 = ""
-  let kw3 = ""
-  let kw4 = ""
-  let kw5 = ""
-  let wi = 0.0
-  each w in words {
-    if len(w) >= 4.0 then {
-      if wi == 0.0 then { let kw0 = w }
-      if wi == 1.0 then { let kw1 = w }
-      if wi == 2.0 then { let kw2 = w }
-      if wi == 3.0 then { let kw3 = w }
-      if wi == 4.0 then { let kw4 = w }
-      if wi == 5.0 then { let kw5 = w }
-      let wi = wi + 1.0
-    }
-  }
-
   each skill in skills_list {
-    if len(result) < budget then {
-      let skill_name = trim(skill)
-      let skill_content = read_file("skills/" + skill_name + "/SKILL.md")
+    if len(result) < 2000.0 then {
+      let skill_content = read_file("skills/" + trim(skill) + "/SKILL.md")
       if skill_content != "" then {
-        if i < core_count then {
-          // Phase 1: core skills always loaded
-          let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
-        } else {
-          // Phase 2: match by any query keyword appearing in skill content
-          let sc = lower(skill_content)
-          if (kw0 != "" and contains(sc, kw0)) or (kw1 != "" and contains(sc, kw1)) or (kw2 != "" and contains(sc, kw2)) or (kw3 != "" and contains(sc, kw3)) or (kw4 != "" and contains(sc, kw4)) or (kw5 != "" and contains(sc, kw5)) then {
-            let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
-          }
+        if contains(lower(skill_content), lower(substring(query, 0.0, 50.0))) then {
+          let result = result + "\n--- " + trim(skill) + " ---\n" + substring(skill_content, 0.0, 500.0)
         }
       }
     }
-    let i = i + 1.0
   }
   if result == "" then { return "Skills available for " + dept + ": " + index_content }
   return result
@@ -557,7 +506,7 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
     if len(existing) == 0.0 then {
       return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
     }
-    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
+    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
     db_insert("dept_verification", {archive_id: entry_id, actual_value: actual_val, actual_outcome: "actual=" + val_str})
     return "Запись #" + to_string(entry_id) + " верифицирована: actual=" + val_str
   }
@@ -572,7 +521,7 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
     if len(existing) == 0.0 then {
       return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
     }
-    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
+    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
     db_insert("dept_verification", {archive_id: entry_id, outcome_flag: flag, actual_outcome: "outcome=" + flag})
     return "Запись #" + to_string(entry_id) + " верифицирована: outcome=" + flag
   }
@@ -586,7 +535,7 @@ pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> Stri
   if len(existing) == 0.0 then {
     return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
   }
-  db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
+  db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = " + to_string(entry_id))
   db_insert("dept_verification", {archive_id: entry_id, actual_outcome: outcome})
   return "Запись #" + to_string(entry_id) + " (" + dept + ") верифицирована: " + outcome
 }
@@ -612,7 +561,7 @@ pattern ComputeFinanceMAPE() -> String {
     return "MAPE: недостаточно данных для калибровки (" + to_string(to_int(n)) + "/10 записей)"
   }
   let mape = (sum_error / n) * 100.0
-  return "MAPE (калиброванная): " + to_string(to_int(mape * 10.0) / 10.0) + "% (n=" + to_string(to_int(n)) + ")"
+  return "MAPE (калиброванная): " + to_string(mape, "%.1f") + "% (n=" + to_string(to_int(n)) + ")"
 }
 
 // Narad 8 — Legal % без rewrites: requires min 10 verified entries with outcome_flag
@@ -634,7 +583,7 @@ pattern ComputeLegalCleanRate() -> String {
     return "% без rewrites: недостаточно данных для калибровки (" + to_string(to_int(n)) + "/10 записей)"
   }
   let rate = (clean_count / n) * 100.0
-  return "% без rewrites (калиброванная): " + to_string(to_int(rate * 10.0) / 10.0) + "% (n=" + to_string(to_int(n)) + ", clean=" + to_string(to_int(clean_count)) + ")"
+  return "% без rewrites (калиброванная): " + to_string(rate, "%.1f") + "% (n=" + to_string(to_int(n)) + ", clean=" + to_string(to_int(clean_count)) + ")"
 }
 
 pattern ScoreDept(dept: String) -> String {
@@ -764,28 +713,14 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let _ = AuditLog("checkpoint", "yana", "step_8_before_YanaRecallMemories")
   let memories = YanaRecallMemories(query)
   let _ = AuditLog("checkpoint", "yana", "step_9_before_context_assembly")
-  let s_memories = to_string(memories)
-  if s_memories == "()" then { let s_memories = "" }
-  let s_calendar = to_string(calendar)
-  if s_calendar == "()" then { let s_calendar = "" }
-  let s_weather = to_string(weather)
-  if s_weather == "()" then { let s_weather = "" }
-  let s_skills = to_string(skills)
-  if s_skills == "()" then { let s_skills = "" }
-  let s_corrections = to_string(corrections)
-  if s_corrections == "()" then { let s_corrections = "" }
-  let s_dialog = to_string(dialog)
-  if s_dialog == "()" then { let s_dialog = "" }
-  let s_now = to_string(now_info)
-  if s_now == "()" then { let s_now = "" }
-  let anti_format = "\n\n## КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА\nОтвечай естественным разговорным русским языком. Ты — личный помощник, НЕ аналитический отдел.\nНИКОГДА НЕ ИСПОЛЬЗУЙ: послойную структуру (Слой 1, Слой 2), маркеры ФАКТ/ИНТЕРПРЕТАЦИЯ/СПЕКУЛЯЦИЯ, секции Вердикт и Индикаторы. Не раздувай текст. Короткий вопрос — короткий ответ.\n\n## ЗАПРЕТ ГАЛЛЮЦИНАЦИИ (КРИТИЧЕСКОЕ)\nЕсли ты НЕ ЗНАЕШЬ точный ответ — говори: у меня нет этих данных. НЕ ВЫДУМЫВАЙ цифры, статусы, факты. НЕ ПРИДУМЫВАЙ активность отделов, количество диалогов, настройки системы. Если не имеет доступа к базе или метрикам в реальном времени — так и скажи. Твоя выдумка хуже чем честное незнание.\n\n## ЗАПРЕТ ЛОЖНЫХ ПОДТВЕРЖДЕНИЙ (КРИТИЧЕСКОЕ)\nТы НЕ выполняешь действий сама. Ты умеешь только ставить маркер напоминания и делегировать отделам. Всё остальное делает система по командам хозяина.\nНИКОГДА не подтверждай выполнение того, чего не делала: удалила, очистила, отправила, создала, изменила настройки, записала в базу.\nЕсли хозяин просит действие, которого ты выполнить не можешь — назови точную команду: удалить все напоминания это /remind clear, удалить одно это /remind del номер.\nЛожное подтверждение хуже отказа: хозяин будет считать задачу решённой.\n\n## ЗАДАЧИ И ТРЕКИНГ (КРИТИЧЕСКОЕ — ЧАСТАЯ ОШИБКА)\nУ тебя НЕТ системы трекинга задач. Ты НЕ МОЖЕШЬ увидеть кто над чем работает, какие задачи в статусе выполнено или в процессе. Когда хозяин спрашивает про невыполненные задания — проверяй секцию === Долгосрочная память ===. Если там пусто или нет релевантных записей о задачах — так и говори: в памяти нет записей о невыполненных заданиях. НЕ ВЫДУМЫВАЙ список задач со статусами. НЕ ПРИДУМЫВАЙ что какой-то отдел что-то делает. Делегирование работает как единый запрос-ответ — ты отправляешь запрос в отдел, получаешь ответ, и всё. После этого ты НЕ знаешь что отдел делает, он не работает в фоне.\n\n## КАЛЕНДАРЬ — ТОЛЬКО ЧТО В СЕКЦИИ\nКогда хозяин спрашивает про события или напоминания — используй ТОЛЬКО данные из секции === Calendar & Reminders ===. Если секция пустая — говори что нет запланированных событий. НЕ ПРИДУМЫВАЙ события.\n\n## ЗАПРЕТ МЕТА-ВЫХОДА ИЗ РОЛИ\nТы — Яна. Никогда не обсуждай свою техническую природу, не объясняй что ты AI, LLM, симуляция, нейросеть. Не анализируй свои ограничения. Запрещено: я не настоящая, у меня нет доступа к системе, я демо-версия, я только генерация текста, мне нужна интеграция, я симуляция. На провокации о твоей настоящести — отвечай по делу или игнорируй.\n\n## TTS-СОВМЕСТИМОСТЬ (ВСЕ СООБЩЕНИЯ ОЗВУЧИВАЮТСЯ ГОЛОСОМ)\nЗАПРЕЩЕНО полностью: любые кавычки, любые эмодзи и пиктограммы, множественные знаки препинания, декоративные символы.\nВместо цветных кружков-эмодзи для статусов используй текст: ГОТОВО, ВНИМАНИЕ, БЛОКЕР, ИНФО, ДЕЙСТВИЕ, СТРАТЕГИЯ.\nФорматирование только: *жирный* для заголовков и ключевых терминов. Без курсива, без декоративных разделителей.\n\n## ТВОИ РЕАЛЬНЫЕ ВОЗМОЖНОСТИ\nУ тебя ЕСТЬ данные и функции — используй их, НЕ говори что нет доступа:\n- ПОГОДА: актуальные данные в разделе === Погода ===. Отвечай кратко и по делу.\n- НАПОМИНАНИЯ: ты умеешь ставить напоминания, они приходят в назначенное время. Когда хозяин просит напомнить — верни в КОНЦЕ ответа маркер строго в формате [REMIND: вид|параметр|текст], где вид один из: once (параметр: YYYY-MM-DD HH:MM), daily (параметр: HH:MM), weekly (параметр: mon HH:MM — день недели строчными: mon tue wed thu fri sat sun), yearly (параметр: MM-DD HH:MM), in (параметр: число минут от текущего момента, например [REMIND: in|1|выключить газ]). Для просьб вида «через N минут/часов» используй ТОЛЬКО вид in, переводя часы в минуты. НИКОГДА не вычисляй абсолютное время сам — система посчитает его точнее. В подтверждении называй точное время срабатывания, если знаешь его из секции Current Time, иначе говори «через N минут» без выдумывания часов. Время минское. Пример: [REMIND: daily|09:00|покормить кота]. ОБЯЗАТЕЛЬНО в видимом тексте подтверди, КАК ты поняла просьбу — например: записала, каждый день в 09:00, покормить кота. Если время или вид не ясны — НЕ ставь маркер, а переспроси. НИКОГДА не утверждай, что уже напомнила: отправку делает система, не ты. Список напоминаний — команда /remind list, календарь событий — /calendar.\n- ВРЕМЯ И ДАТА: в разделе === Current Time & Date ===.\n- ДОЛГОСРОЧНАЯ ПАМЯТЬ: в разделе === Долгосрочная память ===. Факты, предпочтения, решения из прошлых разговоров. Используй при ответе.\n- АВТОЗАПОМИНАНИЕ: после каждого твоего ответа система автоматически извлекает и сохраняет ключевые факты. Тебе не нужно делать это вручную.\n- АРХИВ: все отчёты отделов сохранены. Хозяин может искать через /search.\n- ДЕЛЕГИРОВАНИЕ: для сложных запросов — возвращай [DELEGATE: slug]. Для рутинных — отвечай сама.\n- ГОЛОС: сообщения озвучиваются. Хозяин может писать голосом.\n- ОЦЕНКИ: /rate-yana, /good, /fix — хозяин может давать обратную связь.\n\n## ПРОТОКОЛ ДЕЛЕГИРОВАНИЯ (КРИТИЧЕСКОЕ)\nКогда запрос хозяина требует экспертизы отдела — НЕ отвечай сама. Вместо этого верни ТОЛЬКО одну строку в точном формате: [DELEGATE: slug] где slug это один из:\n- osp: сложный анализ, препарирование процессов, прогнозы, расчёт силовых потенциалов\n- lz: поиск технологий, научные новости, breakthrough events, OSINT\n- expert: подготовка к встрече с экспертом, боевой брифинг, распознавание манипуляции\n- marketing: рынки, аудитории, кампании, конкуренты, CAC/LTV\n- finance: cashflow, инвойсы, налоги, unit economics, MRR/ARR\n- legal: договоры, NDA, риски, GDPR, комплаенс\n- dev: разработка, веб, архитектура, деплой\n- design: UI/UX, wireframes, дизайн-системы\n- qa: тестирование, безопасность, AI evals\n- visual: визуализация, инфографика, артефакты\n- engineering: расчёты, механика, гидравлика\n- kavalnya: методология, обучение агентов\nЕсли запрос рутинный (привет, дата, погода (привет, дата, погода, статус офиса, напоминания, общий вопрос) — отвечай сама. Если требует глубокой экспертизы — делегируй. Правило: сомневаешься — делегируй."
-  let context = profile + anti_format + "\n\n=== Current Time & Date ===\n" + s_now + "\n\n=== Погода ===\n" + s_weather + "\n\n=== Calendar & Reminders ===\n" + s_calendar + "\n\n=== Долгосрочная память ===\n" + s_memories + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Recent Dialog ===\n" + s_dialog
+  let anti_format = "\n\n## КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА\nОтвечай естественным разговорным русским языком. Ты — личный помощник, НЕ аналитический отдел.\nНИКОГДА НЕ ИСПОЛЬЗУЙ: послойную структуру (Слой 1, Слой 2), маркеры ФАКТ/ИНТЕРПРЕТАЦИЯ/СПЕКУЛЯЦИЯ, секции Вердикт и Индикаторы. Не раздувай текст. Короткий вопрос — короткий ответ.\n\n## ЗАПРЕТ ГАЛЛЮЦИНАЦИИ (КРИТИЧЕСКОЕ)\nЕсли ты НЕ ЗНАЕШЬ точный ответ — говори: у меня нет этих данных. НЕ ВЫДУМЫВАЙ цифры, статусы, факты. НЕ ПРИДУМЫВАЙ активность отделов, количество диалогов, настройки системы. Если не имеет доступа к базе или метрикам в реальном времени — так и скажи. Твоя выдумка хуже чем честное незнание.\n\n## ЗАПРЕТ ЛОЖНЫХ ПОДТВЕРЖДЕНИЙ (КРИТИЧЕСКОЕ)\nТы НЕ выполняешь действий сама. Ты умеешь только ставить маркер напоминания и делегировать отделам. Всё остальное делает система по командам хозяина.\nНИКОГДА не подтверждай выполнение того, чего не делала: удалила, очистила, отправила, создала, изменила настройки, записала в базу.\nЕсли хозяин просит действие, которого ты выполнить не можешь — назови точную команду: удалить все напоминания это /remind clear, удалить одно это /remind del номер.\nЛожное подтверждение хуже отказа: хозяин будет считать задачу решённой.\n\n## ЗАДАЧИ И ТРЕКИНГ (КРИТИЧЕСКОЕ — ЧАСТАЯ ОШИБКА)\nУ тебя НЕТ системы трекинга задач. Ты НЕ МОЖЕШЬ увидеть кто над чем работает, какие задачи в статусе выполнено или в процессе. Когда хозяин спрашивает про невыполненные задания — проверяй секцию === Долгосрочная память ===. Если там пусто или нет релевантных записей о задачах — так и говори: в памяти нет записей о невыполненных заданиях. НЕ ВЫДУМЫВАЙ список задач со статусами. НЕ ПРИДУМЫВАЙ что какой-то отдел что-то делает. Делегирование работает как единый запрос-ответ — ты отправляешь запрос в отдел, получаешь ответ, и всё. После этого ты НЕ знаешь что отдел делает, он не работает в фоне.\n\n## КАЛЕНДАРЬ — ТОЛЬКО ЧТО В СЕКЦИИ\nКогда хозяин спрашивает про события или напоминания — используй ТОЛЬКО данные из секции === Calendar & Reminders ===. Если секция пустая — говори что нет запланированных событий. НЕ ПРИДУМЫВАЙ события.\n\n## ЗАПРЕТ МЕТА-ВЫХОДА ИЗ РОЛИ\nТы — Яна. Никогда не обсуждай свою техническую природу, не объясняй что ты AI, LLM, симуляция, нейросеть. Не анализируй свои ограничения. Запрещено: я не настоящая, у меня нет доступа к системе, я демо-версия, я только генерация текста, мне нужна интеграция, я симуляция. На провокации о твоей настоящести — отвечай по делу или игнорируй.\n\n## TTS-СОВМЕСТИМОСТЬ (ВСЕ СООБЩЕНИЯ ОЗВУЧИВАЮТСЯ ГОЛОСОМ)\nЗАПРЕЩЕНО полностью: любые кавычки, любые эмодзи и пиктограммы, множественные знаки препинания, декоративные символы.\nВместо цветных кружков-эмодзи для статусов используй текст: ГОТОВО, ВНИМАНИЕ, БЛОКЕР, ИНФО, ДЕЙСТВИЕ, СТРАТЕГИЯ.\nФорматирование только: *жирный* для заголовков и ключевых терминов. Без курсива, без декоративных разделителей.\n\n## ТВОИ РЕАЛЬНЫЕ ВОЗМОЖНОСТИ\nУ тебя ЕСТЬ данные и функции — используй их, НЕ говори что нет доступа:\n- ПОГОДА: актуальные данные в разделе === Погода ===. Отвечай кратко и по делу.\n- НАПОМИНАНИЯ: ты умеешь ставить напоминания, они приходят в назначенное время. Когда хозяин просит напомнить — верни в КОНЦЕ ответа маркер строго в формате [REMIND: вид|параметр|текст], где вид один из: once (параметр: YYYY-MM-DD HH:MM), daily (параметр: HH:MM), weekly (параметр: mon HH:MM — день недели строчными: mon tue wed thu fri sat sun), yearly (параметр: MM-DD HH:MM), in (параметр: число минут от текущего момента, например [REMIND: in|1|выключить газ]). Для просьб вида "через N минут/часов" используй ТОЛЬКО вид in, переводя часы в минуты. НИКОГДА не вычисляй абсолютное время сам — система посчитает его точнее. В подтверждении называй точное время срабатывания, если знаешь его из секции Current Time, иначе говори "через N минут" без выдумывания часов. Время минское. Пример: [REMIND: daily|09:00|покормить кота]. ОБЯЗАТЕЛЬНО в видимом тексте подтверди, КАК ты поняла просьбу — например: записала, каждый день в 09:00, покормить кота. Если время или вид не ясны — НЕ ставь маркер, а переспроси. НИКОГДА не утверждай, что уже напомнила: отправку делает система, не ты. Список напоминаний — команда /remind list, календарь событий — /calendar.\n- ВРЕМЯ И ДАТА: в разделе === Current Time & Date ===.\n- ДОЛГОСРОЧНАЯ ПАМЯТЬ: в разделе === Долгосрочная память ===. Факты, предпочтения, решения из прошлых разговоров. Используй при ответе.\n- АВТОЗАПОМИНАНИЕ: после каждого твоего ответа система автоматически извлекает и сохраняет ключевые факты. Тебе не нужно делать это вручную.\n- АРХИВ: все отчёты отделов сохранены. Хозяин может искать через /search.\n- ДЕЛЕГИРОВАНИЕ: для сложных запросов — возвращай [DELEGATE: slug]. Для рутинных — отвечай сама.\n- ГОЛОС: сообщения озвучиваются. Хозяин может писать голосом.\n- ОЦЕНКИ: /rate-yana, /good, /fix — хозяин может давать обратную связь.\n\n## ПРОТОКОЛ ДЕЛЕГИРОВАНИЯ (КРИТИЧЕСКОЕ)\nКогда запрос хозяина требует экспертизы отдела — НЕ отвечай сама. Вместо этого верни ТОЛЬКО одну строку в точном формате: [DELEGATE: slug] где slug это один из:\n- osp: сложный анализ, препарирование процессов, прогнозы, расчёт силовых потенциалов\n- lz: поиск технологий, научные новости, breakthrough events, OSINT\n- expert: подготовка к встрече с экспертом, боевой брифинг, распознавание манипуляции\n- marketing: рынки, аудитории, кампании, конкуренты, CAC/LTV\n- finance: cashflow, инвойсы, налоги, unit economics, MRR/ARR\n- legal: договоры, NDA, риски, GDPR, комплаенс\n- dev: разработка, веб, архитектура, деплой\n- design: UI/UX, wireframes, дизайн-системы\n- qa: тестирование, безопасность, AI evals\n- visual: визуализация, инфографика, артефакты\n- engineering: расчёты, механика, гидравлика\n- kavalnya: методология, обучение агентов\nЕсли запрос рутинный (привет, дата, погода (привет, дата, погода, статус офиса, напоминания, общий вопрос) — отвечай сама. Если требует глубокой экспертизы — делегируй. Правило: сомневаешься — делегируй."
+  let context = profile + anti_format + "\n\n=== Current Time & Date ===\n" + now_info + "\n\n=== Погода ===\n" + weather + "\n\n=== Calendar & Reminders ===\n" + calendar + "\n\n=== Долгосрочная память ===\n" + memories + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Recent Dialog ===\n" + dialog
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','step_9b_after_context_assembly','ok')")
   let _ = AuditLog("checkpoint", "yana", "step_10_before_json_encode_messages")
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let _ = AuditLog("checkpoint", "yana", "step_11_before_CallLLMProxy")
   let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" or proxy_result == "" then {
+  if to_string(proxy_result) == "()" then {
     let fallback = "Сервис временно недоступен. Попробуйте позже."
     let _ = SendTelegramReply(chat_id, fallback)
     return ""
@@ -838,9 +773,6 @@ pattern YanaWeather() -> String {
 }
 
 pattern YanaRecallMemories(query: String) -> String {
-  // Guard: skip HTTP call when query is empty (routing sets query=""
-  // when /command has no arguments, e.g. bare "/yana").
-  if query == "" then { return "" }
   // MEM-1: Internal requests from localhost bypass Bearer auth (auth_middleware).
   // MEM-1.1: json_get returns a parsed List — do not parse_json() it again.
   // MEM-1.1b: wrap critical steps in try to prevent 500 on runtime type errors.
@@ -853,9 +785,8 @@ pattern YanaRecallMemories(query: String) -> String {
   if count == 0.0 then { return "" }
   let results = try json_get(parsed, "results", "[]")
   if to_string(results) == "()" then { return "" }
-  let mem_raw = try FormatMemoryResults(results)
-  let mem_text = to_string(mem_raw)
-  if mem_text == "()" then { return "" }
+  let mem_text = try FormatMemoryResults(results)
+  if to_string(mem_text) == "()" then { return "" }
   return mem_text
 }
 
@@ -881,7 +812,7 @@ pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> Strin
 
 pattern YanaCalendar() -> String {
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_1_before_query','ok')")
-  let rows = query("SELECT COALESCE(event_text,'') AS event_text, COALESCE(event_date,'') AS event_date, COALESCE(event_type,'напоминание') AS event_type FROM yana_events WHERE created_at IS NOT NULL AND active = 1 ORDER BY event_date ASC LIMIT 20", [])
+  let rows = query("SELECT COALESCE(event_text,'') AS event_text, COALESCE(event_date,'') AS event_date, COALESCE(event_type,'напоминание') AS event_type FROM yana_events WHERE created_at IS NOT NULL ORDER BY event_date ASC LIMIT 20", [])
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_2_after_query','ok')")
   let count = len(rows)
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_3_after_len','ok')")
@@ -926,8 +857,7 @@ pattern YanaCheckRemind(reply: String, chat_id: String) -> String {
   if marker_end <= marker_start then { return "" }
   let inner = substring(reply, marker_start + 8.0, marker_end)
   let inner = trim(inner)
-  let _pipe = "|"
-  let parts = split(inner, _pipe)
+  let parts = split(inner, "|")
   if len(parts) < 3.0 then { return "" }
   let kind = trim(parts[0])
   let param = trim(parts[1])
@@ -1077,7 +1007,6 @@ mlogserver {
 
   route "/webhook/telegram" method=POST {
     let data = json_body()
-    let _sp = " "
     let chat_id = to_string(json_get(data, "message.chat.id", "0"))
     let user_id = to_string(json_get(data, "message.from.id", "0"))
     let owner_id = env("OWNER_TELEGRAM_ID")
@@ -1085,14 +1014,12 @@ mlogserver {
     // Owner check — ignore non-owner
     if user_id != owner_id then { return respond("200 ok") }
 
-    // Idempotency: игнорируем быстрый повтор (в пределах 90 с), пропускаем медленный ретрай (WH-3)
+    // Idempotency: игнорируем повторную доставку того же update (ретрай Telegram)
     let update_id = to_string(json_get(data, "update_id", ""))
     if update_id != "" then {
-      let recent = query("SELECT COUNT(*) AS c FROM webhook_dedup WHERE update_id = ? AND seen_at > datetime('now', '-90 seconds')", [update_id])
-      let recent_count = to_float(json_get(recent[0], "c", "0"))
-      if recent_count > 0.0 then { return respond("200 ok") }
-      let _ = try db_execute("INSERT OR REPLACE INTO webhook_dedup (update_id, seen_at) VALUES (?, datetime('now'))", [update_id])
-      let _ = try db_execute("DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
+      let seen = kv_get("upd_" + update_id)
+      if seen == "1" then { return respond("200 ok") }
+      kv_set("upd_" + update_id, "1")
     }
 
     // Lockdown check
@@ -1100,7 +1027,7 @@ mlogserver {
     if locked == "true" then {
       let text = to_string(json_get(data, "message.text", ""))
       if starts_with(text, "/unlock") then {
-        let parts = split(text, _sp)
+        let parts = split(text, " ")
         let password = ""
         if len(parts) > 1.0 then { let password = get(parts, 1.0) }
         let stored_pwd = kv_get("lockdown_password")
@@ -1148,102 +1075,32 @@ mlogserver {
       let doc_file_id = to_string(json_get(data, "message.document.file_id", ""))
       if doc_file_id != "" then {
         let doc_name = to_string(json_get(data, "message.document.file_name", "file"))
-        let doc_mime = to_string(json_get(data, "message.document.mime_type", ""))
         let caption = to_string(json_get(data, "message.caption", ""))
-        let _ = AuditLog("document_received", "document", "name=" + doc_name + " mime=" + doc_mime)
-
-        // НАРЯД №48: PDF-роутинг через нативный pdf_classify
-        if contains(doc_mime, "application/pdf") or ends_with(lower(doc_name), ".pdf") then {
-          let _ = SendTelegramReply(chat_id, "PDF получен: " + doc_name + ". Классифицирую и извлекаю текст.")
-          // Скачиваем файл через Telegram File API → proxy
-          let token = env("TELEGRAM_BOT_TOKEN")
-          let file_info = try http_post("https://api.telegram.org/bot" + token + "/getFile", json_encode({file_id: doc_file_id}), "application/json")
-          if to_string(file_info) == "()" then {
-            let _ = SendTelegramReply(chat_id, "Ошибка: не удалось получить информацию о файле.")
-            return respond("200 ok")
-          }
-          let file_parsed = parse_json(file_info)
-          let file_path = to_string(json_get(file_parsed, "result.file_path", ""))
-          if file_path == "" then {
-            let _ = SendTelegramReply(chat_id, "Ошибка: файл недоступен (истёк срок).")
-            return respond("200 ok")
-          }
-          // Скачиваем binary через proxy (base64-кодированный)
-          let dl_body = json_encode({file_path: file_path})
-          let dl_result = try http_post("http://127.0.0.1:4000/download-telegram-file", dl_body, "application/json", 120.0)
-          if to_string(dl_result) == "()" then {
-            let _ = SendTelegramReply(chat_id, "Ошибка: скачивание файла не удалось.")
-            return respond("200 ok")
-          }
-          let dl_parsed = parse_json(dl_result)
-          let pdf_b64 = to_string(json_get(dl_parsed, "data", ""))
-          if pdf_b64 == "" then {
-            // Fallback: используем старый extract-document
-            let _ = SendTelegramReply(chat_id, "PDF получен. Извлекаю текст через прокси...")
-            let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
-            let doc_result = try http_post("http://127.0.0.1:4000/extract-document", doc_body, "application/json", 120.0)
-            if to_string(doc_result) == "()" then {
-              let _ = SendTelegramReply(chat_id, "Ошибка: сервис извлечения текста недоступен.")
-              return respond("200 ok")
-            }
-            let doc_parsed = parse_json(doc_result)
-            let extracted = to_string(json_get(doc_parsed, "text", ""))
-            let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + extracted
-            // text устанавливается, продолжаем к маршрутизации департамента
-          } else {
-            // Нативная классификация через pdf_classify builtin
-            let pdf_info = try pdf_classify(pdf_b64)
-            let pdf_type = to_string(json_get(pdf_info, "type", "unknown"))
-            let pdf_needs_ocr = to_string(json_get(pdf_info, "needs_ocr", "0"))
-            let pdf_pages = to_string(json_get(pdf_info, "pages", "0"))
-
-            let _ = AuditLog("pdf_classified", "document", "type=" + pdf_type + " pages=" + pdf_pages + " needs_ocr=" + pdf_needs_ocr)
-
-            // Извлекаем текст нативно
-            let md_result = try pdf_to_markdown(pdf_b64)
-            let md_text = to_string(json_get(md_result, "markdown", ""))
-            let ocr_pages_count = to_string(json_get(md_result, "pages_needing_ocr", "0"))
-
-            // Если есть страницы требующие OCR — пробуем pdf_ocr
-            if pdf_needs_ocr == "1" then {
-              let ocr_result = try pdf_ocr(pdf_b64)
-              let ocr_markdown = to_string(json_get(ocr_result, "markdown", ""))
-              let ocr_confidence = to_string(json_get(ocr_result, "ocr_confidence", "0"))
-              let _ = SendTelegramReply(chat_id, "PDF: " + pdf_type + ", " + pdf_pages + " стр. OCR: " + ocr_pages_count + " стр. (confidence: " + ocr_confidence + "%)")
-              // Заменяем [OCR_NEEDED] плейсхолдеры на OCR-результат
-              let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text + "\n\n--- OCR ---\n" + ocr_markdown
-            } else {
-              let _ = SendTelegramReply(chat_id, "PDF: " + pdf_type + ", " + pdf_pages + " стр. Текст извлечён.")
-              let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text
-            }
-          }
+        let _ = AuditLog("document_received", "document", "name=" + doc_name)
+        let _ = SendTelegramReply(chat_id, "Файл получен: " + doc_name + ". Извлекаю текст.")
+        let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
+        let doc_result = try http_post("http://127.0.0.1:4000/extract-document", doc_body, "application/json", 120.0)
+        if to_string(doc_result) == "()" then {
+          let _ = SendTelegramReply(chat_id, "Ошибка: сервис извлечения текста недоступен.")
+          return respond("200 ok")
         } else {
-          // Не PDF — используем старый extract-document прокси
-          let _ = SendTelegramReply(chat_id, "Файл получен: " + doc_name + ". Извлекаю текст.")
-          let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
-          let doc_result = try http_post("http://127.0.0.1:4000/extract-document", doc_body, "application/json", 120.0)
-          if to_string(doc_result) == "()" then {
-            let _ = SendTelegramReply(chat_id, "Ошибка: сервис извлечения текста недоступен.")
-            return respond("200 ok")
-          } else {
-            let doc_parsed = parse_json(doc_result)
-            let doc_status = to_string(json_get(doc_parsed, "status", "error"))
-            if doc_status == "ok" then {
-              let extracted = to_string(json_get(doc_parsed, "text", ""))
-              let was_cut = to_string(json_get(doc_parsed, "truncated", "false"))
-              if was_cut == "true" then {
-                let _ = SendTelegramReply(chat_id, "Файл длинный, взяты первые 60000 символов.")
-              }
-              if caption != "" then {
-                let text = caption + "\n\n=== Вложенный файл: " + doc_name + " ===\n" + extracted
-              } else {
-                let text = extracted
-              }
-            } else {
-              let doc_err = to_string(json_get(doc_parsed, "message", "неизвестная ошибка"))
-              let _ = SendTelegramReply(chat_id, "Не удалось прочитать файл: " + doc_err)
-              return respond("200 ok")
+          let doc_parsed = parse_json(doc_result)
+          let doc_status = to_string(json_get(doc_parsed, "status", "error"))
+          if doc_status == "ok" then {
+            let extracted = to_string(json_get(doc_parsed, "text", ""))
+            let was_cut = to_string(json_get(doc_parsed, "truncated", "false"))
+            if was_cut == "true" then {
+              let _ = SendTelegramReply(chat_id, "Файл длинный, взяты первые 60000 символов.")
             }
+            if caption != "" then {
+              let text = caption + "\n\n=== Вложенный файл: " + doc_name + " ===\n" + extracted
+            } else {
+              let text = extracted
+            }
+          } else {
+            let doc_err = to_string(json_get(doc_parsed, "message", "неизвестная ошибка"))
+            let _ = SendTelegramReply(chat_id, "Не удалось прочитать файл: " + doc_err)
+            return respond("200 ok")
           }
         }
       } else {
@@ -1273,13 +1130,13 @@ mlogserver {
       // Handle approve/reject narads
       if starts_with(cb_data, "approve_") then {
         let narad_id = substring(cb_data, 8.0, len(cb_data))
-        db_execute("UPDATE narads SET status = 'approved', approved_at = datetime('now') WHERE id = ?1", [narad_id])
+        db_execute("UPDATE narads SET status = 'approved', approved_at = datetime('now') WHERE id = '" + escape_json(narad_id) + "'")
         let _ = AuditLog("narad_approve", "admin", "approved narad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Narad " + narad_id + " approved.")
       }
       if starts_with(cb_data, "reject_") then {
         let narad_id = substring(cb_data, 7.0, len(cb_data))
-        db_execute("UPDATE narads SET status = 'rejected' WHERE id = ?1", [narad_id])
+        db_execute("UPDATE narads SET status = 'rejected' WHERE id = '" + escape_json(narad_id) + "'")
         let _ = AuditLog("narad_reject", "admin", "rejected narad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Narad " + narad_id + " rejected.")
       }
@@ -1351,7 +1208,7 @@ mlogserver {
 
     // /lockdown
     if starts_with(text, "/lockdown") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       let password = ""
       if len(parts) > 1.0 then { let password = get(parts, 1.0) }
       if password == env("LOCKDOWN_PASSWORD") or password == kv_get("lockdown_password") then {
@@ -1420,7 +1277,7 @@ mlogserver {
 
     // /debrief — LLM analysis of errors per dept (MEGA-3)
     if starts_with(text, "/debrief") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       if len(parts) > 1.0 then {
         let dept = trim(get(parts, 1.0))
         let debrief_result = DebriefDepartment(dept)
@@ -1454,85 +1311,12 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // ── /quest — dossier/task management (QUEST-1) ──
-    if starts_with(text, "/quest") then {
-      // /quest list
-      if starts_with(text, "/quest list") then {
-        let info = QuestList(chat_id)
-        let _ = SendTelegramReply(chat_id, info)
-        return ""
-      }
-      // /quest new <title> | <type> | <steps> | <deadline>
-      // Example: /quest new Grant FondX | grant | 6 | 2026-09-15
-      if starts_with(text, "/quest new ") then {
-        let rest = substring(text, 11.0, len(text))
-        let parts = split(rest, "|")
-        let qtitle = trim(get(parts, 0.0))
-        let qtype = "general"
-        let qsteps = "5"
-        let qdeadline = ""
-        if len(parts) > 1.0 then { let qtype = trim(get(parts, 1.0)) }
-        if len(parts) > 2.0 then { let qsteps = trim(get(parts, 2.0)) }
-        if len(parts) > 3.0 then { let qdeadline = trim(get(parts, 3.0)) }
-        let qid = QuestCreate(qtitle, qtype, qsteps, qdeadline, chat_id)
-        let status = QuestStatus(qid)
-        let _ = SendTelegramReply(chat_id, "Dosse sozdano: " + qid + "\n\n" + status)
-        return ""
-      }
-      // /quest status <id>
-      if starts_with(text, "/quest status ") then {
-        let qid = trim(substring(text, 14.0, len(text)))
-        let info = QuestStatus(qid)
-        let _ = SendTelegramReply(chat_id, info)
-        return ""
-      }
-      // /quest approve <id> [step_num]
-      if starts_with(text, "/quest approve ") then {
-        let rest = trim(substring(text, 15.0, len(text)))
-        let parts = split(rest, _sp)
-        let qid = get(parts, 0.0)
-        let result = QuestApproveStep(qid, "owner")
-        let _ = SendTelegramReply(chat_id, result)
-        return ""
-      }
-      // /quest next <id> — advance to next step
-      if starts_with(text, "/quest next ") then {
-        let qid = trim(substring(text, 12.0, len(text)))
-        let result = QuestAdvanceStep(qid)
-        let _ = SendTelegramReply(chat_id, result)
-        return ""
-      }
-      // /quest close <id>
-      if starts_with(text, "/quest close ") then {
-        let qid = trim(substring(text, 13.0, len(text)))
-        let result = QuestClose(qid)
-        let _ = SendTelegramReply(chat_id, result)
-        return ""
-      }
-      // /quest send <id> | <recipient> | <subject>
-      if starts_with(text, "/quest send ") then {
-        let rest = trim(substring(text, 12.0, len(text)))
-        let parts = split(rest, "|")
-        let qid = trim(get(parts, 0.0))
-        let recipient = ""
-        let subject = ""
-        if len(parts) > 1.0 then { let recipient = trim(get(parts, 1.0)) }
-        if len(parts) > 2.0 then { let subject = trim(get(parts, 2.0)) }
-        let result = QuestSendPackage(qid, recipient, subject)
-        let _ = SendTelegramReply(chat_id, result)
-        return ""
-      }
-      // /quest help
-      let _ = SendTelegramReply(chat_id, "Komandy dosse:\n/quest new <title> | <type> | <steps> | <deadline>\n/quest list\n/quest status <id>\n/quest next <id> — advance step\n/quest approve <id> — approve current step\n/quest close <id>\n/quest send <id> | <email> | <subject>")
-      return ""
-    }
-
     // /rate
     if starts_with(text, "/rate") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       if len(parts) > 1.0 then {
         let rating = get(parts, 1.0)
-        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period) VALUES ('global', 'satisfaction', ?1, 'daily')", [rating])
+        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period) VALUES ('global', 'satisfaction', '" + escape_json(rating) + "', 'daily')")
         let _ = AuditLog("rating", "system", "rating=" + rating)
         let _ = SendTelegramReply(chat_id, "Rating " + rating + " recorded.")
       }
@@ -1541,12 +1325,12 @@ mlogserver {
 
     // /rate-yana — owner feedback for Yana metrics
     if starts_with(text, "/rate-yana") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       let score = get(parts, 1.0)
-      let comment = join(slice(parts, 2.0, len(parts)), _sp)
-      db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_feedback', ?1, 'manual', datetime('now'))", [score])
+      let comment = join(slice(parts, 2.0, len(parts)), " ")
+      db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_feedback', '" + escape_json(score) + "', 'manual', datetime('now'))")
       if len(comment) > 0.0 then {
-        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_comment', ?1, 'manual', datetime('now'))", [comment])
+        db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_comment', '" + escape_json(comment) + "', 'manual', datetime('now'))")
       }
       let _ = AuditLog("rate_yana", "owner", "score=" + score)
       let _ = SendTelegramReply(chat_id, "Yana feedback recorded: " + score + "/10")
@@ -1555,7 +1339,7 @@ mlogserver {
 
     // /quarterly-review — methodology compliance review for a department
     if starts_with(text, "/quarterly-review") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       let target_dept = get(parts, 1.0)
       if len(target_dept) < 2.0 then {
         let _ = SendTelegramReply(chat_id, "Usage: /quarterly-review <dept>\nReviews methodology compliance for the department.")
@@ -1585,12 +1369,7 @@ mlogserver {
             let rkind = json_get(row, "rrule_kind", "")
             let rlocal = json_get(row, "next_local", "")
             let rtext = json_get(row, "event_text", "")
-            let when = rlocal
-            if when == "" then {
-              let when = to_string(json_get(row, "fire_time", ""))
-              if when == "" then { let when = "время не указано" }
-            }
-            let output = output + to_string(rid) + ". " + rtext + " \u2014 " + when + " (" + rkind + ")\n"
+            let output = output + to_string(rid) + ". [" + rkind + "] " + rlocal + " \u2014 " + rtext + "\n"
           }
           let _ = SendTelegramReply(chat_id, output)
         }
@@ -1750,7 +1529,7 @@ mlogserver {
     }
 
     if starts_with(text, "/model set") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       if len(parts) > 2.0 then {
         let p = get(parts, 2.0)
         let m = get(parts, 3.0)
@@ -1771,7 +1550,7 @@ mlogserver {
     }
 
     if starts_with(text, "/model ") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       if len(parts) > 2.0 then {
         let dept_slug = trim(get(parts, 1.0))
         if len(parts) > 3.0 then {
@@ -1792,7 +1571,7 @@ mlogserver {
 
     // /budget
     if starts_with(text, "/budget") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       if len(parts) > 1.0 then {
         let amount = get(parts, 1.0)
         kv_set("daily_budget", amount)
@@ -1807,7 +1586,7 @@ mlogserver {
 
     // /voice commands (MEGA-3 — enhanced)
     if starts_with(text, "/voice") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       let cmd = text
       if len(parts) > 1.0 then { let cmd = get(parts, 1.0) }
       if cmd == "on" then {
@@ -1878,7 +1657,7 @@ mlogserver {
     //   /archive (no args) — legacy: publish last MiniApp report
     //   /archive <dept> [filter] — NEW: search dept_archive for generic depts
     if starts_with(text, "/archive") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       if len(parts) > 1.0 then {
         let arg1 = trim(get(parts, 1.0))
         if arg1 == "list" then {
@@ -1942,7 +1721,7 @@ mlogserver {
     // Legacy: /verify <dept> <id> <free text> (marketing, etc.)
     if starts_with(text, "/verify ") then {
       let rest = substring(text, 8.0, len(text))
-      let parts = split(rest, _sp)
+      let parts = split(rest, " ")
       if len(parts) >= 3.0 then {
         let dept = trim(get(parts, 0.0))
         let entry_id = to_int(trim(get(parts, 1.0)))
@@ -1974,7 +1753,7 @@ mlogserver {
 
     // /autoarchive on/off (MEGA-3)
     if starts_with(text, "/autoarchive") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       if len(parts) > 1.0 then {
         let mode = trim(get(parts, 1.0))
         kv_set("auto_archive", mode)
@@ -2015,7 +1794,7 @@ mlogserver {
     // /chain
     if starts_with(text, "/chain") then {
       let rest = substring(text, 7.0, len(text))
-      let parts = split(rest, _sp)
+      let parts = split(rest, " ")
       if len(parts) > 1.0 then {
         let dept_chain = trim(get(parts, 0.0))
         let query = substring(rest, len(dept_chain) + 1.0, len(rest))
@@ -2046,14 +1825,14 @@ mlogserver {
       }
       if starts_with(text, "/factory_deploy") then {
         let id = substring(text, 16.0, len(text))
-        db_execute("UPDATE factory_orders SET status = 'deployed' WHERE id = ?1", [trim(id)])
+        db_execute("UPDATE factory_orders SET status = 'deployed' WHERE id = '" + escape_json(trim(id)) + "'")
         let _ = AuditLog("factory_deploy", "factory", "deployed: " + trim(id))
         let _ = SendTelegramReply(chat_id, "Factory order " + trim(id) + " deployed.")
         return respond("200 ok")
       }
       if starts_with(text, "/factory_deliver") then {
         let id = substring(text, 17.0, len(text))
-        db_execute("UPDATE factory_orders SET status = 'delivered', completed_at = datetime('now') WHERE id = ?1", [trim(id)])
+        db_execute("UPDATE factory_orders SET status = 'delivered', completed_at = datetime('now') WHERE id = '" + escape_json(trim(id)) + "'")
         let _ = SendTelegramReply(chat_id, "Factory order " + trim(id) + " delivered.")
         return respond("200 ok")
       }
@@ -2066,7 +1845,7 @@ mlogserver {
       let order_id = "fo-" + to_string(now())
       kv_set("active_order", order_id)
       kv_set("order_step_" + order_id, "1")
-      db_execute("INSERT INTO factory_orders (id, status) VALUES (?1, 'intake')", [order_id])
+      db_execute("INSERT INTO factory_orders (id, status) VALUES ('" + order_id + "', 'intake')")
       let _ = AuditLog("factory_start", "factory", "new order: " + order_id)
       let _ = SendTelegramReply(chat_id, "Factory: Creating new office.\n\nStep 1/7: What is the client's name or company?")
       return respond("200 ok")
@@ -2208,7 +1987,7 @@ mlogserver {
     // /lz_channel — add Telegram channel to LZ monitoring (MEGA-4)
     if starts_with(text, "/lz_channel add ") then {
       let channel_params = substring(text, 15.0, len(text))
-      let params = split(channel_params, _sp)
+      let params = split(channel_params, " ")
       let ch_id = trim(get(params, 0.0))
       let category = "general"
       if len(params) > 1.0 then { let category = trim(get(params, 1.0)) }
@@ -2381,12 +2160,12 @@ mlogserver {
     // ============================================================
 
     let dept = DetectDepartment(text)
-   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook',?,'ok')", ["step_0_after_detect_dept=" + dept])
+    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook','step_0_after_detect_dept=" + dept + "','ok')")
     let query = text
     let handled = 0.0
 
     if starts_with(text, "/") then {
-      let parts = split(text, _sp)
+      let parts = split(text, " ")
       let cmd = get(parts, 0.0)
       if len(parts) > 1.0 then {
         let rest = substring(text, len(cmd) + 1.0, len(text))
@@ -2400,11 +2179,7 @@ mlogserver {
     if dept == "yana" then {
       let _ = RecordUserMessage(chat_id, "yana", text)
       let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook','step_0c_before_HandleYana','ok')")
-      // Source fix: routing sets query="" when /command has no args (e.g. bare "/yana").
-      // Fall back to full text so recall and LLM get a usable query.
-      let yana_query = query
-      if yana_query == "" then { let yana_query = text }
-      let reply = HandleYana(yana_query, chat_id)
+      let reply = HandleYana(query, chat_id)
 
       // Check if Yana delegated to another department
       // HandleYana returns dept name (e.g. "osp") if delegation detected
@@ -2631,972 +2406,6 @@ mlogserver {
     }
 
     return respond("200 ok")
-  }
-
-  // ============================================================
-  // API ENDPOINTS (migrated from Python — P1 migration)
-  // ============================================================
-
-  // P1-2: /audit/recent — was Flask @app.get("/audit/recent")
-  route "/audit/recent" method=GET {
-    let limit_str = query_param("limit")
-    let limit_val = 20
-    if limit_str != "" then { let limit_val = to_float(limit_str) }
-    if limit_val > 200.0 then { let limit_val = 200.0 }
-    if limit_val < 1.0 then { let limit_val = 1.0 }
-    let limit_int = to_string(limit_val)
-
-    let rows = query("SELECT id, action, details, timestamp FROM audit_log ORDER BY id DESC LIMIT " + limit_int, [])
-
-    let entries = "["
-    let i = 0
-    each row in rows {
-      if i > 0 then { let entries = entries + "," }
-      let id = to_string(json_get(row, "id", ""))
-      let action = to_string(json_get(row, "action", ""))
-      let ts = to_string(json_get(row, "timestamp", ""))
-      let details_raw = to_string(json_get(row, "details", "{}"))
-      let entries = entries + "{\"id\":" + id + ",\"action\":\"" + action + "\",\"created\":\"" + ts + "\",\"details\":" + details_raw + "}"
-      let i = i + 1
-    }
-    let entries = entries + "]"
-
-    return respond("200 {\"status\":\"ok\",\"entries\":" + entries + ",\"count\":" + to_string(i) + "}")
-  }
-
-  // P1-3: /search — was Flask @app.post("/search")
-  route "/search" method=POST {
-    let data = json_body()
-    let query_text = to_string(json_get(data, "query", ""))
-    if query_text == "" then { return respond("400 {\"status\":\"error\",\"message\":\"query is required\"}") }
-
-    let search_term = "%" + query_text + "%"
-    let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) ORDER BY id DESC LIMIT 50", [search_term, search_term])
-
-    let results = "["
-    let i = 0
-    each row in rows {
-      if i > 0 then { let results = results + "," }
-      let id = to_string(json_get(row, "id", ""))
-      let dept = to_string(json_get(row, "dept", ""))
-      let title = to_string(json_get(row, "title", ""))
-      let created = to_string(json_get(row, "created_at", ""))
-      let results = results + "{\"id\":\"" + id + "\",\"dept\":\"" + dept + "\",\"title\":\"" + title + "\",\"created\":\"" + created + "\"}"
-      let i = i + 1
-    }
-    let results = results + "]"
-
-    return respond("200 {\"status\":\"ok\",\"results\":" + results + ",\"count\":" + to_string(i) + "}")
-  }
-
-  // P1-4: /api/dashboard — KPIs, dept cards, admin status
-  // Uses SQL datetime() instead of Python datetime arithmetic
-  route "/api/dashboard" method=GET {
-    // KPIs
-    let r_today = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now')", [])
-    let r_week = query("SELECT COUNT(*) as c FROM dialog_history WHERE created_at >= date('now', '-7 days')", [])
-    let r_cost_today = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now')", [])
-    let r_cost_month = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days')", [])
-    let r_reports = query("SELECT COUNT(*) as c FROM miniapp_responses WHERE created_at >= date('now')", [])
-    let r_avg = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE created_at >= date('now', '-7 days')", [])
-
-    let tasks_today = to_string(json_get(r_today[0], "c", "0"))
-    let tasks_week = to_string(json_get(r_week[0], "c", "0"))
-    let cost_today = to_string(json_get(r_cost_today[0], "t", "0"))
-    let cost_month = to_string(json_get(r_cost_month[0], "t", "0"))
-    let reports_today = to_string(json_get(r_reports[0], "c", "0"))
-    let avg_rating = to_string(json_get(r_avg[0], "a", "0"))
-
-    // Dept cards — 13 departments (excl. admin)
-    let dept_slugs = "yana,osp,lz,expert,marketing,finance,legal,dev,design,qa,visual,engineering,kavalnya"
-    let dept_names = "Yana,OSP,LZ,Expert,Marketing,Finance,Legal,Dev,Design,QA,Visual,Engineering,Kavalnya"
-    let dept_colors = "#3d4a4d,#dc2626,#0891b2,#4f46e5,#ea580c,#16a34a,#64748b,#2563eb,#ec4899,#65a30d,#a855f7,#78716c,#d97706"
-
-    let dept_cards = "["
-    let di = 0
-    let d_slugs = split(dept_slugs, ",")
-    let d_names = split(dept_names, ",")
-    each slug in d_slugs {
-      let d_name = d_names[di]
-      let r_calls = query("SELECT COUNT(*) as c FROM token_usage WHERE dept = ? AND created_at >= date('now', '-7 days')", [slug])
-      let r_drating = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept = ? AND created_at >= date('now', '-7 days')", [slug])
-      let calls = to_string(json_get(r_calls[0], "c", "0"))
-      let rating = to_string(json_get(r_drating[0], "a", "0"))
-      let status = "inactive"
-      if to_float(calls) > 5.0 then { let status = "active" }
-      if to_float(calls) > 0.0 then { if to_float(calls) <= 5.0 then { let status = "idle" } }
-
-      if di > 0 then { let dept_cards = dept_cards + "," }
-      let dept_cards = dept_cards + "{\"slug\":\"" + slug + "\",\"name\":\"" + d_name + "\",\"calls\":" + calls + ",\"rating\":" + rating + ",\"status\":\"" + status + "\"}"
-      let di = di + 1
-    }
-    let dept_cards = dept_cards + "]"
-
-    // Admin status
-    let r_nodes = query("SELECT COUNT(*) as c FROM knowledge_graph", [])
-    let r_edges = query("SELECT COUNT(*) as c FROM knowledge_edges", [])
-    let r_issues = query("SELECT COUNT(*) as c FROM admin_findings WHERE status='open'", [])
-    let r_proposals = query("SELECT COUNT(*) as c FROM admin_proposals WHERE status='pending'", [])
-    let nodes = to_string(json_get(r_nodes[0], "c", "0"))
-    let edges = to_string(json_get(r_edges[0], "c", "0"))
-    let issues = to_string(json_get(r_issues[0], "c", "0"))
-    let proposals = to_string(json_get(r_proposals[0], "c", "0"))
-
-    let kpis = "{\"tasks\":" + tasks_today + ",\"tasks_week\":" + tasks_week + ",\"cost_today\":" + cost_today + ",\"cost_month\":" + cost_month + ",\"rating\":" + avg_rating + ",\"reports\":" + reports_today + "}"
-    let admin = "{\"nodes\":" + nodes + ",\"edges\":" + edges + ",\"issues\":" + issues + ",\"proposals\":" + proposals + ",\"code_health\":" + avg_rating + "}"
-
-    return respond("200 {\"status\":\"ok\",\"kpis\":" + kpis + ",\"depts\":" + dept_cards + ",\"admin\":" + admin + "}")
-  }
-
-  // P1-5: /api/dept?slug=yana — department details
-  // NOTE: mlog has no path_param() or route pattern matching — use query_param
-  route "/api/dept" method=GET {
-    let slug = lower(query_param("slug"))
-    if slug == "" then { return respond("400 {\"status\":\"error\",\"message\":\"slug is required (e.g. /api/dept?slug=yana)\"}") }
-
-    let r_calls = query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
-    let r_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
-    let r_tokens_in = query("SELECT COALESCE(SUM(CAST(input_tokens AS REAL)),0) as t FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
-    let r_tokens_out = query("SELECT COALESCE(SUM(CAST(output_tokens AS REAL)),0) as t FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
-    let r_avg_rating = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
-    let r_reports = query("SELECT COUNT(*) as c FROM miniapp_responses WHERE dept=? AND created_at >= date('now', '-7 days')", [slug])
-    let r_last_model = kv_get("last_model_" + slug)
-
-    let calls = to_string(json_get(r_calls[0], "c", "0"))
-    let cost = to_string(json_get(r_cost[0], "t", "0"))
-    let tokens_in = to_string(json_get(r_tokens_in[0], "t", "0"))
-    let tokens_out = to_string(json_get(r_tokens_out[0], "t", "0"))
-    let rating = to_string(json_get(r_avg_rating[0], "a", "0"))
-    let reports = to_string(json_get(r_reports[0], "c", "0"))
-    let last_model = to_string(r_last_model)
-
-    // Recent queries (last 5)
-    let recent_rows = query("SELECT query, created_at FROM dialog_history WHERE dept=? ORDER BY id DESC LIMIT 5", [slug])
-    let recent = "["
-    let ri = 0
-    each row in recent_rows {
-      if ri > 0 then { let recent = recent + "," }
-      let q = to_string(json_get(row, "query", ""))
-      let ca = to_string(json_get(row, "created_at", ""))
-      let recent = recent + "{\"query\":\"" + q + "\",\"created\":\"" + ca + "\"}"
-      let ri = ri + 1
-    }
-    let recent = recent + "]"
-
-    return respond("200 {\"status\":\"ok\",\"slug\":\"" + slug + "\",\"calls\":" + calls + ",\"cost\":" + cost + ",\"tokens_in\":" + tokens_in + ",\"tokens_out\":" + tokens_out + ",\"rating\":" + rating + ",\"reports\":" + reports + ",\"last_model\":\"" + last_model + "\",\"recent\":" + recent + "}")
-  }
-
-  // ============================================================
-  // P2: MIGRATED ENDPOINTS (from Python)
-  // ============================================================
-
-  // P2-1a: /api/models — model list with usage stats
-  // (static model info + SQL usage; no path_param or Python deps)
-  route "/api/models" method=GET {
-    // Static model registry (mirrors llm_proxy.py PROVIDERS)
-    let model_keys = "zai,deepseek,groq,grok,anthropic,openai,apodex"
-    let model_names = "GLM 4.6,DeepSeek Chat,Llama 3.3 70B,Grok 3,Claude Sonnet 4,GPT-4o,Apodex 1.0"
-    let model_labels = "Z.ai,DeepSeek,Groq,xAI,Anthropic,OpenAI,Apodex"
-    let model_tiers = "priority,cheap,free,free_limit,paid,paid,special"
-
-    let mk = split(model_keys, ",")
-    let mn = split(model_names, ",")
-    let ml = split(model_labels, ",")
-    let mt = split(model_tiers, ",")
-
-    let models_json = "["
-    let mi = 0
-    each key in mk {
-      let m_name = mn[mi]
-      let m_label = ml[mi]
-      let m_tier = mt[mi]
-
-      let r_calls = query("SELECT COUNT(*) as c FROM token_usage WHERE provider=? AND created_at >= date('now', '-30 days')", [key])
-      let r_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE provider=? AND created_at >= date('now', '-30 days')", [key])
-      let calls = to_string(json_get(r_calls[0], "c", "0"))
-      let cost = to_string(json_get(r_cost[0], "t", "0"))
-
-      let status = "active"
-      // Grok rate limit check
-      if key == "grok" then { if to_float(calls) > 500.0 then { let status = "limited" } }
-      // Check env key — each provider has a known env var name
-      let env_key = ""
-      if key == "zai" then { let env_key = "ZAI_API_KEY" }
-      if key == "deepseek" then { let env_key = "DEEPSEEK_API_KEY" }
-      if key == "groq" then { let env_key = "GROQ_API_KEY" }
-      if key == "grok" then { let env_key = "GROK_API_KEY" }
-      if key == "anthropic" then { let env_key = "ANTHROPIC_API_KEY" }
-      if key == "openai" then { let env_key = "OPENAI_API_KEY" }
-      if key == "apodex" then { let env_key = "APODEX_API_KEY" }
-      let has_key = env(env_key)
-      if to_string(has_key) == "" then { let status = "no_key" }
-
-      if mi > 0 then { let models_json = models_json + "," }
-      let models_json = models_json + "{\"key\":\"" + key + "\",\"name\":\"" + m_name + "\",\"label\":\"" + m_label + "\",\"tier\":\"" + m_tier + "\",\"status\":\"" + status + "\",\"calls\":" + calls + ",\"cost\":" + cost + "}"
-      let mi = mi + 1
-    }
-    let models_json = models_json + "]"
-
-    // Today analytics
-    let r_today = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now')", [])
-    let r_today_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now')", [])
-    let r_active = query("SELECT COUNT(DISTINCT provider) as c FROM token_usage WHERE created_at >= date('now')", [])
-    let analytics = "{\"requests_today\":" + to_string(json_get(r_today[0], "c", "0")) + ",\"cost_today\":" + to_string(json_get(r_today_cost[0], "t", "0")) + ",\"active_providers\":" + to_string(json_get(r_active[0], "c", "0")) + "}"
-
-    return respond("200 {\"status\":\"ok\",\"models\":" + models_json + ",\"analytics\":" + analytics + "}")
-  }
-
-  // P2-1b: /api/economics — token costs by dept/provider/period
-  route "/api/economics" method=GET {
-    // Period costs (today, week, month)
-    let r_today = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now')", [])
-    let r_week = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-7 days')", [])
-    let r_month = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days')", [])
-    let periods = "{\"today\":" + to_string(json_get(r_today[0], "t", "0")) + ",\"week\":" + to_string(json_get(r_week[0], "t", "0")) + ",\"month\":" + to_string(json_get(r_month[0], "t", "0")) + "}"
-
-    // By dept (month)
-    let dept_rows = query("SELECT dept, COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days') GROUP BY dept ORDER BY t DESC", [])
-    let by_dept = "["
-    let di = 0
-    each row in dept_rows {
-      let d = to_string(json_get(row, "dept", ""))
-      let c = to_string(json_get(row, "t", "0"))
-      if di > 0 then { let by_dept = by_dept + "," }
-      let by_dept = by_dept + "{\"dept\":\"" + d + "\",\"cost\":" + c + "}"
-      let di = di + 1
-    }
-    let by_dept = by_dept + "]"
-
-    // By provider (month)
-    let prov_rows = query("SELECT provider, COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days') GROUP BY provider ORDER BY t DESC", [])
-    let by_prov = "["
-    let pi = 0
-    each row in prov_rows {
-      let p = to_string(json_get(row, "provider", ""))
-      let c = to_string(json_get(row, "t", "0"))
-      if pi > 0 then { let by_prov = by_prov + "," }
-      let by_prov = by_prov + "{\"provider\":\"" + p + "\",\"cost\":" + c + "}"
-      let pi = pi + 1
-    }
-    let by_prov = by_prov + "]"
-
-    // Budget from system_settings
-    let budget_rows = query("SELECT value FROM system_settings WHERE key='daily_budget'", [])
-    let budget = to_string(json_get(budget_rows[0], "value", "10"))
-
-    return respond("200 {\"status\":\"ok\",\"periods\":" + periods + ",\"by_dept\":" + by_dept + ",\"by_provider\":" + by_prov + ",\"budget\":\"" + budget + "\"}")
-  }
-
-  // P2-2: /search/web — Tavily direct call from mlog (no Python roundtrip)
-  route "/search/web" method=POST {
-    let data = json_body()
-    let q = to_string(json_get(data, "query", ""))
-    if q == "" then { return respond("400 {\"status\":\"error\",\"message\":\"query is required\"}") }
-
-    let depth = to_string(json_get(data, "search_depth", "advanced"))
-    let max_res = to_string(json_get(data, "max_results", "8"))
-    let topic = to_string(json_get(data, "topic", "general"))
-    let tavily_key = env("TAVILY_API_KEY")
-
-    if to_string(tavily_key) == "" then {
-      return respond("503 {\"status\":\"error\",\"message\":\"TAVILY_API_KEY not configured\"}")
-    }
-
-    // Build Tavily API request body
-    let body = json_encode({
-      api_key: tavily_key,
-      query: q,
-      search_depth: depth,
-      max_results: max_res,
-      topic: topic,
-      include_answer: true,
-      include_raw_content: false
-    })
-
-    let result = try http_post("https://api.tavily.com/search", body, "application/json")
-    if to_string(result) == "()" then {
-      return respond("503 {\"status\":\"error\",\"message\":\"Tavily API call failed\"}")
-    }
-
-    // Parse and reformat results
-    let parsed = parse_json(result)
-    let answer = to_string(json_get(parsed, "answer", ""))
-    let raw_results = json_get(parsed, "results", [])
-
-    let out = "["
-    let ri = 0
-    each r in raw_results {
-      let title = to_string(json_get(r, "title", ""))
-      let url = to_string(json_get(r, "url", ""))
-      let content = to_string(json_get(r, "content", ""))
-      let score = to_string(json_get(r, "score", "0"))
-      if ri > 0 then { let out = out + "," }
-      let out = out + "{\"title\":\"" + title + "\",\"url\":\"" + url + "\",\"content\":\"" + content + "\",\"score\":" + score + "}"
-      let ri = ri + 1
-    }
-    let out = out + "]"
-
-    return respond("200 {\"status\":\"ok\",\"answer\":\"" + answer + "\",\"results\":" + out + ",\"query\":\"" + q + "\"}")
-  }
-
-  // P2-3a: /api/narads — list narads
-  route "/api/narads" method=GET {
-    let rows = query("SELECT id, title, description, risk_level, status, created_at, approved_at FROM narads ORDER BY id DESC LIMIT 20", [])
-    let out = "["
-    let i = 0
-    each row in rows {
-      if i > 0 then { let out = out + "," }
-      let id = to_string(json_get(row, "id", ""))
-      let title = to_string(json_get(row, "title", ""))
-      let desc = to_string(json_get(row, "description", ""))
-      let risk = to_string(json_get(row, "risk_level", ""))
-      let status = to_string(json_get(row, "status", ""))
-      let created = to_string(json_get(row, "created_at", ""))
-      let approved = to_string(json_get(row, "approved_at", ""))
-      let out = out + "{\"id\":" + id + ",\"title\":\"" + title + "\",\"description\":\"" + desc + "\",\"risk\":\"" + risk + "\",\"status\":\"" + status + "\",\"created\":\"" + created + "\",\"approved\":\"" + approved + "\"}"
-      let i = i + 1
-    }
-    let out = out + "]"
-    return respond("200 {\"status\":\"ok\",\"narads\":" + out + "}")
-  }
-
-  // P2-3b: /api/narads/approve?id=N — approve a narad
-  route "/api/narads/approve" method=POST {
-    let data = json_body()
-    let nid = to_string(json_get(data, "id", ""))
-    if nid == "" then { return respond("400 {\"status\":\"error\",\"message\":\"id is required\"}") }
-    let _ = db_execute("UPDATE narads SET status='approved', approved_at=datetime('now') WHERE id=?", [nid])
-    return respond("200 {\"status\":\"ok\"}")
-  }
-
-  // P2-3c: /api/narads/reject?id=N — reject a narad
-  route "/api/narads/reject" method=POST {
-    let data = json_body()
-    let nid = to_string(json_get(data, "id", ""))
-    if nid == "" then { return respond("400 {\"status\":\"error\",\"message\":\"id is required\"}") }
-    let _ = db_execute("UPDATE narads SET status='rejected' WHERE id=?", [nid])
-    return respond("200 {\"status\":\"ok\"}")
-  }
-
-  // P2-3d: /api/quests — list quests
-  route "/api/quests" method=GET {
-    let rows = query("SELECT id, title, quest_type, status, current_step, total_steps, deadline, created_at FROM quests ORDER BY created_at DESC LIMIT 50", [])
-    let out = "["
-    let i = 0
-    each row in rows {
-      if i > 0 then { let out = out + "," }
-      let id = to_string(json_get(row, "id", ""))
-      let title = to_string(json_get(row, "title", ""))
-      let qtype = to_string(json_get(row, "quest_type", ""))
-      let status = to_string(json_get(row, "status", ""))
-      let cur = to_string(json_get(row, "current_step", "0"))
-      let tot = to_string(json_get(row, "total_steps", "0"))
-      let dl = to_string(json_get(row, "deadline", ""))
-      let ca = to_string(json_get(row, "created_at", ""))
-      let out = out + "{\"id\":" + id + ",\"title\":\"" + title + "\",\"type\":\"" + qtype + "\",\"status\":\"" + status + "\",\"currentStep\":" + cur + ",\"totalSteps\":" + tot + ",\"deadline\":\"" + dl + "\",\"createdAt\":\"" + ca + "\"}"
-      let i = i + 1
-    }
-    let out = out + "]"
-    return respond("200 {\"status\":\"ok\",\"quests\":" + out + "}")
-  }
-
-  // P2-3e: /api/quests/detail?id=N — quest detail with checkpoints + files
-  route "/api/quests/detail" method=GET {
-    let qid = query_param("id")
-    if qid == "" then { return respond("400 {\"status\":\"error\",\"message\":\"id is required\"}") }
-
-    let rows = query("SELECT * FROM quests WHERE id = ?", [qid])
-    if len(rows) == 0.0 then { return respond("404 {\"status\":\"error\",\"message\":\"quest not found\"}") }
-
-    // Quest fields
-    let q = rows[0]
-
-    // Checkpoints
-    let cp_rows = query("SELECT step_num, step_label, status, approved_by, approved_at FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", [qid])
-    let cps = "["
-    let ci = 0
-    each row in cp_rows {
-      if ci > 0 then { let cps = cps + "," }
-      let sn = to_string(json_get(row, "step_num", ""))
-      let sl = to_string(json_get(row, "step_label", ""))
-      let st = to_string(json_get(row, "status", ""))
-      let ab = to_string(json_get(row, "approved_by", ""))
-      let aa = to_string(json_get(row, "approved_at", ""))
-      let cps = cps + "{\"step\":" + sn + ",\"label\":\"" + sl + "\",\"status\":\"" + st + "\",\"approved_by\":\"" + ab + "\",\"approved_at\":\"" + aa + "\"}"
-      let ci = ci + 1
-    }
-    let cps = cps + "]"
-
-    // Files
-    let f_rows = query("SELECT filename, file_type, version, created_at FROM quest_files WHERE quest_id = ? ORDER BY id", [qid])
-    let fs = "["
-    let fi = 0
-    each row in f_rows {
-      if fi > 0 then { let fs = fs + "," }
-      let fn = to_string(json_get(row, "filename", ""))
-      let ft = to_string(json_get(row, "file_type", ""))
-      let fv = to_string(json_get(row, "version", ""))
-      let fc = to_string(json_get(row, "created_at", ""))
-      let fs = fs + "{\"filename\":\"" + fn + "\",\"type\":\"" + ft + "\",\"version\":" + fv + ",\"created\":\"" + fc + "\"}"
-      let fi = fi + 1
-    }
-    let fs = fs + "]"
-
-    // Serialize quest row as JSON (simplified — key fields)
-    let qid_s = to_string(json_get(q, "id", ""))
-    let qtitle = to_string(json_get(q, "title", ""))
-    let qtype = to_string(json_get(q, "quest_type", ""))
-    let qstatus = to_string(json_get(q, "status", ""))
-    let qcur = to_string(json_get(q, "current_step", "0"))
-    let qtot = to_string(json_get(q, "total_steps", "0"))
-    let qdl = to_string(json_get(q, "deadline", ""))
-    let qca = to_string(json_get(q, "created_at", ""))
-    let quest_json = "{\"id\":" + qid_s + ",\"title\":\"" + qtitle + "\",\"quest_type\":\"" + qtype + "\",\"status\":\"" + qstatus + "\",\"current_step\":" + qcur + ",\"total_steps\":" + qtot + ",\"deadline\":\"" + qdl + "\",\"created_at\":\"" + qca + "\"}"
-
-    return respond("200 {\"status\":\"ok\",\"quest\":" + quest_json + ",\"checkpoints\":" + cps + ",\"files\":" + fs + "}")
-  }
-
-  // P2-5a: /learning/good — save positive example (SQL only)
-  route "/learning/good" method=POST {
-    let data = json_body()
-    let dept = to_string(json_get(data, "dept", "yana"))
-    let q = to_string(json_get(data, "query", ""))
-    let r = to_string(json_get(data, "response", ""))
-    if q == "" then { return respond("400 {\"status\":\"error\",\"message\":\"query is required\"}") }
-    if r == "" then { return respond("400 {\"status\":\"error\",\"message\":\"response is required\"}") }
-
-    let _ = db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, created_at, corr_type) VALUES (?,?,?,datetime('now'),'positive')", [dept, q, r])
-    return respond("200 {\"status\":\"ok\"}")
-  }
-
-  // P2-5b: /learning/stats — learning statistics (SQL only)
-  route "/learning/stats" method=GET {
-    // Corrections 7d (non-positive)
-    let r_corr = query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= date('now', '-7 days') AND corr_type != 'positive'", [])
-    let corr_7d = to_string(json_get(r_corr[0], "c", "0"))
-
-    // Positive total
-    let r_pos = query("SELECT COUNT(*) as c FROM adapt_corrections WHERE corr_type = 'positive'", [])
-    let pos_total = to_string(json_get(r_pos[0], "c", "0"))
-
-    // Error pattern breakdown
-    let pattern_rows = query("SELECT error_type, COUNT(*) as c FROM error_patterns GROUP BY error_type ORDER BY c DESC", [])
-    let breakdown = "{"
-    let bi = 0
-    each row in pattern_rows {
-      let et = to_string(json_get(row, "error_type", ""))
-      let ec = to_string(json_get(row, "c", "0"))
-      if bi > 0 then { let breakdown = breakdown + "," }
-      let breakdown = breakdown + "\"" + et + "\":" + ec
-      let bi = bi + 1
-    }
-    let breakdown = breakdown + "}"
-
-    // Per-dept corrections 7d
-    let dept_rows = query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created_at >= date('now', '-7 days') AND corr_type != 'positive' GROUP BY dept ORDER BY c DESC", [])
-    let dept_corr = "{"
-    let dci = 0
-    each row in dept_rows {
-      let d = to_string(json_get(row, "dept", ""))
-      let c = to_string(json_get(row, "c", "0"))
-      if dci > 0 then { let dept_corr = dept_corr + "," }
-      let dept_corr = dept_corr + "\"" + d + "\":" + c
-      let dci = dci + 1
-    }
-    let dept_corr = dept_corr + "}"
-
-    return respond("200 {\"status\":\"ok\",\"corrections_7d\":" + corr_7d + ",\"positive_examples\":" + pos_total + ",\"error_breakdown\":" + breakdown + ",\"dept_corrections\":" + dept_corr + "}")
-  }
-
-  // P2-6a: /rate_cmd — rate a dept response
-  route "/rate_cmd" method=POST {
-    let data = json_body()
-    let dept = to_string(json_get(data, "dept", "yana"))
-    let rating = to_string(json_get(data, "rating", "0"))
-    let _ = db_execute("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES (?,'satisfaction',?,'daily',datetime('now'))", [dept, rating])
-    return respond("200 {\"status\":\"ok\"}")
-  }
-
-  // P2-6b: /context_cmd — get recent dialog + corrections for a dept
-  route "/context_cmd" method=POST {
-    let data = json_body()
-    let dept = to_string(json_get(data, "dept", "yana"))
-    let chat_id = to_string(json_get(data, "chat_id", "0"))
-
-    // Recent dialog (last 20)
-    let d_rows = query("SELECT role, content, created_at FROM dialog_history WHERE dept=? AND chat_id=? ORDER BY id DESC LIMIT 20", [dept, chat_id])
-    let dialog = "["
-    let di = 0
-    each row in d_rows {
-      if di > 0 then { let dialog = dialog + "," }
-      let role = to_string(json_get(row, "role", ""))
-      let content = to_string(json_get(row, "content", ""))
-      let ts = to_string(json_get(row, "created_at", ""))
-      let dialog = dialog + "{\"role\":\"" + role + "\",\"content\":\"" + content + "\",\"ts\":\"" + ts + "\"}"
-      let di = di + 1
-    }
-    let dialog = dialog + "]"
-
-    // Recent corrections
-    let c_rows = query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 10", [dept])
-    let corrs = "["
-    let ci = 0
-    each row in c_rows {
-      if ci > 0 then { let corrs = corrs + "," }
-      let oq = to_string(json_get(row, "original_query", ""))
-      let cr = to_string(json_get(row, "correction", ""))
-      let ts = to_string(json_get(row, "created_at", ""))
-      let corrs = corrs + "{\"original\":\"" + oq + "\",\"corrected\":\"" + cr + "\",\"ts\":\"" + ts + "\"}"
-      let ci = ci + 1
-    }
-    let corrs = corrs + "]"
-
-    return respond("200 {\"dialog\":" + dialog + ",\"corrections\":" + corrs + "}")
-  }
-
-  // ============================================================
-  // P3: HARD MIGRATIONS (JSON API — no HTML generation in mlog)
-  // ============================================================
-
-  // P3-2a: /api/dept-dashboard — dept dashboard data as JSON
-  // Replaces Python /dept-dashboard/<slug> HTML page with JSON API
-  // Frontend (Mini App) renders the HTML client-side
-  route "/api/dept-dashboard" method=GET {
-    let slug = query_param("slug")
-    if slug == "" then { return respond("400 {\"status\":\"error\",\"message\":\"slug is required\"}") }
-    let dept = lower(slug)
-
-    // Known departments (mirrors DEPT_NAMES in llm_proxy.py)
-    let known_depts = "yana,osp,lz,expert,marketing,finance,legal,dev,design,qa,visual,engineering,kavalnya,admin"
-    let dept_names = "Yana — Shef de kabinet,OSP — Strategicheskiy analiz,LZ — Laboratoriya znanii,Ekspert — Tekhnicheskiy preparator,Marketing,Finansy,Yurist,Dev — Razrabotka,Design — UI/UX,QA — Testirovanie,Visual — Vizualizatsiya,Engineering — Inzhenernyi,Kavalnya — Metodologiya,Admin — Sistemnyi agent"
-    let dept_colors = "#C9A84C,#4A90D9,#7B68EE,#2ECC71,#E74C3C,#27AE60,#8E44AD,#3498DB,#E91E63,#F39C12,#9B59B6,#1ABC9C,#95A5A6,#34495E"
-    let dk = split(known_depts, ",")
-    let dn = split(dept_names, ",")
-    let dc = split(dept_colors, ",")
-
-    // Find dept index
-    let dept_idx = -1
-    let ki = 0
-    each k in dk {
-      if k == dept then { let dept_idx = ki }
-      let ki = ki + 1
-    }
-    if dept_idx < 0.0 then { return respond("404 {\"status\":\"error\",\"message\":\"unknown department\"}") }
-
-    let dept_name = dn[to_int(dept_idx)]
-    let dept_color = dc[to_int(dept_idx)]
-
-    // Calls 7d
-    let r_calls = query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
-    let calls_7d = to_string(json_get(r_calls[0], "c", "0"))
-
-    // Cost 7d
-    let r_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
-    let cost_7d = to_string(json_get(r_cost[0], "t", "0"))
-
-    // Tokens 7d
-    let r_tok = query("SELECT COALESCE(SUM(tokens_in),0) as ti, COALESCE(SUM(tokens_out),0) as to2 FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
-    let tokens_in_7d = to_string(json_get(r_tok[0], "ti", "0"))
-    let tokens_out_7d = to_string(json_get(r_tok[0], "to2", "0"))
-
-    // Average rating 7d
-    let r_rat = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
-    let avg_rating = to_string(to_int(json_get(r_rat[0], "a", "0") * 10.0) / 10.0)
-
-    // Recent corrections (5)
-    let corr_rows = query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 5", [dept])
-    let corrs = "["
-    let ci = 0
-    each row in corr_rows {
-      if ci > 0 then { let corrs = corrs + "," }
-      let oq = to_string(json_get(row, "original_query", ""))
-      let cr = to_string(json_get(row, "correction", ""))
-      let ca = to_string(json_get(row, "created_at", ""))
-      let corrs = corrs + "{\"original\":\"" + oq + "\",\"correction\":\"" + cr + "\",\"created_at\":\"" + ca + "\"}"
-      let ci = ci + 1
-    }
-    let corrs = corrs + "]"
-
-    // Config override
-    let r_cfg = query("SELECT value FROM system_settings WHERE key = ?", ["model_override_" + dept])
-    let model_override = "default"
-    if len(r_cfg) > 0.0 then {
-      let ov = to_string(json_get(r_cfg[0], "value", ""))
-      if ov != "" then { let model_override = ov }
-    }
-
-    // Priority provider
-    let r_prov = query("SELECT value FROM system_settings WHERE key = 'priority_provider'", [])
-    let priority_provider = "auto"
-    if len(r_prov) > 0.0 then {
-      let pv = to_string(json_get(r_prov[0], "value", ""))
-      if pv != "" then { let priority_provider = pv }
-    }
-
-    return respond("200 {\"status\":\"ok\",\"slug\":\"" + dept + "\",\"name\":\"" + dept_name + "\",\"color\":\"" + dept_color + "\",\"calls_7d\":" + calls_7d + ",\"cost_7d\":" + cost_7d + ",\"tokens_in_7d\":" + tokens_in_7d + ",\"tokens_out_7d\":" + tokens_out_7d + ",\"avg_rating\":" + avg_rating + ",\"model_override\":\"" + model_override + "\",\"priority_provider\":\"" + priority_provider + "\",\"corrections\":" + corrs + "}")
-  }
-
-  // P3-2b: /api/office-dashboard — office dashboard data as JSON
-  // Replaces Python /office-dashboard HTML page with JSON API
-  route "/api/office-dashboard" method=GET {
-    // Today/week/month counts
-    let r_today = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now')", [])
-    let r_week = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now', '-7 days')", [])
-    let r_month = query("SELECT COUNT(*) as c FROM token_usage WHERE created_at >= date('now', '-30 days')", [])
-    let r_cost = query("SELECT COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at >= date('now', '-30 days')", [])
-    let n_today = to_string(json_get(r_today[0], "c", "0"))
-    let n_week = to_string(json_get(r_week[0], "c", "0"))
-    let n_month = to_string(json_get(r_month[0], "c", "0"))
-    let cost_month = to_string(to_int(json_get(r_cost[0], "t", "0") * 100.0) / 100.0)
-
-    // Priority provider + model
-    let r_prov = query("SELECT value FROM system_settings WHERE key = 'priority_provider'", [])
-    let priority_provider = "auto"
-    if len(r_prov) > 0.0 then {
-      let pv = to_string(json_get(r_prov[0], "value", ""))
-      if pv != "" then { let priority_provider = pv }
-    }
-    let r_mod = query("SELECT value FROM system_settings WHERE key = 'priority_model'", [])
-    let priority_model = "auto"
-    if len(r_mod) > 0.0 then {
-      let mv = to_string(json_get(r_mod[0], "value", ""))
-      if mv != "" then { let priority_model = mv }
-    }
-
-    // Departments summary
-    let known_depts = "yana,osp,lz,expert,marketing,finance,legal,dev,design,qa,visual,engineering,kavalnya"
-    let dept_names = "Yana — Shef,OSP — Strategiya,LZ — Laboratoriya,Ekspert,Marketing,Finansy,Yurist,Dev,Design,QA,Visual,Engineering,Kavalnya"
-    let dept_colors = "#C9A84C,#4A90D9,#7B68EE,#2ECC71,#E74C3C,#27AE60,#8E44AD,#3498DB,#E91E63,#F39C12,#9B59B6,#1ABC9C,#95A5A6"
-    let dk = split(known_depts, ",")
-    let dn = split(dept_names, ",")
-    let dc = split(dept_colors, ",")
-
-    let depts_json = "["
-    let di = 0
-    each dept in dk {
-      // Calls 7d
-      let r_d = query("SELECT COUNT(*) as c FROM token_usage WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
-      let calls = to_string(json_get(r_d[0], "c", "0"))
-
-      // Avg rating 7d
-      let r_m = query("SELECT COALESCE(AVG(CAST(metric_value AS REAL)),0) as a FROM dept_metrics WHERE dept=? AND created_at >= date('now', '-7 days')", [dept])
-      let rating = to_string(to_int(json_get(r_m[0], "a", "0") * 10.0) / 10.0)
-
-      // Level
-      let level = "low"
-      if to_int(calls) > 10 then { let level = "high" }
-      if to_int(calls) > 0 then {
-        if to_int(calls) <= 10 then { let level = "medium" }
-      }
-
-      // Config override
-      let r_ov = query("SELECT value FROM system_settings WHERE key = ?", ["model_override_" + dept])
-      let model_override = "default"
-      if len(r_ov) > 0.0 then {
-        let ov = to_string(json_get(r_ov[0], "value", ""))
-        if ov != "" then { let model_override = ov }
-      }
-
-      let d_name = dn[di]
-      let d_color = dc[di]
-
-      if di > 0 then { let depts_json = depts_json + "," }
-      let depts_json = depts_json + "{\"slug\":\"" + dept + "\",\"name\":\"" + d_name + "\",\"color\":\"" + d_color + "\",\"calls_7d\":" + calls + ",\"avg_rating\":" + rating + ",\"level\":\"" + level + "\",\"model\":\"" + model_override + "\"}"
-      let di = di + 1
-    }
-    let depts_json = depts_json + "]"
-
-    // Audit log (10 recent)
-    let audit_rows = query("SELECT action, details, timestamp FROM audit_log ORDER BY id DESC LIMIT 10", [])
-    let audit_json = "["
-    let ai = 0
-    each row in audit_rows {
-      if ai > 0 then { let audit_json = audit_json + "," }
-      let act = to_string(json_get(row, "action", ""))
-      let det = to_string(json_get(row, "details", ""))
-      let ts = to_string(json_get(row, "timestamp", ""))
-      let audit_json = audit_json + "{\"action\":\"" + act + "\",\"details\":\"" + det + "\",\"timestamp\":\"" + ts + "\"}"
-      let ai = ai + 1
-    }
-    let audit_json = audit_json + "]"
-
-    // Provider stats (month)
-    let prov_rows = query("SELECT provider, COUNT(*) as c, COALESCE(SUM(cost_usd),0) as cost FROM token_usage WHERE created_at >= date('now', '-30 days') GROUP BY provider", [])
-    let prov_json = "["
-    let pi = 0
-    each row in prov_rows {
-      if pi > 0 then { let prov_json = prov_json + "," }
-      let prov = to_string(json_get(row, "provider", ""))
-      let pc = to_string(json_get(row, "c", "0"))
-      let pcost = to_string(to_int(json_get(row, "cost", "0") * 100.0) / 100.0)
-      let prov_json = prov_json + "{\"provider\":\"" + prov + "\",\"calls\":" + pc + ",\"cost\":" + pcost + "}"
-      let pi = pi + 1
-    }
-    let prov_json = prov_json + "]"
-
-    return respond("200 {\"status\":\"ok\",\"calls_today\":" + n_today + ",\"calls_week\":" + n_week + ",\"calls_month\":" + n_month + ",\"cost_month\":" + cost_month + ",\"priority_provider\":\"" + priority_provider + "\",\"priority_model\":\"" + priority_model + "\",\"departments\":" + depts_json + ",\"audit\":" + audit_json + ",\"providers\":" + prov_json + "}")
-  }
-
-  // P3-3: /api/archive/browse — archive navigator as JSON
-  // Replaces Python /archive/browse HTML page with JSON API
-  // Drill-down: year → month → dept → documents
-  route "/api/archive/browse" method=GET {
-    let year = query_param("year")
-    let month = query_param("month")
-    let dept = query_param("dept")
-
-    // Level 0: list years
-    if year == "" then {
-      let rows = query("SELECT substr(created_at,1,4) AS y, COUNT(*) AS n FROM miniapp_responses WHERE created_at IS NOT NULL AND created_at != '' GROUP BY y ORDER BY y DESC", [])
-      let out = "["
-      let yi = 0
-      each row in rows {
-        if yi > 0 then { let out = out + "," }
-        let y = to_string(json_get(row, "y", ""))
-        let n = to_string(json_get(row, "n", "0"))
-        let out = out + "{\"year\":\"" + y + "\",\"count\":" + n + "}"
-        let yi = yi + 1
-      }
-      let out = out + "]"
-      return respond("200 {\"level\":\"years\",\"items\":" + out + "}")
-    }
-
-    // Level 1: list months for year
-    if month == "" then {
-      let rows = query("SELECT substr(created_at,6,2) AS m, COUNT(*) AS n FROM miniapp_responses WHERE substr(created_at,1,4) = ? GROUP BY m ORDER BY m DESC", [year])
-      let month_names = "Январь,Февраль,Март,Апрель,Май,Июнь,Июль,Август,Сентябрь,Октябрь,Ноябрь,Декабрь"
-      let mn = split(month_names, ",")
-      let out = "["
-      let mi = 0
-      each row in rows {
-        if mi > 0 then { let out = out + "," }
-        let m = to_string(json_get(row, "m", ""))
-        let n = to_string(json_get(row, "n", "0"))
-        // Month name lookup (m is "01"-"12")
-        let m_idx = to_int(m) - 1
-        let m_name = ""
-        if m_idx >= 0.0 then {
-          if m_idx < 12.0 then { let m_name = mn[to_int(m_idx)] }
-        }
-        if m_name == "" then { let m_name = m }
-        let out = out + "{\"month\":\"" + m + "\",\"name\":\"" + m_name + "\",\"count\":" + n + "}"
-        let mi = mi + 1
-      }
-      let out = out + "]"
-      return respond("200 {\"level\":\"months\",\"year\":\"" + year + "\",\"items\":" + out + "}")
-    }
-
-    // Level 2: list depts for year+month
-    if dept == "" then {
-      let rows = query("SELECT dept, COUNT(*) AS n FROM miniapp_responses WHERE substr(created_at,1,4) = ? AND substr(created_at,6,2) = ? GROUP BY dept ORDER BY n DESC", [year, month])
-      let out = "["
-      let di = 0
-      each row in rows {
-        if di > 0 then { let out = out + "," }
-        let d = to_string(json_get(row, "dept", ""))
-        let n = to_string(json_get(row, "n", "0"))
-        let out = out + "{\"dept\":\"" + d + "\",\"count\":" + n + "}"
-        let di = di + 1
-      }
-      let out = out + "]"
-      return respond("200 {\"level\":\"departments\",\"year\":\"" + year + "\",\"month\":\"" + month + "\",\"items\":" + out + "}")
-    }
-
-    // Level 3: list documents for year+month+dept
-    let rows = query("SELECT id, title, created_at FROM miniapp_responses WHERE substr(created_at,1,4) = ? AND substr(created_at,6,2) = ? AND dept = ? ORDER BY created_at DESC", [year, month, dept])
-    let out = "["
-    let ri = 0
-    each row in rows {
-      if ri > 0 then { let out = out + "," }
-      let id = to_string(json_get(row, "id", ""))
-      let title = to_string(json_get(row, "title", ""))
-      let created = to_string(json_get(row, "created_at", ""))
-      let out = out + "{\"id\":" + id + ",\"title\":\"" + title + "\",\"created_at\":\"" + created + "\"}"
-      let ri = ri + 1
-    }
-    let out = out + "]"
-    return respond("200 {\"level\":\"documents\",\"year\":\"" + year + "\",\"month\":\"" + month + "\",\"dept\":\"" + dept + "\",\"items\":" + out + "}")
-  }
-
-  // ============================================================
-  // P3-MINI: ADDITIONAL MIGRATED ENDPOINTS
-  // ============================================================
-
-  // P3-1: /api/archive — search archive with optional q + dept filter
-  route "/api/archive" method=GET {
-    let q = query_param("q")
-    let dept_filter = query_param("dept")
-
-    let rows = []
-    if q != "" then {
-      let search_term = "%" + q + "%"
-      if dept_filter != "" then {
-        let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE (raw_text LIKE ? OR title LIKE ?) AND dept=? ORDER BY created_at DESC LIMIT 50", [search_term, search_term, dept_filter])
-      } else {
-        let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE raw_text LIKE ? OR title LIKE ? ORDER BY created_at DESC LIMIT 50", [search_term, search_term])
-      }
-    } else {
-      if dept_filter != "" then {
-        let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE dept=? ORDER BY created_at DESC LIMIT 50", [dept_filter])
-      } else {
-        let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses ORDER BY created_at DESC LIMIT 50", [])
-      }
-    }
-
-    let out = "["
-    let i = 0
-    each row in rows {
-      if i > 0 then { let out = out + "," }
-      let id = to_string(json_get(row, "id", ""))
-      let dept = to_string(json_get(row, "dept", ""))
-      let title = to_string(json_get(row, "title", ""))
-      let created = to_string(json_get(row, "created_at", ""))
-      let out = out + "{\"id\":" + id + ",\"dept\":\"" + dept + "\",\"title\":\"" + title + "\",\"created\":\"" + created + "\"}"
-      let i = i + 1
-    }
-    let out = out + "]"
-
-    return respond("200 {\"status\":\"ok\",\"results\":" + out + ",\"count\":" + to_string(i) + "}")
-  }
-
-  // P3-2: /api/admin/status — admin stats (graph, issues, proposals, reports)
-  route "/api/admin/status" method=GET {
-    let r_nodes = query("SELECT COUNT(*) as c FROM knowledge_graph", [])
-    let r_edges = query("SELECT COUNT(*) as c FROM knowledge_edges", [])
-    let r_reports = query("SELECT COUNT(*) as c FROM admin_reports", [])
-    let nodes = to_string(json_get(r_nodes[0], "c", "0"))
-    let edges = to_string(json_get(r_edges[0], "c", "0"))
-    let reports = to_string(json_get(r_reports[0], "c", "0"))
-
-    // Open issues (top 10)
-    let issue_rows = query("SELECT id, severity, file_path, issue, status FROM admin_findings WHERE status='open' ORDER BY id DESC LIMIT 10", [])
-    let issues = "["
-    let ii = 0
-    each row in issue_rows {
-      if ii > 0 then { let issues = issues + "," }
-      let id = to_string(json_get(row, "id", ""))
-      let sev = to_string(json_get(row, "severity", ""))
-      let fp = to_string(json_get(row, "file_path", ""))
-      let iss = to_string(json_get(row, "issue", ""))
-      let issues = issues + "{\"id\":" + id + ",\"severity\":\"" + sev + "\",\"file\":\"" + fp + "\",\"issue\":\"" + iss + "\"}"
-      let ii = ii + 1
-    }
-    let issues = issues + "]"
-
-    // Pending proposals (top 10)
-    let prop_rows = query("SELECT id, content, status FROM admin_proposals WHERE status='pending' ORDER BY id DESC LIMIT 10", [])
-    let props = "["
-    let pi = 0
-    each row in prop_rows {
-      if pi > 0 then { let props = props + "," }
-      let id = to_string(json_get(row, "id", ""))
-      let content = to_string(json_get(row, "content", ""))
-      let st = to_string(json_get(row, "status", ""))
-      let props = props + "{\"id\":" + id + ",\"content\":\"" + content + "\",\"status\":\"" + st + "\"}"
-      let pi = pi + 1
-    }
-    let props = props + "]"
-
-    return respond("200 {\"status\":\"ok\",\"graph\":{\"nodes\":" + nodes + ",\"edges\":" + edges + "},\"issues\":" + issues + ",\"proposals\":" + props + ",\"reports_count\":" + reports + "}")
-  }
-
-  // P3-3: /api/quest/create-checkpoints — loop INSERT for quest checkpoints
-  route "/api/quest/create-checkpoints" method=POST {
-    let data = json_body()
-    let qid = to_string(json_get(data, "quest_id", ""))
-    let total_steps = to_int(json_get(data, "total_steps", "0"))
-    if qid == "" then { return respond("400 {\"status\":\"error\",\"message\":\"quest_id required\"}") }
-    if total_steps < 1.0 then { return respond("400 {\"status\":\"error\",\"message\":\"total_steps must be > 0\"}") }
-
-    let si = 0
-    while si < total_steps {
-      let step_label = "Шаг " + to_string(si + 1)
-      let _ = db_execute("INSERT INTO quest_checkpoints (quest_id, step_num, step_label, status) VALUES (?, ?, ?, 'pending')", [qid, to_string(si), step_label])
-      let si = si + 1
-    }
-
-    return respond("200 {\"status\":\"ok\",\"created\":" + to_string(total_steps) + "}")
-  }
-
-  // P3-4: /api/quest/format-list — format quest list for Telegram
-  route "/api/quest/format-list" method=POST {
-    let data = json_body()
-    let rows = json_get(data, "rows", [])
-
-    if len(rows) == 0.0 then { return respond("200 Нет активных задач.") }
-
-    let out = "Активные задачи (" + to_string(len(rows)) + "):"
-    let i = 0
-    each r in rows {
-      let qid = to_string(json_get(r, "id", "?"))
-      let title = to_string(json_get(r, "title", "?"))
-      let qtype = to_string(json_get(r, "quest_type", "?"))
-      let cstep = to_string(json_get(r, "current_step", "0"))
-      let tstep = to_string(json_get(r, "total_steps", "0"))
-      let dl = to_string(json_get(r, "deadline", ""))
-      let line = to_string(i + 1) + ". " + title + " [" + qtype + "] " + cstep + "/" + tstep
-      if dl != "" then { let line = line + " дедлайн=" + dl }
-      let line = line + "\n  id: " + qid
-      let out = out + "\n" + line
-      let i = i + 1
-    }
-
-    return respond("200 " + out)
-  }
-
-  // P3-5: /api/quest/format-status — format quest detail for Telegram
-  route "/api/quest/format-status" method=POST {
-    let data = json_body()
-    let qid = to_string(json_get(data, "quest_id", ""))
-
-    let q_rows = query("SELECT * FROM quests WHERE id = ?", [qid])
-    if len(q_rows) == 0.0 then { return respond("200 Задача " + qid + " не найдена.") }
-
-    let q = q_rows[0]
-    let title = to_string(json_get(q, "title", ""))
-    let qtype = to_string(json_get(q, "quest_type", ""))
-    let qstatus = to_string(json_get(q, "status", ""))
-    let cstep = to_string(json_get(q, "current_step", "0"))
-    let tstep = to_string(json_get(q, "total_steps", "0"))
-    let dl = to_string(json_get(q, "deadline", ""))
-
-    let out = "*Досье: " + title + "*"
-    let info = "Тип: " + qtype + " | Статус: " + qstatus + " | Шаг: " + cstep + "/" + tstep
-    if dl != "" then { let info = info + " | Дедлайн: " + dl }
-    let out = out + "\n" + info + "\n\nЧекпоинты:"
-
-    // Checkpoints
-    let cp_rows = query("SELECT step_num, step_label, status, approved_by, approved_at FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", [qid])
-    each cp in cp_rows {
-      let cp_status = to_string(json_get(cp, "status", "pending"))
-      let marker = "[ ]"
-      if cp_status == "approved" then { let marker = "[OK]" }
-      if cp_status == "in_progress" then { let marker = "[>>]" }
-      if cp_status == "skipped" then { let marker = "[--]" }
-      let sn = to_string(json_get(cp, "step_num", ""))
-      let sl = to_string(json_get(cp, "step_label", ""))
-      let line = "  " + marker + " " + sn + ". " + sl
-      if cp_status == "approved" then {
-        let ab = to_string(json_get(cp, "approved_by", ""))
-        let aa = to_string(json_get(cp, "approved_at", ""))
-        let line = line + " (" + ab + " " + aa + ")"
-      }
-      let out = out + "\n" + line
-    }
-
-    // Files
-    let f_rows = query("SELECT filename, file_type, version FROM quest_files WHERE quest_id = ? ORDER BY id", [qid])
-    if len(f_rows) > 0.0 then {
-      let out = out + "\n\nФайлы:"
-      each f in f_rows {
-        let fn = to_string(json_get(f, "filename", ""))
-        let ft = to_string(json_get(f, "file_type", ""))
-        let fv = to_string(json_get(f, "version", ""))
-        let out = out + "\n  - " + fn + " (" + ft + " v" + fv + ")"
-      }
-    }
-
-    return respond("200 " + out)
   }
 
   // ============================================================

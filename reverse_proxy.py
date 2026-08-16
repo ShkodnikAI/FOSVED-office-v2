@@ -15,7 +15,7 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
 # Routes that go to LLM Proxy (Mini App + dashboards + archive + scheduler + learning)
 LLM_ROUTES_PREFIXES = [
-    # "/webhook/telegram",  # WH-1: in Metalogos (app.mlog:1078)
+    # "/webhook/",   # Telegram webhook — Python handler
     "/webhook/miniapp-action",  # Mini App action bar → LLM Proxy (must precede generic mlog routing)
     "/cron/collect-news",  # registered in LLM Proxy, not in Metalogos; guarded by CRON_SECRET
     "/news/stats",         # read-only counters, used by the smoke script,
@@ -23,20 +23,12 @@ LLM_ROUTES_PREFIXES = [
     "/miniapp",
     "/miniapp-spa/",
     "/miniapp-spa",
-    "/api/integrations",   # P1-4: /api/dashboard + /api/dept migrated to Metalogos
-    # P2-3: /api/narads, /api/quests migrated to Metalogos
-    "/api/quest/generate",    # docx/pdf generation → Python
-    "/api/quest/send-package",  # email + file → Python
-    "/api/email/",
-    "/api/admin/",
+    "/api/",
     "/dept-dashboard/",
     "/dept-dashboard",
     "/office-dashboard",
     "/archive/browse",
-    # P1-2: /audit/recent migrated to Metalogos — removed from here
-    # P1-3: /search migrated to Metalogos — removed from INTERNAL_ONLY
-    # P1-4: /api/dashboard migrated to Metalogos
-    # P1-5: /api/dept/<slug> migrated to Metalogos
+    "/audit/",
 ]
 
 # Called by Metalogos directly on 127.0.0.1:4000 — must never be reachable
@@ -45,11 +37,10 @@ INTERNAL_ONLY_PREFIXES = [
     "/ask",
     "/detect-dept",
     "/scheduler/",
-    "/learning/fix",     # P2-5: /learning/fix needs call_llm → Python; good+stats in mlog
-    "/learning/debrief",  # needs call_llm
+    "/learning/",
     "/memory/",
     "/lz/",
-    # P2-2: /search/web migrated to Metalogos (Tavily direct http_post)
+    "/search",
     "/tts",
     "/stt",
     "/voice-set",
@@ -64,8 +55,9 @@ INTERNAL_ONLY_PREFIXES = [
     "/archive/publish",
     "/archive/digest",
     "/archive/daily-digest",
+    "/archive/save",
     "/extract-document",
-    "/download-telegram-file",
+    "/expert/chart",  # Expert chart gen — called by mlog internally
 ]
 
 
@@ -74,28 +66,10 @@ def is_internal_only(path):
 
 
 # Routes that go to Metalogos
+# NOTE: mlog routes checked BEFORE LLM routes (specific > catch-all)
 MLOG_ROUTES_PREFIXES = [
-    "/webhook/",   # P1-1: Telegram webhook in Metalogos (app.mlog:1078)
-    "/audit/",     # P1-2: /audit/recent in Metalogos
-    "/search",     # P1-3: /search (SQLite LIKE) in Metalogos (but /search/web → Python)
-    "/api/dashboard",  # P1-4: Dashboard KPIs in Metalogos
-    "/api/dept",       # P1-5: Dept details in Metalogos (query_param slug)
-    "/api/models",     # P2-1: Model list in Metalogos
-    "/api/economics",  # P2-1: Token economics in Metalogos
-    "/api/narads",     # P2-3: Narads in Metalogos
-    "/api/quests",     # P2-3: Quests in Metalogos
-    "/learning/good",  # P2-5: Positive example in Metalogos
-    "/learning/stats", # P2-5: Learning stats in Metalogos
-    "/rate_cmd",       # P2-6: Rate in Metalogos
-    "/context_cmd",    # P2-6: Context in Metalogos
-    "/api/archive",    # P3-1: Archive search in Metalogos
-    "/api/archive/browse",  # P3-3: Archive browse navigator in Metalogos
-    "/api/admin/status",  # P3-2: Admin status in Metalogos
-    "/api/dept-dashboard",  # P3-2a: Dept dashboard JSON in Metalogos
-    "/api/office-dashboard",  # P3-2b: Office dashboard JSON in Metalogos
-    "/api/quest/create-checkpoints",  # P3-3.5: Quest helpers in Metalogos
-    "/api/quest/format-list",
-    "/api/quest/format-status",
+    "/api/expert/",  # Expert automotive API — served by mlog (dept/expert.mlog)
+    "/webhook/",    # Telegram webhook — mlog handler
     "/cron/",
     "/health",
     "/",
@@ -142,8 +116,10 @@ def proxy(path):
     if full_path == "/webhook/":
         full_path = "/webhook/telegram"
 
-    # Determine target
-    if is_llm_route(full_path):
+    # Determine target — mlog routes checked FIRST (specific routes > catch-all /api/)
+    if is_mlog_route(full_path):
+        target_url = MLOG_URL + full_path
+    elif is_llm_route(full_path):
         target_url = LLM_URL + full_path
     else:
         target_url = MLOG_URL + full_path

@@ -4,15 +4,8 @@ Flask server on port 4000 with native circuit breaker, combo chains, token compr
 7-provider direct failover, dept routing, dashboards, SQLite,
 TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
-import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid, base64
+import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
 import doc_extract
-import secrets_crypto
-from credential_manager import (
-    scan_missing_keys, format_missing_for_telegram,
-    format_missing_for_morning_brief, format_missing_for_json,
-    format_provider_status, check_all_balances,
-    set_key_in_env, auto_generate_key, CREDENTIAL_MANIFEST
-)
 import html as html_lib
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -225,32 +218,6 @@ PROVIDERS = {
     "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
 }
 
-# INT-1: Single source of truth for the Integrations screen (SEC-6) and
-# for future get_secret() consumers. Kind: "model" (LLM provider, wired
-# into PROVIDERS/COMBO_CHAINS) or "service" (external tool, e.g. search).
-INTEGRATIONS_REGISTRY = [
-    {"env_key": "ZAI_API_KEY", "label": "Z.ai (GLM)", "kind": "model"},
-    {"env_key": "DEEPSEEK_API_KEY", "label": "DeepSeek", "kind": "model"},
-    {"env_key": "GROQ_API_KEY", "label": "Groq", "kind": "model"},
-    {"env_key": "CEREBRAS_API_KEY", "label": "Cerebras", "kind": "model"},
-    {"env_key": "KIMI_API_KEY", "label": "Kimi (Moonshot)", "kind": "model"},
-    {"env_key": "ANTHROPIC_API_KEY", "label": "Anthropic (Claude)", "kind": "model"},
-    {"env_key": "OPENAI_API_KEY", "label": "OpenAI", "kind": "model"},
-    {"env_key": "GROK_API_KEY", "label": "Grok (xAI)", "kind": "model"},
-    {"env_key": "NVIDIA_API_KEY", "label": "NVIDIA", "kind": "model"},
-    {"env_key": "APODEX_API_KEY", "label": "Apodex", "kind": "model"},
-    {"env_key": "TAVILY_API_KEY", "label": "Tavily (веб-поиск)", "kind": "service"},
-    {"env_key": "GITHUB_TOKEN_METALOGOS", "label": "GitHub (трекинг репозиториев)", "kind": "service"},
-    {"env_key": "SMTP_EMAIL", "label": "SMTP (email для отправки)", "kind": "service"},
-    {"env_key": "SMTP_PASSWORD", "label": "SMTP (пароль/app-password)", "kind": "service"},
-]
-
-# Some providers require a specific temperature value;
-# list only providers that differ from the default (0.7).
-PROVIDER_TEMPERATURE = {
-    "kimi": 1.0,
-}
-
 TOKEN_COSTS = {
     "zai": {"input": 0.5, "output": 1.5}, "deepseek": {"input": 0.14, "output": 0.28},
     "groq": {"input": 0.0, "output": 0.0}, "grok": {"input": 3.0, "output": 15.0},
@@ -327,34 +294,30 @@ _breaker = CircuitBreaker(threshold=3, reset_after_ms=60000)
 # Each combo is an ordered list of (provider, [models]) tuples.
 # call_llm walks the chain: for each provider, try each model until one works.
 COMBO_CHAINS = {
-    # Fix: groq 413 (sys_len>6K chars) kills Yana. kimi ($0.60/M) and zai ($0.50/M)
-    # are cheap enough for the "free" chain and actually work with large prompts.
     "fosved-free": [
-        ("kimi", ["kimi-k3"]),
-        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("deepseek", ["deepseek-chat"]),
     ],
     "fosved-standard": [
         ("kimi", ["kimi-k3"]),
-        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("deepseek", ["deepseek-chat"]),
+        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("groq", ["llama-3.3-70b-versatile"]),
         ("cerebras", ["gpt-oss-120b"]),
     ],
     "fosved-deep": [
         ("kimi", ["kimi-k3"]),
-        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("deepseek", ["deepseek-chat"]),
+        ("zai", ["glm-4.6"]),
         ("groq", ["llama-3.3-70b-versatile"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
     "fosved-fusion": [
         ("kimi", ["kimi-k3"]),
-        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("deepseek", ["deepseek-chat"]),
+        ("zai", ["glm-4.6"]),
         ("groq", ["llama-3.3-70b-versatile"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
@@ -436,10 +399,8 @@ def _compress_messages(messages, dept='yana'):
     ]
 
     try:
-        # Try groq first (short prompt, no 413 risk), fallback to kimi
+        # Use cheap provider for compression
         summary_result = _call_single_provider("groq", "llama-3.3-70b-versatile", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
-        if not summary_result or not summary_result.get("reply"):
-            summary_result = _call_single_provider("kimi", "kimi-k3", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
         if summary_result and summary_result.get("reply"):
             summary_msg = {"role": "system", "content": f"[Earlier conversation summary]: {summary_result['reply'][:2000]}"}
             compressed = system_msgs + [summary_msg] + to_keep
@@ -458,7 +419,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     prov = PROVIDERS.get(provider_name)
     if not prov:
         return None
-    api_key = get_secret(prov["env_key"])
+    api_key = os.environ.get(prov["env_key"])
     if not api_key:
         return None
     if not _breaker.can_call(provider_name):
@@ -468,8 +429,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     try:
         if prov["format"] == "openai":
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            temp = PROVIDER_TEMPERATURE.get(provider_name, 0.7)
-            body = {"model": model, "messages": messages, "temperature": temp, "max_tokens": max_tokens}
+            body = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": max_tokens}
         else:  # anthropic
             sys_msg = ""
             user_msgs = []
@@ -511,14 +471,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
         return {"reply": reply, "provider": provider_name, "model": model, "tokens_in": t_in, "tokens_out": t_out}
     except Exception as e:
         _breaker.record_failure(provider_name)
-        detail = ""
-        resp_obj = getattr(e, "response", None)
-        if resp_obj is not None:
-            try:
-                detail = f" body={resp_obj.text[:300]}"
-            except Exception:
-                pass
-        log.warning(f"LLM fail: provider={provider_name} model={model} err={e}{detail}")
+        log.warning(f"LLM fail: provider={provider_name} model={model} err={e}")
         return None
 
 # ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
@@ -818,15 +771,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS news_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, title TEXT NOT NULL, summary TEXT, url TEXT, category TEXT DEFAULT 'general', language TEXT DEFAULT 'ru', published TIMESTAMP, collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, relevance_score REAL DEFAULT 0, hash TEXT UNIQUE);
         CREATE INDEX IF NOT EXISTS idx_news_category ON news_cache (category, collected DESC);
         CREATE INDEX IF NOT EXISTS idx_news_hash ON news_cache (hash);
-        -- WH-3: Webhook dedup table (90s window)
-        CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS idx_webhook_dedup_seen ON webhook_dedup(seen_at);
-        -- SEC-5: Encrypted secrets store
-        CREATE TABLE IF NOT EXISTS secrets_store (
-            name TEXT PRIMARY KEY,
-            encrypted_value TEXT NOT NULL,
-            updated_at TEXT DEFAULT (datetime('now'))
-        );
         """)
         for col_sql, col_name in [
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
@@ -839,83 +783,7 @@ def init_db():
                 pass
         c.commit(); c.close()
 
-    # Periodic cleanup: remove dedup entries older than 1 day
-    try:
-        with db_lock:
-            c2 = _db()
-            c2.execute("DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
-            c2.commit(); c2.close()
-    except Exception:
-        pass
-
 init_db()
-
-# ──────────────────────────── WEBHOOK DEDUP (WH-3) ────────────────────────────
-_DEDUP_WINDOW_SEC = 90  # Telegram retries ~60s, so 90s window blocks fresh dupes
-
-def _webhook_dedup_check(update_id: str) -> bool:
-    """Return True if this update_id should be processed (not a fresh dupe).
-    
-    Logic:
-    - If update_id not seen → INSERT, return True (process it)
-    - If seen within 90s → it's a Telegram retry, block it (return False)
-    - If seen but >90s ago → it's a slow retry (processing took >90s), allow it
-    """
-    if not update_id:
-        return True  # Can't dedup without an ID
-    try:
-        with db_lock:
-            c = _db()
-            now_iso = datetime.utcnow().isoformat()
-            
-            # Check if we've seen this update_id
-            row = c.execute(
-                "SELECT seen_at FROM webhook_dedup WHERE update_id = ?",
-                (str(update_id),)
-            ).fetchone()
-            
-            if row is None:
-                # First time seeing this update_id → process it
-                c.execute(
-                    "INSERT INTO webhook_dedup (update_id, seen_at) VALUES (?, ?)",
-                    (str(update_id), now_iso)
-                )
-                c.commit(); c.close()
-                return True
-            
-            seen_at = row[0]
-            c.close()
-            
-            # Parse seen_at and check if within dedup window
-            try:
-                from datetime import timezone as _tz
-                seen_dt = datetime.fromisoformat(seen_at).replace(tzinfo=_tz.utc)
-                now_dt = datetime.utcnow().replace(tzinfo=_tz.utc)
-                age_sec = (now_dt - seen_dt).total_seconds()
-            except Exception:
-                age_sec = 999  # If we can't parse, treat as old → allow
-            
-            if age_sec < _DEDUP_WINDOW_SEC:
-                # Fresh dupe — Telegram retry within 90s → block
-                log.info(f"[DEDUP] blocking update_id={update_id} (age={age_sec:.0f}s < {_DEDUP_WINDOW_SEC}s)")
-                return False
-            else:
-                # Old entry — slow retry (processing took >90s) → allow
-                log.info(f"[DEDUP] allowing slow retry update_id={update_id} (age={age_sec:.0f}s >= {_DEDUP_WINDOW_SEC}s)")
-                # Update seen_at so future retries within 90s are blocked
-                with db_lock:
-                    c2 = _db()
-                    c2.execute(
-                        "INSERT OR REPLACE INTO webhook_dedup (update_id, seen_at) VALUES (?, ?)",
-                        (str(update_id), now_iso)
-                    )
-                    c2.commit(); c2.close()
-                return True
-    except Exception as e:
-        # If dedup DB is broken, don't block processing
-        log.warning(f"[DEDUP] error checking update_id={update_id}: {e}")
-        return True
-
 
 def _query(sql, params=(), fetch=False):
     with db_lock:
@@ -929,43 +797,6 @@ def _query(sql, params=(), fetch=False):
             if "no such table" in str(e):
                 return [] if fetch else None
             raise
-
-# ──────────────────────────── SEC-5: ENCRYPTED SECRETS ────────────────────────────
-
-def get_secret(name: str) -> str:
-    """Resolve a secret by name: DB override (encrypted) first, then env var.
-
-    This is the single choke point for both model-provider keys and
-    external service keys (Tavily, GitHub, etc.) going forward.
-    """
-    try:
-        rows = _query("SELECT encrypted_value FROM secrets_store WHERE name = ?", (name,), fetch=True)
-        if rows:
-            decrypted = secrets_crypto.decrypt_value(rows[0]["encrypted_value"])
-            if decrypted:
-                return decrypted
-    except Exception as e:
-        log.error(f"get_secret({name}) DB lookup failed: {e}")
-    return os.environ.get(name, "")
-
-
-def set_secret(name: str, plain_value: str) -> bool:
-    """Store a secret in the DB, encrypted. Returns False if master key missing."""
-    if not secrets_crypto.is_configured():
-        return False
-    encrypted = secrets_crypto.encrypt_value(plain_value)
-    _query(
-        "INSERT INTO secrets_store (name, encrypted_value, updated_at) VALUES (?, ?, datetime('now')) "
-        "ON CONFLICT(name) DO UPDATE SET encrypted_value = excluded.encrypted_value, updated_at = excluded.updated_at",
-        (name, encrypted),
-    )
-    return True
-
-
-def delete_secret(name: str) -> None:
-    """Remove a DB override — falls back to env var again."""
-    _query("DELETE FROM secrets_store WHERE name = ?", (name,))
-
 
 def _get_setting(key, default=""):
     """Read a value from system_settings (shared kv with Metalogos)."""
@@ -1556,8 +1387,6 @@ def ask():
     if not messages:
         return jsonify({"reply": "[Oshibka] Net soobshenii", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 400
     result = call_llm(dept, messages, model_ov)
-    if result is None:
-        return jsonify({"reply": "[Oshibka] LLM nedostupen", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 503
     if dept == "osp" and "reply" in result:
         import re as _re
         from datetime import datetime as _dt
@@ -2312,29 +2141,6 @@ def extract_document():
                 pass
 
 
-@app.post("/download-telegram-file")
-def download_telegram_file():
-    """НАРЯД №48: Download a Telegram file and return base64-encoded data.
-    Used by Metalogos native PDF builtins (pdf_classify, pdf_to_markdown, pdf_ocr).
-    """
-    d = request.get_json(force=True)
-    file_path = d.get("file_path", "")
-    if not file_path:
-        return jsonify({"status": "error", "message": "file_path is required"}), 400
-    try:
-        blob = _tg_download_file(file_path)
-        if not blob:
-            return jsonify({"status": "error",
-                            "message": "не удалось скачать файл"}), 200
-        b64_data = base64.b64encode(blob).decode("ascii")
-        _log_audit("telegram_file_downloaded", {"file_path": file_path,
-                                                 "size": len(blob)})
-        return jsonify({"status": "ok", "data": b64_data, "size": len(blob)})
-    except Exception as e:
-        log.error(f"download_telegram_file failed: {e}")
-        return jsonify({"status": "error", "message": "внутренняя ошибка скачивания"}), 500
-
-
 # ══════════════════════════════════════════════════════════════════════
 #  MEGA-3: ARCHIVE ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════
@@ -2572,27 +2378,21 @@ def scheduler_morning_brief():
         metrics = _collect_metrics_for_period(yesterday, today)
         metrics_text = _format_metrics_text(metrics)
 
-        # P3-1: Use pre-collected SQL data from mlog payload if available
-        # mlog MorningBrief() now queries dialog_24h, active_depts, narads_pending,
-        # corrections_24h, calls_yesterday, cost_yesterday, top_depts before calling Python
-        if "dialog_24h" in d:
-            dialog_24h = int(d.get("dialog_24h", 0))
-            active_depts = d.get("active_depts", [])
-            narads_pending = int(d.get("narads_pending", 0))
-            corrections_24h = int(d.get("corrections_24h", 0))
-        else:
-            # Fallback: query locally (legacy path when called without mlog payload)
-            dialog_rows = _query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
-            dialog_24h = dialog_rows[0]["cnt"] if dialog_rows else 0
+        # Dialog count (24h)
+        dialog_rows = _query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+        dialog_24h = dialog_rows[0]["cnt"] if dialog_rows else 0
 
-            dept_rows = _query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
-            active_depts = [r["dept"] for r in dept_rows] if dept_rows else []
+        # Active departments (24h)
+        dept_rows = _query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+        active_depts = [r["dept"] for r in dept_rows] if dept_rows else []
 
-            narad_rows = _query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", fetch=True)
-            narads_pending = narad_rows[0]["cnt"] if narad_rows else 0
+        # Pending narads
+        narad_rows = _query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", fetch=True)
+        narads_pending = narad_rows[0]["cnt"] if narad_rows else 0
 
-            corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
-            corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
+        # Recent corrections
+        corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
+        corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
 
         # ── 3. LZ daily findings (from memory) ──
         lz_findings = ""
@@ -2651,40 +2451,13 @@ def scheduler_morning_brief():
             {"role": "user", "content": user_prompt},
         ]
 
-        # ── 5. Missing credentials + provider status ──
-        cred_scan = scan_missing_keys()
-        cred_block = ""
-        if cred_scan["total_missing"] > 0:
-            cred_block = format_missing_for_morning_brief(cred_scan)
-            # Append to user prompt so LLM includes it in the brief
-            user_prompt += f"\n\n=== НЕДОСТАЮЩИЕ КЛЮЧИ ===\n{cred_block}\n\n⚠️ Включи в отчёт секцию 🔑 Ключи — перечисли какие ключи не хватает, кратко зачем. Не расписывай шаги — просто перечисли."
-
-        # Provider status + balances (always include, even if all keys set)
-        try:
-            provider_block = format_provider_status(scan_result=cred_scan)
-            user_prompt += f"\n\n=== ПРОВАЙДЕРЫ И БАЛАНСЫ ===\n{provider_block}\n\nВключи в отчёт секцию 📊 Провайдеры — покажи какие LLM провайдеры активны, их балансы/лимиты, и GitHub rate limit. Кратко, в одну-две строки на провайдер."
-        except Exception as e:
-            log.warning(f"Failed to get provider status: {e}")
-
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"morning_brief: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         brief = result["reply"]
 
-        # If missing keys, send a follow-up with details + links
-        if cred_scan["total_missing"] > 0:
-            cred_msg = format_missing_for_telegram(cred_scan)
-            if len(cred_msg) > 100:
-                try:
-                    _tg_send_message(owner_id, cred_msg, parse_mode="Markdown")
-                except Exception as e:
-                    log.warning(f"Failed to send credential request: {e}")
-
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
-        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id, "missing_keys": cred_scan["total_missing"]})
+        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
-        return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id, "missing_keys": cred_scan["total_missing"]})
+        return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
 
     except Exception as e:
         log.error(f"morning_brief error: {e}")
@@ -2765,13 +2538,10 @@ def scheduler_admin_morning_reply():
         ]
 
         result = call_llm("admin", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"admin_morning_reply: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         reply = result["reply"]
 
         msg_id = _tg_send_formatted(owner_id, reply, dept="admin")
-        _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
+        _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "reply": reply, "msg_id": msg_id})
 
@@ -2803,9 +2573,6 @@ def scheduler_evening_summary():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"evening_summary: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         summary = result["reply"]
 
         # Send to owner
@@ -2858,9 +2625,6 @@ def scheduler_weekly_digest():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"weekly_digest: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         digest = result["reply"]
 
         # Send via SendReport (if > 800 chars, use Mini App button)
@@ -2901,14 +2665,11 @@ def scheduler_monthly_review():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"monthly_review: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         review = result["reply"]
 
         msg_id = _tg_send_report_with_button(owner_id, review)
 
-        _log_audit("scheduler_monthly_review", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
+        _log_audit("scheduler_monthly_review", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "msg_id": msg_id})
 
@@ -2957,10 +2718,7 @@ def scheduler_control_check():
                     {"role": "user", "content": f"Control check: {topic}\n\nOriginal prediction: {original_prediction}\n\nAnalyze: did the prediction match reality? What changed?\n\nOzhidai: korotkii analiz 2-3 predlozheniya."},
                 ]
                 check_result = call_llm("osp", messages)
-                if check_result is None or not check_result.get("reply"):
-                    analysis = "[контроль недоступен — LLM не ответил]"
-                else:
-                    analysis = check_result["reply"]
+                analysis = check_result["reply"]
                 results.append({"key": key, "topic": topic, "frequency": frequency, "analysis": analysis})
 
         # Format and send results
@@ -3011,9 +2769,6 @@ def scheduler_self_learn():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"self_learn: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         finding = result["reply"]
 
         # Memorize finding
@@ -3051,9 +2806,6 @@ def learning_fix():
         ]
 
         result = call_llm(dept, messages)
-        if result is None or not result.get("reply"):
-            log.error(f"learning_fix: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         reply = result["reply"]
 
         # Parse JSON from LLM response
@@ -3173,12 +2925,9 @@ def learning_debrief():
         ]
 
         result = call_llm(dept, messages)
-        if result is None or not result.get("reply"):
-            log.error(f"learning_debrief: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         analysis = result["reply"]
 
-        _log_audit("learning_debrief", {"dept": dept, "corrections_analyzed": len(corrs), "provider": result.get("provider")})
+        _log_audit("learning_debrief", {"dept": dept, "corrections_analyzed": len(corrs), "provider": result["provider"]})
 
         return jsonify({"status": "ok", "analysis": analysis})
 
@@ -3257,127 +3006,6 @@ def search_endpoint():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ══════════════════════════════════════════════════════════════════════
-#  MEGA-3.5: TAVILY WEB SEARCH
-# ══════════════════════════════════════════════════════════════════════
-
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
-
-def _tavily_search(query, search_depth="advanced", max_results=8, topic="general", include_answer=True):
-    """Call Tavily Search API. Returns list of result dicts or empty list on failure.
-
-    Args:
-        query: search query string
-        search_depth: "basic" (fast, cheap) or "advanced" (deeper, more tokens)
-        max_results: 1–10 results
-        topic: "general" or "news"
-        include_answer: return an LLM-generated answer summary
-
-    Returns:
-        {"answer": str|None, "results": [{"title","url","content","score"}], "query": str}
-    """
-    if not TAVILY_API_KEY:
-        log.warning("TAVILY_API_KEY not set — web search unavailable")
-        return {"answer": None, "results": [], "query": query, "error": "TAVILY_API_KEY not configured"}
-
-    try:
-        body = {
-            "api_key": TAVILY_API_KEY,
-            "query": query,
-            "search_depth": search_depth,
-            "max_results": min(max_results, 10),
-            "topic": topic,
-            "include_answer": include_answer,
-            "include_raw_content": False,  # save tokens — content field is enough
-        }
-        resp = http_requests.post(
-            "https://api.tavily.com/search",
-            json=body,
-            timeout=30 if search_depth == "basic" else 60
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        results = []
-        for r in data.get("results", []):
-            results.append({
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "content": r.get("content", ""),
-                "score": r.get("score", 0),
-            })
-
-        answer = data.get("answer") if include_answer else None
-
-        log.info(f"Tavily search: query='{query[:60]}' depth={search_depth} topic={topic} → {len(results)} results")
-        return {"answer": answer, "results": results, "query": query}
-
-    except Exception as e:
-        log.error(f"Tavily search error: {e}")
-        return {"answer": None, "results": [], "query": query, "error": str(e)}
-
-
-def _tavily_results_to_context(search_data, max_chars=4000):
-    """Convert Tavily search results to a text block for LLM context injection."""
-    if not search_data or not search_data.get("results"):
-        return ""
-
-    parts = []
-    if search_data.get("answer"):
-        parts.append(f"TL;DR: {search_data['answer']}\n")
-
-    parts.append("Web search results:")
-    for i, r in enumerate(search_data["results"][:8], 1):
-        title = r.get("title", "Untitled")
-        url = r.get("url", "")
-        content = r.get("content", "")
-        score = r.get("score", 0)
-        # Truncate each result to keep total under max_chars
-        entry = f"\n{i}. [{title}]({url}) (relevance: {score:.2f})\n   {content}"
-        parts.append(entry)
-
-    text = "\n".join(parts)
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n[...truncated]"
-    return text
-
-
-@app.post("/search/web")
-def search_web_endpoint():
-    """Tavily-powered web search. Returns structured results suitable for LZ and general use.
-
-    Body: {
-        "query": str,           — required
-        "search_depth": str,    — "basic" | "advanced" (default: "advanced")
-        "max_results": int,     — 1-10 (default: 8)
-        "topic": str,           — "general" | "news" (default: "general")
-        "include_answer": bool  — include TL;DR (default: true)
-    }
-    """
-    d = request.get_json(force=True)
-    query = d.get("query", "")
-    if not query:
-        return jsonify({"status": "error", "message": "query is required"}), 400
-
-    search_depth = d.get("search_depth", "advanced")
-    max_results = d.get("max_results", 8)
-    topic = d.get("topic", "general")
-    include_answer = d.get("include_answer", True)
-
-    result = _tavily_search(query, search_depth=search_depth, max_results=max_results,
-                            topic=topic, include_answer=include_answer)
-
-    _log_audit("web_search", {
-        "query": query[:100], "depth": search_depth, "topic": topic,
-        "results": len(result.get("results", [])), "had_answer": bool(result.get("answer"))
-    })
-
-    if result.get("error"):
-        return jsonify({"status": "error", "message": result["error"], "results": []}), 503
-
-    return jsonify({"status": "ok", **result})
-
-
-# ══════════════════════════════════════════════════════════════════════
 #  MEGA-4: LZ DEEP RESEARCH (APODEX)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -3409,13 +3037,7 @@ def _tg_send_chat_action(chat_id, action):
 
 @app.post("/lz/deep-research")
 def lz_deep_research():
-    """Deep research endpoint: Tavily web search → context enrichment → LLM (Apodex/fallback).
-
-    Flow:
-    1. (Optional) Tavily web search for real web data
-    2. Inject search results as context into the user message
-    3. Call Apodex or fallback LLM for deep analysis
-    """
+    """Apodex-powered deep research endpoint with typing indicator refresh."""
     d = request.get_json(force=True)
     query_text = d.get("query", "")
     dept = d.get("dept", "lz")
@@ -3423,8 +3045,6 @@ def lz_deep_research():
     model = d.get("model", "apodex-1.0-mini")
     system_context = d.get("system_context", "")
     chat_id = d.get("chat_id", "")
-    use_web_search = d.get("use_web_search", True)  # default ON for LZ
-    web_search_depth = d.get("web_search_depth", "advanced")
 
     if not query_text:
         return jsonify({"status": "error", "message": "query is required"}), 400
@@ -3434,26 +3054,6 @@ def lz_deep_research():
         stop_typing = _send_chat_action_loop(chat_id, "typing", 5)
 
     try:
-        # ── Phase 0: Tavily web search (real web data) ──────────
-        web_context = ""
-        web_search_meta = {}
-        if use_web_search and TAVILY_API_KEY:
-            log.info(f"LZ deep-research: running Tavily search for '{query_text[:60]}'")
-            search_data = _tavily_search(
-                query_text, search_depth=web_search_depth,
-                max_results=8, topic="general", include_answer=True
-            )
-            web_context = _tavily_results_to_context(search_data, max_chars=6000)
-            web_search_meta = {
-                "web_results": len(search_data.get("results", [])),
-                "web_has_answer": bool(search_data.get("answer")),
-                "web_error": search_data.get("error"),
-            }
-            if web_context:
-                log.info(f"LZ deep-research: injected {len(web_context)} chars of web context")
-        elif use_web_search and not TAVILY_API_KEY:
-            web_search_meta = {"web_results": 0, "web_error": "TAVILY_API_KEY not configured"}
-
         # Build LZ prompt for deep research
         lz_prompt = system_context or get_dept_prompt("lz")
 
@@ -3473,20 +3073,9 @@ Requirements:
 8. Language: Russian
 9. Format: layers (like OSP), with evidence graph at end"""
 
-        # Build user content: inject web context before the query
-        user_content = query_text
-        if web_context:
-            user_content = (
-                f"Я провёл веб-поиск по твоему запросу. Вот реальные данные из интернета:\n\n"
-                f"{web_context}\n\n"
-                f"---\n"
-                f"Теперь на основе ЭТИХ реальных данных + своих знаний выполни глубокий анализ запроса:\n\n"
-                f"{query_text}"
-            )
-
         messages = [
             {"role": "system", "content": lz_prompt},
-            {"role": "user", "content": user_content}
+            {"role": "user", "content": query_text}
         ]
 
         # Call Apodex (or fallback to default provider)
@@ -3530,8 +3119,7 @@ Requirements:
         _log_audit("lz_deep_research", {
             "dept": dept, "provider": used_provider, "model": used_model,
             "query": query_text[:100], "tokens_in": t_in, "tokens_out": t_out,
-            "verified": used_provider == "apodex",
-            **web_search_meta
+            "verified": used_provider == "apodex"
         })
 
         return jsonify({
@@ -3540,8 +3128,7 @@ Requirements:
             "model": used_model,
             "verified": used_provider == "apodex",
             "tokens_in": t_in,
-            "tokens_out": t_out,
-            "web_search": web_search_meta
+            "tokens_out": t_out
         })
 
     except Exception as e:
@@ -3832,336 +3419,6 @@ def api_narad_reject(nid):
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# ──────────────────── SEC-6: INTEGRATIONS SCREEN ENDPOINTS ────────────────────
-
-def _has_db_override(name):
-    """Check whether a secret has a DB override (vs just an env var)."""
-    try:
-        rows = _query("SELECT 1 FROM secrets_store WHERE name = ?", (name,), fetch=True)
-        return bool(rows)
-    except Exception:
-        return False
-
-
-@app.get("/api/integrations")
-@require_telegram
-def api_integrations_list():
-    """List known integrations with connection status (masked, never the real value)."""
-    out = []
-    for item in INTEGRATIONS_REGISTRY:
-        current = get_secret(item["env_key"])
-        out.append({
-            "id": item["env_key"],
-            "label": item["label"],
-            "kind": item["kind"],
-            "connected": bool(current),
-            "masked": secrets_crypto.mask_value(current) if current else None,
-            "source": "db" if _has_db_override(item["env_key"]) else ("env" if current else "none"),
-        })
-    return jsonify({"status": "ok", "integrations": out})
-
-
-@app.post("/api/integrations/<env_key>")
-@require_telegram
-def api_integrations_set(env_key):
-    """Set or update a secret. Value is never echoed back in full."""
-    known = {item["env_key"] for item in INTEGRATIONS_REGISTRY}
-    if env_key not in known:
-        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
-    d = request.get_json(force=True)
-    value = d.get("value", "").strip()
-    if not value:
-        return jsonify({"status": "error", "message": "значение не может быть пустым"}), 400
-    ok = set_secret(env_key, value)
-    if not ok:
-        return jsonify({"status": "error", "message": "SECRETS_MASTER_KEY не настроен на сервере"}), 200
-    _log_audit("integration_key_set", {"env_key": env_key})
-    return jsonify({"status": "ok", "masked": secrets_crypto.mask_value(value)})
-
-
-@app.route("/api/integrations/<env_key>", methods=["DELETE"])
-@require_telegram
-def api_integrations_delete(env_key):
-    """Delete a DB override for a secret. Falls back to env var."""
-    known = {item["env_key"] for item in INTEGRATIONS_REGISTRY}
-    if env_key not in known:
-        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
-    delete_secret(env_key)
-    _log_audit("integration_key_deleted", {"env_key": env_key})
-    return jsonify({"status": "ok"})
-
-
-# ──────────────────── QUEST-1: DOSSIER/QUEST API ────────────────────
-
-@app.get("/api/quests")
-@require_telegram
-def api_quests_list():
-    """List all quests with status and progress."""
-    try:
-        rows = _query(
-            "SELECT id, title, quest_type, status, current_step, total_steps, deadline, created_at "
-            "FROM quests ORDER BY created_at DESC LIMIT 50", fetch=True
-        )
-        quests = []
-        for r in rows:
-            quests.append({
-                "id": r["id"], "title": r["title"], "type": r["quest_type"],
-                "status": r["status"], "currentStep": r["current_step"],
-                "totalSteps": r["total_steps"], "deadline": r["deadline"] or "",
-                "createdAt": r["created_at"],
-            })
-        return jsonify({"status": "ok", "quests": quests})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.get("/api/quests/<qid>")
-@require_telegram
-def api_quest_detail(qid):
-    """Get quest detail with checkpoints and files."""
-    try:
-        rows = _query("SELECT * FROM quests WHERE id = ?", (qid,), fetch=True)
-        if not rows:
-            return jsonify({"status": "error", "message": "не найдено"}), 404
-        q = rows[0]
-        checkpoints = _query(
-            "SELECT step_num, step_label, status, approved_by, approved_at "
-            "FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", (qid,), fetch=True
-        )
-        files = _query(
-            "SELECT filename, file_type, version, created_at "
-            "FROM quest_files WHERE quest_id = ? ORDER BY id", (qid,), fetch=True
-        )
-        return jsonify({
-            "status": "ok",
-            "quest": {k: q[k] for k in q.keys()},
-            "checkpoints": [dict(c) for c in checkpoints],
-            "files": [dict(f) for f in files],
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/quest/generate")
-@require_telegram
-def api_quest_generate():
-    """Generate a document from template for a quest (docx/pdf).
-    Delegates to python-docx / reportlab.
-    """
-    d = request.get_json(force=True)
-    qid = d.get("quest_id", "")
-    template = d.get("template", "")
-    data = d.get("data", {})
-
-    if not qid or not template:
-        return jsonify({"status": "error", "message": "quest_id and template required"}), 400
-
-    try:
-        from docx import Document
-        from docx.shared import Pt, Inches
-        import tempfile, os
-
-        doc = Document()
-        doc.add_heading(data.get("title", template), level=1)
-
-        # Template-specific content
-        if template == "cover_letter":
-            doc.add_paragraph(data.get("recipient", ""))
-            doc.add_paragraph("")
-            p = doc.add_paragraph(data.get("body", ""))
-        elif template == "project_description":
-            for section in data.get("sections", []):
-                doc.add_heading(section.get("title", ""), level=2)
-                doc.add_paragraph(section.get("content", ""))
-        else:
-            # Generic: dump all data keys as paragraphs
-            for k, v in data.items():
-                doc.add_heading(k, level=2)
-                doc.add_paragraph(str(v))
-
-        # Save to temp, then store
-        tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
-        doc.save(tmp.name)
-        tmp.close()
-
-        # Store in quest_files directory
-        quest_dir = os.path.join("data", "quests", qid)
-        os.makedirs(quest_dir, exist_ok=True)
-        filename = f"{template}.docx"
-        dest = os.path.join(quest_dir, filename)
-        os.rename(tmp.name, dest)
-
-        # Register in DB
-        _query(
-            "INSERT INTO quest_files (quest_id, filename, file_type, version, storage_path) "
-            "VALUES (?, ?, 'docx', 1, ?)",
-            (qid, filename, dest),
-        )
-        _log_audit("quest_doc_generated", {"quest_id": qid, "template": template, "filename": filename})
-
-        return jsonify({"status": "ok", "filename": filename, "file_type": "docx", "storage_path": dest})
-    except ImportError:
-        return jsonify({"status": "error", "message": "python-docx not installed"}), 500
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/quest/send-package")
-@require_telegram
-def api_quest_send_package():
-    """Send quest package via email (MAIL-1 minimal)."""
-    d = request.get_json(force=True)
-    qid = d.get("quest_id", "")
-    recipient = d.get("recipient", "")
-    subject = d.get("subject", "")
-    quest_title = d.get("quest_title", "")
-
-    if not recipient:
-        return jsonify({"status": "error", "message": "recipient required"}), 400
-
-    # Check if email sending is configured
-    smtp_email = get_secret("SMTP_EMAIL")
-    smtp_password = get_secret("SMTP_PASSWORD")
-    if not smtp_email or not smtp_password:
-        return jsonify({"status": "error", "message": "SMTP не настроен. Добавьте SMTP_EMAIL и SMTP_PASSWORD в Интеграции."}), 200
-
-    try:
-        import yagmail
-        yag = yagmail.SMTP(smtp_email, smtp_password)
-        body = f"Добрый день!\n\nНаправляю пакет документов: {quest_title} (досье {qid}).\n\nС уважением."
-        yag.send(to=recipient, subject=subject or quest_title, contents=body)
-        _log_audit("quest_email_sent", {"quest_id": qid, "recipient": recipient, "subject": subject})
-        return jsonify({"status": "ok", "message": f"Отправлено на {recipient}"})
-    except ImportError:
-        return jsonify({"status": "error", "message": "yagmail not installed. pip install yagmail"}), 500
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/email/send")
-@require_telegram
-def api_email_send():
-    """General-purpose email sending (MAIL-1 minimal). Two-step: caller must confirm."""
-    d = request.get_json(force=True)
-    to = d.get("to", "")
-    subject = d.get("subject", "")
-    body = d.get("body", "")
-    if not to or not subject:
-        return jsonify({"status": "error", "message": "to и subject обязательны"}), 400
-
-    smtp_email = get_secret("SMTP_EMAIL")
-    smtp_password = get_secret("SMTP_PASSWORD")
-    if not smtp_email or not smtp_password:
-        return jsonify({"status": "error", "message": "SMTP не настроен"}), 200
-
-    try:
-        import yagmail
-        yag = yagmail.SMTP(smtp_email, smtp_password)
-        yag.send(to=to, subject=subject, contents=body)
-        _log_audit("email_sent", {"to": to, "subject": subject})
-        return jsonify({"status": "ok"})
-    except ImportError:
-        return jsonify({"status": "error", "message": "yagmail not installed"}), 500
-    except Exception as e:
-        _log_audit("email_send_error", {"to": to, "error": str(e)[:200]})
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# ──────────────────── QUEST-1: MLOG HELPERS (formatting, checkpoint creation) ─────
-
-@app.post("/api/quest/create-checkpoints")
-def api_quest_create_checkpoints():
-    """Create checkpoint rows for a quest (called from Metalogos — no loop construct)."""
-    d = request.get_json(force=True)
-    qid = d.get("quest_id", "")
-    total_steps = int(d.get("total_steps", 0))
-    if not qid or total_steps <= 0:
-        return jsonify({"status": "error", "message": "quest_id and total_steps required"}), 400
-    try:
-        for i in range(total_steps):
-            step_label = f"Шаг {i + 1}"
-            _query(
-                "INSERT INTO quest_checkpoints (quest_id, step_num, step_label, status) VALUES (?, ?, ?, 'pending')",
-                (qid, i, step_label),
-            )
-        return jsonify({"status": "ok", "created": total_steps})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/quest/format-list")
-def api_quest_format_list():
-    """Format quest list for Telegram (called from Metalogos — no loop construct)."""
-    d = request.get_json(force=True)
-    rows = d.get("rows", [])
-    if not rows:
-        return "Нет активных задач."
-    lines = [f"Активные задачи ({len(rows)}):"]
-    for i, r in enumerate(rows):
-        qid = r.get("id", "?")
-        title = r.get("title", "?")
-        qtype = r.get("quest_type", "?")
-        cstep = r.get("current_step", "0")
-        tstep = r.get("total_steps", "0")
-        dl = r.get("deadline", "")
-        line = f'{i + 1}. {title} [{qtype}] {cstep}/{tstep}'
-        if dl:
-            line += f" дедлайн={dl}"
-        line += f"\n  id: {qid}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-@app.post("/api/quest/format-status")
-def api_quest_format_status():
-    """Format quest status for Telegram (called from Metalogos — no loop construct)."""
-    d = request.get_json(force=True)
-    qid = d.get("quest_id", "")
-    try:
-        q_rows = _query("SELECT * FROM quests WHERE id = ?", (qid,), fetch=True)
-        if not q_rows:
-            return f"Задача {qid} не найдена."
-        q = q_rows[0]
-        title = q["title"]
-        qtype = q["quest_type"]
-        qstatus = q["status"]
-        cstep = q["current_step"]
-        tstep = q["total_steps"]
-        dl = q["deadline"] or ""
-
-        lines = [f"*Досье: {title}*"]
-        info = f"Тип: {qtype} | Статус: {qstatus} | Шаг: {cstep}/{tstep}"
-        if dl:
-            info += f" | Дедлайн: {dl}"
-        lines.append(info)
-        lines.append("\nЧекпоинты:")
-
-        cp_rows = _query(
-            "SELECT step_num, step_label, status, approved_by, approved_at "
-            "FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", (qid,), fetch=True
-        )
-        markers = {"approved": "[OK]", "in_progress": "[>>]", "skipped": "[--]", "pending": "[ ]"}
-        for cp in cp_rows:
-            marker = markers.get(cp["status"], "[ ]")
-            line = f"  {marker} {cp['step_num']}. {cp['step_label']}"
-            if cp["status"] == "approved":
-                line += f" ({cp['approved_by'] or ''} {cp['approved_at'] or ''})"
-            lines.append(line)
-
-        f_rows = _query(
-            "SELECT filename, file_type, version FROM quest_files WHERE quest_id = ? ORDER BY id",
-            (qid,), fetch=True
-        )
-        if f_rows:
-            lines.append("\nФайлы:")
-            for f in f_rows:
-                lines.append(f"  - {f['filename']} ({f['file_type']} v{f['version']})")
-
-        return "\n".join(lines)
-    except Exception as e:
-        return f"Ошибка: {e}"
 
 
 @app.get("/api/archive")
@@ -5055,7 +4312,7 @@ def _github_releases(repo_full_name):
 @app.post("/scheduler/lz-daily")
 def scheduler_lz_daily():
     """
-    LZ Daily Report: GitHub scan → Tavily web search → LLM analysis → memory → report.
+    LZ Daily Report: scan GitHub → LLM analysis → save to memory → return report.
     Called by /cron/lz-daily or manually.
     """
     d = request.get_json(force=True) or {}
@@ -5094,40 +4351,11 @@ def scheduler_lz_daily():
         except Exception:
             pass  # Table may not exist yet (created by mlog InitDB)
 
-        # ── Phase 1b: Tavily web search (real web data supplement) ───
-        web_search_context = ""
-        web_search_count = 0
-        tavily_queries = [
-            "latest AI agent frameworks 2025 2026",
-            "new LLM tools and libraries this week",
-            "multi-agent orchestration systems updates",
-        ]
-        # Add custom monitor topics as Tavily queries
-        for topic in monitor_topics[:3]:
-            tavily_queries.append(topic)
-
-        if TAVILY_API_KEY:
-            log.info(f"LZ Daily: running {len(tavily_queries)} Tavily searches")
-            for q in tavily_queries:
-                search_data = _tavily_search(q, search_depth="basic", max_results=5, topic="news", include_answer=False)
-                if search_data.get("results"):
-                    web_search_count += len(search_data["results"])
-                    for r in search_data["results"][:3]:
-                        web_search_context += f"- [{r['title']}]({r['url']}) — {r['content'][:200]}\n"
-                time.sleep(0.5)  # Rate limit courtesy
-
-            if web_search_context:
-                web_search_context = f"\n=== ВЕБ-ПОИСК TAVILY ({web_search_count} результатов) ===\n{web_search_context}"
-                log.info(f"LZ Daily: Tavily found {web_search_count} web results")
-        else:
-            log.info("LZ Daily: TAVILY_API_KEY not set, skipping web search")
-
         scan_summary = {
             "repos_found": len(all_repos),
             "releases_found": len(all_releases),
             "monitors_active": len(monitor_topics),
             "github_api_ok": github_ok,
-            "tavily_results": web_search_count,
         }
 
         # ── Phase 2: LLM Analysis ─────────────────────────────
@@ -5147,14 +4375,13 @@ def scheduler_lz_daily():
 
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub + веб-поиск.\n\n"
+                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub.\n\n"
                  "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ, которые Админ должен изучить для применения в офисе.\n\n"
                  "Структура отчёта:\n"
                  "1. 🔥 TOP-3 находки (с disrupting potential 1-10) — что полезно для Фосвед Офиса\n"
                  "2. 📦 Новые релизы — что обновилось в ключевых проектах\n"
-                 "3. 🌐 Веб-находки — важное из интернета (если есть данные Tavily)\n"
-                 "4. 💡 Рекомендации — что Админу стоит изучить и почему\n"
-                 "5. 📊 Статистика скана\n\n"
+                 "3. 💡 Рекомендации — что Админу стоит изучить и почему\n"
+                 "4. 📊 Статистика скана\n\n"
                  "Фильтруй: только релевантное для AI-офиса, multi-agent систем, Telegram ботов, DSL, memory systems.\n"
                  "Язык: русский."},
                 {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
@@ -5162,8 +4389,7 @@ def scheduler_lz_daily():
                  f"{repos_text}\n\n"
                  f"=== НОВЫЕ РЕЛИЗЫ ({len(all_releases)}) ===\n"
                  f"{releases_text}\n\n"
-                 f"{monitors_text}\n"
-                 f"{web_search_context}"}
+                 f"{monitors_text}"}
             ]
         else:
             # GitHub API failed — LLM researches directly
@@ -5188,8 +4414,7 @@ def scheduler_lz_daily():
                 {"role": "user", "content": f"Сделай ежедневный обзор новинок на GitHub за последнюю неделю.\n"
                  f"Дата: {datetime.utcnow().isoformat()[:10]}\n"
                  f"Фокус: AI agents, LLM, Telegram bots, memory systems, MCP, RAG.\n\n"
-                 f"Для каждого проекта укажи: название, URL, что нового, почему релевантно Фосвед Офису.\n"
-                 f"{web_search_context}"}
+                 f"Для каждого проекта укажи: название, URL, что нового, почему релевантно Фосвед Офису."}
             ]
 
         result = call_llm("lz", analysis_messages)
@@ -5215,7 +4440,7 @@ def scheduler_lz_daily():
         report += f"{'=' * 40}\n\n"
         report += analysis
         report += f"\n\n{'─' * 40}\n"
-        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {web_search_count} web, {len(monitor_topics)} monitors\n"
+        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {len(monitor_topics)} monitors\n"
         report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
 
         # ── Phase 5: Send to Owner (Admin) ────────────────────
@@ -5228,8 +4453,7 @@ def scheduler_lz_daily():
 
         _log_audit("lz_daily_report", {
             "repos": len(all_repos), "releases": len(all_releases),
-            "monitors": len(monitor_topics), "tavily": web_search_count,
-            "provider": result.get("provider"),
+            "monitors": len(monitor_topics), "provider": result.get("provider"),
             "msg_id": msg_id, "dry_run": dry_run
         })
 
@@ -5428,7 +4652,6 @@ def yana_auto_memorize():
                 text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
             facts = _json.loads(text)
             saved = 0
-            saved_facts = []
             for f in facts[:3]:
                 if isinstance(f, dict) and f.get('content'):
                     memory.remember(
@@ -5438,11 +4661,6 @@ def yana_auto_memorize():
                         source='yana_auto'
                     )
                     saved += 1
-                    saved_facts.append({
-                        'content': f['content'][:500],
-                        'type': f.get('type', 'fact'),
-                        'confidence': f.get('confidence', 0.8),
-                    })
             log.info(f"Yana auto-memorize: extracted {saved} facts from chat {chat_id}")
 
             # Also check for dated reminders — store in yana_events for scheduler
@@ -5452,7 +4670,7 @@ def yana_auto_memorize():
                            (f['content'][:300], f['date'][:20]))
                     log.info(f"Yana reminder stored: {f['content'][:60]} at {f.get('date', '?')}")
 
-            return jsonify({'status': 'ok', 'saved': saved, 'facts': saved_facts})
+            return jsonify({'status': 'ok', 'saved': saved})
     except Exception as e:
         log.warning(f"Yana auto-memorize failed: {e}")
     return jsonify({'status': 'error'})
@@ -5640,13 +4858,308 @@ RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("RENDER_URL", 
 _voice_enabled = False
 _tts_voice = "ru-RU-SvetlanaNeural"
 
-# ── NOTE: /webhook/telegram REMOVED (P1-1 migration).
-#    The primary Telegram webhook handler is in Metalogos (app.mlog:1078).
-#    reverse_proxy routes /webhook/telegram → Metalogos :10001.
-#    This Python duplicate was ~355 lines of dead code.
+@app.post("/webhook/telegram")
+def telegram_webhook():
+    # Verify Telegram webhook secret
+    if not _verify_webhook_secret():
+        log.warning("Webhook secret verification failed")
+        return "forbidden", 403
+
+    global _voice_enabled, _tts_voice
+    data = request.get_json(force=True, silent=True) or {}
+    msg = data.get("message", {})
+    if not msg:
+        return "ok", 200
+    
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    user_id = str(msg.get("from", {}).get("id", ""))
+    user_name = msg.get("from", {}).get("first_name", "")
+    text = msg.get("text", "").strip()
+    voice = msg.get("voice")
+    
+    # Owner check
+    if OWNER_ID and user_id != OWNER_ID:
+        return "ok", 200
+    
+    # Voice → STT
+    if voice and not text:
+        file_id = voice.get("file_id", "")
+        if file_id:
+            try:
+                stt_resp = http_requests.post(f"http://127.0.0.1:4000/stt",
+                    json={"file_id": file_id, "chat_id": chat_id}, timeout=60)
+                stt_data = stt_resp.json()
+                text = stt_data.get("text", "")
+                if text:
+                    _tg_send_message(chat_id, f"🎤 Распознано: {text}")
+            except Exception as e:
+                log.error(f"STT failed: {e}")
+                _tg_send_message(chat_id, "Ошибка распознавания голоса")
+                return "ok", 200
+    
+    if not text:
+        return "ok", 200
+    
+    log.info(f"[WEBHOOK] from={user_name} text={text[:80]}")
+    
+    # ── Simple commands ──
+    if text.lower() in ("/start", "/help"):
+        _tg_send_message(chat_id, "Fosved Office v2\n\nОтделы: /yana /osp /lz /expert /marketing /finance /legal /dev /design /qa /visual /engineering /forge /admin\n\nУтилиты: /brief /digest /audit /learning /review /cost /good /fix\nГолос: /voice on|off|male|female\nОценка: /rate <1-10>\nМодель: /model auto|cheap|best|fusion\n\nПросто напиши сообщение — маршрутизация автоматическая.")
+        return "ok", 200
+    
+    if text.lower() == "/status":
+        _tg_send_message(chat_id, f"Fosved Office v2 — online\nVoice: {'on' if _voice_enabled else 'off'}\nWebhook: Python (direct)")
+        return "ok", 200
+    
+    if text.lower().startswith("/voice"):
+        parts = text.split()
+        if len(parts) > 1:
+            cmd = parts[1].lower()
+            if cmd == "on": _voice_enabled = True; _tg_send_message(chat_id, "Голос включён 🎙")
+            elif cmd == "off": _voice_enabled = False; _tg_send_message(chat_id, "Голос выключен")
+            elif cmd == "male": _tts_voice = "ru-RU-SvetlanaNeural"; _tg_send_message(chat_id, "Голос: мужской")
+            elif cmd == "female": _tts_voice = "ru-RU-SvetlanaNeural"; _tg_send_message(chat_id, "Голос: женский")
+        else:
+            _tg_send_message(chat_id, f"Voice: {'on' if _voice_enabled else 'off'}\n/voice on|off|male|female")
+        return "ok", 200
+    
+    if text.lower().startswith("/rate "):
+        try:
+            score = int(text.split()[1])
+            _query("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES ('yana','owner_feedback',?,?,?)",
+                   (str(score), 'manual', datetime.utcnow().isoformat()))
+            _tg_send_message(chat_id, f"Оценка записана: {score}/10")
+        except: _tg_send_message(chat_id, "Формат: /rate <1-10>")
+        return "ok", 200
+
+    # ── Manual trigger commands (MEGA-3) ──
+    if text.lower() == "/brief":
+        action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
+        try:
+            r = http_requests.post("http://127.0.0.1:4000/ask",
+                json={"dept": "yana", "messages": [
+                    {"role": "system", "content": get_dept_prompt("yana")},
+                    {"role": "user", "content": "Сделай утренний brief: что произошло за ночь, что на сегодня запланировано, что критично."}
+                ]}, timeout=120)
+            action_stop.set()
+            reply = r.json().get("reply", "Не удалось получить brief")
+            _tg_send_message(chat_id, reply)
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /brief: {e}")
+        return "ok", 200
+
+    if text.lower() == "/digest":
+        action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
+        try:
+            r = http_requests.post("http://127.0.0.1:4000/ask",
+                json={"dept": "yana", "messages": [
+                    {"role": "system", "content": get_dept_prompt("yana")},
+                    {"role": "user", "content": "Сделай вечерний свод: что сделано за день, что перенесено, на чём акцент завтра."}
+                ]}, timeout=120)
+            action_stop.set()
+            reply = r.json().get("reply", "Не удалось получить digest")
+            _tg_send_message(chat_id, reply)
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /digest: {e}")
+        return "ok", 200
+
+    if text.lower() == "/audit":
+        try:
+            rows = _query("SELECT dept, COUNT(*) as c FROM dialog_history WHERE created_at >= datetime('now', '-7 days') AND role='user' GROUP BY dept ORDER BY c DESC", fetch=True)
+            dept_activity = "\n".join([f"  {r['dept']}: {r['c']} запросов" for r in rows]) if rows else "Нет данных"
+            costs = _query("SELECT dept, SUM(cost_usd) as total FROM token_usage WHERE created_at >= datetime('now', '-7 days') GROUP BY dept ORDER BY total DESC", fetch=True)
+            cost_lines = "\n".join([f"  {r['dept']}: ${float(r['total'] or 0):.4f}" for r in costs]) if costs else "Нет данных"
+            _tg_send_message(chat_id, f"📋 Аудит за 7 дней\n\nАктивность по отделам:\n{dept_activity}\n\nРасходы по отделам:\n{cost_lines}")
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /audit: {e}")
+        return "ok", 200
+
+    if text.lower() == "/learning":
+        try:
+            corrections = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days')", fetch=True)
+            positives = _query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days') AND corr_type='positive'", fetch=True)
+            errors = _query("SELECT COUNT(*) as c FROM error_patterns WHERE created_at >= datetime('now', '-7 days')", fetch=True)
+            c_count = corrections[0]['c'] if corrections else 0
+            p_count = positives[0]['c'] if positives else 0
+            e_count = errors[0]['c'] if errors else 0
+            _tg_send_message(chat_id, f"📊 Обучение за 7 дней\n\nКорректировок: {c_count}\nПозитивных примеров: {p_count}\nОшибок зафиксировано: {e_count}")
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /learning: {e}")
+        return "ok", 200
+
+    if text.lower() == "/review":
+        try:
+            now = datetime.utcnow()
+            week_ago = (now - timedelta(days=7)).isoformat()
+            tasks = _query("SELECT COUNT(*) as c FROM dialog_history WHERE created_at >= ? AND role='user'", (week_ago,), fetch=True)
+            metrics = _query("SELECT metric_name, metric_value, created_at FROM dept_metrics WHERE created_at >= ? ORDER BY created_at DESC LIMIT 10", (week_ago,), fetch=True)
+            msg = f"📊 Обзор за 7 дней\n\nВсего запросов: {tasks[0]['c'] if tasks else 0}\n\nПоследние метрики:\n"
+            for m in (metrics or []):
+                msg += f"  [{m['dept'] or '?'}] {m['metric_name']}: {m['metric_value']}\n"
+            _tg_send_message(chat_id, msg)
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /review: {e}")
+        return "ok", 200
+
+    if text.lower() == "/good":
+        try:
+            rows = _query("SELECT dept, content FROM dialog_history WHERE chat_id=? AND role='assistant' ORDER BY id DESC LIMIT 1", (chat_id,), fetch=True)
+            u_rows = _query("SELECT content FROM dialog_history WHERE chat_id=? AND role='user' ORDER BY id DESC LIMIT 1", (chat_id,), fetch=True)
+            if rows and u_rows:
+                _query("INSERT INTO adapt_corrections (dept, original_query, correction, created_at, corr_type) VALUES (?,?,?,?,?)",
+                       (rows[0]['dept'], u_rows[0]['content'][:500], rows[0]['content'][:2000], datetime.utcnow().isoformat(), "positive"))
+                _tg_send_message(chat_id, "✅ Последний ответ отмечен как хороший пример.")
+            else:
+                _tg_send_message(chat_id, "Нет предыдущего ответа для оценки.")
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /good: {e}")
+        return "ok", 200
+
+    if text.lower() == "/cost":
+        try:
+            rows = _query("SELECT provider, model, SUM(cost_usd) as total, SUM(input_tokens + output_tokens) as tokens FROM token_usage WHERE created_at >= datetime('now', '-7 days') GROUP BY provider, model ORDER BY total DESC", fetch=True)
+            msg = "💰 Расходы за 7 дней\n\n"
+            total_cost = 0
+            for r in (rows or []):
+                cost = float(r['total'] or 0)
+                total_cost += cost
+                msg += f"  {r['provider']}/{r['model']}: ${cost:.4f} ({r['tokens']} tokens)\n"
+            msg += f"\nИтого: ${total_cost:.4f}"
+            _tg_send_message(chat_id, msg)
+        except Exception as e:
+            _tg_send_message(chat_id, f"Ошибка /cost: {e}")
+        return "ok", 200
+
+    # ── Department detection ──
+    dept = detect_dept(text)
+    
+    # Extract query (remove command prefix)
+    query = text
+    for prefix in [f"/{dept}", "/analyze", "/scan", "/deep", "/forge", "/calc", "/simulate",
+                   "/quickanalyze", "/wargame", "/market-research", "/segment", "/competitors", "/campaign"]:
+        if text.lower().startswith(prefix):
+            query = text[len(prefix):].strip() or text
+            break
+    
+    log.info(f"[WEBHOOK] dept={dept} query={query[:80]}")
+    
+    # ── Build prompt ──
+    system_prompt = get_dept_prompt(dept)
+    # Inject current time for ALL departments (was yana-only — root cause of OSP date bug)
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Minsk")
+        now_local = datetime.now(tz)
+        months_ru = ["января", "февраля", "марта", "апреля", "мая", "июня",
+                      "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+        weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+        human_time = f"Сейчас: {now_local.day} {months_ru[now_local.month-1]} {now_local.year}, {weekdays_ru[now_local.weekday()]}, {now_local.strftime('%H:%M')} (Europe/Minsk, UTC+3)"
+        system_prompt += f"\n\n=== Current Time & Date ===\n{human_time}"
+        if dept == "osp":
+            system_prompt += f"\n\nКРИТИЧНО: используй ТОЛЬКО дату выше как текущую. Дату в шапке отчёта («Дата препарирования», «Сейчас», ID) копируй ПОСИМВОЛЬНО из значения выше. Игнорируй любые другие даты, включая упомянутые в архиве/памяти/примерах."
+    except Exception:
+        pass
+    
+    # Record user message
+    _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
+           (chat_id, "user", dept, text[:2000], datetime.utcnow().isoformat()))
+
+    # ── Typing indicator while LLM processes ──
+    action_stop = _send_chat_action_loop(chat_id, "typing", interval=5)
+
+    # ── Call LLM ──
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": query}
+    ]
+    
+    log.info(f"[WEBHOOK] LLM call dept={dept} sys_len={len(system_prompt)} has_format={'ФОРМАТ ОТВЕТА' in system_prompt}")
+    
+    result = call_llm(dept, messages)
+    action_stop.set()  # stop typing indicator
+    reply = result.get("reply", "Ошибка: пустой ответ")
+    provider = result.get("provider", "?")
+    
+    log.info(f"[WEBHOOK] reply_len={len(reply)} provider={provider}")
+    
+    # Record assistant message
+    _query("INSERT INTO dialog_history (chat_id,role,dept,content,created_at) VALUES (?,?,?,?,?)",
+           (chat_id, "assistant", dept, reply[:2000], datetime.utcnow().isoformat()))
+    
+    # ── Send response ──
+    if dept in ("yana", "admin"):
+        # Formatted text with MarkdownV2 (bold, italic, underline via __text__)
+        _tg_send_formatted(chat_id, reply, dept=dept)
+    elif len(reply) > 800:
+        # Mini App report for long responses
+        doc_id = f"doc-{int(datetime.utcnow().timestamp())}"
+        try:
+            css = (BASE_DIR / "report_css.txt").read_text() if (BASE_DIR / "report_css.txt").exists() else ""
+            c = DEPT_COLORS.get(dept, DEPT_COLORS["admin"])
+            name = DEPT_NAMES.get(dept, dept)
+            
+            # Format badges in reply
+            body_html = reply.replace("\n", "<br>")
+            body_html = body_html.replace("[ФАКТ]", '<span class="badge badge-fact">✓</span>')
+            body_html = body_html.replace("[ИНТЕРПРЕТАЦИЯ]", '<span class="badge badge-interp">◈</span>')
+            body_html = body_html.replace("[СПЕКУЛЯЦИЯ]", '<span class="badge badge-spec">⚡</span>')
+            body_html = body_html.replace("[FACT]", '<span class="badge badge-fact">✓</span>')
+            body_html = body_html.replace("[INTERPRETATION]", '<span class="badge badge-interp">◈</span>')
+            body_html = body_html.replace("[SPECULATION]", '<span class="badge badge-spec">⚡</span>')
+            
+            html = f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>{css}</style></head><body>
+<div class="report-container">
+<div class="report-header" style="background:linear-gradient(135deg,{c['start']},{c['end']})">
+<h1>{name}</h1><div class="subtitle">{query[:100]}</div></div>
+<div class="report-meta"><span>ID: {doc_id}</span><span>{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}</span></div>
+<div class="report-body">{body_html}</div>
+{_build_action_bar(dept, doc_id)}
+</div></body></html>'''
+            
+            _query("INSERT INTO miniapp_responses (id,dept,title,query,raw_text,html,confidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                   (doc_id, dept, query[:200], query[:200], reply, html, "2.0", datetime.utcnow().isoformat()))
+            
+            miniapp_url = f"{RENDER_URL}/miniapp/{doc_id}"
+            short = reply[:200] + "..."
+            
+            # Send with Mini App button
+            payload = {
+                "chat_id": chat_id,
+                "text": short,
+                "reply_markup": {"inline_keyboard": [[{
+                    "text": f"📂 Открыть отчёт: {name}",
+                    "web_app": {"url": miniapp_url}
+                }]]}
+            }
+            http_requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                             json=payload, timeout=30)
+        except Exception as e:
+            log.error(f"Mini App report failed: {e}")
+            _tg_send_message(chat_id, reply)
+    else:
+        # Short response — plain text
+        _tg_send_message(chat_id, reply)
+    
+    # ── Voice response (TTS) — clean text for natural speech ──
+    if _voice_enabled and len(reply) > 5:
+        tts_text = _clean_text_for_tts(reply)
+        if dept not in ("yana", "admin") and len(tts_text) > 1000:
+            tts_text = tts_text[:500] + ". Продолжение в текстовом отчёте."
+        if len(tts_text) < 5:
+            tts_text = reply  # fallback to raw if cleaning was too aggressive
+        try:
+            voice = "ru-RU-DmitryNeural" if dept == "admin" else _tts_voice
+            http_requests.post("http://127.0.0.1:4000/tts",
+                json={"text": tts_text, "voice": voice, "chat_id": chat_id}, timeout=60)
+        except Exception as e:
+            log.error(f"TTS failed: {e}")
+    
+    return "ok", 200
 
 
-# ── Cron endpoint ──
+
 # ── Cron endpoint ──
 @app.route("/cron/collect-news", methods=["GET"])
 def cron_collect_news():
@@ -5917,207 +5430,62 @@ def get_night_news_digest():
     return digest
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  EXPERT CHART ENDPOINT
+#  Called by mlog via http_post to generate PNG charts (residual value,
+#  operation cost, TCO comparison) using scripts/expert_charts.py
+# ══════════════════════════════════════════════════════════════════════
 
-# ══════════════════════════════════════════════════════════════════════════
-#  INTERNAL SCHEDULER — background thread for periodic tasks
-#  Works even without Render cron / external ping services.
-# ══════════════════════════════════════════════════════════════════════════
+@app.post("/expert/chart")
+def expert_chart():
+    """Generate PNG chart for Expert automotive analysis.
+    Expects JSON: {chart_type: "residual_value"|"operation_cost"|"comparison", data: {...}}
+    Calls scripts/expert_charts.py to render the chart.
+    """
+    import subprocess
+    d = request.get_json(force=True)
+    chart_type = d.get("chart_type", "residual_value")
+    chart_data = d.get("data", {})
 
-_INTERNAL_SCHEDULER_RUNNING = False
+    if not chart_data:
+        return jsonify({"error": "data required"}), 400
 
-def _internal_scheduler():
-    """Background thread: periodically calls collect-news and lz-daily internally."""
-    global _INTERNAL_SCHEDULER_RUNNING
-    _INTERNAL_SCHEDULER_RUNNING = True
+    script_path = os.path.join(os.path.dirname(__file__), "scripts", "expert_charts.py")
+    if not os.path.exists(script_path):
+        # Fallback: try /home/z/my-project/scripts/expert_charts.py
+        script_path = "/home/z/my-project/scripts/expert_charts.py"
 
-    # Configurable intervals (minutes)
-    NEWS_INTERVAL = int(os.environ.get("SCHED_NEWS_INTERVAL", "60"))    # default: every 60 min
-    LZ_INTERVAL = int(os.environ.get("SCHED_LZ_INTERVAL", "1440"))      # default: once per day
-    MORNING_HOUR_UTC = int(os.environ.get("SCHED_MORNING_HOUR", "4"))   # 04:xx UTC = 07:xx Minsk
-    MORNING_MIN_UTC = int(os.environ.get("SCHED_MORNING_MIN", "20"))    # :20
+    try:
+        # Write data to temp file (avoid shell escaping issues with JSON)
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tf:
+            json.dump(chart_data, tf, ensure_ascii=False)
+            tmp_path = tf.name
 
-    last_news = 0
-    last_lz = 0
-    last_morning_date = ""
+        result = subprocess.run(
+            [sys.executable, script_path, chart_type, tmp_path],
+            capture_output=True, text=True, timeout=30
+        )
+        os.unlink(tmp_path)
 
-    log.info(f"Internal scheduler started: news every {NEWS_INTERVAL}min, LZ every {LZ_INTERVAL}min, morning at {MORNING_HOUR_UTC}:{MORNING_MIN_UTC:02d} UTC")
+        if result.returncode != 0:
+            app.logger.error(f"Expert chart error: {result.stderr}")
+            return jsonify({"error": "chart generation failed", "detail": result.stderr[:500]}), 500
 
-    while True:
-        try:
-            time.sleep(60)  # check every minute
-            now = time.time()
-            now_dt = datetime.utcnow()
+        chart_result = json.loads(result.stdout)
+        return jsonify(chart_result)
 
-            # ── News collection ──
-            if (now - last_news) > NEWS_INTERVAL * 60:
-                log.info("Scheduler: collecting news (RSS + GDELT)...")
-                try:
-                    rss_count = collect_rss()
-                    gdelt_count = collect_gdelt_themes()
-                    _log_audit("scheduler_news", {"rss": rss_count, "gdelt": gdelt_count}, "scheduler")
-                    log.info(f"Scheduler: news collected — RSS={rss_count}, GDELT={gdelt_count}")
-                    last_news = now
-                except Exception as e:
-                    log.error(f"Scheduler news error: {e}")
-
-            # ── LZ daily scan ──
-            if (now - last_lz) > LZ_INTERVAL * 60:
-                log.info("Scheduler: running LZ daily (GitHub scan)...")
-                try:
-                    # Call internally (not via HTTP) — we have the functions
-                    lz_token = os.environ.get("GITHUB_TOKEN_METALOGOS", os.environ.get("GITHUB_TOKEN", ""))
-                    all_repos = []
-                    seen = set()
-                    for q in _build_github_queries():
-                        repos = _github_search(q, per_page=3)
-                        time.sleep(1)
-                        for r in repos:
-                            if r["name"] not in seen:
-                                seen.add(r["name"])
-                                all_repos.append(r)
-                    all_releases = []
-                    for repo in GITHUB_WATCH_RELEASES:
-                        releases = _github_releases(repo)
-                        time.sleep(1)
-                        all_releases.extend(releases)
-                    _log_audit("scheduler_lz", {"repos": len(all_repos), "releases": len(all_releases)}, "scheduler")
-                    log.info(f"Scheduler: LZ scan done — {len(all_repos)} repos, {len(all_releases)} releases")
-                    # Save to memory
-                    try:
-                        memory.remember(
-                            f"LZ Daily {now_dt.isoformat()[:10]}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
-                            "observation", 0.7, "lz_daily"
-                        )
-                    except Exception:
-                        pass
-                    last_lz = now
-                except Exception as e:
-                    log.error(f"Scheduler LZ error: {e}")
-
-            # ── Morning brief ──
-            today_str = now_dt.strftime("%Y-%m-%d")
-            if (today_str != last_morning_date
-                and now_dt.weekday() < 5  # Mon-Fri
-                and now_dt.hour == MORNING_HOUR_UTC
-                and now_dt.minute == MORNING_MIN_UTC):
-                owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
-                if owner_id:
-                    log.info("Scheduler: sending morning brief...")
-                    try:
-                        # Call via internal HTTP to go through the full pipeline
-                        import urllib.request
-                        url = f"http://127.0.0.1:{PORT}/scheduler/morning-brief"
-                        body = json.dumps({"owner_id": owner_id}).encode()
-                        req = urllib.request.Request(url, data=body, method="POST")
-                        req.add_header("Content-Type", "application/json")
-                        with urllib.request.urlopen(req, timeout=120) as resp:
-                            log.info(f"Scheduler: morning brief sent — {resp.status}")
-                        last_morning_date = today_str
-                    except Exception as e:
-                        log.error(f"Scheduler morning brief error: {e}")
-
-        except Exception as e:
-            log.error(f"Internal scheduler error: {e}")
-            time.sleep(60)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "chart generation timeout"}), 504
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    # Global error handlers — log full traceback instead of silent 500
-    @app.errorhandler(500)
-    def _handle_500(e):
-        import traceback as _tb
-        log.error(f"[500] {e}\n{_tb.format_exc()}")
-        return "internal error", 500
-
-    @app.errorhandler(Exception)
-    def _handle_exception(e):
-        import traceback as _tb
-        log.error(f"[UNHANDLED] {type(e).__name__}: {e}\n{_tb.format_exc()}")
-        return "internal error", 500
-
-    # ── Credential Manager endpoints ─────────────────────────────────
-    @app.route("/admin/missing-keys", methods=["GET"])
-    def admin_missing_keys():
-        """Return all missing credentials with step-by-step instructions."""
-        scan = scan_missing_keys()
-        return jsonify(format_missing_for_json(scan))
-
-    @app.route("/admin/providers", methods=["GET"])
-    def admin_providers():
-        """Return active providers with balances/rate-limits."""
-        balances = check_all_balances()
-        scan = scan_missing_keys()
-        return jsonify({
-            "status": "ok",
-            "balances": balances,
-            "provider_text": format_provider_status(balances, scan),
-        })
-
-    @app.route("/admin/missing-keys/telegram", methods=["POST"])
-    def admin_missing_keys_telegram():
-        """Send missing credentials request to owner via Telegram."""
-        d = request.get_json(force=True) or {}
-        owner_id = d.get("owner_id", os.environ.get("OWNER_TELEGRAM_ID", ""))
-        if not owner_id:
-            return jsonify({"status": "error", "message": "OWNER_TELEGRAM_ID not set"}), 400
-        scan = scan_missing_keys()
-        if scan["total_missing"] == 0:
-            _tg_send_message(owner_id, "✅ Все ключи настроены! Офис боеготов.")
-            return jsonify({"status": "ok", "message": "all keys set"})
-        msg = format_missing_for_telegram(scan)
-        msg_id = _tg_send_message(owner_id, msg, parse_mode="Markdown")
-        _log_audit("credential_request_sent", {"owner_id": owner_id, "missing": scan["total_missing"], "msg_id": msg_id})
-        return jsonify({"status": "ok", "missing": scan["total_missing"], "msg_id": msg_id})
-
-    @app.route("/admin/set-key", methods=["POST"])
-    def admin_set_key():
-        """Set a credential value. Body: {"key": "DEEPSEEK_API_KEY", "value": "sk-xxx..."}"""
-        d = request.get_json(force=True) or {}
-        env_key = d.get("key", "").strip().upper()
-        value = d.get("value", "").strip()
-        if not env_key or not value:
-            return jsonify({"status": "error", "message": "Need 'key' and 'value' fields"}), 400
-        success, msg = set_key_in_env(env_key, value)
-        if success:
-            # Reload into current process env for immediate effect
-            os.environ[env_key] = value
-            # Reload module-level vars that depend on this key
-            if env_key == "TELEGRAM_BOT_TOKEN":
-                global TELEGRAM_BOT_TOKEN
-                TELEGRAM_BOT_TOKEN = value
-            _log_audit("credential_set", {"key": env_key, "len": len(value)})
-        return jsonify({"status": "ok" if success else "error", "message": msg})
-
-    @app.route("/admin/auto-key/<env_key>", methods=["POST"])
-    def admin_auto_key(env_key):
-        """Auto-generate a key (for CRON_SECRET etc)."""
-        env_key = env_key.upper()
-        success, msg = auto_generate_key(env_key)
-        if success:
-            os.environ[env_key] = os.environ.get(env_key, "")  # reload
-            _log_audit("credential_auto_generated", {"key": env_key})
-        return jsonify({"status": "ok" if success else "error", "message": msg})
-
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
-    # Startup credential check
-    _cred_scan = scan_missing_keys()
-    if _cred_scan["total_missing"] > 0:
-        log.warning(f"⚠️ {_cred_scan['total_missing']} credentials missing! Call /admin/missing-keys for details.")
-    else:
-        log.info("✅ All required credentials configured.")
-
-    # ── Start internal scheduler (background thread) ──────────────────
-    _sched_enabled = os.environ.get("SCHED_ENABLED", "true").lower() != "false"
-    if _sched_enabled:
-        _sched_thread = threading.Thread(target=_internal_scheduler, daemon=True, name="fosved-scheduler")
-        _sched_thread.start()
-        log.info("Internal scheduler started (background thread)")
-    else:
-        log.info("Internal scheduler disabled (SCHED_ENABLED=false)")
-
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
-             f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*, admin/missing-keys, admin/set-key")
+             f"expert/chart, tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
     app.run(host="127.0.0.1", port=PORT, threaded=True)
 
 

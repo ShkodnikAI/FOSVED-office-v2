@@ -1,9 +1,72 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// Fosved Office v2 — Expert Department (Enriched)
+// Автопром + сравнительный анализ + графики остаточной стоимости/эксплуатации + брифинг lifecycle
+// MEGA-4: 12 Transition Pack skills + automotive domain + comparative engine + chart data
 
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN DISPATCHER — routes sub-commands within Expert
+// ═══════════════════════════════════════════════════════════════════════
 pattern HandleExpert(query: String, chat_id: String) -> String {
   let dept = "expert"
-  let context = BuildContext(dept, query, chat_id)
+  let t = lower(query)
+
+  // ── Sub-command routing ──
+  // /expert auto <brand/model> — automotive domain lookup
+  if starts_with(t, "/expert auto") then {
+    let auto_query = substring(query, 12.0, 200.0)
+    return ExpertAutomotiveLookup(auto_query, chat_id)
+  }
+  // /expert compare <vehicles> — comparative analysis
+  if starts_with(t, "/expert compare") then {
+    let compare_query = substring(query, 15.0, 300.0)
+    return ExpertCompareVehicles(compare_query, chat_id)
+  }
+  // /expert residual <brand/model> — residual value curve data
+  if starts_with(t, "/expert residual") then {
+    let rv_query = substring(query, 16.0, 200.0)
+    return ExpertResidualValueData(rv_query, chat_id)
+  }
+  // /expert cost <brand/model> — operation cost breakdown
+  if starts_with(t, "/expert cost") then {
+    let cost_query = substring(query, 12.0, 200.0)
+    return ExpertOperationCostData(cost_query, chat_id)
+  }
+  // /expert chart residual <vehicles> — generate residual value chart PNG
+  if starts_with(t, "/expert chart residual") then {
+    let chart_q = substring(query, 22.0, 300.0)
+    return ExpertGenerateChart("residual_value", chart_q, chat_id)
+  }
+  // /expert chart cost <vehicles> — generate operation cost chart PNG
+  if starts_with(t, "/expert chart cost") then {
+    let chart_q = substring(query, 18.0, 300.0)
+    return ExpertGenerateChart("operation_cost", chart_q, chat_id)
+  }
+  // /expert briefing <topic> — create new briefing
+  if starts_with(t, "/expert briefing") then {
+    let briefing_topic = substring(query, 16.0, 300.0)
+    return ExpertCreateBriefing(briefing_topic, "2", chat_id)
+  }
+  // /quickexpert <topic> — quick briefing (level 1)
+  if starts_with(t, "/quickexpert") then {
+    let briefing_topic = substring(query, 12.0, 300.0)
+    return ExpertCreateBriefing(briefing_topic, "1", chat_id)
+  }
+  // /deepexpert <topic> — deep briefing (level 3)
+  if starts_with(t, "/deepexpert") then {
+    let briefing_topic = substring(query, 11.0, 300.0)
+    return ExpertCreateBriefing(briefing_topic, "3", chat_id)
+  }
+  // /expert briefings — list briefings
+  if starts_with(t, "/expert briefings") then {
+    return ExpertListBriefings(chat_id)
+  }
+  // /expert debrief <id> — mark briefing debriefed
+  if starts_with(t, "/expert debrief") then {
+    let bid = substring(query, 15.0, 30.0)
+    return ExpertUpdateBriefingStatus(bid, "debriefed")
+  }
+
+  // ── Default: full Expert pipeline (LLM with automotive-enriched context) ──
+  let context = BuildExpertContext(query, chat_id)
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy(dept, messages)
   if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
@@ -14,4 +77,456 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
   return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// EXPERT CONTEXT BUILDER — includes automotive domain + skills
+// ═══════════════════════════════════════════════════════════════════════
+pattern BuildExpertContext(query: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile("expert")
+  let skills = LoadExpertSkills(query)
+  let corrections = GetCorrections("expert")
+  let dialog = GetRecentDialog(chat_id, "10")
+  let memories = YanaRecallMemories(query)
+  let now_info = YanaNowInfo()
+  let auto_kb = ExpertAutomotiveKB()
+
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Automotive Knowledge Base ===\n" + auto_kb + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Recent Dialog ===\n" + dialog
+  return context
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TIER-BASED SKILL LOADING (like OSP pattern)
+// ═══════════════════════════════════════════════════════════════════════
+pattern LoadExpertSkills(query: String) -> String {
+  let t = lower(query)
+  let result = ""
+  let budget = 25000.0
+
+  // ── Tier 1: Methodological core (always loaded) ──
+  let s = read_file("skills/rapid-domain-immersion/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- rapid-domain-immersion ---\n" + s }
+  let s = read_file("skills/project-deconstruction/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- project-deconstruction ---\n" + s }
+  let s = read_file("skills/failure-modes-mapping/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- failure-modes-mapping ---\n" + s }
+  let s = read_file("skills/combat-questions-design/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- combat-questions-design ---\n" + s }
+  let s = read_file("skills/bullshit-detection/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- bullshit-detection ---\n" + s }
+
+  // ── Tier 2: Domain depth (by topic triggers) ──
+  // Trigger: economic/финанс/стоимость/BOM/capex
+  let need_economics = contains(t, "эконом") or contains(t, "стоимост") or contains(t, "capex") or contains(t, "bom") or contains(t, "финанс") or contains(t, "unit economics")
+  if need_economics then {
+    let s = read_file("skills/technical-economics-validation/SKILL.md")
+    if s != "" and len(result) < budget then { let result = result + "\n--- technical-economics-validation ---\n" + s }
+  }
+  // Trigger: peer review/научн/статья/реценз
+  let need_peer = contains(t, "peer review") or contains(t, "научн") or contains(t, "стать") or contains(t, "реценз") or contains(t, "publication")
+  if need_peer then {
+    let s = read_file("skills/peer-review-simulation/SKILL.md")
+    if s != "" and len(result) < budget then { let result = result + "\n--- peer-review-simulation ---\n" + s }
+  }
+  // Trigger: adjacent/смежн/кросс-чек
+  let need_adjacent = contains(t, "adjacent") or contains(t, "смежн") or contains(t, "кросс") or contains(t, "cross-check")
+  if need_adjacent then {
+    let s = read_file("skills/adjacent-field-cross-check/SKILL.md")
+    if s != "" and len(result) < budget then { let result = result + "\n--- adjacent-field-cross-check ---\n" + s }
+  }
+  // Trigger: compare/конкурент/сравнен
+  let need_compare = contains(t, "compar") or contains(t, "конкурент") or contains(t, "сравнен") or contains(t, "versus") or contains(t, " vs ")
+  if need_compare then {
+    let s = read_file("skills/competing-claims-comparison/SKILL.md")
+    if s != "" and len(result) < budget then { let result = result + "\n--- competing-claims-comparison ---\n" + s }
+  }
+  // Trigger: automotive/автопром/авто/машина
+  let need_auto = contains(t, "автопром") or contains(t, "авто") or contains(t, "маши") or contains(t, "automotive") or contains(t, "car") or contains(t, "vehicle")
+  if need_auto then {
+    let auto_skills = ExpertAutomotiveSkillSet()
+    if len(result) < budget then { let result = result + "\n--- automotive-domain ---\n" + auto_skills }
+  }
+
+  // ── Tier 3: Special techniques (explicit trigger or deep mode) ──
+  // Trigger: people/люди/attendee/участник + meeting/встреча
+  let need_intel = contains(t, "pre-meeting") or contains(t, "интел") or (contains(t, "люди") and contains(t, "встреч"))
+  if need_intel then {
+    let s = read_file("skills/pre-meeting-intel/SKILL.md")
+    if s != "" and len(result) < budget then { let result = result + "\n--- pre-meeting-intel ---\n" + s }
+  }
+  // Trigger: tactical/тактик/переговор
+  let need_tactical = contains(t, "тактик") or contains(t, "переговор") or contains(t, "tactical")
+  if need_tactical then {
+    let s = read_file("skills/tactical-meeting-protocol/SKILL.md")
+    if s != "" and len(result) < budget then { let result = result + "\n--- tactical-meeting-protocol ---\n" + s }
+  }
+  // iterative-research-loop — always available as engine
+  let s = read_file("skills/iterative-research-loop/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- iterative-research-loop (engine) ---\n" + substring(s, 0.0, 2000.0) }
+
+  if result == "" then { return "Expert skills: rapid-domain-immersion, project-deconstruction, failure-modes-mapping, combat-questions-design, bullshit-detection, technical-economics-validation, peer-review-simulation, adjacent-field-cross-check, competing-claims-comparison, pre-meeting-intel, tactical-meeting-protocol, iterative-research-loop, automotive-domain" }
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// AUTOMOTIVE KNOWLEDGE BASE
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertAutomotiveKB() -> String {
+  let kb = "АВТОМОБИЛЬНЫЙ ДОМЕН — КЛЮЧЕВЫЕ ДАННЫЕ\n\n"
+  let kb = kb + "КАТЕГОРИИ И ОСТАТОЧНАЯ СТОИМОСТЬ (% от новой цены):\n"
+  let kb = kb + "- Эконом/компакт: 1г=78%, 2г=65%, 3г=55%, 5г=40%, 7г=28%\n"
+  let kb = kb + "- Средний класс: 1г=72%, 2г=58%, 3г=48%, 5г=33%, 7г=22%\n"
+  let kb = kb + "- Премиум/люкс: 1г=65%, 2г=50%, 3г=42%, 5г=28%, 7г=18%\n"
+  let kb = kb + "- SUV/кроссовер: 1г=75%, 2г=62%, 3г=52%, 5г=37%, 7г=25%\n"
+  let kb = kb + "- Электромобиль: 1г=70%, 2г=55%, 3г=45%, 5г=30%, 7г=20%\n"
+  let kb = kb + "- Спортивный: 1г=73%, 2г=60%, 3г=50%, 5г=35%, 7г=24%\n"
+  let kb = kb + "- Коммерческий/фургон: 1г=76%, 2г=63%, 3г=53%, 5г=38%, 7г=26%\n\n"
+  let kb = kb + "СТОИМОСТЬ ВЛАДЕНИЯ (тыс. руб/год, средняя по категории):\n"
+  let kb = kb + "- Эконом: страховка 30, ТО 20, топливо 60, амортизация 120, итого ~230\n"
+  let kb = kb + "- Средний: страховка 45, ТО 30, топливо 80, амортизация 180, итого ~335\n"
+  let kb = kb + "- Премиум: страховка 80, ТО 50, топливо 100, амортизация 350, итого ~580\n"
+  let kb = kb + "- SUV: страховка 55, ТО 35, топливо 90, амортизация 200, итого ~380\n"
+  let kb = kb + "- Электро: страховка 50, ТО 15, электричество 30, амортизация 250, итого ~345\n"
+  let kb = kb + "- Спорт: страховка 100, ТО 60, топливо 120, амортизация 300, итого ~580\n"
+  let kb = kb + "- Коммерческий: страховка 40, ТО 25, топливо 70, амортизация 150, итого ~285\n\n"
+  let kb = kb + "РАЗМЕРНОСТИ ДЛЯ СРАВНИТЕЛЬНОГО АНАЛИЗА:\n"
+  let kb = kb + "1. Цена покупки (тыс. руб)\n2. Остаточная стоимость 3г и 5г (%)\n3. Годовая стоимость владения (тыс. руб)\n4. TCO 5 лет (тыс. руб)\n5. Надёжность (1-10)\n6. Безопасность (1-5 звёзд)\n7. Расход топлива (л/100км или кВт-ч/100км)\n8. Комфорт/оснащение (1-10)\n9. Стоимость км пробега (руб)\n10. Гарантия (лет/км)\n\n"
+  let kb = kb + "БРЕНДЫ ПО КАТЕГОРИЯМ (российский рынок 2024-2026):\n"
+  let kb = kb + "- Эконом: Lada Vesta, Haval Jolion, Chery Tiggo 4 Pro, Geely Coolray\n"
+  let kb = kb + "- Средний: Kia K5, Hyundai Sonata, Toyota Camry, Changan UNI-V\n"
+  let kb = kb + "- Премиум: BMW 5, Mercedes E, Audi A6, Lexus ES, Genesis G80\n"
+  let kb = kb + "- SUV: Toyota RAV4, Hyundai Tucson, Haval F7, Chery Tiggo 7 Pro, Mazda CX-5\n"
+  let kb = kb + "- Электро: Zeekr 001, BYD Seal, Tesla Model 3, Evolute i-PRO\n"
+  let kb = kb + "- Спорт: Porsche 911, BMW M3, Mercedes AMG GT\n"
+  let kb = kb + "- Коммерческий: GAZelle NEXT, UAZ Profi, Ford Transit, VW Transporter"
+  return kb
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// AUTOMOTIVE SKILL SET (injectable context for LLM)
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertAutomotiveSkillSet() -> String {
+  let s = "АВТОМОБИЛЬНЫЙ ДОМЕН — НАБОР НАВЫКОВ ЭКСПЕРТА\n\n"
+  let s = s + "1. РЫНОЧНЫЙ АНАЛИЗ: структура авторынка РФ, тренды (китайские бренды 55%+ рынка), параллельный импорт, санкционное влияние, программы льготного кредитования\n\n"
+  let s = s + "2. ОЦЕНКА ОСТАТОЧНОЙ СТОИМОСТИ: методика расчёта по категориям, влияние пробега, возраста, комплектации, региона, истории владения, аварийности. Ключевые факторы: бренд-фактор (премиум теряет быстрее), платформа-фактор (электро теряет быстрее из-за технологии), рынок-фактор (параллельный импорт давит цены)\n\n"
+  let s = s + "3. СРАВНИТЕЛЬНЫЙ АНАЛИЗ: 10-мерное пространство сравнения (цена, TCO, надёжность, безопасность, расход, комфорт, стоимость км, гарантия, остаточная стоимость, ликвидность). Метод: нормализация по лучшему в категории + взвешенная сумма с весами по приоритету владельца\n\n"
+  let s = s + "4. РАСЧЁТ TCO: полная стоимость владения = цена покупки + (страховка + ТО + топливо/электричество + амортизация + налог + парковка + шиномонтаж) * годы - остаточная стоимость * цена покупки. Скрытые costs: потеря гарантии при нарушении сервиса, удорожание запчастей для санкционных авто, depreciation acceleration при смене поколения\n\n"
+  let s = s + "5. ГРАФИКИ: остаточная стоимость по годам (кривая depreciation), эксплуатационные затраты по годам (нарастающим итогом и по компонентам), TCO-сравнение нескольких авто (стеклянная диаграмма). Данные для графиков доступны через /expert residual и /expert cost\n\n"
+  let s = s + "6. КРАСНЫЕ ФЛАГИ АВТОПРОМА: китайские бренды — нет истории остаточной стоимости старше 3 лет; электромобили — батарея degradation не гарантирована; параллельный импорт — нет гарантии, проблемы с запчастями; программа льготного кредита — зависимость от государства, может отмениться"
+  return s
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// AUTOMOTIVE LOOKUP — returns domain info via LLM with KB
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertAutomotiveLookup(query: String, chat_id: String) -> String {
+  let auto_kb = ExpertAutomotiveKB()
+  let system_prompt = "Ты — Эксперт-автомобилист отдела Fosved. Специализация: российский авторынок, сравнительный анализ автомобилей, расчёт остаточной стоимости и стоимости владения. Отвечай конкретно, с цифрами. Используй данные из базы знаний.\n\n" + auto_kb
+  let messages = json_encode([{role: "system", content: system_prompt}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy("expert", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let _ = RecordAssistantMessage(chat_id, "expert", reply)
+  let _ = AuditLog("expert_auto", "expert", "query: " + substring(query, 0.0, 100.0))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// COMPARATIVE ANALYSIS — structured comparison of vehicles
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertCompareVehicles(query: String, chat_id: String) -> String {
+  let auto_kb = ExpertAutomotiveKB()
+  let compare_prompt = "Ты — Эксперт-автомобилист. Задача: СРАВНИТЕЛЬНЫЙ АНАЛИЗ автомобилей. Формат вывода:\n\n"
+  let compare_prompt = compare_prompt + "1. ТАБЛИЦА СРАВНЕНИЯ (markdown table) со столбцами: Параметр | Авто1 | Авто2 | ... \nСтроки: Цена покупки, Категория, Остаточная стоимость 3г, Остаточная стоимость 5г, Годовая стоимость владения, TCO 5 лет, Надёжность (1-10), Безопасность (1-5), Расход, Комфорт (1-10), Стоимость км пробега\n\n"
+  let compare_prompt = compare_prompt + "2. РЕЙТИНГ по TCO (от лучшего к худшему)\n\n"
+  let compare_prompt = compare_prompt + "3. РЕКОМЕНДАЦИЯ: какой вариант оптимален по соотношению цена/качество, какой по TCO, какой по ликвидности\n\n"
+  let compare_prompt = compare_prompt + "4. КРАСНЫЕ ФЛАГИ: что может увеличить реальные затраты сверх расчётных\n\n"
+  let compare_prompt = compare_prompt + "Используй данные из базы знаний. Все цифры — для российского рынка 2024-2026.\n\n" + auto_kb
+  let messages = json_encode([{role: "system", content: compare_prompt}, {role: "user", content: "Сравни: " + query}])
+  let proxy_result = CallLLMProxy("expert", messages)
+  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+
+  // Save comparison to DB
+  let save_body = json_encode({vehicles: query, result: substring(reply, 0.0, 2000.0), dept: "expert"})
+  let _ = try http_post("http://127.0.0.1:4000/archive/save", save_body, "application/json")
+
+  let _ = RecordAssistantMessage(chat_id, "expert", reply)
+  let _ = AuditLog("expert_compare", "expert", "compare: " + substring(query, 0.0, 100.0))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RESIDUAL VALUE DATA — returns JSON curve data for chart generation
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertResidualValueData(query: String, chat_id: String) -> String {
+  let t = lower(query)
+  // Category detection
+  let cat = "midrange"
+  if contains(t, "эконом") or contains(t, "compact") or contains(t, "vesta") or contains(t, "jolion") then { let cat = "economy" }
+  if contains(t, "премиум") or contains(t, "люкс") or contains(t, "bmw") or contains(t, "mercedes") or contains(t, "audi") or contains(t, "lexus") then { let cat = "premium" }
+  if contains(t, "suv") or contains(t, "кроссовер") or contains(t, "rav4") or contains(t, "tucson") or contains(t, "haval f7") or contains(t, "tiggo 7") then { let cat = "suv" }
+  if contains(t, "электр") or contains(t, "ev") or contains(t, "zeekr") or contains(t, "byd") or contains(t, "tesla") then { let cat = "electric" }
+  if contains(t, "спорт") or contains(t, "porsche") or contains(t, "amg") or contains(t, "m3") then { let cat = "sports" }
+  if contains(t, "коммер") or contains(t, "фургон") or contains(t, "gazelle") or contains(t, "transit") then { let cat = "commercial" }
+
+  // Residual value curves by category (% of original price per year 0-10)
+  // Format: JSON array [year0, year1, ..., year10]
+  let economy_curve  = "[100,78,65,55,46,40,34,28,23,19,16]"
+  let midrange_curve = "[100,72,58,48,40,33,27,22,18,15,12]"
+  let premium_curve  = "[100,65,50,42,35,28,22,18,14,11,9]"
+  let suv_curve      = "[100,75,62,52,44,37,31,25,20,16,13]"
+  let electric_curve = "[100,70,55,45,37,30,24,20,16,13,10]"
+  let sports_curve   = "[100,73,60,50,42,35,29,24,20,16,13]"
+  let commercial_curve = "[100,76,63,53,45,38,32,26,21,17,14]"
+
+  let curve = midrange_curve
+  if cat == "economy" then { let curve = economy_curve }
+  if cat == "premium" then { let curve = premium_curve }
+  if cat == "suv" then { let curve = suv_curve }
+  if cat == "electric" then { let curve = electric_curve }
+  if cat == "sports" then { let curve = sports_curve }
+  if cat == "commercial" then { let curve = commercial_curve }
+
+  let cat_name = "Средний класс"
+  if cat == "economy" then { let cat_name = "Эконом/компакт" }
+  if cat == "premium" then { let cat_name = "Премиум/люкс" }
+  if cat == "suv" then { let cat_name = "SUV/кроссовер" }
+  if cat == "electric" then { let cat_name = "Электромобиль" }
+  if cat == "sports" then { let cat_name = "Спортивный" }
+  if cat == "commercial" then { let cat_name = "Коммерческий" }
+
+  let data = json_encode({category: cat_name, vehicle: query, curve: parse_json(curve), years: [0,1,2,3,4,5,6,7,8,9,10], unit: "% от начальной цены", source: "Fosved Expert automotive KB"})
+
+  let _ = AuditLog("expert_rv_data", "expert", "cat=" + cat + " vehicle=" + substring(query, 0.0, 50.0))
+  return data
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OPERATION COST DATA — returns JSON cost breakdown for chart generation
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertOperationCostData(query: String, chat_id: String) -> String {
+  let t = lower(query)
+  // Category detection (same as residual value)
+  let cat = "midrange"
+  if contains(t, "эконом") or contains(t, "compact") or contains(t, "vesta") or contains(t, "jolion") then { let cat = "economy" }
+  if contains(t, "премиум") or contains(t, "люкс") or contains(t, "bmw") or contains(t, "mercedes") or contains(t, "audi") or contains(t, "lexus") then { let cat = "premium" }
+  if contains(t, "suv") or contains(t, "кроссовер") or contains(t, "rav4") or contains(t, "tucson") or contains(t, "haval f7") or contains(t, "tiggo 7") then { let cat = "suv" }
+  if contains(t, "электр") or contains(t, "ev") or contains(t, "zeekr") or contains(t, "byd") or contains(t, "tesla") then { let cat = "electric" }
+  if contains(t, "спорт") or contains(t, "porsche") or contains(t, "amg") or contains(t, "m3") then { let cat = "sports" }
+  if contains(t, "коммер") or contains(t, "фургон") or contains(t, "gazelle") or contains(t, "transit") then { let cat = "commercial" }
+
+  // Cost breakdown (thousands RUB/year): insurance, maintenance, fuel, depreciation
+  // These are per-year costs for years 1-5 (depreciation increases as car ages)
+  // Format: arrays of 5 values [yr1, yr2, yr3, yr4, yr5]
+
+  // Economy
+  let econ_ins   = "[30,30,30,35,35]"
+  let econ_maint = "[15,20,25,30,35]"
+  let econ_fuel  = "[60,62,64,66,68]"
+  let econ_depr  = "[220,130,100,80,60]"
+
+  // Midrange
+  let mid_ins    = "[45,45,45,50,50]"
+  let mid_maint  = "[20,30,35,40,50]"
+  let mid_fuel   = "[80,82,84,86,88]"
+  let mid_depr   = "[280,160,120,90,70]"
+
+  // Premium
+  let prem_ins   = "[80,80,80,90,90]"
+  let prem_maint = "[30,50,60,70,90]"
+  let prem_fuel  = "[100,102,104,106,108]"
+  let prem_depr  = "[350,200,150,110,80]"
+
+  // SUV
+  let suv_ins    = "[55,55,55,60,60]"
+  let suv_maint  = "[25,35,40,45,55]"
+  let suv_fuel   = "[90,92,94,96,98]"
+  let suv_depr   = "[250,150,110,80,60]"
+
+  // Electric
+  let elec_ins   = "[50,50,50,55,55]"
+  let elec_maint = "[10,15,15,20,25]"
+  let elec_fuel  = "[30,30,32,32,34]"
+  let elec_depr  = "[300,180,130,90,60]"
+
+  // Sports
+  let sport_ins  = "[100,100,100,110,110]"
+  let sport_maint = "[40,60,70,80,100]"
+  let sport_fuel = "[120,122,124,126,128]"
+  let sport_depr = "[270,170,130,90,70]"
+
+  // Commercial
+  let comm_ins   = "[40,40,40,45,45]"
+  let comm_maint = "[20,25,30,35,40]"
+  let comm_fuel  = "[70,72,74,76,78]"
+  let comm_depr  = "[240,130,100,70,50]"
+
+  let ins = mid_ins
+  let maint = mid_maint
+  let fuel = mid_fuel
+  let depr = mid_depr
+
+  if cat == "economy" then { let ins = econ_ins; let maint = econ_maint; let fuel = econ_fuel; let depr = econ_depr }
+  if cat == "premium" then { let ins = prem_ins; let maint = prem_maint; let fuel = prem_fuel; let depr = prem_depr }
+  if cat == "suv" then { let ins = suv_ins; let maint = suv_maint; let fuel = suv_fuel; let depr = suv_depr }
+  if cat == "electric" then { let ins = elec_ins; let maint = elec_maint; let fuel = elec_fuel; let depr = elec_depr }
+  if cat == "sports" then { let ins = sport_ins; let maint = sport_maint; let fuel = sport_fuel; let depr = sport_depr }
+  if cat == "commercial" then { let ins = comm_ins; let maint = comm_maint; let fuel = comm_fuel; let depr = comm_depr }
+
+  let cat_name = "Средний класс"
+  if cat == "economy" then { let cat_name = "Эконом/компакт" }
+  if cat == "premium" then { let cat_name = "Премиум/люкс" }
+  if cat == "suv" then { let cat_name = "SUV/кроссовер" }
+  if cat == "electric" then { let cat_name = "Электромобиль" }
+  if cat == "sports" then { let cat_name = "Спортивный" }
+  if cat == "commercial" then { let cat_name = "Коммерческий" }
+
+  // Fuel label depends on category
+  let fuel_label = "Топливо (тыс. руб/год)"
+  if cat == "electric" then { let fuel_label = "Электричество (тыс. руб/год)" }
+
+  let data = json_encode({category: cat_name, vehicle: query, years: [1,2,3,4,5], insurance: parse_json(ins), maintenance: parse_json(maint), fuel: parse_json(fuel), depreciation: parse_json(depr), fuel_label: fuel_label, unit: "тыс. руб/год", source: "Fosved Expert automotive KB"})
+
+  let _ = AuditLog("expert_cost_data", "expert", "cat=" + cat + " vehicle=" + substring(query, 0.0, 50.0))
+  return data
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CHART GENERATION — invokes Python chart generator via http_post
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertGenerateChart(chart_type: String, query: String, chat_id: String) -> String {
+  // Get data first
+  let chart_data = ""
+  if chart_type == "residual_value" then {
+    let chart_data = ExpertResidualValueData(query, chat_id)
+  }
+  if chart_type == "operation_cost" then {
+    let chart_data = ExpertOperationCostData(query, chat_id)
+  }
+
+  // Call Python chart generator
+  let body = json_encode({chart_type: chart_type, data: parse_json(chart_data), vehicle: query})
+  let result = try http_post("http://127.0.0.1:4000/expert/chart", body, "application/json")
+
+  if to_string(result) == "()" then {
+    // Fallback: return data as text
+    return "Данные для графика (" + chart_type + "):\n" + chart_data + "\n\nДля генерации PNG-графика необходим экспертный chart-сервер."
+  }
+
+  let parsed = parse_json(result)
+  let chart_url = json_get(parsed, "url", "")
+  let chart_summary = json_get(parsed, "summary", "")
+
+  let _ = AuditLog("expert_chart", "expert", "type=" + chart_type + " vehicle=" + substring(query, 0.0, 50.0))
+
+  if chart_url != "" then {
+    return chart_summary + "\n\nГрафик: " + chart_url
+  }
+  return chart_summary
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BRIEFING LIFECYCLE
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertCreateBriefing(topic: String, depth: String, chat_id: String) -> String {
+  // Generate unique ID
+  let ts = query("SELECT strftime('%s','now')", [])
+  let brief_id = "brf-" + to_string(json_get(parse_json(json_encode(ts)), "0", "0"))
+
+  // Insert into DB
+  let esc_topic = escape_json(topic)
+  let _ = db_execute("INSERT INTO expert_briefings (id, topic, depth_level, status, chat_id, created_at) VALUES ('" + brief_id + "', '" + esc_topic + "', '" + depth + "', 'requested', '" + chat_id + "', datetime('now'))")
+
+  // Build briefing via LLM with full Expert pipeline
+  let auto_kb = ExpertAutomotiveKB()
+  let skills = LoadExpertSkills(topic)
+  let depth_name = "Standard (уровень 2)"
+  if depth == "1" then { let depth_name = "Quick (уровень 1)" }
+  if depth == "3" then { let depth_name = "Deep (уровень 3)" }
+
+  let system_prompt = "Ты — Эксперт Fosved (Технический Препаратор). Готовишь боевой брифинг.\nГлубина: " + depth_name + "\n\nЖёсткие правила:\n1. Не выдаёт брифинг без дедлайна встречи\n2. Не использует упрощения которые исказят суть\n3. Не генерирует вопросы без указания правильного/уклончивого ответа\n4. Не игнорирует экономическую сторону\n5. Не доверяет официальным презентациям — ищи независимые источники\n6. Не использует абстрактные формулировки — каждое утверждение проверяемое\n7. Вопросы звучат естественно из уст понимающего человека\n\nПротокол:\nPhase 1: Rapid Domain Immersion (4 слоя: основы → state-of-art → школы/дебаты → числовые якоря)\nPhase 2: Project Deconstruction (что реально утверждают vs что показывают)\nPhase 3: Failure Modes Mapping (7 категорий)\nPhase 4: Combat Questions Design (5-7 вопросов с ожидаемыми ответами)\n\n" + skills + "\n\n" + auto_kb
+
+  let messages = json_encode([{role: "system", content: system_prompt}, {role: "user", content: "Подготовь брифинг на тему: " + topic}])
+  let proxy_result = CallLLMProxy("expert", messages)
+  if to_string(proxy_result) == "()" then { return "Ошибка генерации брифинга." }
+  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+
+  // Update briefing status and content
+  let esc_reply = escape_json(substring(reply, 0.0, 5000.0))
+  let _ = db_execute("UPDATE expert_briefings SET status='briefing_ready', content='" + esc_reply + "' WHERE id='" + brief_id + "'")
+
+  let _ = RecordAssistantMessage(chat_id, "expert", reply)
+  let _ = AuditLog("expert_briefing", "expert", "id=" + brief_id + " depth=" + depth + " topic=" + substring(topic, 0.0, 50.0))
+
+  let header = "Брифинг " + brief_id + " [" + depth_name + "]\n\n"
+  return header + reply
+}
+
+pattern ExpertListBriefings(chat_id: String) -> String {
+  let rows = query("SELECT id, topic, depth_level, status, created_at FROM expert_briefings ORDER BY created_at DESC LIMIT 20", [])
+  return json_encode(rows)
+}
+
+pattern ExpertUpdateBriefingStatus(brief_id: String, new_status: String) -> String {
+  let esc_status = escape_json(new_status)
+  let esc_id = escape_json(brief_id)
+  let _ = db_execute("UPDATE expert_briefings SET status='" + esc_status + "' WHERE id='" + esc_id + "'")
+  let _ = AuditLog("expert_briefing_update", "expert", "id=" + esc_id + " status=" + esc_status)
+  return "Брифинг " + brief_id + " обновлён: статус " + new_status
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// API ROUTES — served at /api/expert/*
+// ═══════════════════════════════════════════════════════════════════════
+
+// GET /api/expert/automotive?query=<brand/model>
+serve /api/expert/automotive -> String {
+  let q = query_param("query")
+  if q == "" then { return json_encode({error: "query param required"}) }
+  return ExpertAutomotiveLookup(q, "api")
+}
+
+// GET /api/expert/compare?vehicles=<v1,v2,...>
+serve /api/expert/compare -> String {
+  let v = query_param("vehicles")
+  if v == "" then { return json_encode({error: "vehicles param required"}) }
+  return ExpertCompareVehicles(v, "api")
+}
+
+// GET /api/expert/residual-value?vehicle=<brand/model>
+serve /api/expert/residual-value -> String {
+  let v = query_param("vehicle")
+  if v == "" then { return json_encode({error: "vehicle param required"}) }
+  return ExpertResidualValueData(v, "api")
+}
+
+// GET /api/expert/operation-cost?vehicle=<brand/model>
+serve /api/expert/operation-cost -> String {
+  let v = query_param("vehicle")
+  if v == "" then { return json_encode({error: "vehicle param required"}) }
+  return ExpertOperationCostData(v, "api")
+}
+
+// POST /api/expert/chart  {chart_type, vehicle}
+serve /api/expert/chart -> String {
+  let body = json_body()
+  let chart_type = json_get(body, "chart_type", "residual_value")
+  let vehicle = json_get(body, "vehicle", "")
+  if vehicle == "" then { return json_encode({error: "vehicle required"}) }
+  return ExpertGenerateChart(chart_type, vehicle, "api")
+}
+
+// GET /api/expert/briefings
+serve /api/expert/briefings -> String {
+  return ExpertListBriefings("api")
+}
+
+// POST /api/expert/briefing  {topic, depth}
+serve /api/expert/briefing -> String {
+  let body = json_body()
+  let topic = json_get(body, "topic", "")
+  let depth = to_string(json_get(body, "depth", 2))
+  if topic == "" then { return json_encode({error: "topic required"}) }
+  return ExpertCreateBriefing(topic, depth, "api")
 }
