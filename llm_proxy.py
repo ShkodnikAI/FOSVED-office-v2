@@ -646,7 +646,12 @@ COMMAND_DEPT = {
 RUSSIAN_KEYWORDS = {
     'osp': ['проанализируй', 'прогноз', 'стратегия', 'геополитик', 'анализ', 'сценари', 'вероятност', 'деconstruct', 'деконстру', 'тополог'],
     'lz': ['технолог', 'монитор', 'тренд', 'прорыв', 'наука', 'исследован', 'обзор', 'что такое', 'как работает', 'лаборатори'],
-    'expert': ['встреч', 'брифинг', 'подготов к', 'эксперт', 'подготовь', 'вопросы для', 'комбат-вопрос', 'подготов'],
+    'expert': ['встреч', 'брифинг', 'подготов к', 'эксперт', 'подготовь', 'вопросы для', 'комбат-вопрос', 'подготов',
+              'переговор', 'byd', 'geely', 'chery', 'zeekr', 'lixiang', 'nio', 'xpeng', 'vinfast',
+              'авто', 'автомобиль', 'автопром', 'конкурент', 'соперник',
+              'toyota', 'bmw', 'mercedes', 'vw ', 'volkswagen', 'honda', 'hyundai', 'kia',
+              'платформ', 'ev ', 'электромобиль', 'завод', 'производств', 'сборк', 'локализац',
+              'cto', 'ceo', 'cfo', 'директор', 'руководств', 'встреча с', 'митинг', 'переговоры'],
     'marketing': ['реклам', 'аудитори', 'конверси', 'маркетинг', 'позицио', 'воронк', 'smm', 'бренд', 'контент', 'сегмент'],
     'finance': ['бюджет', 'cashflow', 'налог', 'финанс', 'расход', 'доход', 'инвестиц', 'кредит', 'курс валют', 'кассовый разрыв'],
     'legal': ['договор', 'иск', 'gdpr', 'юридическ', 'nda', 'право', 'суд', 'комплаенс', 'контракт', 'закон'],
@@ -659,15 +664,51 @@ RUSSIAN_KEYWORDS = {
     'admin': ['оптимизир', 'почини', 'рефакторинг', 'deploy', 'админ', 'инфраструктур', 'здравствуй', 'перезагруз', 'конфиг'],
 }
 
+# ── Keyword weights for scoring: higher = more specific/less generic ──
+# 'анализ' is generic (weight 1) while 'встреч' is specific (weight 4), 'byd' is very specific (weight 5)
+KEYWORD_WEIGHTS = {
+    'osp': {'проанализируй': 3, 'прогноз': 2, 'стратегия': 2, 'геополитик': 3, 'анализ': 1, 'сценари': 2, 'вероятност': 2, 'деconstruct': 3, 'деконстру': 3, 'тополог': 3},
+    'expert': {'встреч': 4, 'встреча с': 5, 'брифинг': 4, 'подготов к': 3, 'эксперт': 3, 'подготовь': 3, 'вопросы для': 3, 'комбат-вопрос': 4, 'подготов': 2,
+              'переговор': 4, 'переговоры': 4, 'byd': 5, 'geely': 5, 'chery': 5, 'zeekr': 5, 'lixiang': 5, 'nio': 5, 'xpeng': 5, 'vinfast': 5,
+              'cto': 4, 'ceo': 4, 'cfo': 4, 'директор': 3, 'авто': 3, 'автомобиль': 3, 'автопром': 4, 'конкурент': 3, 'платформ': 3, 'ev ': 4,
+              'электромобиль': 4, 'завод': 2, 'производств': 2, 'сборк': 2, 'локализац': 3},
+}
+
 def detect_dept(text):
     text_lower = text.lower().strip()
+    # Phase 1: Explicit command prefix (exact match, no scoring needed)
     for cmd, dept in sorted(COMMAND_DEPT.items(), key=lambda x: -len(x[0])):
         if text_lower.startswith(cmd) and (len(text_lower) == len(cmd) or text_lower[len(cmd)] in ' \n/'):
             return dept
+
+    # Phase 2: Weighted keyword scoring across ALL departments
+    # Each dept scores points for matching keywords; highest score wins.
+    # This fixes the OSP-before-Expert ordering bug where 'анализ' (weight 1)
+    # hijacked queries containing 'встреч' (weight 4) or 'byd' (weight 5).
+    scores = {}
     for dept, kws in RUSSIAN_KEYWORDS.items():
+        score = 0
+        matched = []
+        weights = KEYWORD_WEIGHTS.get(dept, {})
         for kw in kws:
             if kw in text_lower:
-                return dept
+                w = weights.get(kw, 1)  # default weight = 1 for unweighted keywords
+                score += w
+                matched.append(kw)
+        if score > 0:
+            scores[dept] = (score, matched)
+
+    if scores:
+        # Sort by score descending; on tie, prefer expert > osp > others
+        _PRIORITY = {'expert': 0, 'osp': 1, 'lz': 2, 'finance': 3, 'marketing': 4, 'legal': 5,
+                     'dev': 6, 'engineering': 7, 'design': 8, 'qa': 9, 'visual': 10, 'kavalnya': 11, 'admin': 12}
+        best = sorted(scores.items(), key=lambda x: (-x[1][0], _PRIORITY.get(x[0], 99)))[0]
+        best_dept = best[0]
+        best_score = best[1][0]
+        best_keywords = best[1][1]
+        log.info(f"[detect_dept] scored: { {d: s[0] for d, s in scores.items()} } → {best_dept} (score={best_score}, kw={best_keywords})")
+        return best_dept
+
     return 'yana'
 
 # ──────────────────────────── CONDENSED PROMPTS ────────────────────────────
