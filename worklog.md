@@ -28,3 +28,22 @@ Stage Summary:
   - prisma/osp-schema.prisma (7 models, 5 enums)
 - All changes synced across 3 project copies
 - No breaking changes — all new functions are additive
+
+---
+Task ID: 2
+Agent: Super Z (main)
+Task: Register OSP API endpoints in llm_proxy.py, ensure SQLite tables, commit, push, create report
+
+Work Log:
+- Added 7 OSP API routes to llm_proxy.py: /osp/archive, /osp/archive/:id, /osp/indicators/due, /osp/verify/:id, /osp/bet, /osp/score, /osp/regime
+- Added _ensure_osp_tables() function with 6 SQLite tables + 12 indexes for non-Prisma environments
+- Updated endpoint list in app.run() log message
+- Git commit: "OSP V3.1 enrichment: API endpoints + SQLite tables + worklog" (2 files changed, 221 insertions)
+- Git rebase to resolve 3 conflicts (dept/lz.mlog, dept/utils.mlog, app.mlog — all theirs) + 1 conflict in llm_proxy.py (ours)
+- Git push to origin/main successful (f300692)
+- Generated PDF report via subagent: /home/z/my-project/download/OSP-V3.1-Enrichment-Report.pdf (10 pages, 198.7KB)
+
+Stage Summary:
+- llm_proxy.py enriched with 7 REST endpoints + SQLite auto-table creation
+- Code committed and pushed to GitHub
+- PDF report delivered with full specification
