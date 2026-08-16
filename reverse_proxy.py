@@ -69,6 +69,7 @@ def is_internal_only(path):
 # NOTE: mlog routes checked BEFORE LLM routes (specific > catch-all)
 MLOG_ROUTES_PREFIXES = [
     "/api/expert/",  # Expert automotive API — served by mlog (dept/expert.mlog)
+    "/api/lz/",      # LZ multi-domain API — served by mlog (dept/lz.mlog)
     "/webhook/",    # Telegram webhook — mlog handler
     "/cron/",
     "/health",
