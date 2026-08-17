@@ -4382,10 +4382,15 @@ def scheduler_lz_daily():
 
         # Check watched repos for new releases
         all_releases = []
+        seen_release_keys = set()  # dedup by (repo, tag) across runs
         for repo in GITHUB_WATCH_RELEASES:
             releases = _github_releases(repo)
             time.sleep(1)
-            all_releases.extend(releases)
+            for r in releases:
+                rkey = f"{r['repo']}@{r['tag']}"
+                if rkey not in seen_release_keys:
+                    seen_release_keys.add(rkey)
+                    all_releases.append(r)
 
         github_ok = bool(all_repos or all_releases)
         if not github_ok:
@@ -4468,20 +4473,26 @@ def scheduler_lz_daily():
         result = call_llm("lz", analysis_messages)
         analysis = result.get("reply", "Analysis failed.")
 
-        # ── Phase 3: Save to Memory ───────────────────────────
+        # ── Phase 3: Save to Memory (with cross-run dedup) ───────────
         if not dry_run:
-            memory.remember(
-                f"LZ Daily {datetime.utcnow().isoformat()[:10]}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
-                "observation", 0.7, "lz_daily"
-            )
-            # Save top findings as individual memories
+            today_key = f"lz_daily:{datetime.utcnow().isoformat()[:10]}"
+            # Check if we already stored today's scan summary
+            existing = memory.recall(today_key, source="lz_daily", limit=1)
+            if not existing:
+                memory.remember(
+                    f"LZ Daily {datetime.utcnow().isoformat()[:10]}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
+                    "observation", 0.7, "lz_daily"
+                )
+            # Save top findings as individual memories (dedup by content prefix)
             for line in analysis.split("\n"):
                 line = line.strip()
                 if line.startswith(("1.", "2.", "3.")) and len(line) > 20:
-                    memory.remember(
-                        f"LZ находка: {line[:200]}",
-                        "observation", 0.8, "lz_daily"
-                    )
+                    mem_key = f"lz_find:{line[:60]}"
+                    if not memory.recall(mem_key, source="lz_daily", limit=1):
+                        memory.remember(
+                            f"LZ находка: {line[:200]}",
+                            "observation", 0.8, "lz_daily"
+                        )
 
         # ── Phase 4: Build Report ─────────────────────────────
         report = f"🔍 LZ DAILY REPORT — {datetime.utcnow().isoformat()[:10]}\n"
