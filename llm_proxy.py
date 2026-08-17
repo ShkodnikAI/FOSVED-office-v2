@@ -4473,8 +4473,28 @@ def scheduler_lz_daily():
         result = call_llm("lz", analysis_messages)
         analysis = result.get("reply", "Analysis failed.")
 
-        # ── Phase 3: Save to Memory (with cross-run dedup) ───────────
+        # ── Phase 3: Save to DB + Memory (with cross-run dedup) ───────────
         if not dry_run:
+            # LZ Dedup: save releases & repos to lz_telegram_posts with update_id
+            # update_id format: "gh:{repo}:{tag}" for releases, "gh:repo:{name}" for repos
+            # UNIQUE constraint on update_id prevents duplicate entries across scans
+            for r in all_releases:
+                try:
+                    _query(
+                        "INSERT OR IGNORE INTO lz_telegram_posts (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, ?)",
+                        (f"gh:{r.get('repo','')}:{r.get('tag','')}", r.get('repo',''), r.get('repo',''), r.get('body','')[:500], r.get('date',''))
+                    )
+                except Exception:
+                    pass  # update_id column may not exist yet (pre-ALTER TABLE state)
+            for r in all_repos:
+                try:
+                    _query(
+                        "INSERT OR IGNORE INTO lz_telegram_posts (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, datetime('now'))",
+                        (f"gh:repo:{r.get('name','')}", "github", r.get('lang',''), r.get('desc','')[:300])
+                    )
+                except Exception:
+                    pass
+
             today_key = f"lz_daily:{datetime.utcnow().isoformat()[:10]}"
             # Check if we already stored today's scan summary
             existing = memory.recall(today_key, source="lz_daily", limit=1)
