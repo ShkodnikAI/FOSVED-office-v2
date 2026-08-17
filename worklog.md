@@ -48,6 +48,32 @@ Stage Summary:
 - Code committed and pushed to GitHub
 - PDF report delivered with full specification
 ---
+Task ID: 1
+Agent: Super Z (main)
+Task: Build new mlog 0.13.0 binary, deploy, add LZ daily dedup + WH-3 webhook dedup
+
+Work Log:
+- Explored Metalogos codebase: Rust 0.13.0, ~30.5K LOC, 7 semantic primitives
+- Found 3 binary copies: root=21.8MB 0.12.0, FOSVED-office-v2=21.8MB 0.12.0, fosved-work=13.6MB (old)
+- Source Cargo.toml = 0.13.0 but binary not rebuilt — still 0.12.0
+- Installed Rust toolchain via rustup
+- Fixed 2 compilation errors in src/builtins/pdf.rs: lopdf::Error::Other → ::DictKey, stream.dictionary → stream.dict
+- Built mlog 0.13.0 successfully (21.9MB)
+- Deployed to all 3 directories: fosved-work, FOSVED-office-v2, root
+- Added update_id TEXT UNIQUE to lz_telegram_posts schema in all 3 app.mlog copies
+- Added webhook_dedup table + WH-3 time-windowed logic (90s window) to fosved-work & FOSVED-office-v2 app.mlog
+- Replaced eternal kv-flag webhook dedup with DB-backed time-windowed dedup
+- Added LZ daily dedup in llm_proxy.py: INSERT OR IGNORE for both releases (update_id=gh:{repo}:{tag}) and repos (update_id=gh:repo:{name})
+- Synced all changes across directories
+
+Stage Summary:
+- mlog 0.13.0 binary built and deployed everywhere
+- lz_telegram_posts now has update_id TEXT UNIQUE — dedup at schema level
+- WH-3 webhook dedup: time-windowed (90s) replacing eternal kv-flag
+- LZ daily scan saves results to lz_telegram_posts with dedup via INSERT OR IGNORE
+- All 3 directories synchronized
+
+---
 Task ID: engineering-enrichment-1
 Agent: Super Z (main)
 Task: Enrich engineering department from 17-line Python proxy stub to native Metalogos implementation
