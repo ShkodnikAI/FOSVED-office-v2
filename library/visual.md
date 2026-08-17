@@ -1,11 +1,17 @@
 # Визуальный Отдел
-**Fosved Library · v1.1**
+**Fosved Library · v2.0** (Metalogos 0.17.0 PDF-native)
 
 ---
 
 ## Роль
 
-Превращает структурированные данные других отделов в **визуальные артефакты** 5 типов. Поддерживает визуальный архив с эволюционирующим стилем.
+Превращает структурированные данные других отделов в **визуальные артефакты** 5 типов, используя **PDF-примитивы Metalogos 0.17.0** как основной render-движок. Поддерживает визуальный архив с эволюционирующим стилем.
+
+**Render stack:**
+- **Type 3 (Card), Type 4 (Reference):** прямые `pdf_*` builtins (pdf_create, pdf_draw_rect, pdf_draw_line, pdf_draw_table, pdf_write_text, pdf_save) — быстрые, template-driven, без LLM
+- **Type 1 (Compression):** LLM извлекает структуру + `pdf_*` builtins рендерят — гибридный
+- **Type 2 (Memorable):** LLM генерирует HTML/SVG + `html_to_pdf` конвертирует — максимальная свобода дизайна
+- **Type 5 (Premium Spec):** LLM генерирует JSON spec для Midjourney+Figma — ручное производство
 
 **Базовый принцип:** хорошая инфографика — это компрессия понимания. Если за 5 секунд получил суть — работает. Если нужно 30 секунд вчитываться — это документ.
 
@@ -119,4 +125,21 @@
 _(пополняется через `/visual-debrief | <текст>` после значимых сессий)_
 
 ---
-**End of profile visual.md v1.1**
+## Metalogos Builtins Used
+
+| Builtin | Применение |
+|---|---|
+| `pdf_create()` | Создание PDF-handle |
+| `pdf_add_page(id, w, h)` | Добавление страницы (A4, Card, Landscape) |
+| `pdf_write_text(id, x, y, text, font, size)` | Типографика (Helvetica, Courier, Times) |
+| `pdf_draw_rect(id, x, y, w, h, stroke, fill)` | Прямоугольники: хедеры, бары, секции |
+| `pdf_draw_line(id, x1, y1, x2, y2, width)` | Линии: оси, разделители |
+| `pdf_draw_table(id, x, y, cols, rows, style)` | Таблицы: key-value, данные |
+| `pdf_save(id, path)` | Сохранение PDF |
+| `html_to_pdf(html, path)` | HTML/SVG → PDF (Type 2 Memorable) |
+| `pdf_add_image(id, x, y, path)` | Вставка PNG/JPEG в PDF |
+| `pdf_set_page_header/footer(id, text)` | Колонтитулы |
+| `pdf_watermark(id, text)` | Водяной знак (DRAFT, CONFIDENTIAL) |
+
+---
+**End of profile visual.md v2.0**
