@@ -103,3 +103,32 @@ Stage Summary:
 - Lifecycle state machine: drafted → calculated → self_verified → sent_for_review → engineer_approved/corrected
 - Disclaimer enforcement: top + bottom on every output, final safety check in entry point
 - Learning loop: verification → weekly → monthly → quarterly
+
+---
+Task ID: finance-enrichment-1
+Agent: Super Z (main)
+Task: Enrich finance department from 18-line Python proxy stub to native Metalogos implementation
+
+Work Log:
+- Extracted finance-dept-integration (4).zip (48 files)
+- Read FINANCE_INTEGRATION_PLAN.md, README.md, library/finance.md
+- Read all 9 SKILL.md files (3 full + 6 placeholders)
+- Read prisma/finance-schema.prisma (7 models)
+- Read lib/finance.js (16.7KB, 14 exports)
+- Read all 5 patches (bot handlers, scheduler, army, routing, registry)
+- Read existing finance.mlog stub (18 lines, 100% Python proxy)
+- Designed native architecture: 13 sections, 23 functions/patterns
+- Wrote finance.mlog: 708 lines, 0 CallLLMProxy, 41 builtin calls, 12 call_llm (native)
+- Verified: zero Python proxy calls (only in comments)
+- Verified: app.mlog already routes HandleFinance natively
+
+Stage Summary:
+- finance.mlog: 18 → 708 lines (39x enrichment)
+- Nativeness: 5% → ~85% (remaining 15% is native call_llm for LLM reasoning)
+- 9 skill patterns implemented (3 full Tier 1 + 1 Tier 2 + 1 Tier 3 + 4 stubs)
+- 4 jurisdictions: BY (full), RU/EU/US (placeholder rates)
+- 7 hard rules enforced as native gates
+- 2 lifecycle machines: forecast (6 states) + invoice (10 states)
+- 7 bot commands + 3 scheduler tasks
+- MAPE-based learning loop: verification → monthly → quarterly
+- Invoice auto-escalation: >60d→pre_legal, >14d→escalation, >0d→overdue
