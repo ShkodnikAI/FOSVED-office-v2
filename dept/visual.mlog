@@ -1,17 +1,527 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// ═══════════════════════════════════════════════════════════════════════
+// Fosved Office v2 — Visual Department (NATIVE v2.0)
+// ═══════════════════════════════════════════════════════════════════════
+// Replaces LLM-proxy with native Metalogos SVG rendering.
+// 44 built-in SVG functions, 10 palettes, 4 compositions, 0 external deps.
+//
+// Architecture:
+//   HandleVisual(query, chat_id)
+//     → ParseVisualQuery(query)        ← NLP keyword detection
+//     → DetectVisualType(request)      ← chart | diagram | infographic | kpi | raw
+//     → DetectIntent(context)          ← calm | tension | energy | authority | warmth
+//     → DetectMode(context)            ← light | dark
+//     → RenderByType(type, kind, data, intent, mode)
+//         → RenderChart     (8 types: bar/line/area/donut/scatter/radar/boxplot/heatmap)
+//         → RenderDiagram   (14 types: tree/org/flowchart/process/timeline/gantt/...)
+//         → RenderInfographic (4 compositions: poster/dashboard/comparison/timeline)
+//         → RenderKPI       (card panels)
+//         → RenderRaw       (passthrough)
+//     → infographic_qa(svg)           ← WCAG AA, XSS, anti-chartjunk
+//     → RecordAssistantMessage
+//
+// Depends on BUILTINS only (no Python, no LLM for rendering):
+//   svg_canvas, svg_group, svg_text, svg_rect, svg_circle, svg_path,
+//   svg_line, svg_ellipse, svg_polygon, svg_polyline,
+//   chart_bar, chart_line, chart_area, chart_donut, chart_scatter,
+//   chart_radar, chart_boxplot, chart_heatmap,
+//   diagram_tree, diagram_org, diagram_flowchart, diagram_process,
+//   diagram_timeline, diagram_gantt, diagram_venn2, diagram_venn3,
+//   diagram_pyramid, diagram_er, diagram_state_machine, diagram_sankey,
+//   diagram_funnel, diagram_onion,
+//   color_palette, infographic_qa, contrast_ratio, content_hash,
+//   svg_count_charts
+//
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── SECTION 1: TYPE & INTENT DETECTION ───────────────────────────────
+
+fn DetectVisualType(request: Struct{
+  has_axes: Bool,
+  has_nodes: Bool,
+  has_sections: Bool,
+  has_kpi: Bool,
+  is_timeline: Bool,
+  is_comparison: Bool,
+  is_existing_svg: Bool
+}) -> String {
+  if request.is_existing_svg then { return "raw" }
+  if request.has_kpi && request.has_sections then { return "infographic" }
+  if request.has_kpi then { return "kpi" }
+  if request.is_comparison then { return "infographic" }
+  if request.is_timeline then { return "infographic" }
+  if request.has_nodes then { return "diagram" }
+  if request.has_axes then { return "chart" }
+  if request.has_sections then { return "infographic" }
+  return "chart"
+}
+
+fn DetectIntent(context: Struct{
+  is_financial: Bool,
+  is_urgent: Bool,
+  is_promotional: Bool,
+  is_analytical: Bool,
+  is_operational: Bool,
+  is_educational: Bool
+}) -> String {
+  if context.is_financial then { return "authority" }
+  if context.is_analytical then { return "authority" }
+  if context.is_urgent then { return "tension" }
+  if context.is_operational then { return "energy" }
+  if context.is_promotional then { return "energy" }
+  if context.is_educational then { return "warmth" }
+  return "calm"
+}
+
+fn DetectMode(context: Struct{
+  is_dark_ui: Bool,
+  is_print: Bool,
+  is_presentation: Bool
+}) -> String {
+  if context.is_dark_ui then { return "dark" }
+  if context.is_print then { return "light" }
+  if context.is_presentation then { return "dark" }
+  return "light"
+}
+
+// ─── SECTION 2: 5 RENDERERS BY TYPE ──────────────────────────────────
+
+// 2a. RenderChart — 8 chart types
+fn RenderChart(kind: String, data: Any, intent: String, mode: String) -> String {
+  let style = color_palette(intent, mode)
+  if kind == "bar" then       { return chart_bar(data, style) }
+  if kind == "line" then      { return chart_line(data, style) }
+  if kind == "area" then      { return chart_area(data, style) }
+  if kind == "donut" then     { return chart_donut(data, style) }
+  if kind == "scatter" then   { return chart_scatter(data, style) }
+  if kind == "radar" then     { return chart_radar(data, style) }
+  if kind == "boxplot" then   { return chart_boxplot(data, style) }
+  if kind == "heatmap" then   { return chart_heatmap(data, style) }
+  return svg_text(svg_canvas(400.0, 200.0, style.paper), 20.0, 40.0, "Unknown chart: " + kind, style.muted, 14.0, "normal")
+}
+
+// 2b. RenderDiagram — 14 diagram types
+fn RenderDiagram(kind: String, data: Any, intent: String, mode: String) -> String {
+  let style = color_palette(intent, mode)
+  if kind == "tree" then          { return diagram_tree(data, style) }
+  if kind == "org" then           { return diagram_org(data, style) }
+  if kind == "flowchart" then     { return diagram_flowchart(data, style) }
+  if kind == "process" then       { return diagram_process(data, style) }
+  if kind == "timeline" then      { return diagram_timeline(data, style) }
+  if kind == "gantt" then         { return diagram_gantt(data, style) }
+  if kind == "venn2" then         { return diagram_venn2(data, style) }
+  if kind == "venn3" then         { return diagram_venn3(data, style) }
+  if kind == "pyramid" then       { return diagram_pyramid(data, style) }
+  if kind == "er" then            { return diagram_er(data, style) }
+  if kind == "state_machine" then { return diagram_state_machine(data, style) }
+  if kind == "sankey" then        { return diagram_sankey(data, style) }
+  if kind == "funnel" then        { return diagram_funnel(data, style) }
+  if kind == "onion" then         { return diagram_onion(data, style) }
+  return svg_text(svg_canvas(400.0, 200.0, style.paper), 20.0, 40.0, "Unknown diagram: " + kind, style.muted, 14.0, "normal")
+}
+
+// 2c. RenderInfographic — 4 compositions (defined in Section 5 below)
+fn RenderInfographic(
+  composition: String,
+  title: String,
+  intent: String,
+  mode: String,
+  payload: Any
+) -> String {
+  if composition == "poster" then {
+    return InfographicPoster(title, payload.subtitle, intent, mode, payload.sections)
+  }
+  if composition == "dashboard" then {
+    return InfographicDashboard(title, intent, mode, payload.kpis, payload.charts)
+  }
+  if composition == "comparison" then {
+    return InfographicComparison(title, intent, mode, payload.left_label, payload.right_label, payload.left_data, payload.right_data)
+  }
+  if composition == "timeline" then {
+    return InfographicTimeline(title, intent, mode, payload.events)
+  }
+  let style = color_palette(intent, mode)
+  return svg_text(svg_canvas(400.0, 200.0, style.paper), 20.0, 40.0, "Unknown composition: " + composition, style.muted, 14.0, "normal")
+}
+
+// 2d. RenderKPI — KPI card panel
+fn RenderKPI(
+  kpis: List<Struct{label: String, value: String, delta: String, delta_positive: Bool}>,
+  intent: String,
+  mode: String
+) -> String {
+  let style = color_palette(intent, mode)
+  let card_w = 200.0
+  let card_h = 90.0
+  let gap = 16.0
+  let cols = 4
+  let rows = if length(kpis) % cols == 0 then { length(kpis) / cols } else { length(kpis) / cols + 1 }
+  let canvas_w = 40.0 + to_float(cols) * (card_w + gap)
+  let canvas_h = 40.0 + to_float(rows) * (card_h + gap)
+  let root = svg_canvas(canvas_w, canvas_h, style.paper)
+  return RenderKPI_layout(root, kpis, style, 20.0, 20.0, card_w, card_h, gap, cols)
+}
+
+fn RenderKPI_layout(
+  canvas: String,
+  kpis: List<Struct{label: String, value: String, delta: String, delta_positive: Bool}>,
+  style: Struct{paper: String, ink: String, accent: String, muted: String, rule: String},
+  x: Float, y: Float, w: Float, h: Float, gap: Float, cols: Int
+) -> String {
+  if length(kpis) == 0 then { return canvas }
+  let kpi = kpis[0]
+  let rest = slice(kpis, 1, length(kpis))
+  let idx = length(kpis) - length(rest) - 1
+  let col = idx % cols
+  let row = idx / cols
+  let cx = x + to_float(col) * (w + gap)
+  let cy = y + to_float(row) * (h + gap)
+  let c = svg_rect(canvas, cx, cy, w, h, style.paper, style.rule)
+  let c = svg_text(c, cx + 12.0, cy + 22.0, kpi.label, style.muted, 10.0, "normal")
+  let c = svg_text(c, cx + 12.0, cy + 52.0, kpi.value, style.ink, 26.0, "bold")
+  let delta_color = if kpi.delta_positive then { "#2d5f3f" } else { "#8b2942" }
+  let c = svg_text(c, cx + 12.0, cy + 74.0, kpi.delta, delta_color, 11.0, "normal")
+  return RenderKPI_layout(c, rest, style, x, y, w, h, gap, cols)
+}
+
+// 2e. RenderRaw — passthrough / error
+fn RenderRaw(svg: String) -> String {
+  let qa = infographic_qa(svg)
+  if qa.passed then { return svg }
+  let style = color_palette("tension", "light")
+  let c = svg_canvas(400.0, 60.0, style.paper)
+  let c = svg_text(c, 12.0, 30.0, "RAW SVG QA FAIL: " + join(qa.warnings, ", "), "#8b2942", 12.0, "bold")
+  return c
+}
+
+// 2f. Master dispatcher
+fn RenderByType(
+  type: String,
+  kind: String,
+  data: Any,
+  intent: String,
+  mode: String
+) -> String {
+  if type == "chart" then       { return RenderChart(kind, data, intent, mode) }
+  if type == "diagram" then     { return RenderDiagram(kind, data, intent, mode) }
+  if type == "infographic" then { return RenderInfographic(kind, data.title, intent, mode, data) }
+  if type == "kpi" then         { return RenderKPI(data, intent, mode) }
+  if type == "raw" then         { return RenderRaw(data) }
+  let style = color_palette(intent, mode)
+  return svg_text(svg_canvas(400.0, 200.0, style.paper), 20.0, 40.0, "Unknown visual type: " + type, style.muted, 14.0, "normal")
+}
+
+// ─── SECTION 3: INFOGRAPHIC COMPOSITIONS ─────────────────────────────
+
+// 3a. InfographicPoster — vertical poster (Type 1 Compression)
+fn InfographicPoster(
+  title: String,
+  subtitle: String,
+  intent: String,
+  mode: String,
+  sections: List<Struct{ kind: String, data: Any, caption: String }>
+) -> String {
+  let style = color_palette(intent, mode)
+  let canvas_w = 800.0
+  let canvas_h = 200.0 + to_float(length(sections)) * 320.0
+  let root = svg_canvas(canvas_w, canvas_h, style.paper)
+  let root = svg_text(root, 40.0, 52.0, title, style.ink, 28.0, "bold")
+  let root = svg_text(root, 40.0, 82.0, subtitle, style.muted, 14.0, "normal")
+  let root = svg_rect(root, 40.0, 96.0, canvas_w - 80.0, 1.0, style.rule)
+  return InfographicPoster_sections(root, sections, style, 120.0)
+}
+
+fn InfographicPoster_sections(
+  canvas: String,
+  sections: List<Struct{ kind: String, data: Any, caption: String }>,
+  style: Struct{ paper: String, ink: String, accent: String, muted: String, rule: String },
+  y: Float
+) -> String {
+  if length(sections) == 0 then { return canvas }
+  let sec = sections[0]
+  let rest = slice(sections, 1, length(sections))
+  let svg_block = if sec.kind == "chart_bar" then { chart_bar(sec.data, style) }
+    else if sec.kind == "chart_line" then { chart_line(sec.data, style) }
+    else if sec.kind == "chart_area" then { chart_area(sec.data, style) }
+    else if sec.kind == "chart_donut" then { chart_donut(sec.data, style) }
+    else if sec.kind == "chart_radar" then { chart_radar(sec.data, style) }
+    else if sec.kind == "chart_heatmap" then { chart_heatmap(sec.data, style) }
+    else if sec.kind == "diagram_flowchart" then { diagram_flowchart(sec.data, style) }
+    else if sec.kind == "diagram_process" then { diagram_process(sec.data, style) }
+    else if sec.kind == "diagram_timeline" then { diagram_timeline(sec.data, style) }
+    else if sec.kind == "diagram_tree" then { diagram_tree(sec.data, style) }
+    else if sec.kind == "diagram_venn2" then { diagram_venn2(sec.data, style) }
+    else if sec.kind == "diagram_venn3" then { diagram_venn3(sec.data, style) }
+    else if sec.kind == "diagram_pyramid" then { diagram_pyramid(sec.data, style) }
+    else if sec.kind == "diagram_er" then { diagram_er(sec.data, style) }
+    else if sec.kind == "diagram_gantt" then { diagram_gantt(sec.data, style) }
+    else if sec.kind == "diagram_org" then { diagram_org(sec.data, style) }
+    else if sec.kind == "diagram_state_machine" then { diagram_state_machine(sec.data, style) }
+    else { svg_text(canvas, 40.0, y, "Unsupported: " + sec.kind, style.muted, 12.0, "normal") }
+  let c = svg_group(canvas, 40.0, y, svg_block)
+  let c = svg_text(c, 40.0, y + 290.0, sec.caption, style.muted, 11.0, "italic")
+  return InfographicPoster_sections(c, rest, style, y + 320.0)
+}
+
+// 3b. InfographicDashboard — KPI panel + chart grid (2 cols)
+fn InfographicDashboard(
+  title: String,
+  intent: String,
+  mode: String,
+  kpis: List<Struct{ label: String, value: String, delta: String }>,
+  charts: List<Struct{ kind: String, data: Any, caption: String }>
+) -> String {
+  let style = color_palette(intent, mode)
+  let canvas_w = 960.0
+  let kpi_row_h = 80.0
+  let chart_h = 280.0
+  let rows = if length(charts) % 2 == 0 then { length(charts) / 2 } else { length(charts) / 2 + 1 }
+  let canvas_h = 60.0 + kpi_row_h + 20.0 + to_float(rows) * (chart_h + 40.0)
+  let root = svg_canvas(canvas_w, canvas_h, style.paper)
+  let root = svg_text(root, 32.0, 38.0, title, style.ink, 20.0, "bold")
+  let kpi_width = (canvas_w - 64.0) / to_float(length(kpis))
+  let root = Dashboard_kpis(root, kpis, style, 32.0, 52.0, kpi_width)
+  let y_start = 52.0 + kpi_row_h + 20.0
+  let col_w = (canvas_w - 64.0 - 20.0) / 2.0
+  return Dashboard_grid(root, charts, style, y_start, col_w, chart_h)
+}
+
+fn Dashboard_kpis(
+  canvas: String,
+  kpis: List<Struct{ label: String, value: String, delta: String }>,
+  style: Struct{ paper: String, ink: String, accent: String, muted: String, rule: String },
+  x: Float, y: Float, w: Float
+) -> String {
+  if length(kpis) == 0 then { return canvas }
+  let kpi = kpis[0]
+  let rest = slice(kpis, 1, length(kpis))
+  let c = svg_rect(canvas, x, y, w - 12.0, 60.0, style.paper, style.rule)
+  let c = svg_text(c, x + 10.0, y + 22.0, kpi.label, style.muted, 10.0, "normal")
+  let c = svg_text(c, x + 10.0, y + 44.0, kpi.value, style.ink, 22.0, "bold")
+  let c = svg_text(c, x + w - 50.0, y + 44.0, kpi.delta, style.accent, 11.0, "normal")
+  return Dashboard_kpis(c, rest, style, x + w, y, w)
+}
+
+fn Dashboard_grid(
+  canvas: String,
+  charts: List<Struct{ kind: String, data: Any, caption: String }>,
+  style: Struct{ paper: String, ink: String, accent: String, muted: String, rule: String },
+  y: Float, col_w: Float, chart_h: Float
+) -> String {
+  if length(charts) == 0 then { return canvas }
+  let chart = charts[0]
+  let rest = slice(charts, 1, length(charts))
+  let idx = length(charts) - length(rest) - 1
+  let col = if idx % 2 == 0 then { 0 } else { 1 }
+  let row = idx / 2
+  let x_offset = 32.0 + to_float(col) * (col_w + 20.0)
+  let y_offset = y + to_float(row) * (chart_h + 40.0)
+  let svg_block = if chart.kind == "chart_bar" then { chart_bar(chart.data, style) }
+    else if chart.kind == "chart_line" then { chart_line(chart.data, style) }
+    else if chart.kind == "chart_donut" then { chart_donut(chart.data, style) }
+    else if chart.kind == "chart_area" then { chart_area(chart.data, style) }
+    else if chart.kind == "chart_radar" then { chart_radar(chart.data, style) }
+    else if chart.kind == "chart_scatter" then { chart_scatter(chart.data, style) }
+    else if chart.kind == "chart_boxplot" then { chart_boxplot(chart.data, style) }
+    else if chart.kind == "chart_heatmap" then { chart_heatmap(chart.data, style) }
+    else if chart.kind == "diagram_flowchart" then { diagram_flowchart(chart.data, style) }
+    else { svg_text(canvas, x_offset, y_offset, "Unsupported: " + chart.kind, style.muted, 12.0, "normal") }
+  let c = svg_group(canvas, x_offset, y_offset, svg_block)
+  let c = svg_text(c, x_offset, y_offset + chart_h + 12.0, chart.caption, style.muted, 10.0, "italic")
+  return Dashboard_grid(c, rest, style, y, col_w, chart_h)
+}
+
+// 3c. InfographicComparison — side-by-side
+fn InfographicComparison(
+  title: String,
+  intent: String,
+  mode: String,
+  left_label: String,
+  right_label: String,
+  left_data: Struct{ kind: String, data: Any },
+  right_data: Struct{ kind: String, data: Any }
+) -> String {
+  let style = color_palette(intent, mode)
+  let canvas_w = 960.0
+  let canvas_h = 380.0
+  let half_w = (canvas_w - 80.0) / 2.0
+  let root = svg_canvas(canvas_w, canvas_h, style.paper)
+  let root = svg_text(root, 40.0, 36.0, title, style.ink, 20.0, "bold")
+  let root = svg_text(root, 40.0, 64.0, left_label, style.accent, 13.0, "bold")
+  let root = svg_text(root, 40.0 + half_w + 20.0, 64.0, right_label, style.accent, 13.0, "bold")
+  let divider_x = 40.0 + half_w + 10.0
+  let root = svg_rect(root, divider_x, 56.0, 1.0, canvas_h - 80.0, style.rule)
+  let left_svg = if left_data.kind == "chart_bar" then { chart_bar(left_data.data, style) }
+    else if left_data.kind == "chart_donut" then { chart_donut(left_data.data, style) }
+    else if left_data.kind == "chart_radar" then { chart_radar(left_data.data, style) }
+    else { chart_bar(left_data.data, style) }
+  let root = svg_group(root, 40.0, 80.0, left_svg)
+  let right_svg = if right_data.kind == "chart_bar" then { chart_bar(right_data.data, style) }
+    else if right_data.kind == "chart_donut" then { chart_donut(right_data.data, style) }
+    else if right_data.kind == "chart_radar" then { chart_radar(right_data.data, style) }
+    else { chart_bar(right_data.data, style) }
+  let root = svg_group(root, divider_x + 10.0, 80.0, right_svg)
+  return root
+}
+
+// 3d. InfographicTimeline — vertical event chronology
+fn InfographicTimeline(
+  title: String,
+  intent: String,
+  mode: String,
+  events: List<Struct{ date: String, title: String, description: String, magnitude: Float }>
+) -> String {
+  let style = color_palette(intent, mode)
+  let canvas_w = 800.0
+  let row_h = 80.0
+  let canvas_h = 80.0 + to_float(length(events)) * row_h + 40.0
+  let root = svg_canvas(canvas_w, canvas_h, style.paper)
+  let root = svg_text(root, 40.0, 38.0, title, style.ink, 22.0, "bold")
+  let axis_x = 120.0
+  let root = svg_rect(root, axis_x, 60.0, 2.0, canvas_h - 100.0, style.rule)
+  return Timeline_events(root, events, style, axis_x, 80.0, row_h)
+}
+
+fn Timeline_events(
+  canvas: String,
+  events: List<Struct{ date: String, title: String, description: String, magnitude: Float }>,
+  style: Struct{ paper: String, ink: String, accent: String, muted: String, rule: String },
+  axis_x: Float, y: Float, row_h: Float
+) -> String {
+  if length(events) == 0 then { return canvas }
+  let ev = events[0]
+  let rest = slice(events, 1, length(events))
+  let radius = 4.0 + ev.magnitude * 3.0
+  let c = svg_circle(canvas, axis_x, y + 12.0, radius, style.accent)
+  let c = svg_text(c, axis_x - 70.0, y + 16.0, ev.date, style.muted, 10.0, "normal")
+  let c = svg_text(c, axis_x + 20.0, y + 8.0, ev.title, style.ink, 13.0, "bold")
+  let c = svg_text(c, axis_x + 20.0, y + 26.0, ev.description, style.muted, 10.0, "normal")
+  let c = svg_rect(c, axis_x + radius, y + 12.0, 16.0 - radius, 1.0, style.rule)
+  return Timeline_events(c, rest, style, axis_x, y + row_h, row_h)
+}
+
+// ─── SECTION 4: NLP QUERY PARSER ─────────────────────────────────────
+
+fn ParseVisualQuery(query: String) -> Struct{
+  kind: String,
+  data: Any,
+  has_axes: Bool,
+  has_nodes: Bool,
+  has_sections: Bool,
+  has_kpi: Bool,
+  is_timeline: Bool,
+  is_comparison: Bool,
+  is_existing_svg: Bool,
+  is_financial: Bool,
+  is_urgent: Bool,
+  is_promotional: Bool,
+  is_analytical: Bool,
+  is_operational: Bool,
+  is_educational: Bool,
+  is_dark_ui: Bool,
+  is_print: Bool,
+  is_presentation: Bool
+} {
+  let kind = if contains(query, "bar chart") then { "bar" }
+    else if contains(query, "line chart") then { "line" }
+    else if contains(query, "area chart") then { "area" }
+    else if contains(query, "donut") then { "donut" }
+    else if contains(query, "scatter") then { "scatter" }
+    else if contains(query, "radar") then { "radar" }
+    else if contains(query, "boxplot") then { "boxplot" }
+    else if contains(query, "heatmap") then { "heatmap" }
+    else if contains(query, "tree") then { "tree" }
+    else if contains(query, "org chart") then { "org" }
+    else if contains(query, "flowchart") then { "flowchart" }
+    else if contains(query, "process") then { "process" }
+    else if contains(query, "timeline") then { "timeline" }
+    else if contains(query, "gantt") then { "gantt" }
+    else if contains(query, "venn") then { "venn2" }
+    else if contains(query, "pyramid") then { "pyramid" }
+    else if contains(query, "funnel") then { "funnel" }
+    else if contains(query, "sankey") then { "sankey" }
+    else if contains(query, "dashboard") then { "dashboard" }
+    else if contains(query, "poster") then { "poster" }
+    else if contains(query, "KPI") then { "kpi" }
+    else { "bar" }
+
+  let has_axes = contains(query, "chart") || contains(query, "graph") || contains(query, "plot")
+  let has_nodes = contains(query, "tree") || contains(query, "flowchart") || contains(query, "org")
+  let has_sections = contains(query, "poster") || contains(query, "dashboard") || contains(query, "report")
+  let has_kpi = contains(query, "KPI") || contains(query, "metric") || contains(query, "dashboard")
+  let is_timeline = contains(query, "timeline") || contains(query, "roadmap")
+  let is_comparison = contains(query, "compare") || contains(query, " vs ") || contains(query, "versus")
+
+  let is_financial = contains(query, "cost") || contains(query, "revenue") || contains(query, "budget")
+  let is_urgent = contains(query, "urgent") || contains(query, "alert") || contains(query, "critical")
+  let is_promotional = contains(query, "promo") || contains(query, "launch") || contains(query, "campaign")
+  let is_analytical = contains(query, "analysis") || contains(query, "report") || contains(query, "insight")
+  let is_operational = contains(query, "status") || contains(query, "monitor") || contains(query, "operational")
+  let is_educational = contains(query, "learn") || contains(query, "tutorial") || contains(query, "guide")
+
+  let is_dark_ui = contains(query, "dark") || contains(query, "night")
+  let is_print = contains(query, "print") || contains(query, "PDF")
+  let is_presentation = contains(query, "slide") || contains(query, "presentation")
+
+  return {
+    kind: kind, data: query,
+    has_axes: has_axes, has_nodes: has_nodes, has_sections: has_sections,
+    has_kpi: has_kpi, is_timeline: is_timeline, is_comparison: is_comparison,
+    is_existing_svg: false,
+    is_financial: is_financial, is_urgent: is_urgent, is_promotional: is_promotional,
+    is_analytical: is_analytical, is_operational: is_operational, is_educational: is_educational,
+    is_dark_ui: is_dark_ui, is_print: is_print, is_presentation: is_presentation
+  }
+}
+
+// ─── SECTION 5: ENTRY POINT (HandleVisual) ───────────────────────────
+// This is the pattern that app.mlog calls via import dept/visual
 
 pattern HandleVisual(query: String, chat_id: String) -> String {
   let dept = "visual"
-  let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
-  let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
-  return reply
+  let _ = AuditLog("dept_entry", dept, "query: " + substring(query, 0, 100))
+
+  // Parse visual request from query
+  let request = ParseVisualQuery(query)
+
+  // Detect type and intent automatically
+  let visual_type = DetectVisualType({
+    has_axes:      request.has_axes,
+    has_nodes:     request.has_nodes,
+    has_sections:  request.has_sections,
+    has_kpi:       request.has_kpi,
+    is_timeline:   request.is_timeline,
+    is_comparison: request.is_comparison,
+    is_existing_svg: request.is_existing_svg
+  })
+
+  let intent = DetectIntent({
+    is_financial:    request.is_financial,
+    is_urgent:       request.is_urgent,
+    is_promotional:  request.is_promotional,
+    is_analytical:   request.is_analytical,
+    is_operational:  request.is_operational,
+    is_educational:  request.is_educational
+  })
+
+  let mode = DetectMode({
+    is_dark_ui:      request.is_dark_ui,
+    is_print:        request.is_print,
+    is_presentation: request.is_presentation
+  })
+
+  // Native render — NO LLM call
+  let svg = RenderByType(visual_type, request.kind, request.data, intent, mode)
+
+  // QA gate — validate before returning
+  let qa = infographic_qa(svg)
+  if qa.passed == false then {
+    let _ = AuditLog("visual_qa_warn", dept, join(qa.warnings, " | "))
+  }
+
+  // Record for history
+  let _ = RecordAssistantMessage(chat_id, dept, svg)
+  let _ = kv_set("last_visual_type_" + dept, visual_type)
+  let _ = kv_set("last_visual_intent_" + dept, intent + "/" + mode)
+
+  return svg
 }
