@@ -1,18 +1,1139 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// ═══════════════════════════════════════════════════════════════════════
+// Fosved Office v2 — Legal Department (NATIVE v1.0)
+// ═══════════════════════════════════════════════════════════════════════
+// Replaces Python proxy stub with native Metalogos legal engine.
+// 10 skill patterns (3 Tier 1 full, 2 Tier 1 placeholder, 4 Tier 2 placeholder,
+//   1 Tier 3 placeholder), 7 hard rules, 12 red flag categories,
+//   risk mapping with 4 categories, lifecycle state machine,
+//   mandatory disclaimer enforcement, 4 jurisdictions, 3 business forms.
+// 0 CallLLMProxy calls, 0 Python dependencies.
+//
+// Architecture:
+//   HandleLegal(query, chat_id)
+//     → ParseLegalQuery(query)          ← NLP skill + command detection
+//     → EnforceHardRules(context)       ← 7 hard rules as native gates
+//     → RouteByCommand(cmd, ...)        ← 9 bot commands + free-text dispatch
+//       → cmd=nda       → QuickNDA
+//       → cmd=msa       → QuickMSA
+//       → cmd=review    → RedFlagAnalysis
+//       → cmd=riskmap   → RiskMapping
+//       → cmd=verify    → VerifyResult
+//       → cmd=archive   → SearchArchive
+//       → cmd=score     → LegalScore
+//       → cmd=templates → ListTemplates
+//       → cmd=help      → ShowHelp
+//       → free-text     → FullPipeline
+//     → FullPipeline (for free-text queries):
+//       → BuildLegalContext              ← jurisdiction + businessForm + counterparty
+//       → LoadJurisdictionKnowledge      ← BY/RU/EU/US knowledge packs
+//       → LoadBusinessFormKnowledge      ← ooo/ip/selfemployed knowledge packs
+//       → LoadCompatibilityMatrix        ← cross-JX and cross-form rules
+//       → RiskMappingProtocol            ← Tier 1: mandatory first step
+//       → [Route by document type]:
+//         → own draft  → ContractDraftingDiscipline  ← Tier 1: drafting
+//         → their draft → RedFlagDetection            ← Tier 1: analysis
+//       → ApplyDisclaimer                ← mandatory: draft + risk map
+//       → SaveToArchive                  ← db + long docs as files
+//     → RecordAssistantMessage
+//
+// Tier 1 skills (full):
+//   risk-mapping-protocol, contract-drafting-discipline, red-flag-detection
+// Tier 1 skills (placeholder):
+//   cross-jurisdiction-comparison, precedent-search-application
+// Tier 2 skills (placeholder):
+//   nda-msa-sla-templates, gdpr-compliance-check, ip-clause-discipline,
+//   consumer-protection-check
+// Tier 3 skills (placeholder):
+//   dispute-resolution-strategy
+//
+// Depends on BUILTINS only (no Python, no CallLLMProxy):
+//   call_llm, db_execute, kv_get, kv_set, json_encode, json_get, parse_json,
+//   to_string, to_float, to_int, length, contains, lower, substring,
+//   split, join, now, format_date, hash, AuditLog,
+//   RecordAssistantMessage, BuildContext, SendTelegramMessage
+//
+// ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 0: CONSTANTS & DISCLAIMER
+// ═══════════════════════════════════════════════════════════════════════
+
+let DISCLAIMER_TOP = "DRAFT + RISK MAP. Не финальный юридический документ. Перед подписанием договора на критичные суммы обязательна проверка лицензированным юристом. Knowledge packs могут устареть — для критичных сделок сверяйтесь с актуальной нормативной базой."
+
+let DISCLAIMER_BOTTOM = "⚠ Данный документ — draft + risk map, подготовленный вспомогательным инструментом, не заменяющим юриста. Все результаты должны быть: 1) проверены лицензированным юристом перед подписанием; 2) сверены с актуальной нормативной базой; 3) использованы как draft + risk map, не финальный документ."
+
+let DEPT = "legal"
+let METRIC = "pct-clean-signings"
+let TARGET_Y1 = "≥ 80%"
+let TARGET_Y2 = "≥ 90%"
+let VERIFICATION_DAYS = 90
+
+// Jurisdictions
+let JX_BY = "BY"
+let JX_RU = "RU"
+let JX_EU = "EU"
+let JX_US = "US"
+let VALID_JURISDICTIONS = "BY,RU,EU,US"
+
+// Business forms
+let BF_OOO = "ooo"
+let BF_IP = "ip"
+let BF_SELFEMPLOYED = "selfemployed"
+let VALID_FORMS = "ooo,ip,selfemployed"
+
+// Document types
+let DT_NDA = "NDA"
+let DT_MSA = "MSA"
+let DT_SLA = "SLA"
+let DT_TZ = "TZ"
+let DT_ANALYSIS = "analysis"
+let DT_RISK_MAP = "risk_map"
+let DT_RED_FLAG = "red_flag_review"
+let DT_TEMPLATE = "template_draft"
+
+// Lifecycle statuses
+let ST_DRAFTED = "drafted"
+let ST_PUBLISHED = "published"
+let ST_LAWYER_REVIEW = "under-lawyer-review"
+let ST_SIGNED = "signed"
+let ST_VERIFIED = "verified-clean"
+let ST_REWRITE = "rewrite"
+let ST_DISPUTE = "dispute"
+let ST_SUPERSEDED = "superseded"
+
+// Risk levels
+let RL_LOW = "low"
+let RL_MEDIUM = "medium"
+let RL_HIGH = "high"
+let RL_CRITICAL = "critical"
+
+// Red flag severity
+let RF_CRITICAL = "CRITICAL"
+let RF_HIGH = "HIGH"
+let RF_MEDIUM = "MEDIUM"
+let RF_LOW = "LOW"
+
+// Risk categories
+let RC_FINANCIAL = "financial"
+let RC_OPERATIONAL = "operational"
+let RC_REPUTATIONAL = "reputational"
+let RC_REGULATORY = "regulatory"
+
+// Likelihood/Impact
+let LI_HIGH = "High"
+let LI_MEDIUM = "Medium"
+let LI_LOW = "Low"
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 1: HARD RULES — 7 non-negotiable constraints
+// ═══════════════════════════════════════════════════════════════════════
+// Each hard rule is a native gate — violation produces immediate rejection.
+// No LLM can override these. They are structural constraints of Legal.
+
+// Rule 1: Never sign contracts on behalf of owner
+fn EnforceRule1_NoSigning(context: String) -> String {
+  if contains(lower(context), "подписать от имени") then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 1: no signing on behalf of owner")
+    return "ОТКАЗ: Legal не подписывает договоры от имени владельца. Мы готовим draft + risk map, подписание — ответственность владельца с юристом."
+  }
+  if contains(lower(context), "я подписываю") then {
+    return "ОТКАЗ: Подписание от имени владельца — вне компетенции Legal. Мы готовим draft для проверки."
+  }
+  return "PASS"
+}
+
+// Rule 2: Never represent in court
+fn EnforceRule2_NoCourtRepresentation(context: String) -> String {
+  if contains(lower(context), "представлять в суде") then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 2: no court representation")
+    return "ОТКАЗ: Судебное представительство требует лицензии адвоката. Legal готовит позицию, но в суд идёт лицензированный адвокат."
+  }
+  if contains(lower(context), "иск от нашего имени") then {
+    return "ОТКАЗ: Подача иска от имени владельца — вне компетенции Legal. Готовим позицию для адвоката."
+  }
+  return "PASS"
+}
+
+// Rule 3: Never work without jurisdiction
+fn EnforceRule3_JurisdictionRequired(jurisdiction: String) -> String {
+  if length(jurisdiction) == 0 then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 3: no jurisdiction specified")
+    return "ОТКАЗ: Без указания юрисдикции анализ невозможен. Норма закона применима в стране, без страны нет анализа. Укажите юрисдикцию: BY, RU, EU, US."
+  }
+  if contains(VALID_JURISDICTIONS, jurisdiction) == false then {
+    return "ОТКАЗ: Юрисдикция '" + jurisdiction + "' не поддерживается. Доступные: BY, RU, EU, US."
+  }
+  return "PASS"
+}
+
+// Rule 4: Never work with criminal cases
+fn EnforceRule4_NoCriminal(context: String) -> String {
+  if contains(lower(context), "уголовн") then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 4: criminal case attempt")
+    return "ОТКАЗ: Legal не работает с уголовными делами. Наша область — гражданское и хозяйственное право."
+  }
+  if contains(lower(context), "преступлен") then {
+    return "ОТКАЗ: Уголовное право — вне компетенции Legal. Обратитесь к адвокату по уголовным делам."
+  }
+  return "PASS"
+}
+
+// Rule 5: Never give 100% guarantees
+fn EnforceRule5_NoGuarantees(context: String) -> String {
+  if contains(lower(context), "100% гарантия") then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 5: 100% guarantee claim")
+    return "ПРЕДУПРЕЖДЕНИЕ: Правовая работа всегда вероятностна. Мы оцениваем риски, не их отсутствие. '100% гарантия' в юридическом контексте — признак непрофессионализма."
+  }
+  if contains(lower(context), "гарантированно") then {
+    return "ПРЕДУПРЕЖДЕНИЕ: В праве нет гарантий. Есть вероятностные оценки рисков. Переформулирую."
+  }
+  return "PASS"
+}
+
+// Rule 6: Never produce final texts without legal review marker
+fn EnforceRule6_DraftOnlyMarker(result: String) -> String {
+  if contains(result, "DRAFT") == false then {
+    return result + "\n\nDRAFT — требуется проверка лицензированного юриста."
+  }
+  return result
+}
+
+// Rule 7: Never ignore cross-jurisdictional risks
+fn EnforceRule7_CrossJurisdictionCheck(jx: String, cpJx: String, result: String) -> String {
+  if length(cpJx) > 0 && jx != cpJx then {
+    if contains(result, "cross-jurisdiction") == false && contains(result, "применимое право") == false then {
+      return result + "\n\n⚠ КРОСС-ЮРИСДИКЦИОННЫЙ КЕЙС: стороны из " + jx + " и " + cpJx + ". Необходимо явно указать применимое право (choice of law) и юрисдикцию разрешения споров (forum). Это обязательное требование."
+    }
+  }
+  return result
+}
+
+// Composite hard rules check
+fn EnforceHardRules(query: String, jurisdiction: String, cpJx: String) -> String {
+  let r1 = EnforceRule1_NoSigning(query)
+  if r1 != "PASS" then { return r1 }
+  let r2 = EnforceRule2_NoCourtRepresentation(query)
+  if r2 != "PASS" then { return r2 }
+  let r3 = EnforceRule3_JurisdictionRequired(jurisdiction)
+  if r3 != "PASS" then { return r3 }
+  let r4 = EnforceRule4_NoCriminal(query)
+  if r4 != "PASS" then { return r4 }
+  let r5 = EnforceRule5_NoGuarantees(query)
+  if r5 != "PASS" then { return r5 }
+  return "PASS"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 2: QUERY PARSER & COMMAND ROUTER
+// ═══════════════════════════════════════════════════════════════════════
+
+fn ParseLegalQuery(query: String) -> String {
+  let q = lower(query)
+  if contains(q, "/legal-nda") then { return "cmd:nda" }
+  if contains(q, "/legal-msa") then { return "cmd:msa" }
+  if contains(q, "/legal-review") then { return "cmd:review" }
+  if contains(q, "/legal-risk-map") then { return "cmd:riskmap" }
+  if contains(q, "/legal-verify") then { return "cmd:verify" }
+  if contains(q, "/legal-archive") then { return "cmd:archive" }
+  if contains(q, "/legal-score") then { return "cmd:score" }
+  if contains(q, "/legal-templates") then { return "cmd:templates" }
+  if contains(q, "/legal") && contains(q, "help") == false then { return "cmd:help" }
+
+  // Intent detection for free-text
+  if contains(q, "красные флаги") || contains(q, "red flag") then { return "intent:redflag" }
+  if contains(q, "проверь договор") || contains(q, "посмотри договор") then { return "intent:redflag" }
+  if contains(q, "риск") && (contains(q, "карта") || contains(q, "mapping")) then { return "intent:riskmap" }
+  if contains(q, "сделай nda") || contains(q, "подготовь nda") then { return "intent:nda" }
+  if contains(q, "сделай msa") || contains(q, "подготовь msa") then { return "intent:msa" }
+  if contains(q, "gdpr") || contains(q, "комплаенс") then { return "intent:gdpr" }
+  if contains(q, "ip") && (contains(q, "права") || contains(q, "clause")) then { return "intent:ip" }
+  if contains(q, "спор") || contains(q, "претензия") || contains(q, "иск") then { return "intent:dispute" }
+
+  return "intent:general"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 3: CONTEXT BUILDER
+// ═══════════════════════════════════════════════════════════════════════
+// Legal requires: jurisdiction + businessForm (mandatory)
+// Optional: counterpartyJurisdiction + counterpartyForm + documentType + positionInDeal
+
+fn BuildLegalContext(query: String, chat_id: String) -> String {
+  let base = BuildContext(DEPT, query, chat_id)
+  let q = lower(query)
+
+  // Extract jurisdiction from query
+  let jx = ""
+  if contains(q, "by") || contains(q, "беларусь") || contains(q, "белорус") then { jx = JX_BY }
+  if contains(q, "ru") || contains(q, "россия") || contains(q, "рф") then { jx = JX_RU }
+  if contains(q, "eu") || contains(q, "евросоюз") || contains(q, "ес") then { jx = JX_EU }
+  if contains(q, "us") || contains(q, "сша") || contains(q, "америк") then { jx = JX_US }
+
+  // Extract business form
+  let bf = ""
+  if contains(q, "ооо") then { bf = BF_OOO }
+  if contains(q, "ип") && contains(q, "самозанят") == false then { bf = BF_IP }
+  if contains(q, "самозанят") || contains(q, "нпд") then { bf = BF_SELFEMPLOYED }
+
+  // Extract counterparty jurisdiction
+  let cpJx = ""
+  if contains(q, "контрагент из германи") || contains(q, "eu клиент") then { cpJx = JX_EU }
+  if contains(q, "контрагент из росси") || contains(q, "ru клиент") then { cpJx = JX_RU }
+  if contains(q, "клиент из сша") || contains(q, "us клиент") then { cpJx = JX_US }
+
+  // Extract document type
+  let docType = DT_ANALYSIS
+  if contains(q, "nda") || contains(q, "неразглашени") then { docType = DT_NDA }
+  if contains(q, "msa") || contains(q, "услуг") then { docType = DT_MSA }
+  if contains(q, "sla") then { docType = DT_SLA }
+  if contains(q, "тз") || contains(q, "техническое задание") then { docType = DT_TZ }
+
+  let ctx = json_encode({
+    jurisdiction: jx,
+    businessForm: bf,
+    counterpartyJurisdiction: cpJx,
+    documentType: docType,
+    baseContext: base,
+    isCrossJurisdictional: length(cpJx) > 0 && jx != cpJx
+  })
+
+  return ctx
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 4: KNOWLEDGE LOADER
+// ═══════════════════════════════════════════════════════════════════════
+
+fn LoadJurisdictionKnowledge(jurisdiction: String) -> String {
+  // Load jurisdiction knowledge from KV store (populated at startup from .md files)
+  let key = "legal_jx_" + jurisdiction
+  let cached = kv_get(key)
+  if length(cached) > 0 then { return cached }
+
+  // Fallback: return structured summary based on known content
+  if jurisdiction == JX_BY then {
+    return "BY — Беларусь. Континентальная система. ГК РБ, ХПК, НК, ТК. Иерархия: Конституция → Законы → Указы → Постановления. Письменная форма обязательна для юр.лиц. ЭЦП через ГосСУОК. Срок исковой давности: 3 года. ПВТ-резиденты: льготы по Декрету №8. Sanctions EU/US/UK с 2020+. Валютный контроль, регистрация контрактов > 3000 BYN."
+  }
+  if jurisdiction == JX_RU then {
+    return "RU — Россия. Континентальная система. ГК РФ, АПК, НК, ТК. Pravo.ru, КонсультантПлюс. Срок исковой давности: 3 года. Самозанятые (НПД): договор ГПХ, запрет трудовых формулировок. Sanctions с 2022+."
+  }
+  if jurisdiction == JX_EU then {
+    return "EU — Евросоюз. Континентальная + общее право. Rome I/II регламенты. GDPR обязательен. ECJ — высшая инстанция. DPF для EU-US data transfer. DPO, DPA, SCC обязательны для PII. Consumer protection директивы."
+  }
+  if jurisdiction == JX_US then {
+    return "US — США. Общее право (common law). USC, CFR. Delaware/NY/CA — популярные jurisdiction. AAA/JAMS арбитраж. OFAC sanctions list. W-8BEN-E для иностранных контрагентов. No tax treaty с BY: withholding 30% default."
+  }
+  return "Юрисдикция " + jurisdiction + " — knowledge pack не загружен."
+}
+
+fn LoadBusinessFormKnowledge(form: String, jx: String) -> String {
+  if form == BF_OOO then {
+    return "ООО — ограниченная ответственность. Уставный капитал (BY: 100 БВ). Директор на основании Устава/доверенности. Договоры от имени директора. Переход долей по нотариальной форме. Ликвидация через регистрирующий орган."
+  }
+  if form == BF_IP then {
+    return "ИП — индивидуальный предприниматель. Личная ответственность всем имуществом. Подписывает лично. Упрощённый документооборот. УСН/ОСН."
+  }
+  if form == BF_SELFEMPLOYED then {
+    let warning = "⚠ КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ: при работе с самозанятым — запрет трудовых формулировок ('зарплата', 'график', 'руководство', 'отпуск'). Риск переквалификации в трудовые отношения с доначислением 30% страховых взносов."
+    if jx == JX_RU then {
+      return "Самозанятый (НПД) в РФ. Чек НПД обязателен на каждый платёж. " + warning
+    }
+    if jx == JX_BY then {
+      return "Ремесленник в BY. Работает в рамках лицензии. Запрет найма работников. " + warning
+    }
+    return "Самозанятый / sole proprietor. " + warning
+  }
+  return "Бизнес-форма " + form + " — knowledge pack не загружен."
+}
+
+fn LoadCompatibilityMatrix(jx: String, bf: String, cpJx: String, cpBf: String) -> String {
+  let matrix = "Compatibility matrix: "
+
+  // Cross-jurisdictional situations
+  if jx == JX_BY && cpJx == JX_EU then {
+    matrix = matrix + "BY↔EU: Rome I регламент для choice of law. GDPR обязателен если EU-клиент даёт PII. Валютный контроль BY: регистрация контракта > 3000 BYN. Арбитраж: ICAC при ICC или Belarusian Court of Arbitration."
+  }
+  if jx == JX_BY && cpJx == JX_US then {
+    matrix = matrix + "BY↔US: No tax treaty. Withholding 30% default, 0% на business income с W-8BEN-E. AAA/JAMS арбитраж. OFAC sanctions check обязателен. Delaware law — частый choice of law US-стороны."
+  }
+  if jx == JX_RU && cpJx == JX_EU then {
+    matrix = matrix + "RU↔EU: EU sanctions check обязателен. Платежи через определённые банки могут не пройти. Force majeure формулировки обновить с учётом 2022+."
+  }
+  if jx == JX_EU && cpJx == JX_US then {
+    matrix = matrix + "EU↔US: Data Privacy Framework (DPF) для трансатлантической передачи PII. GDPR применяется к EU-резидентам независимо от choice of law."
+  }
+  if length(cpJx) == 0 || jx == cpJx then {
+    matrix = matrix + "Одна юрисдикция (" + jx + ") — simpler case."
+  }
+
+  // Cross-business-form situations
+  if bf == BF_OOO && cpBf == BF_SELFEMPLOYED then {
+    matrix = matrix + " ООО↔Самозанятый: запрет 'трудового характера' формулировок. Договор ГПХ, не трудовой."
+  }
+  if bf == BF_OOO && cpBf == BF_IP then {
+    matrix = matrix + " ООО↔ИП: ИП подписывает лично, ООО — через директора."
+  }
+
+  return matrix
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 5: RISK MAPPING PROTOCOL (Tier 1, FULL)
+// ═══════════════════════════════════════════════════════════════════════
+// Core principle: юрист-параноик читает не «что сказано», а «кому вредно при плохом сценарии».
+// 4 categories: financial, operational, reputational, regulatory.
+// Each risk: likelihood × impact = score (Critical / Major / Minor).
+
+pattern RiskMappingProtocol(dealContext: String, jx: String, bf: String, cpJx: String, chat_id: String) -> String {
+  let prompt = "Ты юрист-параноик. Построй карту правовых рисков сделки.\n\n" +
+    "Принцип: каждая формулировка договора — либо защита от риска, либо создание риска. Нейтральных не бывает. Карта не симметрична: оценивай риски СВОЕЙ стороны.\n\n" +
+    "Контекст сделки:\n" + dealContext + "\n\n" +
+    "Юрисдикция: " + jx + "\nБизнес-форма: " + bf + "\n" +
+    (length(cpJx) > 0 ? "Контрагент: " + cpJx + "\n" : "") +
+    "\nПрогони через 4 категории рисков:\n" +
+    "1. FINANCIAL: неоплата, penalty без cap, indemnity unlimited, скрытые расходы, валютные, налоговые\n" +
+    "2. OPERATIONAL: сорванные сроки, качество, зависимость от ключевого человека, сложность смены контрагента\n" +
+    "3. REPUTATIONAL: нарушение конфиденциальности, публичный спор, связь с одиозным контрагентом\n" +
+    "4. REGULATORY: GDPR/privacy, sanctions, tax authorities, industry-specific\n\n" +
+    "Для каждого риска — три параметра: Likelihood (H/M/L), Impact (H/M/L), Mitigation (конкретная формулировка).\n" +
+    "Risk score: Critical (HxH, HxM, MxH), Major (MxM, HxL, LxH), Minor (LxM, MxL, LxL).\n\n" +
+    "Выведи в формате:\n" +
+    "═══════════════════════════════════════════\n" +
+    "RISK REGISTER\n" +
+    "═══════════════════════════════════════════\n" +
+    "КРИТИЧЕСКИЕ РИСКИ (обязательно адресовать)\n" +
+    "ВАЖНЫЕ РИСКИ (рекомендуется адресовать)\n" +
+    "МАЛЫЕ РИСКИ (на усмотрение)\n" +
+    "Verification date: +90 дней после signing\n\n" +
+    "Anti-patterns: не делай универсальную карту (каждая сделка уникальна), не игнорируй позицию владельца, не балансируй 'справедливость' (юрист обслуживает свою сторону), не доверяй шаблонам слепо."
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 6: CONTRACT DRAFTING DISCIPLINE (Tier 1, FULL)
+// ═══════════════════════════════════════════════════════════════════════
+// Core principle: каждый пункт отвечает на «что произойдёт если…». Нет ответа = лишний.
+// Двусмысленность = баг. Сторона, обнаружившая двусмысленность, прочитает в свою пользу.
+
+pattern ContractDraftingDiscipline(riskMap: String, jx: String, bf: String, cpJx: String, cpBf: String, docType: String, chat_id: String) -> String {
+  let jxKnowledge = LoadJurisdictionKnowledge(jx)
+  let bfKnowledge = LoadBusinessFormKnowledge(bf, jx)
+  let matrix = LoadCompatibilityMatrix(jx, bf, cpJx, cpBf)
+
+  let prompt = "Ты юрист-педант. Составь draft договора на основе карты рисков.\n\n" +
+    "Принцип: юридический текст — это код. Двусмысленность = баг. Сторона, обнаружившая двусмысленность, прочитает её в свою пользу.\n\n" +
+    "Карта рисков (построена ранее):\n" + riskMap + "\n\n" +
+    "Юрисдикция: " + jx + " (знания: " + jxKnowledge + ")\n" +
+    "Бизнес-форма: " + bf + " (знания: " + bfKnowledge + ")\n" +
+    "Тип документа: " + docType + "\n" +
+    (length(cpJx) > 0 ? "Контрагент: " + cpJx + "/" + cpBf + "\n" : "") +
+    "Compatibility: " + matrix + "\n\n" +
+    "Скелет документа (12 разделов):\n" +
+    "1. Preamble — дата, номер, стороны (полные реквизиты, на основании Устава)\n" +
+    "2. Subject — конкретный, не размытый (ссылка на ТЗ/спецификацию)\n" +
+    "3. Rights & obligations — обеих сторон, симметричная структура\n" +
+    "4. Price & payment — сумма цифрами И прописью, НДС явно, рабочие дни, дата оплаты однозначно\n" +
+    "5. Term — срок + основания для прекращения, не 'бессрочно'\n" +
+    "6. Quality/acceptance — критерии, процедура приёмки\n" +
+    "7. Liability — penalty С CAP для обеих сторон, совокупный cap, exclusion упущенной выгоды\n" +
+    "8. Confidentiality — режим + срок + штраф за нарушение\n" +
+    "9. IP — права переходят после оплаты, pre-existing IP остаётся, портфолио с согласованием\n" +
+    "10. Force majeure — современный перечень (COVID, sanctions, cyber)\n" +
+    "11. Dispute resolution — applicable law + forum + procedure (переговоры → суд/арбитраж)\n" +
+    "12. Final provisions — изменения письменно, уведомления, severability, экземпляры\n\n" +
+    "Anti-patterns: не копируй шаблон без адаптации, не пиши литературные формулировки, не используй 'и/или', всегда cap на penalty и indemnity, не пиши 'бессрочно', не пиши размытые acceptance criteria, IP только после оплаты.\n\n" +
+    "Для каждого Critical и Major риска из Risk Register — конкретная формулировка-защита в соответствующем разделе договора.\n\n" +
+    "В конце: DRAFTING NOTES — decision points, known weak spots, points depending on negotiation."
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 7: RED FLAG DETECTION (Tier 1, FULL)
+// ═══════════════════════════════════════════════════════════════════════
+// Core principle: опасный пункт — не тот, который очевидно плохой.
+// Это тот, который выглядит нормально, но при плохом сценарии разрушает позицию.
+// 12 категорий red flags.
+
+pattern RedFlagDetection(contractText: String, jx: String, bf: String, positionInDeal: String, chat_id: String) -> String {
+  let jxKnowledge = LoadJurisdictionKnowledge(jx)
+  let bfKnowledge = LoadBusinessFormKnowledge(bf, jx)
+
+  let prompt = "Ты юрист-параноик. Проведи red flag analysis присланного договора.\n\n" +
+    "Принцип: опасный пункт — не тот, который очевидно плохой, а тот, который выглядит нормально, но при плохом сценарии разрушает твою позицию. Шаблон написан юристами для ДРУГОЙ стороны.\n\n" +
+    "Текст договора:\n" + contractText + "\n\n" +
+    "Наша юрисдикция: " + jx + " (" + jxKnowledge + ")\n" +
+    "Наша бизнес-форма: " + bf + " (" + bfKnowledge + ")\n" +
+    "Наша позиция в сделке: " + positionInDeal + "\n\n" +
+    "Прогони через 12 категорий red flags:\n" +
+    "1. ONE-SIDED PENALTIES — penalty только для одной стороны\n" +
+    "2. UNLIMITED LIABILITY — нет cap на penalty/indemnity/damages\n" +
+    "3. DISPROPORTIONATE PENALTIES — явно завышен % относительно нарушения\n" +
+    "4. VAGUE SUBJECT — предмет размытый, без приложений\n" +
+    "5. UNILATERAL TERMINATION — одна сторона может расторгнуть без обоснования\n" +
+    "6. UNFAVORABLE LAW/FORUM — применимое право и forum в стране контрагента\n" +
+    "7. BROAD CONFIDENTIALITY WITHOUT EXCEPTIONS — 'всё конфиденциально', без исключений\n" +
+    "8. IP GRAB — все права на 'всё созданное' включая pre-existing\n" +
+    "9. INDEMNITY FOR THINGS YOU DON'T CONTROL — indemnify за чужие ошибки\n" +
+    "10. CHANGE WITHOUT CONSENT — контрагент меняет условия односторонне\n" +
+    "11. AUTO-RENEWAL WITHOUT EXPLICIT CONSENT — сложный отказ от пролонгации\n" +
+    "12. VAGUE PAYMENT TERMS — 'после приёмки' без конкретного срока\n\n" +
+    "Для каждого red flag:\n" +
+    "- Severity: CRITICAL (must change before signing) / HIGH / MEDIUM / LOW\n" +
+    "- Risk: что произойдёт при плохом сценарии\n" +
+    "- Counter: конкретная replacement formulation\n\n" +
+    "В конце — RECOMMENDATION: DO NOT SIGN / SIGN WITH CHANGES / SIGN WITH RISK ACCEPTANCE.\n" +
+    "Если risk acceptance — Risk Acceptance Log с письменной фиксацией.\n\n" +
+    "Anti-patterns: не говори 'это плохо' без альтернативы, не бойся возражать на 'стандартный шаблон', не фокусись только на больших суммах, не игнорируй boilerplate в конце, не оставляй red flags на 'потом разберёмся'."
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 8: PLACEHOLDER SKILLS — honest redirect + basic capability
+// ═══════════════════════════════════════════════════════════════════════
+// 7 placeholder skills: 2 Tier 1, 4 Tier 2, 1 Tier 3
+// Each returns honest placeholder response + redirect to full Tier 1 skills.
+
+pattern CrossJurisdictionComparison(jx1: String, jx2: String, question: String, chat_id: String) -> String {
+  let jx1Knowledge = LoadJurisdictionKnowledge(jx1)
+  let jx2Knowledge = LoadJurisdictionKnowledge(jx2)
+
+  let prompt = "Сравни нормы " + jx1 + " и " + jx2 + " по вопросу: " + question + ".\n\n" +
+    "Знания " + jx1 + ": " + jx1Knowledge + "\n" +
+    "Знания " + jx2 + ": " + jx2Knowledge + "\n\n" +
+    "Дай базовое сравнение: ключевые различия, риски каждой юрисдикции по этому вопросу, рекомендация по choice of law."
+
+  let result = call_llm(prompt, chat_id)
+  return result + "\n\n⚠ Скилл cross-jurisdiction-comparison — базовая реализация. Для глубокой работы рекомендую привлечение лицензированного юриста в обеих юрисдикциях."
+}
+
+pattern PrecedentSearchApplication(jx: String, disputeType: String, chat_id: String) -> String {
+  return "Скилл precedent-search-application в процессе наполнения. Базовая методология применима через Tier 1 скиллы (risk-mapping-protocol, contract-drafting-discipline).\n\nДля поиска прецедентов в " + jx + " по типу '" + disputeType + "' рекомендую:\n- BY: Верховный суд РБ (court.gov.by)\n- RU: Верховный суд РФ + КонсультантПлюс\n- EU: ECJ (curia.europa.eu)\n- US: Westlaw / LexisNexis\n\nДля глубокой работы — привлечение лицензированного юриста."
+}
+
+pattern NdaMslaSlaTemplates(docType: String, jx: String, bf: String, chat_id: String) -> String {
+  let jxKnowledge = LoadJurisdictionKnowledge(jx)
+  let bfKnowledge = LoadBusinessFormKnowledge(bf, jx)
+
+  let prompt = "Подготовь черновик " + docType + " для " + jx + "/" + bf + ".\n\n" +
+    "Юрисдикция: " + jxKnowledge + "\nБизнес-форма: " + bfKnowledge + "\n\n" +
+    "Следуй скелету из contract-drafting-discipline (12 разделов). Для " + docType + " — сокращённый набор разделов.\n" +
+    "Все формулировки конкретные, без двусмысленностей. Cap на liability. IP после оплаты. Confidentiality с exceptions."
+
+  let result = call_llm(prompt, chat_id)
+  return result + "\n\n⚠ Шаблон " + docType + " — базовая реализация. Для типовых ситуаций используйте как отправную точку, затем примените risk-mapping-protocol."
+}
+
+pattern GdprComplianceCheck(projectContext: String, jx: String, chat_id: String) -> String {
+  let prompt = "Проведи GDPR compliance check.\n\nКонтекст проекта: " + projectContext + "\nЮрисдикция: " + jx + "\n\n" +
+    "Обязательные пункты:\n" +
+    "1. DPO (Data Protection Officer) — нужен ли?\n" +
+    "2. DPA (Data Processing Agreement) — с процессорами\n" +
+    "3. SCC (Standard Contractual Clauses) — для трансграничной передачи\n" +
+    "4. Consent mechanism — конкретный, информированный, отзывной\n" +
+    "5. Rights of data subject — доступ, исправление, удаление, портабельность\n" +
+    "6. Breach notification — 72 часа в authority\n" +
+    "7. DPIA (Data Protection Impact Assessment) — когда нужен\n" +
+    "8. Privacy Policy — обязательна для B2C\n" +
+    "9. Cookie consent — если применимо\n\n" +
+    "Также проверь: ФЗ-152 (если BY/RU), CCPA (если US/California).\n\n" +
+    "Для каждого пункта: статус (✓ есть / ✗ нет / ⚠ частично) + что нужно сделать."
+
+  let result = call_llm(prompt, chat_id)
+  return result + "\n\n⚠ Скилл gdpr-compliance-check — базовая реализация. Для production compliance — привлечение DPO/юриста в соответствующей юрисдикции."
+}
+
+pattern IpClauseDiscipline(workType: String, jx: String, chat_id: String) -> String {
+  let prompt = "Сформулируй IP-клаузы для договора на " + workType + " в юрисдикции " + jx + ".\n\n" +
+    "Разделение IP:\n" +
+    "- Pre-existing IP: остаётся за Исполнителем (библиотеки, методологии, frameworks)\n" +
+    "- New IP (Deliverables): Заказчику, но после ПОЛНОЙ оплаты\n" +
+    "- Derivative works: определяй явно, кто владеет\n" +
+    "- License back: Исполнитель сохраняет право на методики + портфолио (с blur и согласованием)\n" +
+    "- Work-for-hire vs license: явно укажи модель\n\n" +
+    "Anti-patterns: не пиши 'все права переходят' без условия оплаты, не включай pre-existing IP в передачу."
+
+  let result = call_llm(prompt, chat_id)
+  return result + "\n\n⚠ Скилл ip-clause-discipline — базовая реализация. Для сложных IP-структур — юрист-специалист по IP."
+}
+
+pattern ConsumerProtectionCheck(productContext: String, jx: String, chat_id: String) -> String {
+  return "Скилл consumer-protection-check в процессе наполнения.\n\nДля B2C-продукта в " + jx + ":\n- BY: Закон 'О защите прав потребителей' (возврат 14 дней, претензии 2-10 лет)\n- RU: Закон РФ о ЗПП (аналогично)\n- EU: Consumer Rights Directive (14 дней возврат для online, unfair terms директива)\n- US: varies by state, FTC Act Section 5\n\nДля проверки terms of service / оферты на соответствие — привлечение юриста."
+}
+
+pattern DisputeResolutionStrategy(disputeContext: String, jx: String, chat_id: String) -> String {
+  let prompt = "Оцени стратегию разрешения спора.\n\nКонтекст: " + disputeContext + "\nЮрисдикция: " + jx + "\n\n" +
+    "Шаги:\n" +
+    "1. Определи позиции сторон (сильные/слабые аргументы)\n" +
+    "2. Оцени перспективы в суде (вероятность, сроки, стоимость)\n" +
+    "3. Оцени альтернативы: переговоры → медиация → арбитраж → суд\n" +
+    "4. Cost-benefit analysis каждого пути\n" +
+    "5. Рекомендация: оптимальная стратегия + timeline\n\n" +
+    "Важно: Legal не представляет в суде — готовит позицию для адвоката."
+
+  let result = call_llm(prompt, chat_id)
+  return result + "\n\n⚠ Скилл dispute-resolution-strategy — базовая реализация. Для реального спора — привлечение лицензированного адвоката."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 9: LIFECYCLE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════
+// drafted → published → under-lawyer-review → signed →
+//   verified-clean / rewrite / dispute → superseded
+
+fn TransitionLifecycle(assessmentId: String, newStatus: String) -> String {
+  let _ = db_execute("UPDATE legal_assessments SET status = ?, updated_at = NOW() WHERE id = ?", [newStatus, assessmentId])
+  let _ = AuditLog("legal_lifecycle", DEPT, "Assessment #" + assessmentId + " → " + newStatus)
+  return newStatus
+}
+
+fn SetVerificationDate(assessmentId: String, signingDate: String) -> String {
+  // Verification = 90 days after signing
+  let verDate = format_date(to_float(signingDate) + (86400.0 * to_float(to_string(VERIFICATION_DAYS))), "yyyy-MM-dd")
+  let _ = db_execute("UPDATE legal_assessments SET verification_date = ?, status = ? WHERE id = ?", [verDate, ST_SIGNED, assessmentId])
+  return verDate
+}
+
+fn GetCurrentStatus(assessmentId: String) -> String {
+  let rows = db_execute("SELECT status FROM legal_assessments WHERE id = ?", [assessmentId])
+  if length(rows) > 0 then { return json_get(parse_json(rows), "0.status", ST_DRAFTED) }
+  return "not_found"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 10: VERIFICATION & LEARNING LOOP
+// ═══════════════════════════════════════════════════════════════════════
+
+fn VerifyLegalResult(assessmentId: String, outcome: String, wasPredictable: String, disputeNature: String, notes: String) -> String {
+  // outcome: clean | rewrite | dispute
+  let _ = db_execute(
+    "INSERT INTO legal_assessment_verifications (assessment_id, outcome, rewrite_was_predictable, dispute_nature, notes, verified_at) VALUES (?, ?, ?, ?, ?, NOW())",
+    [assessmentId, outcome, wasPredictable, disputeNature, notes]
+  )
+
+  let newStatus = ST_VERIFIED
+  if outcome == "rewrite" then { newStatus = ST_REWRITE }
+  if outcome == "dispute" then { newStatus = ST_DISPUTE }
+
+  let _ = TransitionLifecycle(assessmentId, newStatus)
+  let _ = AuditLog("legal_verification", DEPT, "Assessment #" + assessmentId + " verified: " + outcome + " (predictable: " + wasPredictable + ")")
+  return "Verification recorded: #" + assessmentId + " → " + outcome
+}
+
+// Per-assessment learning: if rewrite was predictable → methodology gap
+fn CheckMethodologyGap(assessmentId: String, wasPredictable: String) -> String {
+  if wasPredictable == "true" then {
+    let _ = db_execute(
+      "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, predictable_rewrites_count, improvements, created_at) VALUES (NOW(), NOW(), 0, 1, 'Methodology gap: predictable rewrite missed in risk map', NOW())",
+      []
+    )
+    return "METHODOLOGY GAP: predictable rewrite detected — risk map may be incomplete. Updating methodology."
+  }
+  return "No methodology gap."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 11: METRIC & SCORING
+// ═══════════════════════════════════════════════════════════════════════
+
+fn GetLegalMetric() -> String {
+  // pct-clean-signings = clean / total × 100
+  let rows = db_execute(
+    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable FROM legal_assessment_verifications WHERE verified_at >= NOW() - INTERVAL '30 days'",
+    []
+  )
+  let data = parse_json(rows)
+  let total = to_float(json_get(data, "0.total", "0"))
+  let clean = to_float(json_get(data, "0.clean", "0"))
+  let predictable = to_float(json_get(data, "0.predictable", "0"))
+
+  if total > 0.0 then {
+    let pctClean = (clean / total) * 100.0
+    let pctPredictableMissed = (predictable / total) * 100.0
+    return json_encode({
+      metric: METRIC,
+      value: to_string(pctClean),
+      unit: "%",
+      sample_size: to_string(total),
+      period: "last_30_days",
+      target_y1: TARGET_Y1,
+      target_y2: TARGET_Y2,
+      predictable_missed_pct: to_string(pctPredictableMissed)
+    })
+  }
+  return json_encode({ metric: METRIC, value: "N/A", sample_size: "0", period: "last_30_days" })
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 12: SCHEDULER TASKS
+// ═══════════════════════════════════════════════════════════════════════
+
+// Task 1: Daily check — verifications due
+fn RunDailyCheck() -> String {
+  let rows = db_execute(
+    "SELECT id, short_title, jurisdiction, document_type FROM legal_assessments WHERE status = 'published' AND verification_date::date = CURRENT_DATE",
+    []
+  )
+  let data = parse_json(rows)
+  let count = length(data)
+  if count > 0 then {
+    let i = 0
+    let alerts = ""
+    while i < count {
+      let id = json_get(data, to_string(i) + ".id", "")
+      let title = json_get(data, to_string(i) + ".short_title", "")
+      let alert = "📋 Legal assessment #" + id + " (" + title + ") — verification date наступил. Требуется проверка post-signing статуса."
+      let _ = SendTelegramMessage("owner", alert)
+      alerts = alerts + alert + "\n"
+      i = i + 1
+    }
+    let _ = AuditLog("legal_daily_check", DEPT, "Alerts sent: " + to_string(count))
+    return "Daily check: " + to_string(count) + " verification(s) due. Alerts sent."
+  }
+  return "Daily check: no verifications due."
+}
+
+// Task 2: Monthly review — compute pct-clean-signings
+fn RunMonthlyReview() -> String {
+  let rows = db_execute(
+    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean_signings, SUM(CASE WHEN outcome = 'rewrite' THEN 1 ELSE 0 END) as rewrites, SUM(CASE WHEN outcome = 'dispute' THEN 1 ELSE 0 END) as disputes, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable_rewrites FROM legal_assessment_verifications WHERE verified_at >= NOW() - INTERVAL '30 days'",
+    []
+  )
+  let data = parse_json(rows)
+  let total = to_float(json_get(data, "0.total", "0"))
+  let cleanSignings = to_float(json_get(data, "0.clean_signings", "0"))
+  let rewrites = to_float(json_get(data, "0.rewrites", "0"))
+  let disputes = to_float(json_get(data, "0.disputes", "0"))
+  let predictableRewrites = to_float(json_get(data, "0.predictable_rewrites", "0"))
+
+  let pctClean = "0"
+  let pctPredictableMissed = "0"
+  if total > 0.0 then {
+    pctClean = to_string((cleanSignings / total) * 100.0)
+    pctPredictableMissed = to_string((predictableRewrites / total) * 100.0)
+  }
+
+  let _ = db_execute(
+    "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, clean_signings, rewrite_count, dispute_count, predictable_rewrites_count, pct_clean_signings, pct_predictable_missed, created_at) VALUES (NOW() - INTERVAL '30 days', NOW(), ?, ?, ?, ?, ?, ?, ?, NOW())",
+    [to_string(total), to_string(cleanSignings), to_string(rewrites), to_string(disputes), to_string(predictableRewrites), pctClean, pctPredictableMissed]
+  )
+
+  let summary = "📊 Legal — Monthly Review\n\n" +
+    "Total verifications: " + to_string(total) + "\n" +
+    "Clean signings: " + to_string(cleanSignings) + "\n" +
+    "Required rewrites: " + to_string(rewrites) + "\n" +
+    "Disputes: " + to_string(disputes) + "\n" +
+    "% Clean signings: " + pctClean + "% (target Y1: " + TARGET_Y1 + ", Y2: " + TARGET_Y2 + ")\n" +
+    "% Predictable rewrites (methodology gap): " + pctPredictableMissed + "%"
+
+  let _ = AuditLog("legal_monthly_review", DEPT, summary)
+  return summary
+}
+
+// Task 3: Quarterly methodology review
+fn RunQuarterlyMethodologyReview() -> String {
+  let rows = db_execute(
+    "SELECT SUM(predictable_rewrites_count) as total_predictable, SUM(total_assessments) as total FROM legal_monthly_reviews WHERE created_at >= NOW() - INTERVAL '90 days'",
+    []
+  )
+  let data = parse_json(rows)
+  let totalPredictable = to_float(json_get(data, "0.total_predictable", "0"))
+  let total = to_float(json_get(data, "0.total", "0"))
+
+  let review = "📋 Legal — Quarterly Methodology Review\n\n" +
+    "Total assessments (90 days): " + to_string(total) + "\n" +
+    "Total predictable rewrites: " + to_string(totalPredictable) + "\n"
+
+  if total > 0.0 && totalPredictable > 0.0 then {
+    let pct = (totalPredictable / total) * 100.0
+    review = review + "Predictable miss rate: " + to_string(pct) + "%\n\n"
+    if pct > 10.0 then {
+      review = review + "⚠ ВЫСОКИЙ METHODOLOGY GAP. Рекомендации:\n" +
+        "1. Обновить anti-patterns в risk-mapping-protocol\n" +
+        "2. Добавить missed risks в шаблоны\n" +
+        "3. Усилить red-flag-detection categories\n"
+    }
+  }
+
+  let _ = AuditLog("legal_quarterly_review", DEPT, review)
+  return review
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 13: BOT COMMANDS
+// ═══════════════════════════════════════════════════════════════════════
+
+fn ShowHelp() -> String {
+  return "⚖️ Юрист. Договорная работа и правовая защита.\n\n" +
+    "Команды:\n" +
+    "/legal-nda — быстрый NDA\n" +
+    "/legal-msa — быстрый MSA\n" +
+    "/legal-review <текст> — анализ присланного договора (red flags)\n" +
+    "/legal-risk-map <ситуация> — карта рисков сделки\n" +
+    "/legal-verify <id> — verification прошлой работы\n" +
+    "/legal-archive [фильтр] — поиск в архиве\n" +
+    "/legal-score — метрика отдела (pct-clean-signings)\n" +
+    "/legal-templates — список шаблонов\n\n" +
+    "Или опишите задачу свободным текстом.\n\n" +
+    "⚠ Все результаты — draft + risk map. Перед подписанием — обязательная проверка лицензированным юристом."
+}
+
+fn QuickNDA(query: String, chat_id: String) -> String {
+  let ctx = BuildLegalContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let jx = json_get(parsed, "jurisdiction", JX_BY)
+  let bf = json_get(parsed, "businessForm", BF_OOO)
+
+  let rules = EnforceHardRules(query, jx, "")
+  if rules != "PASS" then { return rules }
+
+  let result = NdaMslaSlaTemplates(DT_NDA, jx, bf, chat_id)
+  let final = EnforceRule6_DraftOnlyMarker(result)
+  let withDisclaimer = ApplyDisclaimer(final)
+  return withDisclaimer
+}
+
+fn QuickMSA(query: String, chat_id: String) -> String {
+  let ctx = BuildLegalContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let jx = json_get(parsed, "jurisdiction", JX_BY)
+  let bf = json_get(parsed, "businessForm", BF_OOO)
+
+  let rules = EnforceHardRules(query, jx, "")
+  if rules != "PASS" then { return rules }
+
+  // Full pipeline: risk map → draft
+  let riskMap = RiskMappingProtocol("MSA для " + jx + "/" + bf, jx, bf, "", chat_id)
+  let draft = ContractDraftingDiscipline(riskMap, jx, bf, "", "", DT_MSA, chat_id)
+  let final = EnforceRule6_DraftOnlyMarker(draft)
+  let withDisclaimer = ApplyDisclaimer(final)
+  return withDisclaimer
+}
+
+fn RedFlagAnalysis(query: String, chat_id: String) -> String {
+  let ctx = BuildLegalContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let jx = json_get(parsed, "jurisdiction", JX_BY)
+  let bf = json_get(parsed, "businessForm", BF_OOO)
+
+  let rules = EnforceHardRules(query, jx, "")
+  if rules != "PASS" then { return rules }
+
+  let position = "contractor"
+  if contains(lower(query), "заказчик") then { position = "client" }
+
+  let result = RedFlagDetection(query, jx, bf, position, chat_id)
+  let final = EnforceRule6_DraftOnlyMarker(result)
+  let withDisclaimer = ApplyDisclaimer(final)
+  return withDisclaimer
+}
+
+fn RiskMapping(query: String, chat_id: String) -> String {
+  let ctx = BuildLegalContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let jx = json_get(parsed, "jurisdiction", JX_BY)
+  let bf = json_get(parsed, "businessForm", BF_OOO)
+  let cpJx = json_get(parsed, "counterpartyJurisdiction", "")
+
+  let rules = EnforceHardRules(query, jx, cpJx)
+  if rules != "PASS" then { return rules }
+
+  let result = RiskMappingProtocol(query, jx, bf, cpJx, chat_id)
+  let final = EnforceRule7_CrossJurisdictionCheck(jx, cpJx, result)
+  let withDisclaimer = ApplyDisclaimer(final)
+  return withDisclaimer
+}
+
+fn VerifyResult(query: String) -> String {
+  // Parse: /legal-verify <id> [outcome] [notes]
+  let parts = split(query, " ")
+  if length(parts) < 2 then { return "Использование: /legal-verify <id> <clean|rewrite|dispute> [notes]" }
+  let id = parts[1]
+  let outcome = "clean"
+  if length(parts) >= 3 then { outcome = parts[2] }
+
+  let wasPredictable = "false"
+  if outcome == "rewrite" then { wasPredictable = "true" }
+
+  let notes = ""
+  if length(parts) >= 4 then { notes = join(parts, " ", 3, length(parts)) }
+
+  let result = VerifyLegalResult(id, outcome, wasPredictable, "", notes)
+
+  // Check for methodology gap
+  if outcome == "rewrite" then {
+    let gap = CheckMethodologyGap(id, wasPredictable)
+    result = result + "\n" + gap
+  }
+
+  return result
+}
+
+fn SearchArchive(filter: String) -> String {
+  let rows = db_execute(
+    "SELECT id, short_title, document_type, status, jurisdiction, risk_level, created_at FROM legal_assessments WHERE short_title ILIKE '%' || ? || '%' ORDER BY created_at DESC LIMIT 10",
+    [filter]
+  )
+  if length(rows) == 0 then { return "📭 Архив пуст или нет совпадений по фильтру: " + filter }
+  return "📚 Legal архив:\n" + rows
+}
+
+fn LegalScore() -> String {
+  let metric = GetLegalMetric()
+  let data = parse_json(metric)
+  let value = json_get(data, "value", "N/A")
+  let sample = json_get(data, "sample_size", "0")
+  let y1 = json_get(data, "target_y1", TARGET_Y1)
+  let y2 = json_get(data, "target_y2", TARGET_Y2)
+  let predictableMissed = json_get(data, "predictable_missed_pct", "0")
+
+  return "📊 Legal — Метрика отдела\n\n" +
+    "Метрика: " + METRIC + "\n" +
+    "Значение: " + value + "%\n" +
+    "За период: last 30 days\n" +
+    "Выборка: " + sample + " verification(s)\n" +
+    "Цели Y1: " + y1 + ", Y2: " + y2 + "\n" +
+    "Methodology gap (predictable missed): " + predictableMissed + "%"
+}
+
+fn ListTemplates() -> String {
+  let rows = db_execute(
+    "SELECT id, document_type, jurisdiction, business_form, name, version, status FROM contract_templates WHERE status = 'active' ORDER BY document_type, jurisdiction",
+    []
+  )
+  if length(rows) == 0 then {
+    return "📋 Шаблоны не загружены. Базовые шаблоны NDA/MSA/SLA доступны через /legal-nda и /legal-msa."
+  }
+  return "📋 Доступные шаблоны:\n" + rows
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 14: DISCLAIMER WRAPPER & ARCHIVE
+// ═══════════════════════════════════════════════════════════════════════
+
+fn ApplyDisclaimer(text: String) -> String {
+  return text + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+fn SaveToLegalArchive(shortTitle: String, fullResult: String, docType: String, jx: String, bf: String, cpJx: String, cpBf: String, riskLevel: String, confidence: String, chat_id: String) -> String {
+  let resultWithDisclaimer = ApplyDisclaimer(fullResult)
+
+  let _ = db_execute(
+    "INSERT INTO legal_assessments (short_title, full_result, document_type, status, jurisdiction, business_form, counterparty_jurisdiction, counterparty_form, risk_level, confidence, created_at, updated_at) VALUES (?, ?, ?, 'published', ?, ?, ?, ?, ?, ?, NOW(), NOW())",
+    [shortTitle, resultWithDisclaimer, docType, jx, bf, cpJx, cpBf, riskLevel, confidence]
+  )
+
+  let idRows = db_execute("SELECT LASTVAL() as id", [])
+  let id = json_get(parse_json(idRows), "0.id", "0")
+
+  // Set verification date = 90 days from now
+  let _ = db_execute(
+    "UPDATE legal_assessments SET verification_date = CURRENT_DATE + INTERVAL '90 days' WHERE id = ?",
+    [id]
+  )
+
+  let _ = AuditLog("legal_save", DEPT, "Assessment #" + to_string(id) + " saved: " + shortTitle + " [" + docType + "] " + jx + "/" + bf)
+  return to_string(id)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 15: FULL PIPELINE
+// ═══════════════════════════════════════════════════════════════════════
+// For free-text queries: context → knowledge → risk map → route by intent → disclaimer → archive
+
+fn FullLegalPipeline(query: String, chat_id: String, intent: String) -> String {
+  let ctx = BuildLegalContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let jx = json_get(parsed, "jurisdiction", "")
+  let bf = json_get(parsed, "businessForm", "")
+  let cpJx = json_get(parsed, "counterpartyJurisdiction", "")
+  let docType = json_get(parsed, "documentType", DT_ANALYSIS)
+
+  // Hard rules gate
+  let rules = EnforceHardRules(query, jx, cpJx)
+  if rules != "PASS" then { return rules }
+
+  // If jurisdiction not detected, ask
+  if length(jx) == 0 then {
+    return "⚠ Без указания юрисдикции анализ невозможен. Укажите юрисдикцию вашей стороны:\n• BY — Беларусь\n• RU — Россия\n• EU — Евросоюз\n• US — США\n\nПример: '/legal MSA для BY ООО с EU клиентом'"
+  }
+
+  // Load knowledge packs
+  let jxKnowledge = LoadJurisdictionKnowledge(jx)
+  let bfKnowledge = LoadBusinessFormKnowledge(bf, jx)
+  let cpJxKnowledge = ""
+  if length(cpJx) > 0 then { cpJxKnowledge = LoadJurisdictionKnowledge(cpJx) }
+  let matrix = LoadCompatibilityMatrix(jx, bf, cpJx, "")
+
+  // Step 1: Risk mapping (mandatory first step for all contract work)
+  let riskMap = ""
+  if intent == "intent:riskmap" || intent == "intent:nda" || intent == "intent:msa" || intent == "intent:general" then {
+    riskMap = RiskMappingProtocol(query, jx, bf, cpJx, chat_id)
+  }
+
+  // Step 2: Route by intent
+  let result = ""
+
+  if intent == "intent:redflag" then {
+    // Red flag detection — analysis of incoming contract
+    let position = "contractor"
+    if contains(lower(query), "заказчик") then { position = "client" }
+    result = RedFlagDetection(query, jx, bf, position, chat_id)
+  }
+  if intent == "intent:nda" then {
+    if length(riskMap) > 0 then {
+      let draft = ContractDraftingDiscipline(riskMap, jx, bf, cpJx, "", DT_NDA, chat_id)
+      result = draft
+    } else {
+      result = NdaMslaSlaTemplates(DT_NDA, jx, bf, chat_id)
+    }
+  }
+  if intent == "intent:msa" then {
+    if length(riskMap) > 0 then {
+      let draft = ContractDraftingDiscipline(riskMap, jx, bf, cpJx, "", DT_MSA, chat_id)
+      result = draft
+    } else {
+      result = NdaMslaSlaTemplates(DT_MSA, jx, bf, chat_id)
+    }
+  }
+  if intent == "intent:gdpr" then {
+    result = GdprComplianceCheck(query, jx, chat_id)
+  }
+  if intent == "intent:ip" then {
+    result = IpClauseDiscipline(query, jx, chat_id)
+  }
+  if intent == "intent:dispute" then {
+    result = DisputeResolutionStrategy(query, jx, chat_id)
+  }
+  if intent == "intent:riskmap" then {
+    result = riskMap
+  }
+  if intent == "intent:general" then {
+    // General query — route through LLM with legal context
+    let prompt = "Ты юрист-параноик отдела Legal Fosved Office. Отвечай холодно, чётко, без эвфемизмов.\n\n" +
+      "Юрисдикция: " + jx + " (" + jxKnowledge + ")\n" +
+      "Бизнес-форма: " + bf + " (" + bfKnowledge + ")\n" +
+      (length(cpJx) > 0 ? "Контрагент: " + cpJx + " (" + cpJxKnowledge + ")\n" : "") +
+      "Compatibility: " + matrix + "\n\n" +
+      (length(riskMap) > 0 ? "Карта рисков (построена):\n" + riskMap + "\n\n" : "") +
+      "Запрос: " + query + "\n\n" +
+      "Жёсткие правила:\n" +
+      "1. Не подписываешь договоры от имени владельца\n" +
+      "2. Не представляешь в суде\n" +
+      "3. Не работаешь без юрисдикции\n" +
+      "4. Не работаешь с уголовкой\n" +
+      "5. Не даёшь 100% гарантий\n" +
+      "6. Все тексты помечаешь DRAFT\n" +
+      "7. Cross-jurisdictional риски помечаешь явно"
+
+    result = call_llm(prompt, chat_id)
+  }
+
+  // Step 3: Apply hard rules to output
+  let final = EnforceRule6_DraftOnlyMarker(result)
+  final = EnforceRule7_CrossJurisdictionCheck(jx, cpJx, final)
+
+  // Step 4: Disclaimer
+  let withDisclaimer = ApplyDisclaimer(final)
+
+  // Step 5: Save to archive
+  let shortTitle = substring(query, 0.0, 80.0)
+  let effectiveDocType = docType
+  if intent == "intent:redflag" then { effectiveDocType = DT_RED_FLAG }
+  if intent == "intent:riskmap" then { effectiveDocType = DT_RISK_MAP }
+  if intent == "intent:nda" then { effectiveDocType = DT_NDA }
+  if intent == "intent:msa" then { effectiveDocType = DT_MSA }
+
+  let riskLevel = RL_MEDIUM
+  if contains(lower(result), "critical") then { riskLevel = RL_CRITICAL }
+  if contains(lower(result), "high") && riskLevel != RL_CRITICAL then { riskLevel = RL_HIGH }
+
+  let archiveId = SaveToLegalArchive(shortTitle, withDisclaimer, effectiveDocType, jx, bf, cpJx, "", riskLevel, "medium", chat_id)
+
+  // Step 6: Final safety check — never output without disclaimer
+  if contains(withDisclaimer, "требуется проверка лицензированным юристом") == false then {
+    return "⚠ ВНУТРЕННЯЯ ОШИБКА: disclaimer не применён. Результат заблокирован. Assessment #" + archiveId
+  }
+
+  return withDisclaimer + "\n\n📎 Сохранено в архив: #" + archiveId + " | Verification date: +90 дней"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 16: ENTRY POINT
+// ═══════════════════════════════════════════════════════════════════════
 
 pattern HandleLegal(query: String, chat_id: String) -> String {
-  let dept = "legal"
-  let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
-  let _ = RecordAssistantMessage(chat_id, dept, reply)
+  let dept = DEPT
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
-  let _ = SaveToGenericArchive(dept, query, reply)
+
+  // Parse command/intent
+  let parsed = ParseLegalQuery(query)
+
+  // Route by command
+  if parsed == "cmd:help" then {
+    let reply = ShowHelp()
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:nda" then {
+    let reply = QuickNDA(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:msa" then {
+    let reply = QuickMSA(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:review" then {
+    let reply = RedFlagAnalysis(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:riskmap" then {
+    let reply = RiskMapping(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:verify" then {
+    let reply = VerifyResult(query)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:archive" then {
+    let filter = ""
+    let parts = split(query, " ")
+    if length(parts) >= 2 then { filter = join(parts, " ", 1, length(parts)) }
+    let reply = SearchArchive(filter)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:score" then {
+    let reply = LegalScore()
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:templates" then {
+    let reply = ListTemplates()
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  // Free-text → full pipeline
+  let reply = FullLegalPipeline(query, chat_id, parsed)
+  let _ = RecordAssistantMessage(chat_id, dept, reply)
   return reply
 }
