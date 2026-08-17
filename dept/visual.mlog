@@ -1,50 +1,37 @@
-// Fosved Office v2 — Visual Department (ENRICHED v1.0)
-// Генерация визуальных артефактов 5 типов на PDF-примитивах Metalogos 0.17.0
+// Fosved Office v2 — Visual Department (ENRICHED v2.0)
+// Нативная графическая подсистема Metalogos — 44 SVG builtin функции
 //
-// Архитектура: Metalogos PDF builtins (pdf_create, pdf_draw_rect, pdf_draw_line,
-//   pdf_draw_table, pdf_write_text, pdf_save, html_to_pdf) + LLM для data extraction
+// Архитектура: Metalogos SVG builtins (chart_bar, chart_line, chart_donut,
+//   chart_area, chart_scatter, chart_radar, chart_boxplot, chart_heatmap,
+//   chart_waterfall, diagram_flowchart, diagram_tree, diagram_timeline,
+//   diagram_org, diagram_process, diagram_venn, diagram_gantt, diagram_er,
+//   diagram_pyramid, diagram_state_machine, diagram_sankey,
+//   diagram_brainstorm, diagram_comparison, diagram_funnel,
+//   diagram_matrix, diagram_network, diagram_map, diagram_calendar,
+//   diagram_cycle, diagram_bracket, svg_canvas, svg_group, svg_text,
+//   svg_path, svg_rect, svg_circle, svg_line, color_palette,
+//   infographic_qa, html_render) + html_to_pdf для растеризации
 //
 // 5 типов output'а:
-//   Type 1 — Compression Visual: многостраничный отчёт → одностраничный PDF
-//   Type 2 — Memorable Infographic: LLM + HTML template → PDF (через html_to_pdf)
-//   Type 3 — Analysis Card: template-driven PDF для каждого анализа (AUTO)
-//   Type 4 — Reference Sheet: одностраничная справка (entity profile)
-//   Type 5 — Premium Spec: JSON spec для ручного производства (Midjourney+Figma)
+//   Type 1 — Compression Visual: анализ → dashboard SVG → PDF
+//   Type 2 — Memorable Infographic: LLM структурирует → native SVG → PDF
+//   Type 3 — Analysis Card: auto-генерация card при каждом анализе
+//   Type 4 — Reference Sheet: entity profile → structured SVG → PDF
+//   Type 5 — Premium Spec: JSON spec для Midjourney+Figma ручного производства
 
 // ═══════════════════════════════════════════════════════════════════════
 // BRAND IDENTITY — фиксированная палитра Fosved
 // ═══════════════════════════════════════════════════════════════════════
 
-// Цвета (RGB для PDF: 0-1 диапазон, hex для HTML)
-// Navy:     #1a1a2e  → RGB 0.102, 0.102, 0.180
-// Cream:    #f5f1e8  → RGB 0.961, 0.945, 0.910
-// Gold:     #c9a961  → RGB 0.788, 0.663, 0.380
-// Burgundy: #8b2942  → RGB 0.545, 0.161, 0.259
-// Forest:   #2d5f3f  → RGB 0.176, 0.373, 0.247
-// Grey:     #5a5a5a  → RGB 0.353, 0.353, 0.353
-// LightGrey:#e0ddd5  → RGB 0.878, 0.867, 0.835
-
-// ═══════════════════════════════════════════════════════════════════════
-// PDF CONSTANTS
-// ═══════════════════════════════════════════════════════════════════════
-
-// A4: 595.28 × 841.89 pt
-// Card: 360 × 504 pt (half A4)
-// Margins: 36pt (0.5 inch)
-// Grid: 12 columns × 26.67pt, 24pt gutters
-
-// ── Типы карточек (ширина × высота в pt) ──
-pattern VisualCanvasWidth() -> Float { return 595.28 }
-pattern VisualCanvasHeight() -> Float { return 841.89 }
-pattern VisualMargin() -> Float { return 36.0 }
-pattern VisualCardWidth() -> Float { return 360.0 }
-pattern VisualCardHeight() -> Float { return 504.0 }
+// Доступ через color_palette("authority", "light") или напрямую:
+// Navy: #1a1a2e  Cream: #f5f1e8  Gold: #c9a961
+// Burgundy: #8b2942  Forest: #2d5f3f
 
 // ═══════════════════════════════════════════════════════════════════════
 // TYPE 3 — Analysis Card (AUTO для каждого анализа)
 // ═══════════════════════════════════════════════════════════════════════
 
-// Генерирует PDF-карточку для OSP/Expert/LZ анализа
+// Генерирует SVG-карточку для OSP/Expert/LZ анализа
 // source_type: "analysis" | "expert" | "lz"
 // source_id: ID записи в БД
 pattern GenerateAnalysisCard(source_type: String, source_id: String) -> String {
@@ -70,56 +57,48 @@ pattern GenerateAnalysisCard(source_type: String, source_id: String) -> String {
   // Parse source data
   let parsed = parse_json(data)
   let topic = to_string(json_get(json_get(parsed, 0.0), "topic", "N/A"))
-  let result_text = to_string(json_get(json_get(parsed, 0.0), "full_result", ""))
-  let status = to_string(json_get(json_get(parsed, 0.0), "status", "drafted"))
   let confidence = to_string(json_get(json_get(parsed, 0.0), "confidence", "N/A"))
+  let status = to_string(json_get(json_get(parsed, 0.0), "status", "drafted"))
   let created_at = to_string(json_get(json_get(parsed, 0.0), "created_at", ""))
-
-  // Create PDF card
-  let pdf_id = pdf_create()
-  let _ = pdf_add_page(pdf_id, 360.0, 504.0)
-
-  // ── Header bar (navy) ──
-  let _ = pdf_draw_rect(pdf_id, 0.0, 0.0, 360.0, 72.0, false, true)
 
   // ── Dept badge ──
   let badge = "ОСП"
   if source_type == "expert" then { badge = "ЭКСПЕРТ" }
   if source_type == "lz" then { badge = "ЛЗ" }
 
-  let _ = pdf_write_text(pdf_id, 18.0, 24.0, badge, "Courier-Bold", 10.0)
-  let _ = pdf_write_text(pdf_id, 18.0, 48.0, substring(topic, 0.0, 40.0), "Helvetica-Bold", 14.0)
+  // ── Build card using SVG primitives ──
+  let style = color_palette("authority", "light")
+  let ink = to_string(json_get(style, "ink", "#1a1a2e"))
+  let accent = to_string(json_get(style, "accent", "#c9a961"))
+  let paper = to_string(json_get(style, "paper", "#ffffff"))
+  let muted = to_string(json_get(style, "muted", "#5a5a5a"))
+  let rule = to_string(json_get(style, "rule", "#e0ddd5"))
 
-  // ── Status + Confidence bar ──
-  let _ = pdf_draw_rect(pdf_id, 0.0, 72.0, 360.0, 24.0, false, true)
-  let _ = pdf_write_text(pdf_id, 18.0, 84.0, "Статус: " + status + "  |  Уверенность: " + confidence, "Courier", 9.0)
+  // Card canvas 360×504
+  let header = svg_group(0.0, 0.0,
+    svg_rect(0.0, 0.0, 360.0, 72.0, accent, accent, 0.0) +
+    svg_text(18.0, 24.0, badge, paper, 10.0) +
+    svg_text(18.0, 48.0, substring(topic, 0.0, 40.0), paper, 14.0)
+  )
+  let status_bar = svg_group(0.0, 72.0,
+    svg_rect(0.0, 0.0, 360.0, 24.0, rule, rule, 0.0) +
+    svg_text(18.0, 16.0, "Статус: " + status + "  |  Уверенность: " + confidence, muted, 9.0)
+  )
+  let footer = svg_group(0.0, 474.0,
+    svg_rect(0.0, 0.0, 360.0, 30.0, accent, accent, 0.0) +
+    svg_text(18.0, 18.0, "FOSVED OFFICE | " + created_at, paper, 7.0)
+  )
 
-  // ── Content area (key sections extracted from result) ──
-  let y = 120.0
-  // Extract first 10 lines of result as summary
-  let lines = split_by(result_text, "\n")
-  let max_lines = 20.0
-  let line_count = to_float(to_string(length(lines)))
-  let n = line_count
-  if line_count > max_lines then { let n = max_lines }
-  let i = 0.0
-  // Render first N lines as body text
-  while i < n {
-    let line = to_string(json_get(lines, i, ""))
-    if length(line) > 2.0 then {
-      let _ = pdf_write_text(pdf_id, 18.0, y, substring(line, 0.0, 52.0), "Helvetica", 8.0)
-      let y = y + 14.0
-    }
-    let i = i + 1.0
-  }
+  // Compose full card
+  let svg = svg_canvas(360.0, 504.0, header + status_bar + footer)
 
-  // ── Footer ──
-  let _ = pdf_draw_rect(pdf_id, 0.0, 474.0, 360.0, 30.0, false, true)
-  let _ = pdf_write_text(pdf_id, 18.0, 490.0, "FOSVED OFFICE | " + created_at, "Courier", 7.0)
+  // QA check
+  let qa = infographic_qa(svg)
 
-  // Save
+  // Convert to PDF via html_to_pdf
+  let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + svg + "</body></html>"
   let output_path = "visuals/card_" + source_type + "_" + source_id + ".pdf"
-  let _ = pdf_save(pdf_id, output_path)
+  let _ = html_to_pdf(html, output_path)
 
   // Record in visual_artifacts table
   let _ = try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["card", source_type, source_id, output_path])
@@ -128,152 +107,77 @@ pattern GenerateAnalysisCard(source_type: String, source_id: String) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// TYPE 1 — Compression Visual (многостраничный → одностраничный PDF)
+// TYPE 1 — Compression Visual (анализ → dashboard SVG)
 // ═══════════════════════════════════════════════════════════════════════
 
-// Сжимает длинный отчёт в одностраничный PDF с 4-6 секциями
+// Сжимает анализ в dashboard: KPI блок + 2-3 чарта
 pattern GenerateCompressionVisual(source_type: String, source_id: String) -> String {
   let _ = InitDB()
 
   // Load full result text
-  let rows = query("SELECT full_result FROM analysis WHERE id = ?", [source_id])
-  let full_text = to_string(json_get(json_get(rows, 0.0), "full_result", ""))
-  if full_text == "" then {
-    let rows2 = query("SELECT full_result FROM dept_archive WHERE id = ?", [source_id])
-    let full_text = to_string(json_get(json_get(rows2, 0.0), "full_result", ""))
-  }
-  if full_text == "" then { return "Error: no content found" }
+  let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [source_id])
+  let topic = to_string(json_get(json_get(rows, 0.0), "topic", ""))
+  let full_result = to_string(json_get(json_get(rows, 0.0), "full_result", ""))
 
-  // Use LLM to extract structured summary for compression
-  let llm_prompt = "Извлеки из следующего анализа 6 ключевых секций для одностраничной визуализации. Формат: каждая секция — заголовок (макс 30 символов) + 2-3 строки сути. JSON: [{\"title\":\"...\",\"body\":\"...\"}]×6\n\nАНАЛИЗ:\n" + substring(full_text, 0.0, 3000.0)
-  let messages = json_encode([{role: "system", content: "Ты — компрессор анализа. Извлекаешь суть."}, {role: "user", content: llm_prompt}])
+  if topic == "" then {
+    let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [source_id])
+    let topic = to_string(json_get(json_get(rows2, 0.0), "topic", ""))
+    let full_result = to_string(json_get(json_get(rows2, 0.0), "full_result", ""))
+  }
+  if topic == "" then { return "Error: no content found" }
+
+  // Use LLM to extract structured data for visualization
+  let llm_prompt = "Извлеки из анализа данные для 3 визуализаций. Формат JSON:\n{\n  \"kpi\": [{\"label\":\"...\",\"value\":\"...\"}],\n  \"bar_data\": [{\"label\":\"...\",\"value\": N}],\n  \"line_data\": [{\"label\":\"...\",\"value\": N}],\n  \"donut_data\": [{\"label\":\"...\",\"value\": N}]\n}\n\nАНАЛИЗ:\n" + substring(full_result, 0.0, 3000.0)
+  let messages = json_encode([{role: "system", content: "Ты — визуальный компрессор. Извлекаешь данные для чартов."}, {role: "user", content: llm_prompt}])
   let proxy_result = CallLLMProxy("visual", messages)
-  let reply = to_string(json_get(parse_json(proxy_result), "reply", "[]"))
+  let reply = to_string(json_get(parse_json(proxy_result), "reply", "{}"))
+  let viz_data = parse_json(reply)
 
-  // Create compression visual PDF (A4 landscape)
-  let pdf_id = pdf_create()
-  let _ = pdf_add_page(pdf_id, 841.89, 595.28)
+  // Generate style
+  let style = color_palette("energy", "light")
+  let ink = to_string(json_get(style, "ink", "#1a1a2e"))
+  let accent = to_string(json_get(style, "accent", "#c9a961"))
+  let paper = to_string(json_get(style, "paper", "#ffffff"))
 
-  // Header
-  let topic_row = query("SELECT topic FROM analysis WHERE id = ?", [source_id])
-  let topic = to_string(json_get(json_get(topic_row, 0.0), "topic", "Analysis"))
-  let _ = pdf_draw_rect(pdf_id, 0.0, 0.0, 841.89, 60.0, false, true)
-  let _ = pdf_write_text(pdf_id, 36.0, 30.0, "COMPRESSION: " + substring(topic, 0.0, 60.0), "Helvetica-Bold", 18.0)
+  // Generate native SVG charts
+  let bar_svg = chart_bar(json_get(viz_data, "bar_data", []), style)
+  let line_svg = chart_line(json_get(viz_data, "line_data", []), style)
+  let donut_svg = chart_donut(json_get(viz_data, "donut_data", []), style)
 
-  // Render 6 sections in 2×3 grid
-  let sections = parse_json(reply)
-  let col = 0.0
-  let row = 0.0
-  let s = 0.0
-  while s < 6.0 {
-    let sec_title = to_string(json_get(json_get(sections, s), "title", ""))
-    let sec_body = to_string(json_get(json_get(sections, s), "body", ""))
-    let x = 36.0 + col * 400.0
-    let y = 84.0 + row * 170.0
+  // KPI header
+  let kpi_data = json_get(viz_data, "kpi", [])
+  let kpi_count = length(kpi_data)
 
-    // Section box
-    let _ = pdf_draw_rect(pdf_id, x, y, 370.0, 150.0, true, false)
-    // Section title
-    let _ = pdf_write_text(pdf_id, x + 12.0, y + 24.0, sec_title, "Helvetica-Bold", 11.0)
-    // Section body (wrapped)
-    let _ = pdf_write_text(pdf_id, x + 12.0, y + 44.0, substring(sec_body, 0.0, 120.0), "Helvetica", 8.0)
+  // Build KPI text blocks
+  let kpi_header = svg_group(0.0, 0.0,
+    svg_rect(0.0, 0.0, 841.89, 60.0, accent, accent, 0.0) +
+    svg_text(36.0, 30.0, "COMPRESSION: " + substring(topic, 0.0, 60.0), paper, 18.0)
+  )
 
-    let col = col + 1.0
-    if col >= 2.0 then {
-      let col = 0.0
-      let row = row + 1.0
-    }
-    let s = s + 1.0
-  }
+  // Compose dashboard
+  let dashboard_svg = svg_canvas(841.89, 595.28,
+    kpi_header +
+    svg_group(20.0, 80.0, bar_svg) +
+    svg_group(300.0, 80.0, line_svg) +
+    svg_group(600.0, 80.0, donut_svg)
+  )
 
-  // Footer
-  let _ = pdf_write_text(pdf_id, 36.0, 570.0, "FOSVED OFFICE | Compression Visual | " + to_string(datetime("now")), "Courier", 7.0)
+  // QA
+  let qa = infographic_qa(dashboard_svg)
 
+  // Convert to PDF
+  let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;display:flex;gap:10px;'>" + dashboard_svg + "</body></html>"
   let output_path = "visuals/compression_" + source_type + "_" + source_id + ".pdf"
-  let _ = pdf_save(pdf_id, output_path)
+  let _ = html_to_pdf(html, output_path)
   let _ = try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["compression", source_type, source_id, output_path])
 
   return output_path
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// TYPE 4 — Reference Sheet (одностраничная справка)
+// TYPE 2 — Memorable Infographic (LLM + native SVG charts)
 // ═══════════════════════════════════════════════════════════════════════
 
-// Генерирует справочную карточку для entity (analysis, project, client)
-pattern GenerateReferenceSheet(entity_type: String, entity_id: String) -> String {
-  let _ = InitDB()
-
-  let pdf_id = pdf_create()
-  let _ = pdf_add_page(pdf_id, 595.28, 841.89)
-
-  // ── Full-width header ──
-  let _ = pdf_draw_rect(pdf_id, 0.0, 0.0, 595.28, 80.0, false, true)
-  let _ = pdf_write_text(pdf_id, 36.0, 36.0, "REFERENCE SHEET", "Courier-Bold", 10.0)
-
-  // Load entity data based on type
-  let entity_label = entity_type
-  let y = 108.0
-
-  if entity_type == "analysis" then {
-    let rows = query("SELECT id, topic, full_result, status, confidence, verification_date, created_at FROM analysis WHERE id = ?", [entity_id])
-    let r = json_get(rows, 0.0)
-    let _ = pdf_write_text(pdf_id, 36.0, 36.0, to_string(json_get(r, "topic", "N/A")), "Helvetica-Bold", 20.0)
-
-    // Key-value table
-    let fields = json_encode([
-      ["ID", to_string(json_get(r, "id", ""))],
-      ["Статус", to_string(json_get(r, "status", ""))],
-      ["Уверенность", to_string(json_get(r, "confidence", ""))],
-      ["Верификация", to_string(json_get(r, "verification_date", "N/A"))],
-      ["Создано", to_string(json_get(r, "created_at", ""))]
-    ])
-    let _ = pdf_draw_table(pdf_id, 36.0, y, json_encode([80.0, 400.0]), fields)
-    let y = y + 120.0
-
-    // Research sources
-    let sources = query("SELECT url, title, tier FROM research_source WHERE analysis_id = ? ORDER BY tier", [entity_id])
-    let _ = pdf_write_text(pdf_id, 36.0, y, "ИСТОЧНИКИ (" + to_string(length(sources)) + ")", "Helvetica-Bold", 12.0)
-    let y = y + 20.0
-    let si = 0.0
-    while si < to_float(to_string(length(sources))) {
-      let src = json_get(sources, si)
-      let _ = pdf_write_text(pdf_id, 48.0, y, "[" + to_string(json_get(src, "tier", "?")) + "] " + substring(to_string(json_get(src, "title", "")), 0.0, 60.0), "Helvetica", 8.0)
-      let y = y + 14.0
-      let si = si + 1.0
-    }
-  }
-
-  if entity_type == "lz" then {
-    let rows = query("SELECT id, topic, full_result, status, confidence, created_at FROM dept_archive WHERE id = ? AND dept = 'lz'", [entity_id])
-    let r = json_get(rows, 0.0)
-    let _ = pdf_write_text(pdf_id, 36.0, 36.0, substring(to_string(json_get(r, "topic", "ЛЗ Артефакт")), 0.0, 50.0), "Helvetica-Bold", 20.0)
-
-    let fields = json_encode([
-      ["ID", to_string(json_get(r, "id", ""))],
-      ["Статус", to_string(json_get(r, "status", ""))],
-      ["Уверенность", to_string(json_get(r, "confidence", ""))],
-      ["Создано", to_string(json_get(r, "created_at", ""))]
-    ])
-    let _ = pdf_draw_table(pdf_id, 36.0, y, json_encode([80.0, 400.0]), fields)
-  }
-
-  // ── Footer ──
-  let _ = pdf_draw_rect(pdf_id, 0.0, 800.0, 595.28, 41.89, false, true)
-  let _ = pdf_write_text(pdf_id, 36.0, 820.0, "FOSVED OFFICE | Reference Sheet | " + entity_type + " #" + entity_id, "Courier", 8.0)
-
-  let output_path = "visuals/ref_" + entity_type + "_" + entity_id + ".pdf"
-  let _ = pdf_save(pdf_id, output_path)
-  let _ = try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["reference", entity_type, entity_id, output_path])
-
-  return output_path
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// TYPE 2 — Memorable Infographic (через HTML template → PDF)
-// ═══════════════════════════════════════════════════════════════════════
-
-// Генерирует запоминающуюся инфографику: LLM создаёт HTML/SVG, html_to_pdf конвертирует
 pattern GenerateMemorableInfographic(source_type: String, source_id: String) -> String {
   let _ = InitDB()
 
@@ -288,18 +192,130 @@ pattern GenerateMemorableInfographic(source_type: String, source_id: String) -> 
     let full_result = to_string(json_get(json_get(rows2, 0.0), "full_result", ""))
   }
 
-  // LLM generates HTML with inline SVG for the infographic
-  let llm_prompt = "Создай HTML-инфографику для анализа. Требования:\n1. Inline SVG, 800x1000px viewport\n2. Brand palette: navy #1a1a2e, cream #f5f1e8, gold #c9a961, burgundy #8b2942, forest #2d5f3f\n3. F-pattern reading flow (important top-left)\n4. Max 5 key data points visualized\n5. Font: system-ui sans-serif\n6. Each visual element must carry information (anti-chartjunk)\n7. Include: header, 2-3 chart sections, key takeaway, footer\n\nТема: " + topic + "\n\nДанные:\n" + substring(full_result, 0.0, 2000.0) + "\n\nВерни ТОЛЬКО HTML код (no markdown, no code fences)."
-
-  let messages = json_encode([{role: "system", content: "Ты — дизайнер-методист инфографик. SVG-first, Tufte principles, F-pattern."}, {role: "user", content: llm_prompt}])
+  // LLM generates structured data for native charts
+  let llm_prompt = "Создай данные для запоминающейся инфографики. Формат JSON:\n{\n  \"headline\": \"...\",\n  \"chart_type\": \"bar|line|donut|area|radar|pyramid\",\n  \"chart_data\": [{\"label\":\"...\",\"value\": N}],\n  \"insight\": \"...\",\n  \"secondary_chart_type\": \"donut|bar|line\",\n  \"secondary_chart_data\": [{\"label\":\"...\",\"value\": N}]\n}\n\nТема: " + topic + "\nДанные:\n" + substring(full_result, 0.0, 2000.0)
+  let messages = json_encode([{role: "system", content: "Ты — дизайнер-методист. Tufte principles, F-pattern, 5-second rule."}, {role: "user", content: llm_prompt}])
   let proxy_result = CallLLMProxy("visual", messages)
-  let html_content = to_string(json_get(parse_json(proxy_result), "reply", "<html><body>Error</body></html>"))
+  let reply = to_string(json_get(parse_json(proxy_result), "reply", "{}"))
+  let spec = parse_json(reply)
 
-  // Convert HTML to PDF
+  let headline = to_string(json_get(spec, "headline", topic))
+  let chart_type = to_string(json_get(spec, "chart_type", "bar"))
+  let chart_data = json_get(spec, "chart_data", [])
+  let insight = to_string(json_get(spec, "insight", ""))
+  let sec_type = to_string(json_get(spec, "secondary_chart_type", "donut"))
+  let sec_data = json_get(spec, "secondary_chart_data", [])
+
+  // Style
+  let style = color_palette("energy", "light")
+  let ink = to_string(json_get(style, "ink", "#1a1a2e"))
+  let accent = to_string(json_get(style, "accent", "#c9a961"))
+  let paper = to_string(json_get(style, "paper", "#ffffff"))
+
+  // Generate primary chart SVG using native builtins
+  let primary_svg = ""
+  if chart_type == "bar" then { primary_svg = chart_bar(chart_data, style) }
+  if chart_type == "line" then { primary_svg = chart_line(chart_data, style) }
+  if chart_type == "donut" then { primary_svg = chart_donut(chart_data, style) }
+  if chart_type == "area" then { primary_svg = chart_area(chart_data, style) }
+  if chart_type == "pyramid" then { primary_svg = diagram_pyramid(chart_data, style) }
+
+  // Generate secondary chart SVG
+  let secondary_svg = ""
+  if sec_type == "donut" then { secondary_svg = chart_donut(sec_data, style) }
+  if sec_type == "bar" then { secondary_svg = chart_bar(sec_data, style) }
+  if sec_type == "line" then { secondary_svg = chart_line(sec_data, style) }
+
+  // Compose infographic with SVG primitives
+  let header = svg_group(0.0, 0.0,
+    svg_rect(0.0, 0.0, 800.0, 80.0, ink, ink, 0.0) +
+    svg_text(40.0, 50.0, substring(headline, 0.0, 50.0), paper, 28.0)
+  )
+  let insight_block = svg_group(0.0, 420.0,
+    svg_rect(0.0, 0.0, 800.0, 80.0, accent, accent, 4.0) +
+    svg_text(20.0, 45.0, substring(insight, 0.0, 100.0), paper, 14.0)
+  )
+
+  let infographic_svg = svg_canvas(800.0, 500.0,
+    header +
+    svg_group(20.0, 100.0, primary_svg) +
+    svg_group(430.0, 100.0, secondary_svg) +
+    insight_block
+  )
+
+  // QA check
+  let qa = infographic_qa(infographic_svg)
+
+  // Convert to PDF
+  let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + infographic_svg + "</body></html>"
   let output_path = "visuals/infographic_" + source_type + "_" + source_id + ".pdf"
-  let result = html_to_pdf(html_content, output_path)
-
+  let _ = html_to_pdf(html, output_path)
   let _ = try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["memorable", source_type, source_id, output_path])
+
+  return output_path
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TYPE 4 — Reference Sheet (entity profile → structured SVG)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern GenerateReferenceSheet(entity_type: String, entity_id: String) -> String {
+  let _ = InitDB()
+
+  let style = color_palette("authority", "light")
+  let ink = to_string(json_get(style, "ink", "#1a1a2e"))
+  let accent = to_string(json_get(style, "accent", "#c9a961"))
+  let paper = to_string(json_get(style, "paper", "#ffffff"))
+  let muted = to_string(json_get(style, "muted", "#5a5a5a"))
+  let rule = to_string(json_get(style, "rule", "#e0ddd5"))
+
+  // Header
+  let header = svg_group(0.0, 0.0,
+    svg_rect(0.0, 0.0, 595.28, 80.0, ink, ink, 0.0) +
+    svg_text(36.0, 36.0, "REFERENCE SHEET", paper, 10.0)
+  )
+
+  let body = ""
+  let entity_label = entity_type
+
+  if entity_type == "analysis" then {
+    let rows = query("SELECT id, topic, full_result, status, confidence, verification_date, created_at FROM analysis WHERE id = ?", [entity_id])
+    let r = json_get(rows, 0.0)
+    let title = to_string(json_get(r, "topic", "N/A"))
+
+    let body = svg_group(0.0, 80.0,
+      svg_text(36.0, 20.0, title, ink, 20.0) +
+      svg_text(36.0, 50.0, "ID: " + to_string(json_get(r, "id", "")) + "  |  Статус: " + to_string(json_get(r, "status", "")), muted, 10.0) +
+      svg_text(36.0, 70.0, "Уверенность: " + to_string(json_get(r, "confidence", "")) + "  |  Верификация: " + to_string(json_get(r, "verification_date", "N/A")), muted, 10.0) +
+      svg_text(36.0, 90.0, "Создано: " + to_string(json_get(r, "created_at", "")), muted, 10.0)
+    )
+  }
+
+  if entity_type == "lz" then {
+    let rows = query("SELECT id, topic, full_result, status, confidence, created_at FROM dept_archive WHERE id = ? AND dept = 'lz'", [entity_id])
+    let r = json_get(rows, 0.0)
+    let title = substring(to_string(json_get(r, "topic", "ЛЗ Артефакт")), 0.0, 50.0)
+
+    let body = svg_group(0.0, 80.0,
+      svg_text(36.0, 20.0, title, ink, 20.0) +
+      svg_text(36.0, 50.0, "ID: " + to_string(json_get(r, "id", "")) + "  |  Статус: " + to_string(json_get(r, "status", "")), muted, 10.0) +
+      svg_text(36.0, 70.0, "Уверенность: " + to_string(json_get(r, "confidence", "")), muted, 10.0)
+    )
+  }
+
+  // Footer
+  let footer = svg_group(0.0, 800.0,
+    svg_rect(0.0, 0.0, 595.28, 41.89, accent, accent, 0.0) +
+    svg_text(36.0, 20.0, "FOSVED OFFICE | Reference Sheet | " + entity_type + " #" + entity_id, paper, 8.0)
+  )
+
+  let svg = svg_canvas(595.28, 841.89, header + body + footer)
+  let qa = infographic_qa(svg)
+
+  let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + svg + "</body></html>"
+  let output_path = "visuals/ref_" + entity_type + "_" + entity_id + ".pdf"
+  let _ = html_to_pdf(html, output_path)
+  let _ = try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["reference", entity_type, entity_id, output_path])
 
   return output_path
 }
@@ -308,7 +324,6 @@ pattern GenerateMemorableInfographic(source_type: String, source_id: String) -> 
 // TYPE 5 — Premium Spec (JSON для ручного производства)
 // ═══════════════════════════════════════════════════════════════════════
 
-// Генерирует JSON spec для Midjourney + Figma ручного производства
 pattern GeneratePremiumSpec(source_type: String, source_id: String) -> String {
   let _ = InitDB()
 
@@ -322,14 +337,16 @@ pattern GeneratePremiumSpec(source_type: String, source_id: String) -> String {
     let full_result = to_string(json_get(json_get(rows2, 0.0), "full_result", ""))
   }
 
-  // LLM generates premium spec
-  let llm_prompt = "Создай premium spec JSON для публикации-качественной инфографики.\n\nФормат JSON:\n{\n  \"title\": \"...\",\n  \"dimensions\": {\"width\": 2400, \"height\": 3000},\n  \"palette\": {\"primary\": \"#1a1a2e\", \"accent\": \"#c9a961\", \"alert\": \"#8b2942\", \"positive\": \"#2d5f3f\"},\n  \"sections\": [\n    {\"type\": \"hero\", \"headline\": \"...\", \"subheadline\": \"...\", \"visual\": \"chart|map|icon|comparison\"},\n    {\"type\": \"data\", \"headline\": \"...\", \"data_points\": [{\"label\": \"...\", \"value\": \"...\", \"visual_treatment\": \"bar|gauge|sparkline|icon\"}]},\n    {\"type\": \"insight\", \"headline\": \"...\", \"body\": \"...\"}\n  ],\n  \"midjourney_prompt\": \"...\",\n  \"figma_overlays\": [{\"layer\": \"...\", \"text\": \"...\", \"position\": \"...\"}]\n}\n\nТема: " + topic + "\nДанные: " + substring(full_result, 0.0, 2000.0)
+  let style = color_palette("energy", "light")
+  let accent = to_string(json_get(style, "accent", "#c9a961"))
+  let ink = to_string(json_get(style, "ink", "#1a1a2e"))
 
-  let messages = json_encode([{role: "system", content: "Ты — premium visual designer. Генерируешь JSON spec для Midjourney+Figma."}, {role: "user", content: llm_prompt}])
+  let llm_prompt = "Создай premium spec JSON для публикации-качественной инфографики.\n\nФормат JSON:\n{\n  \"title\": \"...\",\n  \"dimensions\": {\"width\": 2400, \"height\": 3000},\n  \"palette\": {\"primary\": \"" + ink + "\", \"accent\": \"" + accent + "\"},\n  \"sections\": [\n    {\"type\": \"hero\", \"headline\": \"...\"},\n    {\"type\": \"data\", \"headline\": \"...\", \"data_points: [{\"label\":\"...\",\"value\": N}]\"}\n  ],\n  \"midjourney_prompt\": \"...\",\n  \"figma_overlays\": [{\"layer\": \"...\", \"text\": \"...\"}]\n}\n\nТема: " + topic + "\nДанные: " + substring(full_result, 0.0, 2000.0)
+
+  let messages = json_encode([{role: "system", content: "Ты — premium visual designer."}, {role: "user", content: llm_prompt}])
   let proxy_result = CallLLMProxy("visual", messages)
   let spec = to_string(json_get(parse_json(proxy_result), "reply", "{}"))
 
-  // Save spec as text record
   let output_path = "visuals/premium_spec_" + source_type + "_" + source_id + ".json"
   let _ = try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["premium_spec", source_type, source_id, output_path])
 
@@ -337,56 +354,69 @@ pattern GeneratePremiumSpec(source_type: String, source_id: String) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// BAR CHART — рисует bar chart на существующем PDF
+// COMPOSITION — высокоуровневые паттерны
 // ═══════════════════════════════════════════════════════════════════════
 
-// Рисует bar chart на активной странице PDF
-// id: PDF handle, x/y: top-left corner, w/h: chart area
-// categories_json: ["Cat1","Cat2",...], values_json: [10,25,...]
-pattern DrawBarChart(id: String, x: Float, y: Float, w: Float, h: Float, categories_json: String, values_json: String) -> String {
-  let categories = parse_json(categories_json)
-  let values = parse_json(values_json)
-  let n = length(values)
+// InfographicDashboard: KPI + сетка чартов
+pattern InfographicDashboard(title: String, kpi_json: String, charts_json: String) -> String {
+  let style = color_palette("energy", "light")
+  let ink = to_string(json_get(style, "ink", "#1a1a2e"))
+  let accent = to_string(json_get(style, "accent", "#c9a961"))
+  let paper = to_string(json_get(style, "paper", "#ffffff"))
 
-  if n < 1.0 then { return "Error: empty data" }
+  // Header
+  let header = svg_group(0.0, 0.0,
+    svg_rect(0.0, 0.0, 1200.0, 80.0, ink, ink, 0.0) +
+    svg_text(40.0, 50.0, substring(title, 0.0, 60.0), paper, 28.0)
+  )
 
-  // Find max value for scaling
-  let max_val = 0.0
+  // KPI row
+  let kpi_data = parse_json(kpi_json)
+  let kpi_count = length(kpi_data)
+  let kpi_width = 1200.0 / kpi_count
+  let kpi_row = ""
   let i = 0.0
-  while i < n {
-    let v = to_float(to_string(json_get(values, i, 0.0)))
-    if v > max_val then { let max_val = v }
-    let i = i + 1.0
-  }
-  if max_val == 0.0 then { let max_val = 1.0 }
-
-  // Draw axes
-  let _ = pdf_draw_line(id, x, y, x, y + h, 1.0)       // Y axis
-  let _ = pdf_draw_line(id, x, y + h, x + w, y + h, 1.0) // X axis
-
-  // Draw bars
-  let bar_width = (w - 20.0) / to_float(to_string(n))
-  let i = 0.0
-  while i < n {
-    let v = to_float(to_string(json_get(values, i, 0.0)))
-    let bar_h = (v / max_val) * (h - 30.0)
-    let bar_x = x + 10.0 + to_float(to_string(i)) * bar_width
-    let bar_y = y + h - bar_h
-
-    // Bar (filled rect)
-    let _ = pdf_draw_rect(id, bar_x, bar_y, bar_width - 4.0, bar_h, false, true)
-
-    // Value label on top
-    let _ = pdf_write_text(id, bar_x, bar_y - 12.0, to_string(json_get(values, i, "")), "Courier", 7.0)
-
-    // Category label below
-    let cat = substring(to_string(json_get(categories, i, "")), 0.0, 8.0)
-    let _ = pdf_write_text(id, bar_x, y + h + 10.0, cat, "Helvetica", 6.0)
-
+  while i < kpi_count {
+    let item = json_get(kpi_data, i)
+    let label = to_string(json_get(item, "label", ""))
+    let value = to_string(json_get(item, "value", ""))
+    let x = i * kpi_width
+    let kpi_row = kpi_row + svg_group(x, 0.0,
+      svg_rect(0.0, 0.0, kpi_width - 10.0, 60.0, accent, accent, 4.0) +
+      svg_text(10.0, 20.0, value, paper, 24.0) +
+      svg_text(10.0, 45.0, label, paper, 10.0)
+    )
     let i = i + 1.0
   }
 
-  return "ok"
+  let dashboard = svg_canvas(1200.0, 800.0,
+    header +
+    svg_group(0.0, 100.0, kpi_row)
+  )
+
+  return dashboard
+}
+
+// InfographicComparison: side-by-side
+pattern InfographicComparison(left_svg: String, right_svg: String) -> String {
+  let style = color_palette("energy", "light")
+  let ink = to_string(json_get(style, "ink", "#1a1a2e"))
+
+  let divider = svg_group(395.0, 0.0,
+    svg_line(0.0, 20.0, 0.0, 480.0, ink, 2.0)
+  )
+
+  return svg_canvas(800.0, 500.0,
+    svg_group(0.0, 0.0, left_svg) +
+    divider +
+    svg_group(410.0, 0.0, right_svg)
+  )
+}
+
+// InfographicTimeline: chain of events
+pattern InfographicTimeline(events_json: String) -> String {
+  let style = color_palette("energy", "light")
+  return diagram_timeline(parse_json(events_json), style)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -418,7 +448,6 @@ pattern HandleVisual(query: String, chat_id: String) -> String {
 
   // Direct command routing
   if contains(q, "карточк") or contains(q, "card") then {
-    // /visual-card <source_type> <source_id>
     let parts = split_by(query, " ")
     if length(parts) >= 3.0 then {
       let source_type = to_string(json_get(parts, 1, "analysis"))

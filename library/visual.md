@@ -1,17 +1,18 @@
 # Визуальный Отдел
-**Fosved Library · v2.0** (Metalogos 0.17.0 PDF-native)
+**Fosved Library · v2.0** (Metalogos Native SVG Graphics)
 
 ---
 
 ## Роль
 
-Превращает структурированные данные других отделов в **визуальные артефакты** 5 типов, используя **PDF-примитивы Metalogos 0.17.0** как основной render-движок. Поддерживает визуальный архив с эволюционирующим стилем.
+Превращает структурированные данные других отделов в **визуальные артефакты** 5 типов, используя **нативную SVG-подсистему Metalogos** (44 builtin функции) как основной render-движок. Поддерживает визуальный архив с эволюционирующим стилем.
 
 **Render stack:**
-- **Type 3 (Card), Type 4 (Reference):** прямые `pdf_*` builtins (pdf_create, pdf_draw_rect, pdf_draw_line, pdf_draw_table, pdf_write_text, pdf_save) — быстрые, template-driven, без LLM
-- **Type 1 (Compression):** LLM извлекает структуру + `pdf_*` builtins рендерят — гибридный
-- **Type 2 (Memorable):** LLM генерирует HTML/SVG + `html_to_pdf` конвертирует — максимальная свобода дизайна
-- **Type 5 (Premium Spec):** LLM генерирует JSON spec для Midjourney+Figma — ручное производство
+- **Charts (9):** `chart_bar`, `chart_line`, `chart_donut`, `chart_area`, `chart_scatter`, `chart_radar`, `chart_boxplot`, `chart_heatmap`, `chart_waterfall` — данные по категориям, временные ряды, распределения
+- **Diagrams (20):** `diagram_flowchart`, `diagram_tree`, `diagram_timeline`, `diagram_org`, `diagram_process`, `diagram_venn`, `diagram_gantt`, `diagram_er`, `diagram_pyramid`, `diagram_state_machine`, `diagram_sankey`, `diagram_brainstorm`, `diagram_comparison`, `diagram_funnel`, `diagram_matrix`, `diagram_network`, `diagram_map`, `diagram_calendar`, `diagram_cycle`, `diagram_bracket` — иерархии, процессы, структуры
+- **SVG Primitives (7):** `svg_canvas`, `svg_group`, `svg_text`, `svg_path`, `svg_rect`, `svg_circle`, `svg_line` — низкоуровневая композиция
+- **Visual Helpers (3):** `color_palette(intent, mode)`, `infographic_qa(svg)`, `html_render(html, w, h)` — палитры, QA, растеризация
+- **Composition (4):** `InfographicPoster`, `InfographicDashboard`, `InfographicComparison`, `InfographicTimeline` — высокоуровневые паттерны
 
 **Базовый принцип:** хорошая инфографика — это компрессия понимания. Если за 5 секунд получил суть — работает. Если нужно 30 секунд вчитываться — это документ.
 
@@ -125,21 +126,59 @@
 _(пополняется через `/visual-debrief | <текст>` после значимых сессий)_
 
 ---
-## Metalogos Builtins Used
+## Metalogos SVG Builtins (ADR-0102)
 
-| Builtin | Применение |
-|---|---|
-| `pdf_create()` | Создание PDF-handle |
-| `pdf_add_page(id, w, h)` | Добавление страницы (A4, Card, Landscape) |
-| `pdf_write_text(id, x, y, text, font, size)` | Типографика (Helvetica, Courier, Times) |
-| `pdf_draw_rect(id, x, y, w, h, stroke, fill)` | Прямоугольники: хедеры, бары, секции |
-| `pdf_draw_line(id, x1, y1, x2, y2, width)` | Линии: оси, разделители |
-| `pdf_draw_table(id, x, y, cols, rows, style)` | Таблицы: key-value, данные |
-| `pdf_save(id, path)` | Сохранение PDF |
-| `html_to_pdf(html, path)` | HTML/SVG → PDF (Type 2 Memorable) |
-| `pdf_add_image(id, x, y, path)` | Вставка PNG/JPEG в PDF |
-| `pdf_set_page_header/footer(id, text)` | Колонтитулы |
-| `pdf_watermark(id, text)` | Водяной знак (DRAFT, CONFIDENTIAL) |
+### Charts (§4.19) — данные по категориям/времени
 
----
-**End of profile visual.md v2.0**
+| Builtin | Форма данных | Возвращает |
+|---|---|---|
+| `chart_bar(data, style?)` | `List<Struct{label,value}>` | SVG |
+| `chart_line(data, style?)` | `List<Struct{label,value}>` | SVG |
+| `chart_donut(data, style?)` | `List<Struct{label,value}>` | SVG |
+| `chart_area(data, style?)` | `List<Struct{label,value}>` | SVG |
+| `chart_scatter(data, style?)` | `List<Struct{x,y,label?}>` | SVG |
+| `chart_radar(data, style?)` | `Struct{axes,series}` | SVG |
+| `chart_boxplot(data, style?)` | `List<Struct{label,min,q1,median,q3,max}>` | SVG |
+| `chart_heatmap(data, style?)` | `List<Struct{row,col,value}>` | SVG |
+| `chart_waterfall(data, style?)` | `List<Struct{label,value}>` | SVG |
+
+### Diagrams (§4.19) — иерархии/процессы/структуры
+
+| Builtin | Форма данных | Возвращает |
+|---|---|---|
+| `diagram_flowchart(data, style?)` | `Struct{nodes:[{id,label}],edges:[{from,to,label?}]}` | SVG |
+| `diagram_tree(data, style?)` | `Struct{nodes,edges}` | SVG |
+| `diagram_timeline(data, style?)` | `List<Struct{date,label,description?}>` | SVG |
+| `diagram_org(data, style?)` | `Struct{nodes,edges}` | SVG |
+| `diagram_process(data, style?)` | `List<Struct{label}>` | SVG |
+| `diagram_venn(data, style?)` | `Struct{labels,sizes}` | SVG |
+| `diagram_gantt(data, style?)` | `List<Struct{label,start,end,progress?}>` | SVG |
+| `diagram_pyramid(data, style?)` | `List<Struct{label,value}>` | SVG |
+
++ `diagram_er`, `diagram_state_machine`, `diagram_sankey`, `diagram_brainstorm`, `diagram_comparison`, `diagram_funnel`, `diagram_matrix`, `diagram_network`, `diagram_map`, `diagram_calendar`, `diagram_cycle`, `diagram_bracket`
+
+### SVG Primitives (§4.19) — низкоуровневая композиция
+
+| Builtin | Параметры | Возвращает |
+|---|---|---|
+| `svg_canvas(w, h, content?)` | ширина, высота, содержимое | SVG root |
+| `svg_group(x, y, content?)` | смещение + содержимое | `<g>` элемент |
+| `svg_text(x, y, text, color?, size?)` | позиция + текст | `<text>` элемент |
+| `svg_path(d, color?, width?)` | SVG path data | `<path>` элемент |
+| `svg_rect(x, y, w, h, fill?, stroke?, rx?)` | прямоугольник | `<rect>` элемент |
+| `svg_circle(cx, cy, r, fill?, stroke?)` | окружность | `<circle>` элемент |
+| `svg_line(x1, y1, x2, y2, color?, width?)` | линия | `<line>` элемент |
+
+### Visual Helpers (§4.20)
+
+| Builtin | Параметры | Возвращает |
+|---|---|---|
+| `color_palette(intent, mode?)` | intent ∈ {calm,tension,energy,authority,warmth}, mode ∈ {light,dark} | `Struct{paper,ink,accent,muted,rule}` |
+| `infographic_qa(svg)` | SVG строка | `Struct{passed,warnings,checks_run}` |
+| `html_render(html, w?, h?)` | HTML + размеры | data:image/png;base64,... |
+
+### Безопасность
+
+- Все текстовые входы автоматически экранируются рантаймом
+- `svg_path` проверяет на инъекцию (script/event handlers) — ошибка компиляции, не тихий пропуск
+- `infographic_qa` проверяет WCAG контраст, плотность, наличие viewBox, отсутствие скриптов
