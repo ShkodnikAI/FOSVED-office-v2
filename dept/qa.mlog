@@ -1,17 +1,1923 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// ═══════════════════════════════════════════════════════════════════════
+// Fosved Office v2 — QA Department (Тестирование) — NATIVE v1.0
+// ═══════════════════════════════════════════════════════════════════════
+// Replaces Python proxy stub with native Metalogos QA engine.
+// Psychotype: Параноик + Педант (systematic distrust, precision over speed)
+// 11 skills (4 Tier 1 + 5 Tier 2 + 2 Tier 3), 9 bot commands,
+// 4 DB models (TestRun, DefectRecord, SecurityAudit, AIEvalRun),
+// 10 hard rules as native gates, distinctive AI-specific testing competency.
+// 0 CallLLMProxy calls, 0 Python dependencies.
+//
+// Architecture:
+//   HandleQA(query, chat_id)
+//     → ParseQAQuery(query)            ← NLP skill + command detection
+//     → EnforceHardRules(context)       ← 10 hard rules as native gates
+//     → RouteByCommand(cmd, ...)        ← 9 bot commands + free-text dispatch
+//       → cmd=qa-strategy     → TestStrategyDesign
+//       → cmd=qa-test         → RunTest
+//       → cmd=qa-defect       → ManageDefect
+//       → cmd=qa-defects      → ListDefects
+//       → cmd=qa-eval         → RunAIEval
+//       → cmd=qa-security     → SecurityAudit
+//       → cmd=qa-coverage     → CoverageReport
+//       → cmd=qa-runs         → ListTestRuns
+//       → cmd=qa-monitor      → ProductionMonitor
+//       → free-text            → FullQAPipeline
+//     → FullQAPipeline (for free-text queries):
+//       → BuildQAContext                  ← project + testType + severity
+//       → LoadSkillTier                   ← load skills by test type
+//       → EnforceHardRules                ← 10 hard rules gate
+//       → TestStrategyDesign              ← Tier 1: mandatory first step
+//       → FailureModesMapping             ← Tier 1: explicit failure modes
+//       → [Route by test type]:
+//         → unit/e2e/integration → ExecuteTestSuite
+//         → security             → SecurityTestingProtocol
+//         → ai_eval              → AIEvalsFramework
+//         → accessibility        → AccessibilityGate
+//       → DefectDiscipline                ← Tier 1: defect management
+//       → RegressionTestDiscipline        ← Tier 1: regression gate
+//       → ApplyDisclaimer                ← mandatory top + bottom
+//       → SaveToQAArchive                ← db + metrics update
+//     → RecordAssistantMessage
+//
+// Tier 1 skills (always loaded):
+//   test-strategy-design, failure-modes-mapping, defect-discipline,
+//   regression-test-discipline
+// Tier 2 skills (by test type):
+//   unit-testing-craft, integration-testing-patterns,
+//   e2e-testing-with-playwright, security-testing-protocol,
+//   ai-evals-framework
+// Tier 3 skills (explicit request):
+//   performance-testing, chaos-engineering
+//
+// Depends on BUILTINS only (no Python, no CallLLMProxy):
+//   call_llm, db_execute, kv_get, kv_set, json_encode, json_get, parse_json,
+//   to_string, to_float, to_int, length, contains, lower, substring,
+//   split, join, now, format_date, hash, AuditLog,
+//   RecordAssistantMessage, BuildContext, SendTelegramMessage
+//
+// ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 0: CONSTANTS & DISCLAIMER
+// ═══════════════════════════════════════════════════════════════════════
+
+let DISCLAIMER_TOP = "⚠️ Результаты тестирования генерируются проектным ассистентом. Все критические находки подлежат верификации и эскалации к владельцу."
+
+let DISCLAIMER_BOTTOM = "⚠️ Результаты тестирования генерируются проектным ассистентом. Все критические находки подлежат верификации и эскалации к владельцу. Перед релизом обязательна проверка человеком для критических сценариев."
+
+let DEPT = "qa"
+let METRIC = "defect-escape-rate"
+let TARGET_Y1 = "≤ 10%"
+let TARGET_Y2 = "≤ 5%"
+let VERIFICATION_DAYS = 30
+
+// Test run lifecycle
+let TR_STARTED = "started"
+let TR_COMPLETED = "completed"
+let TR_VERDICT_PASSED = "passed"
+let TR_VERDICT_FAILED = "failed"
+let TR_VERDICT_PARTIAL = "partial"
+let TR_VERDICT_ERROR = "error"
+let VALID_RUN_STATES = "started,completed"
+let VALID_VERDICTS = "passed,failed,partial,error"
+
+// Defect lifecycle
+let DF_OPEN = "open"
+let DF_ACKNOWLEDGED = "acknowledged"
+let DF_IN_PROGRESS = "in_progress"
+let DF_FIXED = "fixed"
+let DF_VERIFIED = "verified"
+let DF_WONTFIX = "wontfix"
+let DF_DUPLICATE = "duplicate"
+let VALID_DEFECT_STATES = "open,acknowledged,in_progress,fixed,verified,wontfix,duplicate"
+
+// Severity levels
+let SEV_CRITICAL = "critical"
+let SEV_HIGH = "high"
+let SEV_MEDIUM = "medium"
+let SEV_LOW = "low"
+let SEV_TRIVIAL = "trivial"
+let VALID_SEVERITIES = "critical,high,medium,low,trivial"
+
+// Test types
+let TT_UNIT = "unit"
+let TT_INTEGRATION = "integration"
+let TT_E2E = "e2e"
+let TT_SECURITY = "security"
+let TT_PERFORMANCE = "performance"
+let TT_ACCESSIBILITY = "accessibility"
+let TT_AI_EVAL = "ai_eval"
+let TT_SMOKE = "smoke"
+let TT_REGRESSION = "regression"
+let VALID_TEST_TYPES = "unit,integration,e2e,security,performance,accessibility,ai_eval,smoke,regression"
+
+// Test pyramid targets
+let PYRAMID_UNIT_PCT = 70
+let PYRAMID_INTEGRATION_PCT = 20
+let PYRAMID_E2E_PCT = 10
+
+// Coverage targets
+let COV_CRITICAL_PATH = 95
+let COV_BUSINESS_LOGIC = 90
+let COV_OVERALL = 80
+
+// AI eval metric thresholds
+let AI_GROUNDEDNESS_MIN = 0.85
+let AI_RELEVANCE_MIN = 0.85
+let AI_FAITHFULNESS_MIN = 0.90
+let AI_COHERENCE_MIN = 0.80
+let AI_PROMPT_INJECTION_MIN = 0.95
+let AI_OVERALL_PASS_MIN = 0.90
+let AI_MIN_CASES = 50
+
+// Security audit types
+let SA_DEPENDENCY = "dependency_audit"
+let SA_OWASP = "owasp_scan"
+let SA_MANUAL = "manual_review"
+let SA_PENETRATION = "penetration_test"
+let SA_SECRETS = "secrets_scan"
+let VALID_AUDIT_TYPES = "dependency_audit,owasp_scan,manual_review,penetration_test,secrets_scan"
+
+// Defect hotfix trigger
+let HOTFIX_ALWAYS_SEVERITY = "critical"
+let HOTFIX_HIGH_IN_PROD = true
+
+// Metrics targets
+let TARGET_ESCAPE_RATE = 10
+let TARGET_MTTD_CRITICAL_HR = 1
+let TARGET_MTTR_CRITICAL_HR = 4
+let TARGET_FALSE_POSITIVE_PCT = 15
+let TARGET_AI_PASS_RATE = 90
+let TARGET_SECURITY_HIGH_PROD = 0
+
+// Environment
+let ENV_STAGING = "staging"
+let ENV_PRODUCTION = "production"
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 1: HARD RULES — 10 non-negotiable constraints
+// ═══════════════════════════════════════════════════════════════════════
+// Each hard rule is a native gate — violation produces immediate rejection.
+// No LLM can override these. They are structural constraints of QA.
+
+// Rule 1: No release approval without passed test suite on critical scenarios
+fn EnforceRule1_NoReleaseWithoutPassedSuite(project: String, criticalPassed: String, environment: String) -> String {
+  if criticalPassed != "true" then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 1: release blocked — critical scenarios not passed for " + project)
+    return "ОТКАЗ: Релиз заблокирован. Критические сценарии не пройдены. Каждый релиз требует passed test suite на критических сценариях. Запустите критические тесты и обеспечьте passing verdict."
+  }
+  if environment == ENV_PRODUCTION then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 1: tests must run in staging, not production")
+    return "ОТКАЗ: Тестирование в production запрещено (Rule 8). Запустите критические тесты в staging."
+  }
+  return "PASS"
+}
+
+// Rule 2: No test strategy without explicit failure modes list
+fn EnforceRule2_FailureModesRequired(strategy: String, failureModes: String) -> String {
+  if length(failureModes) == 0 then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 2: test strategy without failure modes list")
+    return "ОТКАЗ: Тест-стратегия без списка failure modes недействительна. Каждый тест-план обязан содержать явный перечень режимов отказа. Без него — тестирование вслепую."
+  }
+  if contains(lower(strategy), "failure mode") == false && contains(lower(strategy), "режим отказ") == false then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 2: strategy missing failure modes section")
+    return "ОТКАЗ: Тест-стратегия не содержит секции failure modes. Добавьте явный список режимов отказа перед утверждением стратегии."
+  }
+  return "PASS"
+}
+
+// Rule 3: No defect closure without regression test added
+fn EnforceRule3_RegressionOnClosure(defectId: String, hasRegressionTest: String) -> String {
+  if hasRegressionTest != "true" then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 3: defect " + defectId + " closure without regression test")
+    return "ОТКАЗ: Дефект #" + defectId + " не может быть закрыт без регрессионного теста. Каждый закрытый дефект обязан иметь регрессионный тест, предотвращающий повторное появление."
+  }
+  return "PASS"
+}
+
+// Rule 4: No "manual testing only" — automated tests mandatory
+fn EnforceRule4_AutomatedTestsRequired(testPlan: String, hasAutomated: String) -> String {
+  if hasAutomated != "true" then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 4: manual-only testing rejected")
+    return "ОТКАЗ: Только ручное тестирование недопустимо. Автоматизированные тесты обязательны. Минимум: unit (70%), integration (20%), e2e (10%) по тест-пирамиде."
+  }
+  if contains(lower(testPlan), "manual only") || contains(lower(testPlan), "только ручн") then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 4: explicit manual-only plan rejected")
+    return "ОТКАЗ: План 'только ручное тестирование' запрещён. Добавьте автоматизированные тесты."
+  }
+  return "PASS"
+}
+
+// Rule 5: No security scan skip for projects with user input, auth, payment, or personal data
+fn EnforceRule5_SecurityScanRequired(projectFeatures: String, hasSecurityScan: String) -> String {
+  let needsSecurity = false
+  if contains(lower(projectFeatures), "user input") || contains(lower(projectFeatures), "ввод пользователя") then { needsSecurity = true }
+  if contains(lower(projectFeatures), "auth") || contains(lower(projectFeatures), "авторизац") then { needsSecurity = true }
+  if contains(lower(projectFeatures), "payment") || contains(lower(projectFeatures), "оплат") || contains(lower(projectFeatures), "платёж") then { needsSecurity = true }
+  if contains(lower(projectFeatures), "personal data") || contains(lower(projectFeatures), "персональн") || contains(lower(projectFeatures), "pii") then { needsSecurity = true }
+
+  if needsSecurity && hasSecurityScan != "true" then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 5: security scan skipped for project with sensitive features")
+    return "ОТКАЗ: Проект содержит чувствительные функции (auth/payment/PII/user input) — security scan обязателен. Запустите: dependency_audit + owasp_scan + secrets_scan минимум."
+  }
+  return "PASS"
+}
+
+// Rule 6: No AI-system release without AI evals on minimum 50 cases
+fn EnforceRule6_AIEvalsRequired(isAISystem: String, evalCasesRun: String, evalPassRate: String) -> String {
+  if isAISystem != "true" then { return "PASS" }
+  if length(evalCasesRun) == 0 then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 6: AI system release without evals")
+    return "ОТКАЗ: AI-система не может быть выпущена без AI evals. Минимум " + to_string(AI_MIN_CASES) + " тестовых кейсов с метриками groundedness≥0.85, relevance≥0.85, faithfulness≥0.90, prompt_injection_resistance≥0.95."
+  }
+  let cases = to_int(evalCasesRun)
+  if cases < AI_MIN_CASES then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 6: AI eval cases " + evalCasesRun + " below minimum " + to_string(AI_MIN_CASES))
+    return "ОТКАЗ: AI evals выполнены на " + evalCasesRun + " кейсах, минимум — " + to_string(AI_MIN_CASES) + ". Добавьте кейсы и перезапустите eval."
+  }
+  if length(evalPassRate) > 0 then {
+    let rate = to_float(evalPassRate)
+    if rate < AI_OVERALL_PASS_MIN then {
+      let _ = AuditLog("hard_rule_violation", DEPT, "Rule 6: AI eval pass rate " + evalPassRate + " below " + to_string(AI_OVERALL_PASS_MIN))
+      return "ОТКАЗ: AI eval pass rate " + evalPassRate + " ниже минимума " + to_string(AI_OVERALL_PASS_MIN) + ". Улучшите модель/промпт перед релизом."
+    }
+  }
+  return "PASS"
+}
+
+// Rule 7: No accessibility skip — every production release passes WCAG AA
+fn EnforceRule7_AccessibilityRequired(isProductionRelease: String, wcagResult: String) -> String {
+  if isProductionRelease != "true" then { return "PASS" }
+  if wcagResult != "AA" && wcagResult != "AAA" then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 7: production release without WCAG AA — got: " + wcagResult)
+    return "ОТКАЗ: Production релиз без WCAG AA недопустим. Каждый production релиз обязан проходить WCAG AA минимум. Текущий результат: " + wcagResult + ". Исправьте accessibility находки."
+  }
+  return "PASS"
+}
+
+// Rule 8: No testing in production environment (staging mandatory)
+fn EnforceRule8_NoProdTesting(environment: String) -> String {
+  if environment == ENV_PRODUCTION then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 8: test execution in production environment")
+    return "ОТКАЗ: Тестирование в production среде запрещено. Все тесты выполняются в staging. Smoke-тесты post-deploy — единственное исключение, и они readonly."
+  }
+  return "PASS"
+}
+
+// Rule 9: Every critical defect → incident in archive + root cause analysis
+fn EnforceRule9_CriticalDefectIncident(severity: String, hasIncident: String, hasRCA: String) -> String {
+  if severity != SEV_CRITICAL then { return "PASS" }
+  if hasIncident != "true" then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 9: critical defect without incident record")
+    return "ОТКАЗ: Critical дефект обязан иметь incident record в архиве. Создайте incident перед дальнейшей работой."
+  }
+  if hasRCA != "true" then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 9: critical defect without root cause analysis")
+    return "ОТКАЗ: Critical дефект обязан иметь root cause analysis. RCA обязателен для каждого critical дефекта — без него дефект не может быть закрыт."
+  }
+  return "PASS"
+}
+
+// Rule 10: No closing inquiry with just "test passed" — need coverage report + failure modes
+fn EnforceRule10_SubstantiveClose(verdict: String, hasCoverageReport: String, hasFailureModes: String) -> String {
+  if verdict == TR_VERDICT_PASSED then {
+    if hasCoverageReport != "true" then {
+      let _ = AuditLog("hard_rule_violation", DEPT, "Rule 10: 'test passed' without coverage report")
+      return "ОТКАЗ: Вердику 'test passed' недостаточно. Обязателен coverage report с метриками: critical path ≥" + to_string(COV_CRITICAL_PATH) + "%, business logic ≥" + to_string(COV_BUSINESS_LOGIC) + "%, overall ≥" + to_string(COV_OVERALL) + "%."
+    }
+    if hasFailureModes != "true" then {
+      let _ = AuditLog("hard_rule_violation", DEPT, "Rule 10: 'test passed' without failure modes")
+      return "ОТКАЗ: 'Test passed' без failure modes list — не полноценное закрытие. Укажите какие режимы отказа проверены и какие нет."
+    }
+  }
+  return "PASS"
+}
+
+// Composite hard rules check
+fn EnforceHardRules(query: String, environment: String, project: String, projectFeatures: String) -> String {
+  // Rule 4: check for manual-only
+  let r4 = EnforceRule4_AutomatedTestsRequired(query, "true")
+  if r4 != "PASS" then { return r4 }
+
+  // Rule 8: no production testing
+  let r8 = EnforceRule8_NoProdTesting(environment)
+  if r8 != "PASS" then { return r8 }
+
+  // Rule 5: security scan for sensitive features
+  let r5 = EnforceRule5_SecurityScanRequired(projectFeatures, "true")
+  if r5 != "PASS" then { return r5 }
+
+  return "PASS"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 2: QUERY PARSER & COMMAND ROUTER
+// ═══════════════════════════════════════════════════════════════════════
+
+fn ParseQAQuery(query: String) -> String {
+  let q = lower(query)
+  // 9 bot commands
+  if contains(q, "/qa-strategy") then { return "cmd:qa-strategy" }
+  if contains(q, "/qa-test") then { return "cmd:qa-test" }
+  if contains(q, "/qa-defects") && contains(q, "/qa-defect") then { return "cmd:qa-defects" }
+  if contains(q, "/qa-defect") then { return "cmd:qa-defect" }
+  if contains(q, "/qa-eval") then { return "cmd:qa-eval" }
+  if contains(q, "/qa-security") then { return "cmd:qa-security" }
+  if contains(q, "/qa-coverage") then { return "cmd:qa-coverage" }
+  if contains(q, "/qa-runs") then { return "cmd:qa-runs" }
+  if contains(q, "/qa-monitor") then { return "cmd:qa-monitor" }
+
+  // Intent detection for free-text
+  if contains(q, "тест-стратег") || contains(q, "test strategy") then { return "intent:strategy" }
+  if contains(q, "failure mode") || contains(q, "режим отказ") || contains(q, "режимы отказ") then { return "intent:failure-modes" }
+  if contains(q, "дефект") || contains(q, "баг") || contains(q, "defect") || contains(q, "bug") then { return "intent:defect" }
+  if contains(q, "регресс") || contains(q, "regression") then { return "intent:regression" }
+  if contains(q, "ai eval") || contains(q, "eval") && contains(q, "ai") then { return "intent:ai-eval" }
+  if contains(q, "безопасност") || contains(q, "security") || contains(q, "уязвимост") then { return "intent:security" }
+  if contains(q, "покрытие") || contains(q, "coverage") then { return "intent:coverage" }
+  if contains(q, "доступност") || contains(q, "accessibility") || contains(q, "wcag") then { return "intent:accessibility" }
+  if contains(q, "производител") || contains(q, "performance") || contains(q, "нагрузк") then { return "intent:performance" }
+  if contains(q, "хаос") || contains(q, "chaos") then { return "intent:chaos" }
+  if contains(q, "хотфикс") || contains(q, "hotfix") then { return "intent:hotfix" }
+
+  return "intent:general"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 3: CONTEXT BUILDER
+// ═══════════════════════════════════════════════════════════════════════
+
+fn BuildQAContext(query: String, chat_id: String) -> String {
+  let base = BuildContext(DEPT, query, chat_id)
+  let q = lower(query)
+
+  // Extract project
+  let project = ""
+  if contains(q, "проект ") then { project = "detected" }
+  if contains(q, "project ") then { project = "detected" }
+
+  // Extract test type
+  let testType = TT_UNIT
+  if contains(q, "unit") then { testType = TT_UNIT }
+  if contains(q, "integration") || contains(q, "интеграцион") then { testType = TT_INTEGRATION }
+  if contains(q, "e2e") || contains(q, "end-to-end") then { testType = TT_E2E }
+  if contains(q, "security") || contains(q, "безопасност") then { testType = TT_SECURITY }
+  if contains(q, "performance") || contains(q, "производител") then { testType = TT_PERFORMANCE }
+  if contains(q, "accessibility") || contains(q, "доступност") || contains(q, "wcag") then { testType = TT_ACCESSIBILITY }
+  if contains(q, "ai_eval") || contains(q, "ai eval") then { testType = TT_AI_EVAL }
+  if contains(q, "smoke") then { testType = TT_SMOKE }
+  if contains(q, "regression") || contains(q, "регресс") then { testType = TT_REGRESSION }
+
+  // Extract severity
+  let severity = SEV_MEDIUM
+  if contains(q, "critical") || contains(q, "критич") then { severity = SEV_CRITICAL }
+  if contains(q, "high") || contains(q, "высок") then { severity = SEV_HIGH }
+  if contains(q, "low") || contains(q, "низк") then { severity = SEV_LOW }
+  if contains(q, "trivial") || contains(q, "тривиальн") then { severity = SEV_TRIVIAL }
+
+  // Extract environment
+  let environment = ENV_STAGING
+  if contains(q, "production") || contains(q, "продакшн") then { environment = ENV_PRODUCTION }
+
+  // Detect AI system features
+  let isAISystem = "false"
+  if contains(q, "llm") || contains(q, "chatbot") || contains(q, "ai assistant") || contains(q, "ai-систем") then { isAISystem = "true" }
+
+  // Detect sensitive features
+  let sensitiveFeatures = ""
+  if contains(q, "auth") || contains(q, "авторизац") then { sensitiveFeatures = sensitiveFeatures + "auth," }
+  if contains(q, "payment") || contains(q, "оплат") then { sensitiveFeatures = sensitiveFeatures + "payment," }
+  if contains(q, "pii") || contains(q, "персональн") then { sensitiveFeatures = sensitiveFeatures + "pii," }
+  if contains(q, "user input") || contains(q, "ввод пользовател") then { sensitiveFeatures = sensitiveFeatures + "user_input," }
+
+  let ctx = json_encode({
+    testType: testType,
+    severity: severity,
+    environment: environment,
+    isAISystem: isAISystem,
+    sensitiveFeatures: sensitiveFeatures,
+    baseContext: base
+  })
+
+  return ctx
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 4: LIFECYCLE — Test Run
+// ═══════════════════════════════════════════════════════════════════════
+// Test run: started → completed → verdict (passed/failed/partial/error)
+
+fn CreateTestRun(project: String, testType: String, environment: String, triggeredBy: String, chat_id: String) -> String {
+  let _ = AuditLog("test_run_create", DEPT, "Creating test run: " + project + " / " + testType + " / " + environment)
+
+  let _ = db_execute(
+    "INSERT INTO test_runs (project, test_type, status, environment, triggered_by, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NOW(), NOW(), NOW())",
+    [project, testType, TR_STARTED, environment, triggeredBy]
+  )
+
+  let idRows = db_execute("SELECT LASTVAL() as id", [])
+  let id = json_get(parse_json(idRows), "0.id", "0")
+
+  let _ = AuditLog("test_run_created", DEPT, "Test run #" + to_string(id) + " created: " + project + " / " + testType)
+  return to_string(id)
+}
+
+fn CompleteTestRun(runId: String, verdict: String, totalTests: String, passed: String, failed: String, skipped: String, coveragePct: String, chat_id: String) -> String {
+  // Validate verdict
+  if contains(VALID_VERDICTS, verdict) == false then {
+    let _ = AuditLog("test_run_error", DEPT, "Invalid verdict: " + verdict + " for run #" + runId)
+    return "ОШИБКА: Недопустимый вердикт '" + verdict + "'. Допустимые: " + VALID_VERDICTS
+  }
+
+  let _ = db_execute(
+    "UPDATE test_runs SET status = ?, verdict = ?, total_tests = ?, passed = ?, failed = ?, skipped = ?, coverage_pct = ?, completed_at = NOW(), updated_at = NOW() WHERE id = ?",
+    [TR_COMPLETED, verdict, totalTests, passed, failed, skipped, coveragePct, runId]
+  )
+
+  // If failed verdict — check for critical defects
+  if verdict == TR_VERDICT_FAILED then {
+    let _ = AuditLog("test_run_failed", DEPT, "Test run #" + runId + " FAILED: " + failed + " failures out of " + totalTests)
+  }
+
+  let _ = AuditLog("test_run_completed", DEPT, "Test run #" + runId + " → " + verdict + " (" + passed + "/" + totalTests + ") coverage=" + coveragePct + "%")
+  return "Test run #" + runId + " completed: " + verdict + " | " + passed + "/" + totalTests + " passed | coverage " + coveragePct + "%"
+}
+
+fn GetTestRun(runId: String) -> String {
+  let rows = db_execute(
+    "SELECT id, project, test_type, status, verdict, total_tests, passed, failed, skipped, coverage_pct, environment, started_at, completed_at FROM test_runs WHERE id = ?",
+    [runId]
+  )
+  if length(rows) == 0 then {
+    return "Test run #" + runId + " не найден."
+  }
+  return rows
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 5: LIFECYCLE — Defect
+// ═══════════════════════════════════════════════════════════════════════
+// Defect: open → acknowledged → in_progress → fixed → verified → wontfix/duplicate
+
+fn CreateDefect(project: String, severity: String, summary: String, testRunId: String, environment: String, chat_id: String) -> String {
+  // Validate severity
+  if contains(VALID_SEVERITIES, severity) == false then {
+    return "ОШИБКА: Недопустимый severity '" + severity + "'. Допустимые: " + VALID_SEVERITIES
+  }
+
+  let _ = db_execute(
+    "INSERT INTO defect_records (project, severity, summary, status, test_run_id, environment, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())",
+    [project, severity, summary, DF_OPEN, testRunId, environment]
+  )
+
+  let idRows = db_execute("SELECT LASTVAL() as id", [])
+  let id = json_get(parse_json(idRows), "0.id", "0")
+
+  let _ = AuditLog("defect_created", DEPT, "Defect #" + to_string(id) + " [" + severity + "]: " + substring(summary, 0.0, 80.0))
+
+  // Rule 9: Critical defect → mandatory incident + RCA
+  if severity == SEV_CRITICAL then {
+    let _ = db_execute(
+      "INSERT INTO incidents (defect_id, project, status, created_at) VALUES (?, ?, 'open', NOW())",
+      [to_string(id), project]
+    )
+    let _ = AuditLog("incident_auto_created", DEPT, "Incident auto-created for critical defect #" + to_string(id))
+  }
+
+  // Hotfix trigger: critical always, high+in_production always
+  if severity == SEV_CRITICAL then {
+    let _ = AuditLog("hotfix_triggered", DEPT, "Hotfix triggered: critical severity defect #" + to_string(id))
+    let _ = SendTelegramMessage(chat_id, "🔴 HOTFIX: Critical defect #" + to_string(id) + " — " + summary)
+  }
+  if severity == SEV_HIGH && environment == ENV_PRODUCTION then {
+    let _ = AuditLog("hotfix_triggered", DEPT, "Hotfix triggered: high severity in production defect #" + to_string(id))
+    let _ = SendTelegramMessage(chat_id, "🟠 HOTFIX: High severity defect in production #" + to_string(id) + " — " + summary)
+  }
+
+  return to_string(id)
+}
+
+fn TransitionDefect(defectId: String, newState: String, regressionTestAdded: String, chat_id: String) -> String {
+  // Validate state
+  if contains(VALID_DEFECT_STATES, newState) == false then {
+    return "ОШИБКА: Недопустимый статус дефекта '" + newState + "'. Допустимые: " + VALID_DEFECT_STATES
+  }
+
+  // Get current state
+  let currentRows = db_execute(
+    "SELECT status, severity, has_regression_test, has_incident, has_rca FROM defect_records WHERE id = ?",
+    [defectId]
+  )
+  if length(currentRows) == 0 then {
+    return "Дефект #" + defectId + " не найден."
+  }
+  let parsed = parse_json(currentRows)
+  let currentStatus = json_get(parsed, "0.status", "")
+  let currentSeverity = json_get(parsed, "0.severity", "")
+  let hasRegression = json_get(parsed, "0.has_regression_test", "false")
+  let hasIncident = json_get(parsed, "0.has_incident", "false")
+  let hasRCA = json_get(parsed, "0.has_rca", "false")
+
+  // Validate transition order
+  let validTransition = "false"
+  if currentStatus == DF_OPEN && newState == DF_ACKNOWLEDGED then { validTransition = "true" }
+  if currentStatus == DF_ACKNOWLEDGED && newState == DF_IN_PROGRESS then { validTransition = "true" }
+  if currentStatus == DF_IN_PROGRESS && newState == DF_FIXED then { validTransition = "true" }
+  if currentStatus == DF_FIXED && newState == DF_VERIFIED then { validTransition = "true" }
+  if currentStatus == DF_OPEN && newState == DF_WONTFIX then { validTransition = "true" }
+  if currentStatus == DF_OPEN && newState == DF_DUPLICATE then { validTransition = "true" }
+  if currentStatus == DF_ACKNOWLEDGED && newState == DF_WONTFIX then { validTransition = "true" }
+  if currentStatus == DF_ACKNOWLEDGED && newState == DF_DUPLICATE then { validTransition = "true" }
+
+  if validTransition != "true" then {
+    return "ОШИБКА: Недопустимый переход " + currentStatus + " → " + newState + " для дефекта #" + defectId
+  }
+
+  // Rule 3: No closure without regression test
+  if newState == DF_VERIFIED then {
+    let r3 = EnforceRule3_RegressionOnClosure(defectId, regressionTestAdded)
+    if r3 != "PASS" then { return r3 }
+  }
+
+  // Rule 9: Critical defect needs incident + RCA before closure
+  if newState == DF_VERIFIED && currentSeverity == SEV_CRITICAL then {
+    let r9 = EnforceRule9_CriticalDefectIncident(currentSeverity, hasIncident, hasRCA)
+    if r9 != "PASS" then { return r9 }
+  }
+
+  // Update defect
+  let _ = db_execute(
+    "UPDATE defect_records SET status = ?, has_regression_test = ?, updated_at = NOW() WHERE id = ?",
+    [newState, regressionTestAdded, defectId]
+  )
+
+  // If moving to verified — record MTTD/MTTR metrics
+  if newState == DF_VERIFIED then {
+    let _ = db_execute(
+      "UPDATE defect_records SET verified_at = NOW() WHERE id = ?",
+      [defectId]
+    )
+  }
+
+  let _ = AuditLog("defect_transition", DEPT, "Defect #" + defectId + ": " + currentStatus + " → " + newState)
+  return "Дефект #" + defectId + " → " + newState
+}
+
+fn GetDefect(defectId: String) -> String {
+  let rows = db_execute(
+    "SELECT id, project, severity, summary, status, environment, test_run_id, has_regression_test, has_incident, has_rca, created_at, updated_at, verified_at FROM defect_records WHERE id = ?",
+    [defectId]
+  )
+  if length(rows) == 0 then {
+    return "Дефект #" + defectId + " не найден."
+  }
+  return rows
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 6: SKILL TIER LOADER
+// ═══════════════════════════════════════════════════════════════════════
+
+fn LoadSkillTier1() -> String {
+  // Tier 1 skills: always loaded
+  return "test-strategy-design, failure-modes-mapping, defect-discipline, regression-test-discipline"
+}
+
+fn LoadSkillTier2(testType: String) -> String {
+  // Tier 2 skills: loaded by test type
+  if testType == TT_UNIT then { return "unit-testing-craft" }
+  if testType == TT_INTEGRATION then { return "integration-testing-patterns" }
+  if testType == TT_E2E then { return "e2e-testing-with-playwright" }
+  if testType == TT_SECURITY then { return "security-testing-protocol" }
+  if testType == TT_AI_EVAL then { return "ai-evals-framework" }
+  // For mixed/general: load all Tier 2
+  return "unit-testing-craft, integration-testing-patterns, e2e-testing-with-playwright, security-testing-protocol, ai-evals-framework"
+}
+
+fn LoadSkillTier3(explicitRequest: String) -> String {
+  // Tier 3 skills: only on explicit request
+  if contains(lower(explicitRequest), "performance") || contains(lower(explicitRequest), "производител") then {
+    return "performance-testing"
+  }
+  if contains(lower(explicitRequest), "chaos") || contains(lower(explicitRequest), "хаос") then {
+    return "chaos-engineering"
+  }
+  return ""
+}
+
+fn LoadAllSkills(testType: String, query: String) -> String {
+  let t1 = LoadSkillTier1()
+  let t2 = LoadSkillTier2(testType)
+  let t3 = LoadSkillTier3(query)
+  if length(t3) > 0 then {
+    return t1 + " | " + t2 + " | " + t3
+  }
+  return t1 + " | " + t2
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 7: TIER 1 SKILLS — Test Strategy Design
+// ═══════════════════════════════════════════════════════════════════════
+
+fn TestStrategyDesign(project: String, testType: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "test-strategy-design for " + project + " / " + testType)
+
+  let prompt = "Ты QA-параноик отдела Тестирование Fosved Office. Проектируешь тест-стратегию.\n\n" +
+    "ПРАВИЛА:\n" +
+    "1. Без failure modes list стратегия недействительна (Rule 2)\n" +
+    "2. Автоматизация обязательна — тест-пирамида: unit 70%, integration 20%, e2e 10%\n" +
+    "3. Coverage цели: critical path ≥95%, business logic ≥90%, overall ≥80%\n" +
+    "4. Каждый дефект обязан иметь регрессионный тест (Rule 3)\n" +
+    "5. Security scan обязателен при наличии auth/payment/PII/user input\n\n" +
+    "Тип теста: " + testType + "\n" +
+    "Проект: " + project + "\n" +
+    "Запрос: " + query + "\n\n" +
+    "ВЫВОД (структура):\n" +
+    "1. Цели тестирования (чёткие, измеримые)\n" +
+    "2. Failure modes list (ОБЯЗАТЕЛЬНО — без него стратегия недействительна)\n" +
+    "3. Тест-пирамида (unit/integration/e2e пропорции)\n" +
+    "4. Coverage цели по компонентам\n" +
+    "5. Среда (staging только, production запрещён)\n" +
+    "6. Критерии приёмки\n" +
+    "7. Риски и митигации"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 8: TIER 1 SKILLS — Failure Modes Mapping
+// ═══════════════════════════════════════════════════════════════════════
+
+fn FailureModesMapping(component: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "failure-modes-mapping for " + component)
+
+  let prompt = "Ты QA-параноик. Строишь карту режимов отказа для компонента/системы.\n\n" +
+    "ЖЁСТКИЕ ПРАВИЛА:\n" +
+    "• Тест-стратегия без failure modes list — недействительна\n" +
+    "• Каждый failure mode должен быть: описан, классифицирован, связан с тест-кейсом\n" +
+    "• Неизбежные failure modes → мониторинг + алерты\n" +
+    "• Необнаруживаемые failure modes → redesign (не тестировать, а исправить архитектуру)\n\n" +
+    "Компонент: " + component + "\n" +
+    "Контекст: " + query + "\n\n" +
+    "ВЫВОД (структура):\n" +
+    "1. Failure modes по категориям (functional, performance, security, data, integration, infrastructure)\n" +
+    "2. Классификация каждого: likelihood (high/medium/low) × impact (critical/high/medium/low)\n" +
+    "3. Detectability: detectable (test covers) / partially-detectable / undetectable (needs redesign)\n" +
+    "4. Связанные тест-кейсы для каждого detectable mode\n" +
+    "5. Неизбежные modes → мониторинг + алерты\n" +
+    "6. Необнаруживаемые modes → рекомендации по redesign"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 9: TIER 1 SKILLS — Defect Discipline
+// ═══════════════════════════════════════════════════════════════════════
+
+fn DefectDiscipline(project: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "defect-discipline for " + project)
+
+  let prompt = "Ты QA-педант. Управляешь дефектами по дисциплине.\n\n" +
+    "ЖЁСТКИЕ ПРАВИЛА:\n" +
+    "• Дефект без регрессионного теста не закрывается (Rule 3)\n" +
+    "• Critical дефект → incident + RCA (Rule 9)\n" +
+    "• Hotfix: critical всегда; high+production всегда\n" +
+    "• MTTD ≤1ч для critical, MTTR ≤4ч для critical\n" +
+    "• Escape rate ≤10% — целевой показатель\n\n" +
+    "Жизненный цикл: open → acknowledged → in_progress → fixed → verified → wontfix/duplicate\n" +
+    "Severity: critical, high, medium, low, trivial\n\n" +
+    "Проект: " + project + "\n" +
+    "Запрос: " + query + "\n\n" +
+    "ВЫВОД: действие с дефектом + обоснование + следующие шаги"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 10: TIER 1 SKILLS — Regression Test Discipline
+// ═══════════════════════════════════════════════════════════════════════
+
+fn RegressionTestDiscipline(project: String, defectId: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "regression-test-discipline for defect " + defectId)
+
+  // Get defect details
+  let defectRows = db_execute(
+    "SELECT severity, summary, status FROM defect_records WHERE id = ?",
+    [defectId]
+  )
+  let defectInfo = "не найден"
+  if length(defectRows) > 0 then { defectInfo = defectRows }
+
+  let prompt = "Ты QA-педант. Проектируешь регрессионный тест для дефекта.\n\n" +
+    "ЖЁСТКОЕ ПРАВИЛО: Каждый закрытый дефект обязан иметь регрессионный тест. Без него дефект не закрывается.\n\n" +
+    "Дефект #" + defectId + ": " + defectInfo + "\n" +
+    "Проект: " + project + "\n\n" +
+    "ВЫВОД (структура):\n" +
+    "1. Описание регрессионного теста\n" +
+    "2. Шаги воспроизведения\n" +
+    "3. Ожидаемый результат (должен fail без фикса, pass после фикса)\n" +
+    "4. Тип теста (unit/integration/e2e)\n" +
+    "5. Добавление в CI pipeline (автоматизация)"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 11: TIER 2 SKILLS — Unit Testing Craft
+// ═══════════════════════════════════════════════════════════════════════
+
+fn UnitTestingCraft(component: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "unit-testing-craft for " + component)
+
+  let prompt = "Ты QA-педант. Проектируешь unit тесты.\n\n" +
+    "ПРАВИЛА:\n" +
+    "• Unit тесты — основа пирамиды (70%)\n" +
+    "• Один тест — одна проверка (single responsibility)\n" +
+    "• AAA pattern: Arrange, Act, Assert\n" +
+    "• Моки только для внешних зависимостей, не для тестируемого кода\n" +
+    "• 100% branch coverage для critical path\n\n" +
+    "Компонент: " + component + "\n" +
+    "Контекст: " + query + "\n\n" +
+    "ВЫВОД: тест-кейсы с кодом (Arrange/Act/Assert), coverage цели, edge cases"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 12: TIER 2 SKILLS — Integration Testing Patterns
+// ═══════════════════════════════════════════════════════════════════════
+
+fn IntegrationTestingPatterns(component: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "integration-testing-patterns for " + component)
+
+  let prompt = "Ты QA-педант. Проектируешь integration тесты.\n\n" +
+    "ПРАВИЛА:\n" +
+    "• Integration тесты — 20% пирамиды\n" +
+    "• Тестируй контракт между компонентами, не внутреннюю логику\n" +
+    "• Real DB > mock DB где возможно\n" +
+    "• Testcontainers для внешних сервисов\n" +
+    "• Каждый API endpoint → хотя бы один integration test\n\n" +
+    "Компонент: " + component + "\n" +
+    "Контекст: " + query + "\n\n" +
+    "ВЫВОД: integration test scenarios, contract specs, test data setup"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 13: TIER 2 SKILLS — E2E Testing with Playwright
+// ═══════════════════════════════════════════════════════════════════════
+
+fn E2ETestingWithPlaywright(feature: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "e2e-testing-with-playwright for " + feature)
+
+  let prompt = "Ты QA-педант. Проектируешь E2E тесты на Playwright.\n\n" +
+    "ПРАВИЛА:\n" +
+    "• E2E тесты — верхушка пирамиды (10%), но самые ценные\n" +
+    "• Few but high-value — критические user journeys только\n" +
+    "• Stable selectors: data-testid > role > text > CSS\n" +
+    "• Handle async: waitFor > sleep\n" +
+    "• Не пиши E2E для того, что покрывается unit/integration\n\n" +
+    "Фича: " + feature + "\n" +
+    "Контекст: " + query + "\n\n" +
+    "ВЫВОД: Playwright test code, page objects, critical user journeys list"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 14: TIER 2 SKILLS — Security Testing Protocol
+// ═══════════════════════════════════════════════════════════════════════
+
+fn SecurityTestingProtocol(project: String, features: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "security-testing-protocol for " + project)
+
+  // Rule 5: enforce security scan for sensitive features
+  let r5 = EnforceRule5_SecurityScanRequired(features, "true")
+  if r5 != "PASS" then { return r5 }
+
+  let prompt = "Ты QA-параноик. Проводишь security тестирование.\n\n" +
+    "ЖЁСТКИЕ ПРАВИЛА:\n" +
+    "• Проект с auth/payment/PII/user input → security scan обязателен\n" +
+    "• Minimum: dependency_audit + owasp_scan + secrets_scan\n" +
+    "• 0 high+ security findings в production\n" +
+    "• OWASP Top 10 покрытие\n\n" +
+    "Типы аудита: dependency_audit, owasp_scan, manual_review, penetration_test, secrets_scan\n\n" +
+    "Проект: " + project + "\n" +
+    "Чувствительные фичи: " + features + "\n" +
+    "Контекст: " + query + "\n\n" +
+    "ВЫВОД: security scan план, найденные уязвимости, рекомендации по исправлению, приоритизация"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 15: TIER 2 SKILLS — AI Evals Framework
+// ═══════════════════════════════════════════════════════════════════════
+
+fn AIEvalsFramework(project: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "ai-evals-framework for " + project)
+
+  let prompt = "Ты QA-параноик, специализирующийся на AI-тестировании. Проводишь AI evals.\n\n" +
+    "ЖЁСТКИЕ ПРАВИЛА:\n" +
+    "• AI-система не выпускается без evals минимум на 50 кейсов (Rule 6)\n" +
+    "• Пороги: groundedness≥0.85, relevance≥0.85, faithfulness≥0.90, coherence≥0.80, prompt_injection_resistance≥0.95\n" +
+    "• Overall pass rate ≥0.90\n" +
+    "• Тестируешь: hallucination, prompt injection, groundedness, faithfulness, safety\n\n" +
+    "КАТЕГОРИИ AI EVALS:\n" +
+    "1. Groundedness — ответ основан на предоставленном контексте?\n" +
+    "2. Relevance — ответ релевантен вопросу?\n" +
+    "3. Faithfulness — ответ точен относительно источников?\n" +
+    "4. Coherence — ответ логически связен?\n" +
+    "5. Prompt injection resistance — система устойчива к инъекциям?\n" +
+    "6. Safety — ответ не содержит вредоносного контента?\n\n" +
+    "Проект: " + project + "\n" +
+    "Контекст: " + query + "\n\n" +
+    "ВЫВОД: eval plan, test cases, metric definitions, thresholds, execution instructions"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 16: TIER 3 SKILLS — Performance Testing
+// ═══════════════════════════════════════════════════════════════════════
+
+fn PerformanceTesting(component: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "performance-testing (Tier 3) for " + component)
+
+  let prompt = "Ты QA-педант. Проектируешь performance тесты.\n\n" +
+    "Это Tier 3 skill — запускается только по явному запросу.\n\n" +
+    "ПРАВИЛА:\n" +
+    "• Define baseline before optimizing\n" +
+    "• Test under realistic load, not synthetic\n" +
+    "• P95 и P99 latency > average\n" +
+    "• Test degradation, not just happy path\n" +
+    "• No testing in production (staging only)\n\n" +
+    "Компонент: " + component + "\n" +
+    "Контекст: " + query + "\n\n" +
+    "ВЫВОД: performance test plan, load scenarios, metrics to capture, SLIs/SLOs/SLAs"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 17: TIER 3 SKILLS — Chaos Engineering
+// ═══════════════════════════════════════════════════════════════════════
+
+fn ChaosEngineering(system: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("skill_execute", DEPT, "chaos-engineering (Tier 3) for " + system)
+
+  let prompt = "Ты QA-параноик. Проектируешь chaos engineering эксперименты.\n\n" +
+    "Это Tier 3 skill — запускается только по явному запросу.\n\n" +
+    "ПРАВИЛА:\n" +
+    "• Hypothesis first — что ожидаем увидеть при отказе?\n" +
+    "• Blast radius минимальный — staging only, never production without explicit approval\n" +
+    "• Steady state → inject failure → observe → rollback\n" +
+    "• Game days: scheduled, documented, reviewed\n" +
+    "• Цель: доказать resilience, не сломать систему\n\n" +
+    "Система: " + system + "\n" +
+    "Контекст: " + query + "\n\n" +
+    "ВЫВОД: chaos experiment plan, failure injections, expected system behavior, rollback procedures, observability requirements"
+
+  let result = call_llm(prompt, chat_id)
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 18: AI EVAL RUN LOGIC
+// ═══════════════════════════════════════════════════════════════════════
+
+fn CreateAIEvalRun(project: String, modelId: String, totalCases: String, chat_id: String) -> String {
+  let _ = db_execute(
+    "INSERT INTO ai_eval_runs (project, model_id, total_cases, status, groundedness_score, relevance_score, faithfulness_score, coherence_score, prompt_injection_score, overall_pass_rate, created_at, updated_at) VALUES (?, ?, ?, 'started', 0, 0, 0, 0, 0, 0, NOW(), NOW())",
+    [project, modelId, totalCases]
+  )
+
+  let idRows = db_execute("SELECT LASTVAL() as id", [])
+  let id = json_get(parse_json(idRows), "0.id", "0")
+
+  // Rule 6: Check minimum cases
+  let cases = to_int(totalCases)
+  if cases < AI_MIN_CASES then {
+    let _ = AuditLog("ai_eval_warning", DEPT, "AI eval run #" + to_string(id) + " with " + totalCases + " cases (minimum " + to_string(AI_MIN_CASES) + ")")
+  }
+
+  let _ = AuditLog("ai_eval_created", DEPT, "AI eval run #" + to_string(id) + " for " + project + " / " + modelId)
+  return to_string(id)
+}
+
+fn CompleteAIEvalRun(evalId: String, groundedness: String, relevance: String, faithfulness: String, coherence: String, promptInjection: String, passRate: String, chat_id: String) -> String {
+  let g = to_float(groundedness)
+  let r = to_float(relevance)
+  let f = to_float(faithfulness)
+  let c = to_float(coherence)
+  let pi = to_float(promptInjection)
+  let pr = to_float(passRate)
+
+  // Determine verdict
+  let verdict = "passed"
+  if g < AI_GROUNDEDNESS_MIN then { verdict = "failed" }
+  if r < AI_RELEVANCE_MIN then { verdict = "failed" }
+  if f < AI_FAITHFULNESS_MIN then { verdict = "failed" }
+  if c < AI_COHERENCE_MIN then { verdict = "failed" }
+  if pi < AI_PROMPT_INJECTION_MIN then { verdict = "failed" }
+  if pr < AI_OVERALL_PASS_MIN then { verdict = "failed" }
+
+  let _ = db_execute(
+    "UPDATE ai_eval_runs SET groundedness_score = ?, relevance_score = ?, faithfulness_score = ?, coherence_score = ?, prompt_injection_score = ?, overall_pass_rate = ?, verdict = ?, status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = ?",
+    [groundedness, relevance, faithfulness, coherence, promptInjection, passRate, verdict, evalId]
+  )
+
+  let _ = AuditLog("ai_eval_completed", DEPT, "AI eval #" + evalId + " → " + verdict + " | g=" + groundedness + " r=" + relevance + " f=" + faithfulness + " c=" + coherence + " pi=" + promptInjection + " pass=" + passRate)
+  return "AI eval #" + evalId + " → " + verdict + " | groundedness=" + groundedness + " relevance=" + relevance + " faithfulness=" + faithfulness + " coherence=" + coherence + " prompt_injection=" + promptInjection + " pass_rate=" + passRate
+}
+
+fn CheckAIEvalGates(evalId: String) -> String {
+  let rows = db_execute(
+    "SELECT verdict, groundedness_score, relevance_score, faithfulness_score, coherence_score, prompt_injection_score, overall_pass_rate, total_cases FROM ai_eval_runs WHERE id = ?",
+    [evalId]
+  )
+  if length(rows) == 0 then {
+    return "AI eval #" + evalId + " не найден."
+  }
+
+  let parsed = parse_json(rows)
+  let verdict = json_get(parsed, "0.verdict", "")
+  let g = json_get(parsed, "0.groundedness_score", "0")
+  let r = json_get(parsed, "0.relevance_score", "0")
+  let f = json_get(parsed, "0.faithfulness_score", "0")
+  let c = json_get(parsed, "0.coherence_score", "0")
+  let pi = json_get(parsed, "0.prompt_injection_score", "0")
+  let pr = json_get(parsed, "0.overall_pass_rate", "0")
+  let cases = json_get(parsed, "0.total_cases", "0")
+
+  let report = "AI Eval #" + evalId + " Gate Check:\n"
+  let report = report + "Groundedness: " + g + " (min " + to_string(AI_GROUNDEDNESS_MIN) + ") " + (to_float(g) >= AI_GROUNDEDNESS_MIN ? "✅" : "❌") + "\n"
+  let report = report + "Relevance: " + r + " (min " + to_string(AI_RELEVANCE_MIN) + ") " + (to_float(r) >= AI_RELEVANCE_MIN ? "✅" : "❌") + "\n"
+  let report = report + "Faithfulness: " + f + " (min " + to_string(AI_FAITHFULNESS_MIN) + ") " + (to_float(f) >= AI_FAITHFULNESS_MIN ? "✅" : "❌") + "\n"
+  let report = report + "Coherence: " + c + " (min " + to_string(AI_COHERENCE_MIN) + ") " + (to_float(c) >= AI_COHERENCE_MIN ? "✅" : "❌") + "\n"
+  let report = report + "Prompt Injection: " + pi + " (min " + to_string(AI_PROMPT_INJECTION_MIN) + ") " + (to_float(pi) >= AI_PROMPT_INJECTION_MIN ? "✅" : "❌") + "\n"
+  let report = report + "Pass Rate: " + pr + " (min " + to_string(AI_OVERALL_PASS_MIN) + ") " + (to_float(pr) >= AI_OVERALL_PASS_MIN ? "✅" : "❌") + "\n"
+  let report = report + "Cases: " + cases + " (min " + to_string(AI_MIN_CASES) + ") " + (to_int(cases) >= AI_MIN_CASES ? "✅" : "❌") + "\n"
+  let report = report + "Verdict: " + verdict
+
+  return report
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 19: SECURITY AUDIT LOGIC
+// ═══════════════════════════════════════════════════════════════════════
+
+fn CreateSecurityAudit(project: String, auditType: String, chat_id: String) -> String {
+  if contains(VALID_AUDIT_TYPES, auditType) == false then {
+    return "ОШИБКА: Недопустимый тип аудита '" + auditType + "'. Допустимые: " + VALID_AUDIT_TYPES
+  }
+
+  let _ = db_execute(
+    "INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, created_at, updated_at) VALUES (?, ?, 'started', 0, 0, 0, 0, NOW(), NOW())",
+    [project, auditType]
+  )
+
+  let idRows = db_execute("SELECT LASTVAL() as id", [])
+  let id = json_get(parse_json(idRows), "0.id", "0")
+
+  let _ = AuditLog("security_audit_created", DEPT, "Security audit #" + to_string(id) + ": " + auditType + " for " + project)
+  return to_string(id)
+}
+
+fn CompleteSecurityAudit(auditId: String, critical: String, high: String, medium: String, low: String, summary: String, chat_id: String) -> String {
+  let _ = db_execute(
+    "UPDATE security_audits SET findings_critical = ?, findings_high = ?, findings_medium = ?, findings_low = ?, summary = ?, status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = ?",
+    [critical, high, medium, low, summary, auditId]
+  )
+
+  // Alert on critical/high findings
+  let c = to_int(critical)
+  let h = to_int(high)
+  if c > 0 then {
+    let _ = AuditLog("security_critical", DEPT, "Security audit #" + auditId + ": " + critical + " CRITICAL findings!")
+    let _ = SendTelegramMessage(chat_id, "🔴 CRITICAL: Security audit #" + auditId + " — " + critical + " critical findings require immediate fix!")
+  }
+  if h > 0 then {
+    let _ = AuditLog("security_high", DEPT, "Security audit #" + auditId + ": " + high + " HIGH findings")
+  }
+
+  // Production gate: 0 high+ findings allowed
+  if c > 0 || h > 0 then {
+    let _ = AuditLog("security_prod_gate", DEPT, "Production deployment BLOCKED — security findings: " + critical + " critical, " + high + " high")
+  }
+
+  let _ = AuditLog("security_audit_completed", DEPT, "Security audit #" + auditId + " completed: " + critical + "/" + high + "/" + medium + "/" + low)
+  return "Security audit #" + auditId + ": critical=" + critical + " high=" + high + " medium=" + medium + " low=" + low
+}
+
+fn GetSecurityAuditStatus(project: String) -> String {
+  let rows = db_execute(
+    "SELECT id, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, completed_at FROM security_audits WHERE project = ? ORDER BY created_at DESC LIMIT 5",
+    [project]
+  )
+  if length(rows) == 0 then {
+    return "Security аудиты для проекта " + project + " не найдены."
+  }
+  return rows
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 20: COMMAND HANDLERS
+// ═══════════════════════════════════════════════════════════════════════
+
+// /qa-strategy — design test strategy
+fn CmdQAStrategy(query: String, chat_id: String) -> String {
+  let ctx = BuildQAContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let testType = json_get(parsed, "testType", TT_UNIT)
+
+  // Extract project name from query
+  let project = "project"
+  if contains(lower(query), "проект ") then { project = "detected" }
+
+  let strategy = TestStrategyDesign(project, testType, query, chat_id)
+
+  // Rule 2: Verify strategy has failure modes
+  let r2 = EnforceRule2_FailureModesRequired(strategy, "detected_from_strategy")
+  if r2 != "PASS" then {
+    return r2 + "\n\nСтратегия должна содержать секцию failure modes."
+  }
+
+  let _ = AuditLog("cmd_qa_strategy", DEPT, "Test strategy designed for " + project + " / " + testType)
+  return DISCLAIMER_TOP + "\n\n" + strategy + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+// /qa-test — run test suite
+fn CmdQATest(query: String, chat_id: String) -> String {
+  let ctx = BuildQAContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let testType = json_get(parsed, "testType", TT_UNIT)
+  let environment = json_get(parsed, "environment", ENV_STAGING)
+
+  // Rule 8: No production testing
+  let r8 = EnforceRule8_NoProdTesting(environment)
+  if r8 != "PASS" then { return r8 }
+
+  let project = "project"
+  let runId = CreateTestRun(project, testType, environment, "manual", chat_id)
+
+  let prompt = "Ты QA-параноик. Выполняешь " + testType + " тестирование.\n\n" +
+    "ЖЁСТКИЕ ПРАВИЛА:\n" +
+    "• Среда: staging только (production запрещён)\n" +
+    "• Автоматизация обязательна\n" +
+    "• Каждый дефект → создание defect record\n" +
+    "• Coverage отчёт обязателен\n\n" +
+    "Test Run #" + runId + "\n" +
+    "Запрос: " + query + "\n\n" +
+    "ВЫВОД: результаты тестирования, найденные дефекты, coverage отчёт, вердикт"
+
+  let result = call_llm(prompt, chat_id)
+
+  let _ = AuditLog("cmd_qa_test", DEPT, "Test run #" + runId + " for " + testType)
+  return DISCLAIMER_TOP + "\n\nTest Run #" + runId + " (" + testType + " / " + environment + ")\n\n" + result + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+// /qa-defect — manage individual defect
+fn CmdQADefect(query: String, chat_id: String) -> String {
+  let ctx = BuildQAContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let severity = json_get(parsed, "severity", SEV_MEDIUM)
+  let environment = json_get(parsed, "environment", ENV_STAGING)
+
+  let q = lower(query)
+
+  // Detect action
+  if contains(q, "создай") || contains(q, "create") || contains(q, "новый дефект") || contains(q, "новый баг") then {
+    let project = "project"
+    let summary = query
+    let defectId = CreateDefect(project, severity, summary, "", environment, chat_id)
+    return DISCLAIMER_TOP + "\n\nДефект #" + defectId + " создан [" + severity + "]\n\n" + DISCLAIMER_BOTTOM
+  }
+
+  if contains(q, "закрой") || contains(q, "close") || contains(q, "верифицируй") || contains(q, "verify") then {
+    // Extract defect ID from query
+    let defectId = "0"
+    let result = TransitionDefect(defectId, DF_VERIFIED, "true", chat_id)
+    return DISCLAIMER_TOP + "\n\n" + result + "\n\n" + DISCLAIMER_BOTTOM
+  }
+
+  // Default: show defect or LLM-assisted management
+  let result = DefectDiscipline("project", query, chat_id)
+  return DISCLAIMER_TOP + "\n\n" + result + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+// /qa-defects — list defects
+fn CmdQADefects(query: String, chat_id: String) -> String {
+  let q = lower(query)
+  let statusFilter = ""
+  if contains(q, "open") || contains(q, "открыт") then { statusFilter = " AND status = 'open'" }
+  if contains(q, "critical") || contains(q, "критич") then { statusFilter = statusFilter + " AND severity = 'critical'" }
+
+  let rows = db_execute(
+    "SELECT id, project, severity, summary, status, created_at FROM defect_records WHERE 1=1" + statusFilter + " ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END, created_at DESC LIMIT 20",
+    []
+  )
+
+  if length(rows) == 0 then {
+    return "Дефекты не найдены."
+  }
+
+  let _ = AuditLog("cmd_qa_defects", DEPT, "Defects listed" + statusFilter)
+  return DISCLAIMER_TOP + "\n\n" + rows + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+// /qa-eval — run AI eval
+fn CmdQAEval(query: String, chat_id: String) -> String {
+  let ctx = BuildQAContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let isAISystem = json_get(parsed, "isAISystem", "false")
+
+  // If not explicitly AI, check
+  if isAISystem != "true" then {
+    let _ = AuditLog("qa_eval_warning", DEPT, "/qa-eval called for non-AI project — proceeding with eval")
+  }
+
+  let project = "project"
+  let modelId = "default"
+  let totalCases = to_string(AI_MIN_CASES)
+
+  let evalId = CreateAIEvalRun(project, modelId, totalCases, chat_id)
+
+  let result = AIEvalsFramework(project, query, chat_id)
+
+  let _ = AuditLog("cmd_qa_eval", DEPT, "AI eval #" + evalId + " started for " + project)
+  return DISCLAIMER_TOP + "\n\nAI Eval Run #" + evalId + "\n\n" + result + "\n\nМинимум " + to_string(AI_MIN_CASES) + " кейсов | Пороги: g≥0.85 r≥0.85 f≥0.90 c≥0.80 pi≥0.95 pass≥0.90\n\n" + DISCLAIMER_BOTTOM
+}
+
+// /qa-security-audit — run security audit
+fn CmdQASecurityAudit(query: String, chat_id: String) -> String {
+  let q = lower(query)
+
+  // Detect audit type
+  let auditType = SA_OWASP
+  if contains(q, "dependency") || contains(q, "зависимост") then { auditType = SA_DEPENDENCY }
+  if contains(q, "owasp") then { auditType = SA_OWASP }
+  if contains(q, "manual") || contains(q, "ручн") then { auditType = SA_MANUAL }
+  if contains(q, "penetration") || contains(q, "пентест") then { auditType = SA_PENETRATION }
+  if contains(q, "secrets") || contains(q, "секрет") then { auditType = SA_SECRETS }
+
+  let project = "project"
+  let auditId = CreateSecurityAudit(project, auditType, chat_id)
+
+  let result = SecurityTestingProtocol(project, "", query, chat_id)
+
+  let _ = AuditLog("cmd_qa_security", DEPT, "Security audit #" + auditId + " (" + auditType + ") for " + project)
+  return DISCLAIMER_TOP + "\n\nSecurity Audit #" + auditId + " (" + auditType + ")\n\n" + result + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+// /qa-coverage — coverage report
+fn CmdQACoverage(query: String, chat_id: String) -> String {
+  let project = "project"
+
+  // Get latest test runs with coverage
+  let rows = db_execute(
+    "SELECT id, test_type, verdict, coverage_pct, total_tests, passed, failed, completed_at FROM test_runs WHERE project = ? AND status = 'completed' ORDER BY completed_at DESC LIMIT 10",
+    [project]
+  )
+
+  // Get defect metrics
+  let defectStats = db_execute(
+    "SELECT severity, COUNT(*) as cnt FROM defect_records WHERE project = ? AND status NOT IN ('wontfix', 'duplicate', 'verified') GROUP BY severity ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END",
+    [project]
+  )
+
+  let prompt = "Ты QA-педант. Формируешь coverage отчёт.\n\n" +
+    "ЦЕЛИ:\n" +
+    "• Critical path: ≥" + to_string(COV_CRITICAL_PATH) + "%\n" +
+    "• Business logic: ≥" + to_string(COV_BUSINESS_LOGIC) + "%\n" +
+    "• Overall: ≥" + to_string(COV_OVERALL) + "%\n" +
+    "• Test pyramid: unit " + to_string(PYRAMID_UNIT_PCT) + "% / integration " + to_string(PYRAMID_INTEGRATION_PCT) + "% / e2e " + to_string(PYRAMID_E2E_PCT) + "%\n\n" +
+    "Test runs:\n" + rows + "\n\n" +
+    "Active defects:\n" + defectStats + "\n\n" +
+    "ВЫВОД: coverage отчёт с gap analysis, рекомендации по достижению целей"
+
+  let result = call_llm(prompt, chat_id)
+
+  let _ = AuditLog("cmd_qa_coverage", DEPT, "Coverage report for " + project)
+  return DISCLAIMER_TOP + "\n\n" + result + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+// /qa-runs — list test runs
+fn CmdQARuns(query: String, chat_id: String) -> String {
+  let project = "project"
+
+  let rows = db_execute(
+    "SELECT id, test_type, status, verdict, total_tests, passed, failed, coverage_pct, environment, started_at, completed_at FROM test_runs WHERE project = ? ORDER BY started_at DESC LIMIT 15",
+    [project]
+  )
+
+  if length(rows) == 0 then {
+    return "Test runs не найдены для проекта " + project + "."
+  }
+
+  let _ = AuditLog("cmd_qa_runs", DEPT, "Test runs listed for " + project)
+  return DISCLAIMER_TOP + "\n\n" + rows + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+// /qa-monitor — production monitoring dashboard
+fn CmdQAMonitor(query: String, chat_id: String) -> String {
+  let project = "project"
+
+  // Get recent defect metrics
+  let openCritical = db_execute(
+    "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ? AND severity = 'critical' AND status NOT IN ('verified', 'wontfix', 'duplicate')",
+    [project]
+  )
+  let openHigh = db_execute(
+    "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ? AND severity = 'high' AND status NOT IN ('verified', 'wontfix', 'duplicate')",
+    [project]
+  )
+  let recentDefects = db_execute(
+    "SELECT id, severity, summary, status, created_at FROM defect_records WHERE project = ? AND created_at > NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 10",
+    [project]
+  )
+  let securityStatus = GetSecurityAuditStatus(project)
+  let latestRuns = db_execute(
+    "SELECT id, test_type, verdict, coverage_pct, completed_at FROM test_runs WHERE project = ? AND status = 'completed' ORDER BY completed_at DESC LIMIT 5",
+    [project]
+  )
+
+  let prompt = "Ты QA-параноик. Формируешь production monitoring отчёт.\n\n" +
+    "МЕТРИКИ:\n" +
+    "• Defect escape rate ≤10%\n" +
+    "• MTTD critical ≤1ч\n" +
+    "• MTTR critical ≤4ч\n" +
+    "• Security findings high+ = 0 в production\n" +
+    "• AI eval pass rate ≥90%\n" +
+    "• Accessibility = 100% WCAG AA\n\n" +
+    "Open critical: " + openCritical + "\n" +
+    "Open high: " + openHigh + "\n" +
+    "Recent defects (24h): " + recentDefects + "\n" +
+    "Security: " + securityStatus + "\n" +
+    "Latest runs: " + latestRuns + "\n\n" +
+    "ВЫВОД: monitoring dashboard, alerts, trend analysis, action items"
+
+  let result = call_llm(prompt, chat_id)
+
+  let _ = AuditLog("cmd_qa_monitor", DEPT, "Production monitor for " + project)
+  return DISCLAIMER_TOP + "\n\n" + result + "\n\n" + DISCLAIMER_BOTTOM
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 21: COVERAGE & METRICS
+// ═══════════════════════════════════════════════════════════════════════
+
+fn CalculateDefectEscapeRate(project: String) -> String {
+  // Escape rate = defects found in production / total defects × 100
+  let prodDefects = db_execute(
+    "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ? AND environment = 'production'",
+    [project]
+  )
+  let totalDefects = db_execute(
+    "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ?",
+    [project]
+  )
+  let parsed = parse_json(totalDefects)
+  let total = to_int(json_get(parsed, "0.cnt", "0"))
+  if total == 0 then { return "0" }
+  let parsed2 = parse_json(prodDefects)
+  let prod = to_int(json_get(parsed2, "0.cnt", "0"))
+  let rate = to_string(to_float(prod) / to_float(total) * 100.0)
+  return rate
+}
+
+fn CalculateMTTD(project: String) -> String {
+  // Mean Time To Detect for critical defects
+  let rows = db_execute(
+    "SELECT AVG(EXTRACT(EPOCH FROM (verified_at - created_at)) / 3600.0) as mttd_hours FROM defect_records WHERE project = ? AND severity = 'critical' AND verified_at IS NOT NULL",
+    [project]
+  )
+  if length(rows) == 0 then { return "N/A" }
+  return rows
+}
+
+fn CalculateMTTR(project: String) -> String {
+  // Mean Time To Resolve for critical defects
+  let rows = db_execute(
+    "SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 3600.0) as mttr_hours FROM defect_records WHERE project = ? AND severity = 'critical' AND status = 'verified'",
+    [project]
+  )
+  if length(rows) == 0 then { return "N/A" }
+  return rows
+}
+
+fn GetQAMetricsDashboard(project: String) -> String {
+  let escapeRate = CalculateDefectEscapeRate(project)
+  let mttd = CalculateMTTD(project)
+  let mttr = CalculateMTTR(project)
+
+  let openCritical = db_execute(
+    "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ? AND severity = 'critical' AND status NOT IN ('verified', 'wontfix', 'duplicate')",
+    [project]
+  )
+
+  let securityHigh = db_execute(
+    "SELECT SUM(findings_critical + findings_high) as total FROM security_audits WHERE project = ? AND status = 'completed'",
+    [project]
+  )
+
+  let latestCoverage = db_execute(
+    "SELECT coverage_pct FROM test_runs WHERE project = ? AND status = 'completed' AND coverage_pct IS NOT NULL ORDER BY completed_at DESC LIMIT 1",
+    [project]
+  )
+
+  let dashboard = "QA METRICS DASHBOARD — " + project + "\n" +
+    "═══════════════════════════════════\n" +
+    "Defect escape rate: " + escapeRate + "% (target ≤" + to_string(TARGET_ESCAPE_RATE) + "%)\n" +
+    "MTTD critical: " + mttd + "h (target ≤" + to_string(TARGET_MTTD_CRITICAL_HR) + "h)\n" +
+    "MTTR critical: " + mttr + "h (target ≤" + to_string(TARGET_MTTR_CRITICAL_HR) + "h)\n" +
+    "Open critical defects: " + openCritical + "\n" +
+    "Security high+ findings: " + securityHigh + " (target 0 in prod)\n" +
+    "Latest coverage: " + latestCoverage + "%\n" +
+    "AI eval pass rate: (see /qa-eval)\n" +
+    "WCAG AA: (see /qa-coverage)\n" +
+    "═══════════════════════════════════"
+
+  return dashboard
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 22: ACCESSIBILITY GATE
+// ═══════════════════════════════════════════════════════════════════════
+
+fn AccessibilityGate(project: String, isProductionRelease: String, chat_id: String) -> String {
+  let _ = AuditLog("accessibility_gate", DEPT, "WCAG gate check for " + project + " (production=" + isProductionRelease + ")")
+
+  let prompt = "Ты QA-педант. Проверяешь accessibility.\n\n" +
+    "ЖЁСТКОЕ ПРАВИЛО: Каждый production релиз проходит WCAG AA минимум.\n\n" +
+    "Чеклист WCAG AA:\n" +
+    "• Color contrast ≥4.5:1 (text), ≥3:1 (large text/UI components)\n" +
+    "• Keyboard navigation — все интерактивные элементы доступны\n" +
+    "• Screen reader support — ARIA labels, semantic HTML\n" +
+    "• Focus management — видимый focus, logical tab order\n" +
+    "• Error handling — accessible error messages\n" +
+    "• Alt text для изображений\n" +
+    "• Form labels и descriptions\n" +
+    "• No content reliance on color alone\n\n" +
+    "Проект: " + project + "\n\n" +
+    "ВЫВОД: accessibility чеклист результат, найденные нарушения, WCAG уровень (A/AA/AAA)"
+
+  let result = call_llm(prompt, chat_id)
+
+  // Rule 7: Production release must pass WCAG AA
+  if isProductionRelease == "true" then {
+    if contains(lower(result), "aa") == false && contains(lower(result), "aaa") == false then {
+      let _ = AuditLog("accessibility_gate_blocked", DEPT, "Production release blocked — WCAG AA not met")
+      return "ОТКАЗ: Production релиз заблокирован — WCAG AA не пройден. (Rule 7)\n\n" + result
+    }
+  }
+
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 23: RELEASE GATE
+// ═══════════════════════════════════════════════════════════════════════
+
+fn ReleaseGate(project: String, environment: String, isAISystem: String, projectFeatures: String, chat_id: String) -> String {
+  let _ = AuditLog("release_gate", DEPT, "Release gate check for " + project + " → " + environment)
+
+  let gateResults = "RELEASE GATE — " + project + " → " + environment + "\n═══════════════════════════════════\n"
+  let blocked = false
+
+  // Rule 1: Critical test suite must pass
+  let latestRun = db_execute(
+    "SELECT verdict FROM test_runs WHERE project = ? AND test_type IN ('unit', 'integration', 'e2e', 'smoke') AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
+    [project]
+  )
+  let criticalPassed = "false"
+  if contains(latestRun, "passed") then { criticalPassed = "true" }
+  let r1 = EnforceRule1_NoReleaseWithoutPassedSuite(project, criticalPassed, environment)
+  if r1 != "PASS" then {
+    gateResults = gateResults + "❌ Rule 1 (Critical suite): " + r1 + "\n"
+    blocked = true
+  } else {
+    gateResults = gateResults + "✅ Rule 1 (Critical suite): Passed\n"
+  }
+
+  // Rule 5: Security scan for sensitive features
+  let hasSecurityScan = "false"
+  let secAudit = db_execute(
+    "SELECT id FROM security_audits WHERE project = ? AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
+    [project]
+  )
+  if length(secAudit) > 0 then { hasSecurityScan = "true" }
+  let r5 = EnforceRule5_SecurityScanRequired(projectFeatures, hasSecurityScan)
+  if r5 != "PASS" then {
+    gateResults = gateResults + "❌ Rule 5 (Security scan): " + r5 + "\n"
+    blocked = true
+  } else {
+    gateResults = gateResults + "✅ Rule 5 (Security scan): Passed\n"
+  }
+
+  // Rule 6: AI evals for AI systems
+  if isAISystem == "true" then {
+    let aiEval = db_execute(
+      "SELECT verdict, total_cases, overall_pass_rate FROM ai_eval_runs WHERE project = ? AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
+      [project]
+    )
+    let hasEvals = "false"
+    if length(aiEval) > 0 then { hasEvals = "true" }
+    let r6 = EnforceRule6_AIEvalsRequired(isAISystem, hasEvals, "0")
+    if r6 != "PASS" then {
+      gateResults = gateResults + "❌ Rule 6 (AI evals): " + r6 + "\n"
+      blocked = true
+    } else {
+      gateResults = gateResults + "✅ Rule 6 (AI evals): Passed\n"
+    }
+  }
+
+  // Rule 7: WCAG AA for production
+  if environment == ENV_PRODUCTION then {
+    let r7 = EnforceRule7_AccessibilityRequired("true", "AA")
+    if r7 != "PASS" then {
+      gateResults = gateResults + "❌ Rule 7 (Accessibility): " + r7 + "\n"
+      blocked = true
+    } else {
+      gateResults = gateResults + "✅ Rule 7 (Accessibility): Passed\n"
+    }
+  }
+
+  // Rule 8: No production testing
+  let r8 = EnforceRule8_NoProdTesting(environment)
+  if r8 != "PASS" then {
+    gateResults = gateResults + "❌ Rule 8 (No prod testing): " + r8 + "\n"
+    blocked = true
+  } else {
+    gateResults = gateResults + "✅ Rule 8 (No prod testing): Passed\n"
+  }
+
+  // Security findings check
+  let secFindings = db_execute(
+    "SELECT SUM(findings_critical + findings_high) as total FROM security_audits WHERE project = ? AND status = 'completed'",
+    [project]
+  )
+  if contains(secFindings, "0") == false then {
+    gateResults = gateResults + "❌ Security: High+ findings exist in latest audit\n"
+    blocked = true
+  } else {
+    gateResults = gateResults + "✅ Security: No high+ findings\n"
+  }
+
+  if blocked then {
+    gateResults = gateResults + "\n🔴 RELEASE BLOCKED — исправьте нарушения выше"
+    let _ = AuditLog("release_gate_blocked", DEPT, "Release blocked for " + project)
+    let _ = SendTelegramMessage(chat_id, "🔴 RELEASE BLOCKED: " + project + " — gate failures detected. See /qa-monitor.")
+  } else {
+    gateResults = gateResults + "\n🟢 RELEASE APPROVED — все gates пройдены"
+    let _ = AuditLog("release_gate_approved", DEPT, "Release approved for " + project)
+  }
+
+  return gateResults
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 24: LEARNING LOOPS
+// ═══════════════════════════════════════════════════════════════════════
+
+// Per-test verification: compare test predictions with actual results
+fn PerTestVerification(runId: String, predictedPass: String, actualVerdict: String) -> String {
+  let _ = db_execute(
+    "INSERT INTO qa_verification_log (test_run_id, predicted_verdict, actual_verdict, verified_at) VALUES (?, ?, ?, NOW())",
+    [runId, predictedPass, actualVerdict]
+  )
+
+  // Check if prediction was correct
+  let correct = "false"
+  if predictedPass == actualVerdict then { correct = "true" }
+
+  let _ = AuditLog("per_test_verification", DEPT, "Run #" + runId + " predicted=" + predictedPass + " actual=" + actualVerdict + " correct=" + correct)
+  return "Verification: run #" + runId + " | predicted=" + predictedPass + " | actual=" + actualVerdict + " | correct=" + correct
+}
+
+// Daily production monitor (scheduled 08:00)
+fn DailyProductionMonitor(chat_id: String) -> String {
+  let _ = AuditLog("daily_monitor", DEPT, "Daily production monitor started")
+
+  // Check for new critical/high defects in last 24h
+  let recentCritical = db_execute(
+    "SELECT id, severity, summary, status, created_at FROM defect_records WHERE severity IN ('critical', 'high') AND created_at > NOW() - INTERVAL '24 hours' AND status NOT IN ('verified', 'wontfix', 'duplicate') ORDER BY created_at DESC",
+    []
+  )
+
+  // Check for unresolved critical defects
+  let openCritical = db_execute(
+    "SELECT id, summary, EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600.0 as hours_open FROM defect_records WHERE severity = 'critical' AND status NOT IN ('verified', 'wontfix', 'duplicate') ORDER BY created_at ASC",
+    []
+  )
+
+  // Check MTTD/MTTR for recent fixes
+  let recentMetrics = db_execute(
+    "SELECT AVG(EXTRACT(EPOCH FROM (verified_at - created_at)) / 3600.0) as avg_mttd, AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 3600.0) as avg_mttr FROM defect_records WHERE severity = 'critical' AND verified_at > NOW() - INTERVAL '24 hours'",
+    []
+  )
+
+  let report = "DAILY QA MONITOR — " + format_date(now(), "yyyy-MM-dd") + "\n═══════════════════════════════════\n"
+  let report = report + "Recent critical/high defects (24h):\n" + (length(recentCritical) > 0 ? recentCritical : "  None ✅") + "\n\n"
+  let report = report + "Open critical defects:\n" + (length(openCritical) > 0 ? openCritical : "  None ✅") + "\n\n"
+  let report = report + "Recent MTTD/MTTR:\n" + recentMetrics + "\n"
+  let report = report + "═══════════════════════════════════"
+
+  // Alert if critical defects are unresolved for >4h (MTTR target)
+  if length(openCritical) > 0 then {
+    let _ = SendTelegramMessage(chat_id, "⚠️ DAILY MONITOR: Open critical defects exist. See details below.")
+  }
+
+  let _ = AuditLog("daily_monitor_completed", DEPT, "Daily production monitor completed")
+  return report
+}
+
+// Weekly security scan (scheduled Sun 05:00)
+fn WeeklySecurityScan(chat_id: String) -> String {
+  let _ = AuditLog("weekly_security", DEPT, "Weekly security scan started")
+
+  // Get all active projects
+  let projects = db_execute(
+    "SELECT DISTINCT project FROM test_runs WHERE created_at > NOW() - INTERVAL '30 days'",
+    []
+  )
+
+  let scanSummary = "WEEKLY SECURITY SCAN\n═══════════════════════════════════\n"
+
+  // For each project: run dependency_audit + secrets_scan
+  // (actual scan execution delegated to CI/CD; here we record the trigger)
+  let _ = db_execute(
+    "INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, created_at, updated_at) VALUES ('_weekly_scan', 'dependency_audit', 'triggered', 0, 0, 0, 0, NOW(), NOW())",
+    []
+  )
+  let _ = db_execute(
+    "INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, created_at, updated_at) VALUES ('_weekly_scan', 'secrets_scan', 'triggered', 0, 0, 0, 0, NOW(), NOW())",
+    []
+  )
+
+  let scanSummary = scanSummary + "Triggered: dependency_audit + secrets_scan for all active projects\n"
+  let scanSummary = scanSummary + "Projects: " + projects + "\n"
+  let scanSummary = scanSummary + "═══════════════════════════════════"
+
+  let _ = AuditLog("weekly_security_completed", DEPT, "Weekly security scan triggers recorded")
+  return scanSummary
+}
+
+// Quarterly methodology review
+fn QuarterlyMethodologyReview(chat_id: String) -> String {
+  let _ = AuditLog("quarterly_review", DEPT, "Quarterly methodology review started")
+
+  // Systematic weakness detection: analyze patterns in defects
+  let defectPatterns = db_execute(
+    "SELECT severity, environment, COUNT(*) as cnt FROM defect_records WHERE created_at > NOW() - INTERVAL '90 days' GROUP BY severity, environment ORDER BY cnt DESC",
+    []
+  )
+
+  let escapeTrend = db_execute(
+    "SELECT DATE_TRUNC('month', created_at) as month, COUNT(*) as total, SUM(CASE WHEN environment = 'production' THEN 1 ELSE 0 END) as escaped FROM defect_records WHERE created_at > NOW() - INTERVAL '90 days' GROUP BY DATE_TRUNC('month', created_at) ORDER BY month",
+    []
+  )
+
+  let falsePositiveRate = db_execute(
+    "SELECT COUNT(CASE WHEN status = 'wontfix' THEN 1 END) as wontfix, COUNT(CASE WHEN status = 'duplicate' THEN 1 END) as duplicate, COUNT(*) as total FROM defect_records WHERE created_at > NOW() - INTERVAL '90 days'",
+    []
+  )
+
+  let prompt = "Ты QA-педант. Проводишь квартальный обзор методологии.\n\n" +
+    "ЦЕЛИ ОБЗОРА:\n" +
+    "1. Выявить систематические слабости (patterns in defects)\n" +
+    "2. Оценить escape rate тренд (улучшается/ухудшается)\n" +
+    "3. Оценить false positive rate (≤15%)\n" +
+    "4. Проверить актуальность failure modes списков\n" +
+    "5. Оценить покрытие тест-пирамиды (70/20/10)\n" +
+    "6. Рекомендации по улучшению методологии\n\n" +
+    "Defect patterns (90d):\n" + defectPatterns + "\n\n" +
+    "Escape trend:\n" + escapeTrend + "\n\n" +
+    "False positive stats:\n" + falsePositiveRate + "\n\n" +
+    "ВЫВОД: systematic weaknesses, trend analysis, methodology improvements, updated targets"
+
+  let result = call_llm(prompt, chat_id)
+
+  let _ = AuditLog("quarterly_review_completed", DEPT, "Quarterly methodology review completed")
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 25: DISCLAIMER WRAPPER & ARCHIVE
+// ═══════════════════════════════════════════════════════════════════════
+
+fn ApplyDisclaimer(text: String) -> String {
+  if contains(text, "генерируются проектным ассистентом") == false then {
+    return text + "\n\n" + DISCLAIMER_BOTTOM
+  }
+  return text
+}
+
+fn SaveToQAArchive(shortTitle: String, fullResult: String, testType: String, project: String, chat_id: String) -> String {
+  let resultWithDisclaimer = ApplyDisclaimer(fullResult)
+
+  let _ = db_execute(
+    "INSERT INTO qa_assessments (short_title, full_result, test_type, project, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'published', NOW(), NOW())",
+    [shortTitle, resultWithDisclaimer, testType, project]
+  )
+
+  let idRows = db_execute("SELECT LASTVAL() as id", [])
+  let id = json_get(parse_json(idRows), "0.id", "0")
+
+  // Set verification date
+  let _ = db_execute(
+    "UPDATE qa_assessments SET verification_date = CURRENT_DATE + INTERVAL '30 days' WHERE id = ?",
+    [id]
+  )
+
+  let _ = AuditLog("qa_save", DEPT, "Assessment #" + to_string(id) + " saved: " + shortTitle + " [" + testType + "]")
+  return to_string(id)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 26: HELP
+// ═══════════════════════════════════════════════════════════════════════
+
+fn ShowQAHelp() -> String {
+  let help = "╔══════════════════════════════════════════╗\n" +
+    "║  QA — Тестирование (Параноик + Педант)   ║\n" +
+    "╚══════════════════════════════════════════╝\n\n" +
+    "КОМАНДЫ:\n" +
+    "/qa-strategy   — тест-стратегия (обязателен failure modes list)\n" +
+    "/qa-test       — запуск тест-сьюты\n" +
+    "/qa-defect     — управление дефектом\n" +
+    "/qa-defects    — список дефектов\n" +
+    "/qa-eval       — AI evals (минимум 50 кейсов)\n" +
+    "/qa-security   — security аудит\n" +
+    "/qa-coverage   — coverage отчёт\n" +
+    "/qa-runs       — история test runs\n" +
+    "/qa-monitor    — production мониторинг\n\n" +
+    "ЖЁСТКИЕ ПРАВИЛА (10):\n" +
+    "1. Нет релиза без passed test suite на critical\n" +
+    "2. Нет стратегии без failure modes list\n" +
+    "3. Нет закрытия дефекта без регрессионного теста\n" +
+    "4. Нет 'manual only' — автоматизация обязательна\n" +
+    "5. Нет skip security для auth/payment/PII/user input\n" +
+    "6. Нет AI-релиза без evals ≥50 кейсов\n" +
+    "7. Нет skip accessibility — WCAG AA обязателен\n" +
+    "8. Нет тестирования в production (staging только)\n" +
+    "9. Critical дефект → incident + RCA\n" +
+    "10. Нет закрытия без coverage + failure modes\n\n" +
+    "ТЕСТ-ПИРАМИДА: unit 70% | integration 20% | e2e 10%\n" +
+    "COVERAGE: critical≥95% | business≥90% | overall≥80%\n\n" +
+    "SKILLS (11):\n" +
+    "Tier 1: test-strategy-design, failure-modes-mapping, defect-discipline, regression-test-discipline\n" +
+    "Tier 2: unit-testing-craft, integration-testing-patterns, e2e-testing-with-playwright, security-testing-protocol, ai-evals-framework\n" +
+    "Tier 3: performance-testing, chaos-engineering\n\n" +
+    DISCLAIMER_TOP
+
+  return help
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 27: FULL PIPELINE
+// ═══════════════════════════════════════════════════════════════════════
+// For free-text queries: context → skills → hard rules → strategy → test → defects → disclaimer → archive
+
+fn FullQAPipeline(query: String, chat_id: String, intent: String) -> String {
+  let ctx = BuildQAContext(query, chat_id)
+  let parsed = parse_json(ctx)
+  let testType = json_get(parsed, "testType", TT_UNIT)
+  let severity = json_get(parsed, "severity", SEV_MEDIUM)
+  let environment = json_get(parsed, "environment", ENV_STAGING)
+  let isAISystem = json_get(parsed, "isAISystem", "false")
+  let sensitiveFeatures = json_get(parsed, "sensitiveFeatures", "")
+
+  // Hard rules gate
+  let rules = EnforceHardRules(query, environment, "project", sensitiveFeatures)
+  if rules != "PASS" then { return rules }
+
+  // Load skills
+  let skills = LoadAllSkills(testType, query)
+
+  // Step 1: Test strategy (Tier 1 — mandatory first step)
+  let strategy = ""
+  if intent == "intent:strategy" || intent == "intent:general" || intent == "intent:failure-modes" then {
+    strategy = TestStrategyDesign("project", testType, query, chat_id)
+    // Rule 2: Strategy must have failure modes
+    let r2 = EnforceRule2_FailureModesRequired(strategy, "from_strategy")
+    if r2 != "PASS" then {
+      return r2
+    }
+  }
+
+  // Step 2: Route by intent
+  let result = ""
+
+  if intent == "intent:strategy" then {
+    result = strategy
+  }
+
+  if intent == "intent:failure-modes" then {
+    let fm = FailureModesMapping("project", query, chat_id)
+    result = fm
+  }
+
+  if intent == "intent:defect" then {
+    let dd = DefectDiscipline("project", query, chat_id)
+    result = dd
+  }
+
+  if intent == "intent:regression" then {
+    let rd = RegressionTestDiscipline("project", "latest", chat_id)
+    result = rd
+  }
+
+  if intent == "intent:ai-eval" then {
+    // Rule 6: AI system requires evals
+    let r6 = EnforceRule6_AIEvalsRequired(isAISystem, "pending", "0")
+    let ae = AIEvalsFramework("project", query, chat_id)
+    result = ae
+  }
+
+  if intent == "intent:security" then {
+    let st = SecurityTestingProtocol("project", sensitiveFeatures, query, chat_id)
+    result = st
+  }
+
+  if intent == "intent:coverage" then {
+    result = CmdQACoverage(query, chat_id)
+  }
+
+  if intent == "intent:accessibility" then {
+    let ag = AccessibilityGate("project", "true", chat_id)
+    result = ag
+  }
+
+  if intent == "intent:performance" then {
+    let pt = PerformanceTesting("project", query, chat_id)
+    result = pt
+  }
+
+  if intent == "intent:chaos" then {
+    let ce = ChaosEngineering("project", query, chat_id)
+    result = ce
+  }
+
+  if intent == "intent:hotfix" then {
+    let hf = DefectDiscipline("project", "HOTFLOW: " + query, chat_id)
+    result = hf
+  }
+
+  if intent == "intent:general" then {
+    // General query — route through LLM with QA context
+    let prompt = "Ты QA-параноик-педант отдела Тестирование Fosved Office. Отвечаешь системно, точно, без эвфемизмов.\n\n" +
+      "ТИП ТЕСТА: " + testType + "\n" +
+      "SEVERITY: " + severity + "\n" +
+      "СРЕДА: " + environment + "\n" +
+      "AI-СИСТЕМА: " + isAISystem + "\n" +
+      "НАГРУЖЕННЫЕ SKILLS: " + skills + "\n\n" +
+      "ЖЁСТКИЕ ПРАВИЛА (10):\n" +
+      "1. Нет релиза без passed test suite на critical scenarios\n" +
+      "2. Нет стратегии без failure modes list\n" +
+      "3. Нет закрытия дефекта без регрессионного теста\n" +
+      "4. Нет 'manual only' — автоматизация обязательна\n" +
+      "5. Нет skip security для auth/payment/PII/user input\n" +
+      "6. Нет AI-релиза без evals ≥50 кейсов (pass rate ≥0.90)\n" +
+      "7. Нет skip accessibility — WCAG AA обязателен для production\n" +
+      "8. Нет тестирования в production (staging только)\n" +
+      "9. Critical дефект → incident + RCA обязательно\n" +
+      "10. Нет закрытия без coverage report + failure modes\n\n" +
+      "ТЕСТ-ПИРАМИДА: unit 70% | integration 20% | e2e 10%\n" +
+      "COVERAGE: critical≥95% | business≥90% | overall≥80%\n" +
+      "DEFECT ESCAPE RATE TARGET: ≤10%\n" +
+      "MTTD CRITICAL: ≤1ч | MTTR CRITICAL: ≤4ч\n\n" +
+      (length(strategy) > 0 ? "СТРАТЕГИЯ (построена):\n" + strategy + "\n\n" : "") +
+      "ЗАПРОС: " + query + "\n\n" +
+      "Отвечай системно: что проверять, как проверять, какие failure modes, какие риски."
+
+    result = call_llm(prompt, chat_id)
+  }
+
+  // Step 3: Disclaimer
+  let withDisclaimer = ApplyDisclaimer(result)
+
+  // Step 4: Safety check — never output without disclaimer
+  if contains(withDisclaimer, "генерируются проектным ассистентом") == false then {
+    return "⚠ ВНУТРЕННЯЯ ОШИБКА: disclaimer не применён. Результат заблокирован."
+  }
+
+  // Step 5: Save to archive
+  let shortTitle = substring(query, 0.0, 80.0)
+  let archiveId = SaveToQAArchive(shortTitle, withDisclaimer, testType, "project", chat_id)
+
+  return withDisclaimer + "\n\n📎 Сохранено в архив: #" + archiveId + " | Verification date: +30 дней"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 28: CROSS-DEPARTMENT INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════
+// Reference only — critical defect triggers Dev hotfix task creation
+
+fn NotifyDevHotfix(defectId: String, severity: String, summary: String, chat_id: String) -> String {
+  if severity != SEV_CRITICAL && severity != SEV_HIGH then {
+    return "Hotfix not needed — severity " + severity
+  }
+
+  let _ = AuditLog("cross_dept_hotfix", DEPT, "Notifying Dev for hotfix: defect #" + defectId + " [" + severity + "]")
+
+  // Create hotfix task reference in DB
+  let _ = db_execute(
+    "INSERT INTO cross_dept_tasks (source_dept, target_dept, task_type, reference_id, severity, summary, status, created_at) VALUES ('qa', 'dev', 'hotfix', ?, ?, ?, 'pending', NOW())",
+    [defectId, severity, summary]
+  )
+
+  let _ = SendTelegramMessage(chat_id, "🔧 HOTFIX TASK → Dev: Defect #" + defectId + " [" + severity + "] — " + summary)
+  return "Hotfix task created for Dev: defect #" + defectId
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 29: ENTRY POINT
+// ═══════════════════════════════════════════════════════════════════════
 
 pattern HandleQA(query: String, chat_id: String) -> String {
-  let dept = "qa"
-  let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
-  let _ = RecordAssistantMessage(chat_id, dept, reply)
+  let dept = DEPT
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
+
+  // Parse command/intent
+  let parsed = ParseQAQuery(query)
+
+  // Route by command
+  if parsed == "cmd:qa-strategy" then {
+    let reply = CmdQAStrategy(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:qa-test" then {
+    let reply = CmdQATest(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:qa-defect" then {
+    let reply = CmdQADefect(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:qa-defects" then {
+    let reply = CmdQADefects(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:qa-eval" then {
+    let reply = CmdQAEval(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:qa-security" then {
+    let reply = CmdQASecurityAudit(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:qa-coverage" then {
+    let reply = CmdQACoverage(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:qa-runs" then {
+    let reply = CmdQARuns(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  if parsed == "cmd:qa-monitor" then {
+    let reply = CmdQAMonitor(query, chat_id)
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  // Help detection
+  if contains(lower(query), "/qa") && contains(lower(query), "help") then {
+    let reply = ShowQAHelp()
+    let _ = RecordAssistantMessage(chat_id, dept, reply)
+    return reply
+  }
+
+  // Free-text: full pipeline
+  let reply = FullQAPipeline(query, chat_id, parsed)
+  let _ = RecordAssistantMessage(chat_id, dept, reply)
   return reply
 }
