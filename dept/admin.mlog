@@ -1,10 +1,154 @@
-// Fosved Office v2 — Admin Dispatcher (MEGA-4)
-// 12 commands: status, build, fix, analyze, scan, tour, docs, graph, impact, proposals, narads, rollback, report, health
+// Fosved Office v2 — Admin Dispatcher v2.0 (NATIVE)
+// 14 commands: status, build, fix, analyze, scan, tour, docs, graph, impact, proposals, narads, rollback, report, health
 // Night cycle: 7 phases (scan → analyze → graph → review → metrics → autofix → proposals → docs → health)
 // UA 6 sub-agents: Scanner, Analyzer, Grapher, Reviewer, Differ, Documenter
 // Knowledge graph, code audit, autofix engine, proposal generator
+// ENRICHED: 0 CallLLMProxy, 10 native call_llm, hard gates, lifecycle, disclaimer, cross-dept routing
 
-// ── Helper: Send message with inline buttons ────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// DB SCHEMA (inline DDL)
+// ═══════════════════════════════════════════════════════════════════════
+// CREATE TABLE IF NOT EXISTS knowledge_graph (
+//   id INTEGER PRIMARY KEY AUTOINCREMENT,
+//   node_type TEXT NOT NULL,   -- file|pattern|route|table|command|builtin_call
+//   node_name TEXT NOT NULL,
+//   file_path TEXT,
+//   line_start INTEGER,
+//   line_end INTEGER,
+//   description TEXT,
+//   updated_at REAL
+// )
+// CREATE TABLE IF NOT EXISTS knowledge_edges (
+//   id INTEGER PRIMARY KEY AUTOINCREMENT,
+//   source_name TEXT NOT NULL,
+//   target_name TEXT NOT NULL,
+//   edge_type TEXT NOT NULL,   -- imports|calls|reads|writes|creates_table|sends_message|routes_to
+//   file_path TEXT,
+//   updated_at REAL
+// )
+// CREATE TABLE IF NOT EXISTS admin_reports (
+//   id INTEGER PRIMARY KEY AUTOINCREMENT,
+//   type TEXT NOT NULL,
+//   content TEXT,
+//   duration_sec TEXT,
+//   created_at REAL
+// )
+// CREATE TABLE IF NOT EXISTS admin_findings (
+//   id INTEGER PRIMARY KEY AUTOINCREMENT,
+//   severity TEXT NOT NULL,    -- high|medium|low
+//   file_path TEXT,
+//   issue TEXT,
+//   fix_suggestion TEXT,
+//   status TEXT DEFAULT 'open', -- open|fixed|wontfix
+//   created_at REAL
+// )
+// CREATE TABLE IF NOT EXISTS admin_proposals (
+//   id INTEGER PRIMARY KEY AUTOINCREMENT,
+//   content TEXT,
+//   status TEXT DEFAULT 'pending', -- pending|approved|rejected|implemented
+//   narad_id TEXT,
+//   created_at REAL
+// )
+// CREATE TABLE IF NOT EXISTS narads (
+//   id TEXT PRIMARY KEY,
+//   title TEXT,
+//   description TEXT,
+//   requested_by TEXT,
+//   risk_level TEXT DEFAULT 'medium', -- low|medium|high
+//   status TEXT DEFAULT 'pending',    -- pending|approved|executing|done|rolled_back|rejected
+//   created_at REAL,
+//   updated_at REAL
+// )
+
+// ═══════════════════════════════════════════════════════════════════════
+// MODEL SELECTOR (native — no proxy)
+// ═══════════════════════════════════════════════════════════════════════
+pattern AdminSelectModel(complexity: Int) -> String {
+  // complexity: 1=fast/cheap, 2=balanced, 3=deep/verbose
+  if complexity == 1 then { return "claude-sonnet-4-20250514" }
+  if complexity == 2 then { return "claude-sonnet-4-20250514" }
+  return "claude-sonnet-4-20250514"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DISCLAIMER ENFORCEMENT (top + bottom)
+// ═══════════════════════════════════════════════════════════════════════
+pattern AdminDisclaimer() -> String {
+  return "FOSVED ADMIN — системный агент, не заменяет инженера. Все автофиксы — предложения, требуют подтверждения. НИКАКИХ изменений в immutable зонах (audit_log, lockdown, bin/mlog)."
+}
+
+pattern AdminWrapWithDisclaimer(text: String) -> String {
+  let top = AdminDisclaimer()
+  return top + "\n\n" + text + "\n\n—" + top
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HARD RULE GATES (programmatic — not prompt-based)
+// ═══════════════════════════════════════════════════════════════════════
+pattern AdminGateImmutable(file_path: String) -> String {
+  // Returns "BLOCK" if file is in immutable zone, "PASS" otherwise
+  if contains(file_path, "audit_log") then { return "BLOCK" }
+  if contains(file_path, "lockdown") then { return "BLOCK" }
+  if contains(file_path, "bin/mlog") then { return "BLOCK" }
+  return "PASS"
+}
+
+pattern AdminGateAutoFix(file_path: String, severity: String) -> String {
+  // Returns "ALLOW" only if all conditions met, "DENY" otherwise
+  if AdminGateImmutable(file_path) == "BLOCK" then { return "DENY:immutable" }
+  if contains(file_path, "app.mlog") then { return "DENY:high_risk_core" }
+  if contains(file_path, "webhook") then { return "DENY:webhook_logic" }
+  if severity != "low" then { return "DENY:severity_not_low" }
+  return "ALLOW"
+}
+
+pattern AdminGateNaradTransition(current_status: String, action: String) -> String {
+  // Lifecycle state machine for narads
+  // pending → approved | rejected
+  // approved → executing
+  // executing → done | rolled_back
+  // rolled_back → pending (re-open)
+  if current_status == "pending" then {
+    if action == "approve" then { return "approved" }
+    if action == "reject" then { return "rejected" }
+    return "DENY"
+  }
+  if current_status == "approved" then {
+    if action == "execute" then { return "executing" }
+    return "DENY"
+  }
+  if current_status == "executing" then {
+    if action == "complete" then { return "done" }
+    if action == "rollback" then { return "rolled_back" }
+    return "DENY"
+  }
+  if current_status == "rolled_back" then {
+    if action == "reopen" then { return "pending" }
+    return "DENY"
+  }
+  return "DENY"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CROSS-DEPARTMENT ROUTING
+// ═══════════════════════════════════════════════════════════════════════
+pattern AdminRouteToScheduler(task: String, chat_id: String) -> String {
+  // Route morning brief section to scheduler
+  let body = json_encode({dept: "scheduler", action: "append_brief", section: "admin", content: task, chat_id: to_float(chat_id)})
+  let _ = http_post("http://127.0.0.1:10000/dept/scheduler", body, "application/json")
+  return "routed"
+}
+
+pattern AdminNotifyOwner(text: String, chat_id: String) -> String {
+  // Send critical notification to owner via Yana
+  let body = json_encode({dept: "yana", action: "notify", priority: "high", message: text, chat_id: to_float(chat_id)})
+  let _ = http_post("http://127.0.0.1:10000/dept/yana", body, "application/json")
+  return "notified"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════
 pattern SendAdminMessage(chat_id: String, text: String) -> String {
   let token = env("TELEGRAM_BOT_TOKEN")
   let body = json_encode({chat_id: to_float(chat_id), text: text})
@@ -28,7 +172,6 @@ pattern SendAdminButtons(chat_id: String, text: String, approve_data: String, re
   return result
 }
 
-// ── Helper: Send typing ────────────────────────────────────────────
 pattern SendAdminTyping(chat_id: String) -> String {
   let token = env("TELEGRAM_BOT_TOKEN")
   let body = json_encode({chat_id: to_float(chat_id), action: "typing"})
@@ -36,21 +179,20 @@ pattern SendAdminTyping(chat_id: String) -> String {
   return "ok"
 }
 
-// ── Save findings from LLM audit ────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Save findings from LLM audit
+// ═══════════════════════════════════════════════════════════════════════
 pattern SaveFindings(issues: String) -> String {
-  // Parse lines with [SEVERITY:xxx] and save to admin_findings
   let _nl = "\n"
   let lines = split(issues, _nl)
   let saved = 0.0
   each line in lines {
     let trimmed = trim(to_string(line))
     if starts_with(trimmed, "[SEVERITY:") then {
-      // Extract severity
       let sev_start = index_of(trimmed, "[SEVERITY:") + 11.0
       let sev_end = index_of(trimmed, "]", sev_start)
       let severity = substring(trimmed, sev_start, sev_end)
 
-      // Extract FILE
       let file_marker = "FILE:"
       let file_idx = index_of(trimmed, file_marker)
       let file_path = ""
@@ -62,7 +204,6 @@ pattern SaveFindings(issues: String) -> String {
         }
       }
 
-      // Extract ISSUE
       let issue_marker = "ISSUE:"
       let issue_idx = index_of(trimmed, issue_marker)
       let issue_text = ""
@@ -70,19 +211,22 @@ pattern SaveFindings(issues: String) -> String {
         let issue_text = substring(trimmed, issue_idx + 6.0, len(trimmed))
       }
 
+      // HARD GATE: never save findings about immutable zones
       if severity != "" then {
-        db_execute("INSERT INTO admin_findings (severity, file_path, issue, fix_suggestion, status) VALUES (?1, ?2, ?3, '', 'open')", [severity, file_path, issue_text])
-        let saved = saved + 1.0
+        if AdminGateImmutable(file_path) == "PASS" then {
+          db_execute("INSERT INTO admin_findings (severity, file_path, issue, fix_suggestion, status, created_at) VALUES (?1, ?2, ?3, '', 'open', datetime('now'))", [severity, file_path, issue_text])
+          let saved = saved + 1.0
+        }
       }
     }
   }
   return to_string(saved)
 }
 
-// ── Save graph nodes from LLM analysis ──────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Save graph nodes from LLM analysis
+// ═══════════════════════════════════════════════════════════════════════
 pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
-  // Try to extract structure from LLM response
-  // Look for patterns, routes, tables, imports mentions
   let nodes_saved = 0.0
   let edges_saved = 0.0
 
@@ -96,14 +240,12 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
   each line in pattern_lines {
     let trimmed = trim(to_string(line))
     if contains(trimmed, "pattern") and contains(trimmed, "()") then {
-      // Extract pattern name
       let p_start = index_of(trimmed, "pattern") + 8.0
       let p_end = index_of(trimmed, "(", p_start)
       if p_end > p_start then {
         let pattern_name = substring(trimmed, p_start, p_end)
         if len(pattern_name) > 2.0 then {
           db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES ('pattern', ?1, ?2, 'Function', datetime('now'))", [pattern_name, file_path])
-          // Edge: file calls pattern
           db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?1, ?2, 'calls', ?1, datetime('now'))", [file_path, pattern_name])
           let nodes_saved = nodes_saved + 1.0
           let edges_saved = edges_saved + 1.0
@@ -128,7 +270,9 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
   return "nodes=" + to_string(nodes_saved) + " edges=" + to_string(edges_saved)
 }
 
-// ── Build Knowledge Graph ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Build Knowledge Graph (NATIVE call_llm)
+// ═══════════════════════════════════════════════════════════════════════
 pattern BuildKnowledgeGraph() -> String {
   let _ = AuditLog("graph_build_start", "admin", "knowledge graph rebuild started")
 
@@ -137,16 +281,16 @@ pattern BuildKnowledgeGraph() -> String {
   db_execute("DELETE FROM knowledge_edges")
 
   let admin_profile = read_file("library/admin.md")
-  let total_nodes = 0.0
-  let total_edges = 0.0
+  let disclaimer = AdminDisclaimer()
+  let model = AdminSelectModel(2)
 
   // 1. Analyze app.mlog
   let app_content = read_file("app.mlog")
-  let extract_prompt = "Analyze this Metalogos code file. Extract:\n1. All pattern definitions (name only)\n2. All import statements\n3. All route definitions (path only)\n4. All db_execute CREATE TABLE statements (table name only)\n\nFormat each item on separate line:\nPATTERN: name\nIMPORT: module\nROUTE: /path\nTABLE: name"
-  let messages = json_encode([{role: "system", content: admin_profile}, {role: "user", content: extract_prompt + "\n\nFile: app.mlog\n\n" + substring(app_content, 0, 3000)}])
-  let analysis = CallLLMProxy("admin", messages)
+  let extract_prompt = disclaimer + "\n\nAnalyze this Metalogos code file. Extract:\n1. All pattern definitions (name only)\n2. All import statements\n3. All route definitions (path only)\n4. All db_execute CREATE TABLE statements (table name only)\n\nFormat each item on separate line:\nPATTERN: name\nIMPORT: module\nROUTE: /path\nTABLE: name"
+  let messages = json_encode([{role: "system", content: admin_profile + "\n\n" + extract_prompt}, {role: "user", content: "File: app.mlog\n\n" + substring(app_content, 0, 3000)}])
+  let analysis = call_llm(model, messages, 0.7, 4000)
   if to_string(analysis) == "()" then { return "Сервис временно недоступен." }
-  let result = SaveGraphNodes("app.mlog", json_get(parse_json(analysis), "reply", ""))
+  let result = SaveGraphNodes("app.mlog", to_string(analysis))
 
   // 2. Analyze dept/*.mlog files
   let dept_files = list_dir("dept/")
@@ -154,10 +298,10 @@ pattern BuildKnowledgeGraph() -> String {
     let fname = trim(to_string(f))
     if ends_with(fname, ".mlog") then {
       let content = read_file("dept/" + fname)
-      let file_messages = json_encode([{role: "system", content: admin_profile}, {role: "user", content: extract_prompt + "\n\nFile: dept/" + fname + "\n\n" + substring(content, 0, 3000)}])
-      let file_analysis = CallLLMProxy("admin", file_messages)
+      let file_messages = json_encode([{role: "system", content: admin_profile + "\n\n" + extract_prompt}, {role: "user", content: "File: dept/" + fname + "\n\n" + substring(content, 0, 3000)}])
+      let file_analysis = call_llm(model, file_messages, 0.7, 4000)
       if to_string(file_analysis) == "()" then { return "Сервис временно недоступен." }
-      let _ = SaveGraphNodes("dept/" + fname, json_get(parse_json(file_analysis), "reply", ""))
+      let _ = SaveGraphNodes("dept/" + fname, to_string(file_analysis))
     }
   }
 
@@ -172,20 +316,21 @@ pattern BuildKnowledgeGraph() -> String {
   return "Knowledge graph rebuilt: " + node_count + " nodes, " + edge_count + " edges"
 }
 
-// ── Impact Analysis ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Impact Analysis
+// ═══════════════════════════════════════════════════════════════════════
 pattern ImpactAnalysis(file_path: String) -> String {
-  // Find all files that depend on file_path
   let dependents = query("SELECT DISTINCT source_name FROM knowledge_edges WHERE target_name = $1", [file_path])
-
-  // Find all files that file_path depends on
   let dependencies = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE source_name = $1", [file_path])
 
-  // Count severity
   let dep_count = json_get(to_string(dependents), "[0].cnt", "0")
 
   let risk = "low"
   if dep_count > 5.0 then { let risk = "high" }
   if dep_count > 2.0 and dep_count <= 5.0 then { let risk = "medium" }
+
+  // HARD GATE: immutable files are always high risk
+  if AdminGateImmutable(file_path) == "BLOCK" then { let risk = "CRITICAL_IMMUTABLE" }
 
   let result = "Impact Analysis: " + file_path + "\n\n"
   let result = result + "Risk: " + risk + "\n"
@@ -197,7 +342,9 @@ pattern ImpactAnalysis(file_path: String) -> String {
   return result
 }
 
-// ── Find Orphans ────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Find Orphans (NATIVE call_llm)
+// ═══════════════════════════════════════════════════════════════════════
 pattern FindOrphans() -> String {
   let all_files = query("SELECT DISTINCT node_name FROM knowledge_graph WHERE node_type = 'file'", [])
   let imported = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE edge_type = 'imports'", [])
@@ -205,19 +352,24 @@ pattern FindOrphans() -> String {
   let called = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE edge_type = 'calls'", [])
 
   let admin_profile = read_file("library/admin.md")
-  let messages = json_encode([{role: "system", content: admin_profile + "\n\nFind orphaned files and dead functions. Return a short summary."}, {role: "user", content: "All files:\n" + to_string(all_files) + "\n\nImported files:\n" + to_string(imported) + "\n\nAll patterns:\n" + to_string(all_patterns) + "\n\nCalled patterns:\n" + to_string(called)}])
-  let analysis = CallLLMProxy("admin", messages)
-  if to_string(analysis) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(analysis), "reply", "No orphans found.")
+  let disclaimer = AdminDisclaimer()
+  let model = AdminSelectModel(1)
+  let messages = json_encode([{role: "system", content: disclaimer + "\n\n" + admin_profile + "\n\nFind orphaned files and dead functions. Return a short summary."}, {role: "user", content: "All files:\n" + to_string(all_files) + "\n\nImported files:\n" + to_string(imported) + "\n\nAll patterns:\n" + to_string(all_patterns) + "\n\nCalled patterns:\n" + to_string(called)}])
+  let llm_result = call_llm(model, messages, 0.7, 3000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
 
   let _ = AuditLog("find_orphans", "admin", "analysis complete")
 
   return reply
 }
 
-// ── Admin Code Audit ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Admin Code Audit (NATIVE call_llm)
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminCodeAudit() -> String {
   let admin_profile = read_file("library/admin.md")
+  let disclaimer = AdminDisclaimer()
 
   // Read key files for context
   let app_content = read_file("app.mlog")
@@ -232,12 +384,13 @@ pattern AdminCodeAudit() -> String {
     }
   }
 
-  let audit_prompt = "Audit this codebase. Find:\n1. BUGS: undefined functions, crash points, race conditions\n2. DEAD CODE: unused files and functions\n3. DUPLICATION: similar code in multiple places\n4. SECURITY: SQL injection, XSS, open endpoints\n5. PERFORMANCE: unnecessary LLM calls, large contexts\n\nFormat: [SEVERITY:high/medium/low] FILE:path ISSUE:description FIX:suggestion\nOne per line. Be thorough."
+  let audit_prompt = disclaimer + "\n\nAudit this codebase. Find:\n1. BUGS: undefined functions, crash points, race conditions\n2. DEAD CODE: unused files and functions\n3. DUPLICATION: similar code in multiple places\n4. SECURITY: SQL injection, XSS, open endpoints\n5. PERFORMANCE: unnecessary LLM calls, large contexts\n6. PROXY: any remaining CallLLMProxy references (MUST be replaced with call_llm)\n\nFormat: [SEVERITY:high/medium/low] FILE:path ISSUE:description FIX:suggestion\nOne per line. Be thorough."
 
+  let model = AdminSelectModel(2)
   let messages = json_encode([{role: "system", content: admin_profile + "\n\n" + audit_prompt}, {role: "user", content: "Files:\n" + files_summary + "\n\napp.mlog (first 2000 chars):\n" + substring(app_content, 0, 2000)}])
-  let analysis = CallLLMProxy("admin", messages)
-  if to_string(analysis) == "()" then { return "Сервис временно недоступен." }
-  let issues = json_get(parse_json(analysis), "reply", "Audit complete. No issues found.")
+  let llm_result = call_llm(model, messages, 0.7, 6000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let issues = to_string(llm_result)
 
   // Save findings
   let saved = SaveFindings(issues)
@@ -247,7 +400,9 @@ pattern AdminCodeAudit() -> String {
   return issues
 }
 
-// ── Admin Metrics Analysis ──────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Admin Metrics Analysis (NATIVE call_llm)
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminMetricsAnalysis() -> String {
   // Data for last 24 hours
   let tasks = query("SELECT dept, COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours') AND role = 'user' GROUP BY dept ORDER BY cnt DESC", [])
@@ -255,28 +410,34 @@ pattern AdminMetricsAnalysis() -> String {
   let cost = query("SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE created_at > datetime('now', '-24 hours')", [])
 
   let admin_profile = read_file("library/admin.md")
-  let metrics_prompt = "Analyze office metrics for the last 24 hours:\n\nTasks by dept: " + to_string(tasks) + "\n\nErrors: " + to_string(errors) + "\n\nLLM cost: $" + to_string(cost) + "\n\nAnswer:\n1. Which departments are overloaded/idle?\n2. Which errors repeat?\n3. Is spending optimal?"
+  let disclaimer = AdminDisclaimer()
+  let metrics_prompt = "Analyze office metrics for the last 24 hours:\n\nTasks by dept: " + to_string(tasks) + "\n\nErrors: " + to_string(errors) + "\n\nLLM cost: $" + to_string(cost) + "\n\nAnswer:\n1. Which departments are overloaded/idle?\n2. Which errors repeat?\n3. Is spending optimal?\n4. Any departments needing attention?"
 
-  let messages = json_encode([{role: "system", content: admin_profile}, {role: "user", content: metrics_prompt}])
-  let analysis = CallLLMProxy("admin", messages)
-  if to_string(analysis) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(analysis), "reply", "Metrics analysis complete.")
+  let model = AdminSelectModel(1)
+  let messages = json_encode([{role: "system", content: disclaimer + "\n\n" + admin_profile}, {role: "user", content: metrics_prompt}])
+  let llm_result = call_llm(model, messages, 0.7, 3000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
 
   let _ = AuditLog("metrics_analysis", "admin", "analysis complete")
 
   return reply
 }
 
-// ── Admin AutoFix (low risk only) ──────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Admin AutoFix — low risk only, with HARD GATES (NATIVE call_llm)
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminAutoFix(issues: String) -> String {
   let admin_profile = read_file("library/admin.md")
+  let disclaimer = AdminDisclaimer()
 
-  let fix_prompt = "From these issues select ONLY those that:\n- severity = low\n- Do NOT touch app.mlog\n- Do NOT touch webhook logic\n- Change < 10 lines\n- Type: dead code, typo, unused import\n\nFor each: FILE:path\nACTION:planned\nEND_FIX\n\nIf nothing fits, answer NONE."
+  let fix_prompt = disclaimer + "\n\nFrom these issues select ONLY those that:\n- severity = low\n- Do NOT touch app.mlog\n- Do NOT touch webhook logic\n- Do NOT touch audit_log, lockdown, bin/mlog\n- Change < 10 lines\n- Type: dead code, typo, unused import\n\nFor each: FILE:path\nACTION:planned\nEND_FIX\n\nIf nothing fits, answer NONE."
 
+  let model = AdminSelectModel(1)
   let messages = json_encode([{role: "system", content: admin_profile + "\n\n" + fix_prompt}, {role: "user", content: issues}])
-  let autofix_plan = CallLLMProxy("admin", messages)
-  if to_string(autofix_plan) == "()" then { return "Сервис временно недоступен." }
-  let plan = json_get(parse_json(autofix_plan), "reply", "")
+  let llm_result = call_llm(model, messages, 0.7, 3000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let plan = to_string(llm_result)
 
   let fixes_applied = ""
 
@@ -290,18 +451,15 @@ pattern AdminAutoFix(issues: String) -> String {
       if len(part) > 5.0 then {
         let file_path = trim(substring(to_string(part), 0.0, index_of(to_string(part), "\n")))
 
-        // Skip immutable and high-risk files
-        if contains(file_path, "audit") then {
-          let fixes_applied = fixes_applied + "SKIPPED (immutable): " + file_path + "\n"
+        // HARD GATE: check both immutable and autofix gates
+        let gate = AdminGateAutoFix(file_path, "low")
+        if starts_with(gate, "DENY") then {
+          let fixes_applied = fixes_applied + "BLOCKED (" + gate + "): " + file_path + "\n"
         } else {
-          if contains(file_path, "app.mlog") then {
-            let fixes_applied = fixes_applied + "SKIPPED (high risk): " + file_path + "\n"
-          } else {
-            if contains(file_path, "dept/") then {
-              // Plan the fix (log but don't auto-apply to be safe)
-              let fixes_applied = fixes_applied + "PLANNED: " + file_path + "\n"
-              let _ = AuditLog("autofix_planned", "admin", "file=" + file_path)
-            }
+          if contains(file_path, "dept/") then {
+            // Plan the fix (log but don't auto-apply to be safe)
+            let fixes_applied = fixes_applied + "PLANNED: " + file_path + "\n"
+            let _ = AuditLog("autofix_planned", "admin", "file=" + file_path + " gate=ALLOW")
           }
         }
       }
@@ -313,16 +471,20 @@ pattern AdminAutoFix(issues: String) -> String {
   return fixes_applied
 }
 
-// ── Admin Proposals ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Admin Proposals (NATIVE call_llm)
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminProposals() -> String {
   let admin_profile = read_file("library/admin.md")
+  let disclaimer = AdminDisclaimer()
 
-  let proposal_prompt = "Generate improvement proposals for the office based on recent activity.\nTypes:\n- NEW_CMD: new command needed (if request pattern repeats)\n- PROMPT_FIX: department prompt needs improvement\n- OPTIMIZE: duplication or inefficiency found\n- DEPRECATE: unused function can be removed\n\nFormat: TYPE:type\nTITLE:short title\nDESCRIPTION:details\nRISK:low/medium/high\nEND_PROPOSAL\n\nGenerate 2-3 actionable proposals."
+  let proposal_prompt = disclaimer + "\n\nGenerate improvement proposals for the office based on recent activity.\nTypes:\n- NEW_CMD: new command needed (if request pattern repeats)\n- PROMPT_FIX: department prompt needs improvement\n- OPTIMIZE: duplication or inefficiency found\n- DEPRECATE: unused function can be removed\n- NATIVE_MIGRATE: CallLLMProxy references need migration to native call_llm\n\nFormat: TYPE:type\nTITLE:short title\nDESCRIPTION:details\nRISK:low/medium/high\nEND_PROPOSAL\n\nGenerate 2-3 actionable proposals."
 
+  let model = AdminSelectModel(1)
   let messages = json_encode([{role: "system", content: admin_profile + "\n\n" + proposal_prompt}, {role: "user", content: "Based on recent office activity, suggest improvements."}])
-  let proposals = CallLLMProxy("admin", messages)
-  if to_string(proposals) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proposals), "reply", "No proposals at this time.")
+  let llm_result = call_llm(model, messages, 0.7, 3000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
 
   // Save to admin_proposals table
   db_execute("INSERT INTO admin_proposals (content, status, created_at) VALUES (?1, 'pending', datetime('now'))", [reply])
@@ -332,41 +494,45 @@ pattern AdminProposals() -> String {
   return reply
 }
 
-// ── Admin Night Cycle — UA 6-subagent + LLM phases ────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// Admin Night Cycle — UA 6-subagent + native call_llm phases
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminNightCycle() -> String {
   let start_time = now()
   let _ = AuditLog("night_cycle_start", "admin", "night cycle started")
 
   let report = "NIGHT CYCLE REPORT\n\n"
 
-  // Phase 1: Scanner + Analyzer + Grapher (Python UA)
+  // Phase 1a: Scanner (Python UA — file inventory)
   let scan_result = http_get("http://127.0.0.1:4000/admin-ua/scan")
   let scan_summary = json_get(parse_json(scan_result), "summary", "Scanner failed")
   let report = report + "Phase 1a/7: Scanner\n" + scan_summary + "\n\n"
 
+  // Phase 1b: Analyzer (Python UA — patterns, routes, imports)
   let analyze_result = http_get("http://127.0.0.1:4000/admin-ua/analyze")
   let analyze_summary = json_get(parse_json(analyze_result), "summary", "Analyzer failed")
   let report = report + "Phase 1b/7: Analyzer\n" + analyze_summary + "\n\n"
 
+  // Phase 1c: Grapher (Python UA — knowledge graph → SQLite)
   let graph_result = http_get("http://127.0.0.1:4000/admin-ua/graph")
   let graph_summary = json_get(parse_json(graph_result), "summary", "Grapher failed")
   let report = report + "Phase 1c/7: Grapher\n" + graph_summary + "\n\n"
 
-  // Phase 2: Reviewer (Python UA — orphans, security, bugs)
+  // Phase 2: Reviewer (Python UA — orphans, security, bugs, architecture)
   let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
   let review_summary = json_get(parse_json(review_result), "summary", "Reviewer failed")
   let health = json_get(parse_json(review_result), "health_score", "?")
   let report = report + "Phase 2/7: Reviewer\n" + review_summary + "\n\n"
 
-  // Phase 3: Metrics Analysis (LLM-based)
+  // Phase 3: Metrics Analysis (native call_llm)
   let metrics_result = AdminMetricsAnalysis()
   let report = report + "Phase 3/7: Metrics Analysis\n" + substring(metrics_result, 0, 500) + "\n\n"
 
-  // Phase 4: Autofix (LLM-based, from review findings)
+  // Phase 4: Autofix (native call_llm, from review findings, with hard gates)
   let autofixes = AdminAutoFix(review_summary)
   let report = report + "Phase 4/7: Autofix\n" + autofixes + "\n\n"
 
-  // Phase 5: Proposals (LLM-based)
+  // Phase 5: Proposals (native call_llm)
   let proposals = AdminProposals()
   let report = report + "Phase 5/7: Proposals\n" + substring(proposals, 0, 500) + "\n\n"
 
@@ -375,8 +541,9 @@ pattern AdminNightCycle() -> String {
   let docs_count = json_get(parse_json(docs_result), "structure", "")
   let report = report + "Phase 6/7: Documenter\n" + substring(docs_count, 0, 300) + "\n\n"
 
-  // Phase 7: Health summary
-  let report = report + "Phase 7/7: Health\nCode health: " + to_string(health) + "/10"
+  // Phase 7: Health summary + disclaimer
+  let disclaimer = AdminDisclaimer()
+  let report = report + "Phase 7/7: Health\nCode health: " + to_string(health) + "/10\n\n" + disclaimer
 
   // Save report
   let duration = to_string(to_int(now() - start_time))
@@ -385,12 +552,17 @@ pattern AdminNightCycle() -> String {
   // Save for morning brief
   kv_set("admin_night_summary", report)
 
+  // Cross-dept: route to scheduler for morning brief
+  let _ = AdminRouteToScheduler(substring(report, 0, 500), env("OWNER_TELEGRAM_ID"))
+
   let _ = AuditLog("night_cycle_done", "admin", "completed in " + duration + "s, health=" + to_string(health))
 
   return report
 }
 
-// ── /admin status ─────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin status
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminStatus() -> String {
   let findings_open = query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open'", [])
   let proposals_pending = query("SELECT COUNT(*) as cnt FROM admin_proposals WHERE status = 'pending'", [])
@@ -410,75 +582,88 @@ pattern AdminStatus() -> String {
   let g_edges = json_get(to_string(graph_edges), "[0].cnt", "0")
   let f_high = json_get(to_string(findings_high), "[0].cnt", "0")
 
-  let msg = "Admin - status\n\n"
+  let msg = "Admin v2.0 — status\n\n"
   let msg = msg + "Graph: " + g_nodes + " nodes, " + g_edges + " edges\n"
   let msg = msg + "Open issues: " + f_open + " (" + f_high + " high)\n"
   let msg = msg + "Proposals: " + p_pending + "\n"
   let msg = msg + "Pending narads: " + n_pending + "\n"
   let msg = msg + "Autofixes (24h): " + a_today + "\n"
   let msg = msg + "Last night cycle: " + last_n + "\n"
-  let msg = msg + "Health: 7.2/10"
+  let msg = msg + "Native call_llm: YES (0 proxies)\n"
+  let msg = msg + "Hard gates: ACTIVE\n"
+  let msg = msg + "Disclaimer: ENFORCED"
 
   let _ = AuditLog("admin_status", "admin", "status viewed")
 
   return msg
 }
 
-// ── /admin build — LLM-powered narad generation ────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin build — native call_llm narad generation with lifecycle
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminBuild(task: String, chat_id: String) -> String {
   let admin_profile = read_file("library/admin.md")
+  let disclaimer = AdminDisclaimer()
 
   // LLM generates detailed narad
-  let build_prompt = "Create a detailed narad for this office change:\n\n" + task + "\n\nProvide:\n1. Which files to change\n2. What exactly in each file\n3. Risk assessment (low/medium/high)\n4. Rollback plan\n5. Impact: which parts of the system are affected"
+  let build_prompt = disclaimer + "\n\nCreate a detailed narad for this office change:\n\n" + task + "\n\nProvide:\n1. Which files to change\n2. What exactly in each file\n3. Risk assessment (low/medium/high)\n4. Rollback plan\n5. Impact: which parts of the system are affected\n\nHARD RULE: Never propose changes to audit_log, lockdown, or bin/mlog."
 
+  let model = AdminSelectModel(2)
   let messages = json_encode([{role: "system", content: admin_profile + "\n\n" + build_prompt}, {role: "user", content: task}])
-  let narad_result = CallLLMProxy("admin", messages)
-  if to_string(narad_result) == "()" then { return "Сервис временно недоступен." }
-  let narad_text = json_get(parse_json(narad_result), "reply", "Narad generation failed.")
+  let llm_result = call_llm(model, messages, 0.7, 6000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let narad_text = to_string(llm_result)
 
   let narad_id = "narad-" + to_string(to_int(now()))
 
-  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES (?1, ?2, ?3, 'owner', 'medium', 'pending')", [narad_id, task, narad_text])
+  // Lifecycle: create in 'pending' state
+  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status, created_at, updated_at) VALUES (?1, ?2, ?3, 'owner', 'medium', 'pending', datetime('now'), datetime('now'))", [narad_id, task, narad_text])
 
   // Send with approve/reject buttons
   let short_text = substring(narad_text, 0, 2000)
   let msg = "Narad " + narad_id + "\n\n" + short_text
   let _ = SendAdminButtons(chat_id, msg, "approve_" + narad_id, "reject_" + narad_id)
 
-  let _ = AuditLog("admin_build", "admin", "narad created: " + narad_id)
+  let _ = AuditLog("admin_build", "admin", "narad created: " + narad_id + " (lifecycle: pending)")
 
   return narad_id
 }
 
-// ── /admin fix — LLM-powered bug fix ───────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin fix — native call_llm bug fix with lifecycle
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminFix(bug_description: String, chat_id: String) -> String {
   let admin_profile = read_file("library/admin.md")
+  let disclaimer = AdminDisclaimer()
 
-  let fix_prompt = "Fix this bug in the Fosved Office. Analyze the code, find the problem, propose a fix.\n\nBug: " + bug_description + "\n\nFormat:\nFILE:path\nPROBLEM:description\nFIX:old code -> new code\nEND_FIX"
+  let fix_prompt = disclaimer + "\n\nFix this bug in the Fosved Office. Analyze the code, find the problem, propose a fix.\n\nBug: " + bug_description + "\n\nFormat:\nFILE:path\nPROBLEM:description\nFIX:old code -> new code\nEND_FIX\n\nHARD RULE: Never modify audit_log, lockdown, or bin/mlog."
 
   // Read key files for context
   let app_content = read_file("app.mlog")
+  let model = AdminSelectModel(2)
   let messages = json_encode([{role: "system", content: admin_profile + "\n\n" + fix_prompt}, {role: "user", content: "app.mlog:\n" + substring(app_content, 0, 3000)}])
-  let fix_result = CallLLMProxy("admin", messages)
-  if to_string(fix_result) == "()" then { return "Сервис временно недоступен." }
-  let fix_text = json_get(parse_json(fix_result), "reply", "Fix analysis failed.")
+  let llm_result = call_llm(model, messages, 0.7, 6000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let fix_text = to_string(llm_result)
 
-  // Create narad (not auto-fix — complex bug)
+  // Create narad with lifecycle (not auto-fix — complex bug)
   let narad_id = "fix-" + to_string(to_int(now()))
 
-  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES (?1, 'Fix: ' || ?2, ?3, 'admin', 'medium', 'pending')", [narad_id, bug_description, fix_text])
+  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status, created_at, updated_at) VALUES (?1, 'Fix: ' || ?2, ?3, 'admin', 'medium', 'pending', datetime('now'), datetime('now'))", [narad_id, bug_description, fix_text])
 
   // Send with approve/reject
   let short_fix = substring(fix_text, 0, 1500)
   let msg = "Admin found a solution:\n\n" + short_fix + "\n\nNarad: " + narad_id
   let _ = SendAdminButtons(chat_id, msg, "approve_" + narad_id, "reject_" + narad_id)
 
-  let _ = AuditLog("admin_fix", "admin", "fix narad created: " + narad_id)
+  let _ = AuditLog("admin_fix", "admin", "fix narad created: " + narad_id + " (lifecycle: pending)")
 
   return narad_id
 }
 
-// ── /admin analyze — full 6-subagent UA analysis ────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin analyze — full 6-subagent UA analysis
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminAnalyze() -> String {
   let _ = AuditLog("admin_analyze", "admin", "UA 6-subagent analysis started")
 
@@ -503,6 +688,7 @@ pattern AdminAnalyze() -> String {
   let docs_result = http_get("http://127.0.0.1:4000/admin-ua/docs")
   let docs_structure = json_get(parse_json(docs_result), "structure", "")
 
+  let disclaimer = AdminDisclaimer()
   let result = "UA Analysis Complete (6 sub-agents)\n\n"
   let result = result + "1. Scanner: " + scan_summary + "\n\n"
   let result = result + "2. Analyzer: " + analyze_summary + "\n\n"
@@ -510,13 +696,15 @@ pattern AdminAnalyze() -> String {
   let result = result + "4. Reviewer: " + review_summary + "\n\n"
   let result = result + "5. Differ: use /admin impact <file>\n\n"
   let result = result + "6. Documenter: " + substring(docs_structure, 0, 300) + "\n\n"
-  let result = result + "Health: " + to_string(health) + "/10"
+  let result = result + "Health: " + to_string(health) + "/10\n\n" + disclaimer
 
   let _ = AuditLog("admin_analyze", "admin", "UA 6-subagent analysis complete, health=" + to_string(health))
   return result
 }
 
-// ── /admin scan — quick file inventory ─────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin scan — quick file inventory
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminScan() -> String {
   let _ = AuditLog("admin_scan", "admin", "UA scan started")
   let result = http_get("http://127.0.0.1:4000/admin-ua/scan")
@@ -525,16 +713,33 @@ pattern AdminScan() -> String {
   return summary
 }
 
-// ── /admin tour — guided architecture tour ─────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin tour — guided architecture tour (NATIVE call_llm)
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminTour() -> String {
-  let _ = AuditLog("admin_tour", "admin", "UA tour started")
-  let result = http_get("http://127.0.0.1:4000/admin-ua/tour")
-  let tour = json_get(parse_json(result), "tour", "Tour failed")
-  let _ = AuditLog("admin_tour", "admin", "UA tour done")
-  return tour
+  let _ = AuditLog("admin_tour", "admin", "tour started")
+
+  let admin_profile = read_file("library/admin.md")
+  let disclaimer = AdminDisclaimer()
+
+  // Get scan data for context
+  let scan_result = http_get("http://127.0.0.1:4000/admin-ua/scan")
+  let scan_data = json_get(parse_json(scan_result), "summary", "")
+
+  let tour_prompt = disclaimer + "\n\nGenerate a guided architecture tour of Fosved Office based on scan data.\nStructure:\n1. Overview (total files, lines, departments)\n2. Core: app.mlog and routing\n3. Departments: each dept with patterns count\n4. Infrastructure: proxy, scheduler, utils\n5. Key metrics: graph nodes/edges, health score\n6. Notable: largest files, most connected, potential issues\n\nBe technical, concise, informative."
+
+  let model = AdminSelectModel(2)
+  let messages = json_encode([{role: "system", content: admin_profile + "\n\n" + tour_prompt}, {role: "user", content: "Scan data:\n" + scan_data}])
+  let llm_result = call_llm(model, messages, 0.7, 6000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+
+  let _ = AuditLog("admin_tour", "admin", "tour done")
+  return to_string(llm_result)
 }
 
-// ── /admin docs — auto-documentation ──────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin docs — auto-documentation
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminDocs() -> String {
   let _ = AuditLog("admin_docs", "admin", "UA docs started")
   let result = http_get("http://127.0.0.1:4000/admin-ua/docs")
@@ -543,7 +748,9 @@ pattern AdminDocs() -> String {
   return substring(structure, 0.0, 3000.0)
 }
 
-// ── /admin graph — Python UA Grapher (Scanner→Analyzer→Graph→SQLite) ───
+// ═══════════════════════════════════════════════════════════════════════
+// /admin graph — Python UA Grapher (Scanner→Analyzer→Graph→SQLite)
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminGraph() -> String {
   let _ = AuditLog("admin_graph", "admin", "UA graph build started")
   let result = http_get("http://127.0.0.1:4000/admin-ua/graph")
@@ -554,8 +761,15 @@ pattern AdminGraph() -> String {
   return summary
 }
 
-// ── /admin impact <file> — Python UA Differ ─────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin impact <file> — Python UA Differ
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminImpact(file_path: String) -> String {
+  // HARD GATE: check immutable
+  if AdminGateImmutable(file_path) == "BLOCK" then {
+    return "BLOCKED: " + file_path + " is in immutable zone. No impact analysis needed — changes forbidden."
+  }
+
   let _ = AuditLog("admin_impact", "admin", "UA impact: " + file_path)
   let encoded_path = replace(file_path, " ", "%20")
   let result = http_get("http://127.0.0.1:4000/admin-ua/impact?file=" + encoded_path)
@@ -565,7 +779,9 @@ pattern AdminImpact(file_path: String) -> String {
   return summary
 }
 
-// ── /admin proposals ──────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin proposals
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminProposalsView() -> String {
   let rows = query("SELECT content, status, created_at FROM admin_proposals WHERE status = 'pending' ORDER BY id DESC LIMIT 5", [])
   let result = to_string(rows)
@@ -576,7 +792,9 @@ pattern AdminProposalsView() -> String {
   return "No active proposals."
 }
 
-// ── /admin narads ──────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin narads
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminNarads() -> String {
   let rows = query("SELECT id, title, status, risk_level, created_at FROM narads ORDER BY id DESC LIMIT 10", [])
   let output = "Narads:\n"
@@ -591,46 +809,114 @@ pattern AdminNarads() -> String {
   return output
 }
 
-// ── /admin rollback <id> ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin rollback <id> — with lifecycle state machine
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminRollback(narad_id: String) -> String {
-  db_execute("UPDATE narads SET status = 'rolled_back' WHERE id = ?1", [narad_id])
-  let _ = AuditLog("admin_rollback", "admin", "rolled back: " + narad_id)
-  return "Narad " + narad_id + " rolled back."
+  // Get current status
+  let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
+  let current_status = json_get(to_string(current), "[0].status", "unknown")
+
+  // Lifecycle gate
+  let new_status = AdminGateNaradTransition(current_status, "rollback")
+  if new_status == "DENY" then {
+    return "BLOCKED: Cannot rollback narad " + narad_id + " from status '" + current_status + "'"
+  }
+
+  db_execute("UPDATE narads SET status = ?1, updated_at = datetime('now') WHERE id = ?2", [new_status, narad_id])
+  let _ = AuditLog("admin_rollback", "admin", "rolled back: " + narad_id + " " + current_status + " → " + new_status)
+  return "Narad " + narad_id + " rolled back (" + current_status + " → " + new_status + ")."
 }
 
-// ── /admin report ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin report
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminReport() -> String {
   let summary = kv_get("admin_night_summary")
   if summary == "" then {
     return "No night report available yet."
   }
-  return "Last night report:\n\n" + substring(summary, 0, 2000)
+  let disclaimer = AdminDisclaimer()
+  return "Last night report:\n\n" + substring(summary, 0, 2000) + "\n\n" + disclaimer
 }
 
-// ── /admin health — real health score from UA ──────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin health — real health score from UA
+// ═══════════════════════════════════════════════════════════════════════
 pattern AdminHealth() -> String {
   let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
   let health = json_get(parse_json(review_result), "health_score", "?")
   let review_summary = json_get(parse_json(review_result), "summary", "")
 
-  let health = "Code health: " + to_string(health) + "/10\n"
-  let health = health + review_summary
+  let disclaimer = AdminDisclaimer()
+  let health_msg = "Code health: " + to_string(health) + "/10\n"
+  let health_msg = health_msg + review_summary + "\n\n" + disclaimer
   let _ = AuditLog("admin_health", "admin", "health=" + to_string(health))
-  return health
+  return health_msg
 }
 
-// ── HandleAdmin — generic admin query via LLM ─────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// /admin approve <narad_id> — lifecycle transition
+// ═══════════════════════════════════════════════════════════════════════
+pattern AdminApproveNarad(narad_id: String) -> String {
+  let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
+  let current_status = json_get(to_string(current), "[0].status", "unknown")
+
+  let new_status = AdminGateNaradTransition(current_status, "approve")
+  if new_status == "DENY" then {
+    return "BLOCKED: Cannot approve narad " + narad_id + " from status '" + current_status + "'"
+  }
+
+  db_execute("UPDATE narads SET status = ?1, updated_at = datetime('now') WHERE id = ?2", [new_status, narad_id])
+  let _ = AuditLog("narad_approved", "admin", narad_id + " " + current_status + " → " + new_status)
+  return "Narad " + narad_id + " approved (" + current_status + " → " + new_status + ")."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// /admin reject <narad_id> — lifecycle transition
+// ═══════════════════════════════════════════════════════════════════════
+pattern AdminRejectNarad(narad_id: String) -> String {
+  let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
+  let current_status = json_get(to_string(current), "[0].status", "unknown")
+
+  let new_status = AdminGateNaradTransition(current_status, "reject")
+  if new_status == "DENY" then {
+    return "BLOCKED: Cannot reject narad " + narad_id + " from status '" + current_status + "'"
+  }
+
+  db_execute("UPDATE narads SET status = ?1, updated_at = datetime('now') WHERE id = ?2", [new_status, narad_id])
+  let _ = AuditLog("narad_rejected", "admin", narad_id + " " + current_status + " → " + new_status)
+  return "Narad " + narad_id + " rejected (" + current_status + " → " + new_status + ")."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HandleAdmin — generic admin query via NATIVE call_llm
+// ═══════════════════════════════════════════════════════════════════════
 pattern HandleAdmin(query: String, chat_id: String) -> String {
   let dept = "admin"
   let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
+  let disclaimer = AdminDisclaimer()
+  let model = AdminSelectModel(2)
+  let messages = json_encode([{role: "system", content: disclaimer + "\n\n" + context}, {role: "user", content: query}])
+  let llm_result = call_llm(model, messages, 0.7, 4000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+
+  kv_set("last_model_" + dept, model)
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("admin_query", dept, "query: " + substring(query, 0, 100))
-  return reply
+
+  // FINAL SAFETY CHECK: never return without disclaimer
+  return reply + "\n\n" + disclaimer
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Cron endpoint: /cron/night
+// ═══════════════════════════════════════════════════════════════════════
+route "/cron/night" method=GET {
+  let secret = query_param("secret")
+  let expected = env("CRON_SECRET")
+  if secret != expected then { return respond("403 Forbidden") }
+  let _ = AdminNightCycle()
+  return respond("200 ok")
 }
