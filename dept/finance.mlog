@@ -1,708 +1,1103 @@
-// ═══════════════════════════════════════════════════════════════════════
-// Fosved Office v2 — Finance Department (NATIVE v1.0)
-// ═══════════════════════════════════════════════════════════════════════
-// Replaces Python proxy stub with native Metalogos finance engine.
-// 9 skill patterns, 4 jurisdictions, 7 hard rules, 2 lifecycle machines,
-// MAPE-based learning loop, invoice auto-escalation.
-// 0 CallLLMProxy calls, 0 Python dependencies.
-//
-// Architecture:
-//   HandleFinance(query, chat_id)
-//     → ParseFinanceQuery(query)          ← NLP domain + command detection
-//     → RouteByCommand(cmd, ...)           ← 7 bot commands + free-text dispatch
-//       → cmd=forecast  → BuildCashflowForecast    (Tier 1)
-//       → cmd=invoice  → InvoiceLifecycle          (Tier 1)
-//       → cmd=tax      → CalculateTax             (Tier 2)
-//       → cmd=verify   → VerifyForecast
-//       → cmd=score    → FinanceScore
-//       → cmd=archive  → SearchArchive
-//       → cmd=unit     → UnitEconomics            (Tier 1)
-//       → cmd=runway   → RunwayAndBurn            (Tier 3)
-//       → free-text    → FullPipeline
-//     → FullPipeline:
-//       → DetectFinanceDomain              ← forecast|invoice|tax|unit_econ|runway|mrr_arr
-//       → RequireJurisdiction              ← hard rule 2
-//       → RequireBusinessForm
-//       → ExecuteDomainLogic               ← Tier 1-2-3 dispatch
-//       → SaveResult                       ← with archive
-//     → RecordAssistantMessage
-//
-// Psychotype: Педант + Методист (accuracy > speed, repeatable procedures)
-//
-// Depends on BUILTINS only (no Python, no CallLLMProxy):
-//   call_llm, db_execute, kv_get, kv_set, json_encode, json_get, parse_json,
-//   to_string, to_float, to_int, length, contains, lower, substring,
-//   join, split, now, format_date, hash, AuditLog,
-//   RecordAssistantMessage, BuildContext, SendTelegramMessage
-//
-// ═══════════════════════════════════════════════════════════════════════
+// Fosved Office v2 — Finance Dispatcher (ENRICHED v1.0)
+// Full financial engine: 9 skills (3 tiers) + jurisdiction routing + business form validation
+// + cashflow forecasting with MAPE verification + invoice lifecycle state machine
+// + multi-currency + tax compliance + unit economics + scheduler hooks
+// + PROJECT PARAMS: per-operation token budgets, depth→model mapping,
+//   hard rule gates (jurisdiction, business form, verification date, no investment advice),
+//   API endpoints, invoice state machine, forecast→verification learning loop
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 0: CONSTANTS & JURISDICTION DATA
+// PROJECT PARAMETERS V1.0 — Token budgets, Models, Hard gates
 // ═══════════════════════════════════════════════════════════════════════
 
-// Hard rule 6 boundary
-let FINANCE_BOUNDARY = "Финансовый отдел — проектный ассистент. Не заменяет бухгалтера, не подаёт декларации, не даёт инвестиционных советов."
-
-// Forecast lifecycle states
-let FC_DRAFTED = "drafted"
-let FC_PUBLISHED = "published"
-let FC_VERIFIED = "verified"
-let FC_MISSED = "missed"
-let FC_PARTIAL = "partial"
-let FC_SUPERSEDED = "superseded"
-
-// Invoice lifecycle states
-let INV_DRAFTED = "drafted"
-let INV_SENT = "sent"
-let INV_DUE_SOON = "due_soon"
-let INV_OVERDUE = "overdue"
-let INV_ESCALATION = "escalation"
-let INV_PRE_LEGAL = "pre_legal"
-let INV_PAID = "paid"
-let INV_PARTIALLY_PAID = "partially_paid"
-let INV_CLOSED = "closed"
-let INV_WRITTEN_OFF = "written_off"
-
-// Default jurisdiction (hard rule 2: explicit jurisdiction required)
-let DEFAULT_JURISDICTION = "BY"
-let DEFAULT_BUSINESS_FORM = "ooo"
-
-// Collection coefficients for cashflow forecasting
-// [0-30d: 95%, 31-60d: 70%, 61-90d: 50%, 90+: 30%, legal: 10%]
-let COLLECTION_0_30 = 0.95
-let COLLECTION_31_60 = 0.70
-let COLLECTION_61_90 = 0.50
-let COLLECTION_90_PLUS = 0.30
-let COLLECTION_LEGAL = 0.10
-
-// ═══════════════════════════════════════════════════════════════════════
-// SECTION 1: NLP QUERY PARSER & DOMAIN DETECTION
-// ═══════════════════════════════════════════════════════════════════════
-
-fn DetectFinanceDomain(query: String) -> String {
-  let q = lower(query)
-  // Cashflow / forecast
-  if contains(q, "cashflow") or contains(q, "денег") or contains(q, "поступлени") or contains(q, "кассов") then { return "forecast" }
-  if contains(q, "прогноз") and (contains(q, "финанс") or contains(q, "денег") or contains(q, "поступл")) then { return "forecast" }
-  if contains(q, "хватит ли") or contains(q, "сколько денег") then { return "forecast" }
-  // Invoice
-  if contains(q, "инвойс") or contains(q, "счёт") or contains(q, "счет") or contains(q, "оплат") then { return "invoice" }
-  if contains(q, "invoice") or contains(q, "payment") or contains(q, "collection") then { return "invoice" }
-  if contains(q, "дебитор") or contains(q, "просроч") then { return "invoice" }
-  // Tax
-  if contains(q, "налог") or contains(q, "ндс") or contains(q, "VAT") or contains(q, "tax") then { return "tax" }
-  if contains(q, "налогов") or contains(q, "подоходн") or contains(q, "прибыльн") then { return "tax" }
-  // Unit economics
-  if contains(q, "cac") or contains(q, "ltv") or contains(q, "unit econ") then { return "unit_econ" }
-  if contains(q, "стоимость привлеч") or contains(q, "окупаемост") or contains(q, "марж") then { return "unit_econ" }
-  if contains(q, "roi") or contains(q, "payback") then { return "unit_econ" }
-  // Runway
-  if contains(q, "runway") or contains(q, "burn rate") or contains(q, "выгорани") then { return "runway" }
-  if contains(q, "ресурс") and contains(q, "месяц") then { return "runway" }
-  // MRR/ARR
-  if contains(q, "mrr") or contains(q, "arr") or contains(q, "подписк") or contains(q, "churn") then { return "mrr_arr" }
-  return "forecast"  // default to cashflow
+// ── Depth → Model mapping ──
+// depth 0: claude-3-5-haiku (fast, cheap — simple lookups, invoice listing)
+// depth 1: claude-sonnet-4-20250514 (balanced — cashflow, tax calc)
+// depth 2: claude-sonnet-4-20250514 (high reasoning — multi-jurisdiction, unit economics)
+// depth 3: claude-opus-4-20250514 (deep — cross-jurisdiction analysis, quarterly review)
+pattern FinanceSelectModel(depth: Int) -> String {
+  if depth == 0.0 then { return "claude-3-5-haiku" }
+  if depth == 1.0 then { return "claude-sonnet-4-20250514" }
+  if depth == 2.0 then { return "claude-sonnet-4-20250514" }
+  if depth == 3.0 then { return "claude-opus-4-20250514" }
+  return "claude-sonnet-4-20250514"
 }
 
-fn DetectJurisdiction(query: String) -> String {
-  let q = lower(query)
-  if contains(q, " by") or contains(q, "беларус") or contains(q, "рб") then { return "BY" }
-  if contains(q, " ru") or contains(q, "росси") or contains(q, "рф") then { return "RU" }
-  if contains(q, " eu") or contains(q, "евросоюз") or contains(q, "ес") then { return "EU" }
-  if contains(q, " us") or contains(q, "сша") or contains(q, "америк") then { return "US" }
-  return ""
+// ── Per-operation token budgets ──
+// [Context, Analysis, Output] per depth level
+pattern FinanceOpBudget(depth: Int) -> String {
+  if depth == 0.0 then { return "2000,500,500" }        // total ~3000
+  if depth == 1.0 then { return "4000,2000,1000" }       // total ~7000
+  if depth == 2.0 then { return "6000,4000,1500" }       // total ~11500
+  if depth == 3.0 then { return "8000,6000,2000" }       // total ~16000
+  return "4000,2000,1000"
 }
 
-fn DetectBusinessForm(query: String) -> String {
-  let q = lower(query)
-  if contains(q, "ооо") or contains(q, "llc") or contains(q, "ltd") then { return "ooo" }
-  if contains(q, " ип") or contains(q, "предпринимател") or contains(q, "sole proprietor") then { return "ip" }
-  if contains(q, "самозанят") or contains(q, "фрилансер") or contains(q, "freelancer") or contains(q, "self-employed") then { return "selfemployed" }
-  return ""
-}
-
-fn DetectCommand(query: String) -> String {
-  let q = lower(query)
-  if contains(q, "/finance-forecast") then { return "forecast" }
-  if contains(q, "/finance-invoice") then { return "invoice" }
-  if contains(q, "/finance-tax") then { return "tax" }
-  if contains(q, "/finance-verify") then { return "verify" }
-  if contains(q, "/finance-archive") then { return "archive" }
-  if contains(q, "/finance-score") then { return "score" }
-  if contains(q, "/finance-unit") then { return "unit" }
-  if contains(q, "/finance-runway") then { return "runway" }
-  if contains(q, "/finance") then { return "help" }
-  return "free_text"
-}
-
-fn ParseFinanceQuery(query: String) -> Struct{
-  command: String,
-  domain: String,
-  jurisdiction: String,
-  business_form: String,
-  task_description: String,
-  forecast_id: String
-} {
-  let command = DetectCommand(query)
-  let domain = DetectFinanceDomain(query)
-  let jurisdiction = DetectJurisdiction(query)
-  let business_form = DetectBusinessForm(query)
-
-  // Extract forecast_id for verify/show commands
-  let forecast_id = ""
-  let parts = split(query, " ")
-  if command == "verify" and length(parts) > 1 then {
-    let forecast_id = to_string(get(parts, 1))
-  }
-
-  return {
-    command: command,
-    domain: domain,
-    jurisdiction: jurisdiction,
-    business_form: business_form,
-    task_description: query,
-    forecast_id: forecast_id
-  }
+// ── Skill loading budget per depth ──
+// Tier1 always loaded (~10K), Tier2 by operation type (~5K), Tier3 by explicit request (~3K)
+pattern FinanceSkillBudget(depth: Int) -> Float {
+  if depth == 0.0 then { return 6000.0 }      // Tier1 partial
+  if depth == 1.0 then { return 10000.0 }     // Tier1 + selective Tier2
+  if depth == 2.0 then { return 15000.0 }     // Tier1 + full Tier2
+  if depth == 3.0 then { return 18000.0 }     // All tiers
+  return 10000.0
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 2: JURISDICTION & COMPATIBILITY
-// Hard rule 2: no work without explicit jurisdiction
+// HARD RULE GATES — programmatic, not prompt-based
+// These gates BLOCK execution if violated. No LLM can override them.
 // ═══════════════════════════════════════════════════════════════════════
 
-fn CheckCompatibility(jurisdiction: String, business_form: String) -> Struct{
-  valid: Bool,
-  alternative: String,
-  notes: String
-} {
-  // BY + selfemployed → incompatible
+// Gate 1: Jurisdiction must be explicit
+pattern GateJurisdiction(jurisdiction: String) -> String {
+  let valid = "BY,RU,EU,US"
+  if jurisdiction == "BY" then { return "PASS" }
+  if jurisdiction == "RU" then { return "PASS" }
+  if jurisdiction == "EU" then { return "PASS" }
+  if jurisdiction == "US" then { return "PASS" }
+  return "FAIL: jurisdiction must be one of BY/RU/EU/US. Neutral financial work does not exist."
+}
+
+// Gate 2: Business form must be valid
+pattern GateBusinessForm(business_form: String) -> String {
+  if business_form == "ooo" then { return "PASS" }
+  if business_form == "ip" then { return "PASS" }
+  if business_form == "selfemployed" then { return "PASS" }
+  return "FAIL: business_form must be one of ooo/ip/selfemployed."
+}
+
+// Gate 3: Compatibility gate (jurisdiction + business form must be compatible)
+pattern GateCompatibility(jurisdiction: String, business_form: String) -> String {
+  // BY/selfemployed is incompatible — such form does not exist in BY
   if jurisdiction == "BY" and business_form == "selfemployed" then {
-    return {
-      valid: false,
-      alternative: "ИП (упрощённая) или ремесленник",
-      notes: "В РБ нет статуса самозанятого. Альтернативы: ИП с упрощённой системой, ремесленник, заявительный принцип."
+    return "FAIL: BY/selfemployed is incompatible. Nearest alternatives: ремесленник или ИП."
+  }
+  return "PASS"
+}
+
+// Gate 4: Forecast must have verification date
+pattern GateVerificationDate(verification_date: String) -> String {
+  if verification_date == "" or verification_date == "null" then {
+    return "FAIL: every forecast must have a verification date. Without it, the forecast is an opinion, not work."
+  }
+  return "PASS"
+}
+
+// Gate 5: No investment advice
+pattern GateNoInvestmentAdvice(query: String) -> String {
+  let t = lower(query)
+  if contains(t, "куда вложить") then { return "FAIL: investment advice is OSP/Expert domain, not Finance. Finance only counts 'how much free cash exists and how much there will be'." }
+  if contains(t, "купить акци") then { return "FAIL: investment advice is OSP/Expert domain." }
+  if contains(t, "инвестиционн совет") then { return "FAIL: investment advice is OSP/Expert domain." }
+  return "PASS"
+}
+
+// Gate 6: No accounting substitution
+pattern GateNoAccountingSubstitution(query: String) -> String {
+  let t = lower(query)
+  if contains(t, "декларац") and contains(t, "подать") then { return "FAIL: filing tax declarations is a licensed accountant's work. Finance PREPARES data, does not FILE." }
+  if contains(t, "бухгалтерск отчёт по форме") then { return "FAIL: formal accounting reports are a licensed accountant's work. Finance prepares DATA for the accountant." }
+  return "PASS"
+}
+
+// Gate 7: No retroactive forecast modification
+pattern GateNoRetroactive(forecast_id: String, new_status: String) -> String {
+  if new_status == "superseded" then {
+    // Superseding is allowed (new forecast replaces old), but not retroactive modification
+    return "PASS"
+  }
+  // Check if forecast already verified — verified forecasts cannot be changed
+  let rows = query("SELECT status FROM financial_forecasts WHERE id = ?", [forecast_id])
+  if len(rows) > 0.0 then {
+    let current_status = get(get(rows, 0.0), "status")
+    if current_status == "verified" or current_status == "missed" or current_status == "partial" then {
+      return "FAIL: verified/missed/partial forecasts cannot be retroactively modified."
     }
   }
-  return { valid: true, alternative: "", notes: "" }
+  return "PASS"
 }
 
-fn RequireJurisdiction(jurisdiction: String) -> String {
-  // Hard rule 2: no work without explicit jurisdiction
-  if jurisdiction == "" then {
-    let default_jx = to_string(kv_get("default_jurisdiction"))
-    if default_jx != "" and default_jx != "()" then { return default_jx }
-    return DEFAULT_JURISDICTION
-  }
-  return jurisdiction
-}
-
-fn RequireBusinessForm(form: String) -> String {
-  if form == "" then {
-    let default_form = to_string(kv_get("default_business_form"))
-    if default_form != "" and default_form != "()" then { return default_form }
-    return DEFAULT_BUSINESS_FORM
-  }
-  return form
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SECTION 3: SAVE RESULT & ARCHIVE
-// ═══════════════════════════════════════════════════════════════════════
-
-fn SaveResult(
-  short_title: String,
-  full_result: String,
-  result_type: String,
-  jurisdiction: String,
-  business_form: String,
-  confidence: String,
-  verification_date: String,
-  amount: String,
-  currency: String
-) -> String {
-  // Hard rule 1: no forecast without verification date
-  if result_type == "forecast" and verification_date == "" then {
-    return "ОШИБКА: Прогноз без даты верификации — это мнение, не прогноз (жёсткое правило 1). Укажите дату проверки."
-  }
-
-  // Check compatibility
-  let compat = CheckCompatibility(jurisdiction, business_form)
-  let compat_warning = if compat.valid then { "" } else { "\n\n⚠️ Несовместимая комбинация " + jurisdiction + "/" + business_form + ". Альтернатива: " + compat.alternative + ". " + compat.notes }
-
-  // Save to DB
-  let id = db_execute("INSERT INTO financial_forecasts (short_title, full_result, result_type, jurisdiction, business_form, confidence, status, verification_date, amount, currency, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now')) RETURNING id", [short_title, full_result, result_type, jurisdiction, business_form, confidence, FC_PUBLISHED, verification_date, amount, currency])
-
-  let forecast_id = to_string(json_get(parse_json(to_string(id)), "id", "0"))
-
-  let _ = AuditLog("fin_save", "finance", "forecast_id=" + forecast_id + " type=" + result_type + " jx=" + jurisdiction + " form=" + business_form)
-
-  return "Результат сохранён: #" + forecast_id + "\nТип: " + result_type + "\nЮрисдикция: " + jurisdiction + "/" + business_form + compat_warning
+// Combined gate check — returns PASS or FAIL with reason
+pattern FinanceRunGates(query: String, jurisdiction: String, business_form: String, verification_date: String) -> String {
+  let g1 = GateJurisdiction(jurisdiction)
+  if g1 != "PASS" then { return g1 }
+  let g2 = GateBusinessForm(business_form)
+  if g2 != "PASS" then { return g2 }
+  let g3 = GateCompatibility(jurisdiction, business_form)
+  if g3 != "PASS" then { return g3 }
+  let g4 = GateVerificationDate(verification_date)
+  if g4 != "PASS" then { return g4 }
+  let g5 = GateNoInvestmentAdvice(query)
+  if g5 != "PASS" then { return g5 }
+  let g6 = GateNoAccountingSubstitution(query)
+  if g6 != "PASS" then { return g6 }
+  return "PASS"
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 4: CASHFLOW FORECASTING (Tier 1 — cashflow-forecasting)
-// Hard rules: #1 (verification date), #4 (no retroactive recalc), #5 (no rounding)
+// DISCLAIMER ENFORCEMENT
 // ═══════════════════════════════════════════════════════════════════════
 
-fn BuildCashflowForecast(days: Int, jurisdiction: String, business_form: String, query: String) -> String {
-  // Step 1: Set scope (granularity by horizon)
-  let granularity = if days <= 30 then { "weekly" } else if days <= 90 then { "biweekly" } else { "monthly" }
+pattern FinanceDisclaimerTop() -> String {
+  return "⚠️ DISCLAIMER: Finance department prepares DATA and CALCULATIONS. It does NOT substitute a licensed accountant, does NOT file tax declarations, does NOT give investment advice. All results require owner review before acting."
+}
 
-  // Step 2: Collect opening balance from DB
-  let opening = db_execute("SELECT SUM(amount) as balance FROM financial_forecasts WHERE result_type = 'cash_balance' AND jurisdiction = ? ORDER BY created_at DESC LIMIT 1", [jurisdiction])
-  let opening_balance = if length(opening) > 0 then { to_string(json_get(get(opening, 0), "balance", "0")) } else { "0" }
+pattern FinanceDisclaimerBottom(jurisdiction: String, business_form: String) -> String {
+  return "---\n⚠️ Расчёт подготовлен для юрисдикции " + jurisdiction + ", форма " + business_form + ". Не является налоговой или бухгалтерской консультацией. Проверьте результат с лицензированным бухгалтером перед подачей."
+}
 
-  // Step 3: Collect outstanding invoices with aging
-  let invoices_out = db_execute("SELECT id, amount, currency, due_date, status FROM invoices WHERE status IN ('sent','due_soon','overdue') AND jurisdiction = ? ORDER BY due_date ASC", [jurisdiction])
-
-  // Step 4: Collect fixed obligations (salary, rent, SaaS, loans)
-  let fixed_outflows = db_execute("SELECT description, amount, currency FROM financial_forecasts WHERE result_type = 'fixed_obligation' AND jurisdiction = ? ORDER BY amount DESC", [jurisdiction])
-
-  // Step 5: Build structured prompt for LLM with all constraints
-  let prompt = "Построй cashflow-прогноз на " + to_string(days) + " дней. Кассовый метод (НЕ начисительный).\n\n"
-  let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:\n"
-  let prompt = prompt + "1. Каждый прогноз — контракт с будущим. Дата верификации обязательна.\n"
-  let prompt = prompt + "2. Кассовый метод: деньги на счёте, не обязательства.\n"
-  let prompt = prompt + "3. Коэффициенты инкассации: 0-30д=95%, 31-60д=70%, 61-90д=50%, 90+=30%, legal=10%.\n"
-  let prompt = prompt + "4. Pipeline — с вероятностью 20-40%. Подписанные инвестиции — только реальные.\n"
-  let prompt = prompt + "5. Фиксированные обязательства — точно. Налоги — по календарю.\n"
-  let prompt = prompt + "6. Копейки до финального вывода (жёсткое правило 5: не округлять для красоты).\n"
-  let prompt = prompt + "7. Кассовый разрыв = closing < 0. Ликвидностный риск = closing < 10% от месячного расхода.\n"
-  let prompt = prompt + "8. Антипаттерны: оптимистичное инкассо, игнор FX, смешение касса/начисление, pipeline без вероятности.\n\n"
-  let prompt = prompt + "Входящие данные:\n"
-  let prompt = prompt + "Остаток на счёте: " + opening_balance + "\n"
-  let prompt = prompt + "Неоплаченные инвойсы: " + to_string(invoices_out) + "\n"
-  let prompt = prompt + "Фиксированные расходы: " + to_string(fixed_outflows) + "\n"
-  let prompt = prompt + "Юрисдикция: " + jurisdiction + "/" + business_form + "\n"
-  let prompt = prompt + "Горизонт: " + to_string(days) + " дней, гранулярность: " + granularity + "\n"
-  let prompt = prompt + "Контекст: " + query + "\n\n"
-  let prompt = prompt + "Формат: JSON с полями periods (array: {date, opening, inflows, outflows, closing, risks}), summary, verification_date, recommendations."
-
-  let llm_result = call_llm("finance-cashflow", prompt, 4000)
-  let parsed = parse_json(llm_result)
-
-  let periods = to_string(json_get(parsed, "periods", "[]"))
-  let summary = to_string(json_get(parsed, "summary", "Расчёт выполнен"))
-  let verification_date = to_string(json_get(parsed, "verification_date", ""))
-  let recommendations = to_string(json_get(parsed, "recommendations", ""))
-
-  // Hard rule 1: enforce verification date
-  let vd = if verification_date == "" then { format_date(now() + to_float(to_string(days)) * 86400.0, "%Y-%m-%d") } else { verification_date }
-
-  // Format output
-  let output = "═══ CASHFLOW-ПРОГНОЗ (" + to_string(days) + "д, " + jurisdiction + "/" + business_form + ") ═══\n\n"
-  let output = output + summary + "\n\n"
-  let output = output + "Периоды:\n" + periods + "\n\n"
-  let output = output + "Рекомендации:\n" + recommendations + "\n\n"
-  let output = output + "Дата верификации: " + vd + "\n"
-  let output = output + "Гранулярность: " + granularity + "\n\n"
-  let output = output + FINANCE_BOUNDARY
-
-  // Save
-  let save = SaveResult("Cashflow " + to_string(days) + "d " + jurisdiction, output, "forecast", jurisdiction, business_form, "medium", vd, "0", "BYN")
-
-  return output + "\n\n" + save
+pattern FinanceFinalSafetyCheck(reply: String) -> String {
+  // Scan output for forbidden patterns that indicate the LLM crossed boundaries
+  let r = lower(reply)
+  let safe = "true"
+  // Check for investment recommendation language
+  if contains(r, "рекомендую купить") or contains(r, "рекомендую инвестировать") then { let safe = "false" }
+  if contains(r, "советую вложить") or contains(r, "стоит купить") then { let safe = "false" }
+  // Check for accounting filing language
+  if contains(r, "подайте декларац") or contains(r, "сдайте отчёт") then { let safe = "false" }
+  // Check for rounding that hides reality
+  if contains(r, "округлено до") or contains(r, "приблизительн") then { let safe = "false" }
+  if safe == "false" then {
+    return reply + "\n\n🚨 SAFETY: Output contained forbidden pattern. Finance does NOT give investment advice, file declarations, or round for comfort. Verify manually."
+  }
+  return reply
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 5: INVOICE LIFECYCLE (Tier 1 — invoice-lifecycle-management)
-// Hard rules: #3 (never substitutes accountant), #5 (no rounding)
+// INTENT CLASSIFIER — determines finance sub-operation
 // ═══════════════════════════════════════════════════════════════════════
 
-fn ListInvoices(status_filter: String, jurisdiction: String) -> String {
-  let rows = if status_filter != "" then {
-    db_execute("SELECT id, invoice_number, client_name, amount, currency, status, due_date FROM invoices WHERE status = ? ORDER BY due_date ASC LIMIT 15", [status_filter])
-  } else {
-    db_execute("SELECT id, invoice_number, client_name, amount, currency, status, due_date FROM invoices ORDER BY due_date ASC LIMIT 15", [])
-  }
-
-  if length(rows) == 0 then {
-    return "Нет инвойсов" + if status_filter != "" then { " со статусом " + status_filter } else { "" } + "."
-  }
-
-  let prompt = "Форматируй список инвойсов для отображения. Статусы: drafted/sent/due_soon/overdue/escalation/pre_legal/paid/closed. Подсвети просроченные. JSON: " + to_string(rows)
-  let formatted = call_llm("finance-format", prompt, 1500)
-  return formatted
-}
-
-fn CreateInvoice(client_name: String, amount: String, currency: String, due_date: String, jurisdiction: String, business_form: String, description: String) -> String {
-  let next_num = db_execute("SELECT COUNT(*) as c FROM invoices", [])
-  let num = to_int(to_string(json_get(get(next_num, 0), "c", "0"))) + 1
-  let invoice_number = "INV-" + to_string(num)
-
-  let _ = db_execute("INSERT INTO invoices (invoice_number, client_name, amount, currency, due_date, jurisdiction, business_form, status, description, issue_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))", [invoice_number, client_name, amount, currency, due_date, jurisdiction, business_form, INV_DRAFTED, description])
-
-  let _ = AuditLog("fin_invoice_create", "finance", "invoice=" + invoice_number + " client=" + client_name + " amount=" + amount + currency)
-
-  return "Инвойс создан: " + invoice_number + "\nКлиент: " + client_name + "\nСумма: " + amount + " " + currency + "\nСрок: " + due_date + "\nСтатус: " + INV_DRAFTED + "\n\n" + FINANCE_BOUNDARY
-}
-
-fn DailyInvoiceCheck() -> String {
-  // Auto-escalation: check overdue invoices and forecasts due for verification
-  let overdue = db_execute("SELECT id, invoice_number, client_name, amount, currency, due_date, status, julianday('now') - julianday(due_date) as days_overdue FROM invoices WHERE status IN ('sent','due_soon','overdue','escalation') AND due_date < datetime('now') ORDER BY due_date ASC", [])
-
-  if length(overdue) == 0 then {
-    let _ = AuditLog("fin_daily", "finance", "No overdue invoices")
-    return "Нет просроченных инвойсов."
-  }
-
-  // Auto-transition based on days overdue
-  // >60d → pre_legal, >14d → escalation, >0d → overdue
-  let prompt = "Обработай просроченные инвойсы. Правила эскалации: >60д=pre_legal, >14д=escalation, >0д=overdue. Сформируй напоминания для каждого. Данные: " + to_string(overdue)
-  let result = call_llm("finance-invoice-check", prompt, 2000)
-
-  // Also check forecasts due for verification today
-  let due_forecasts = db_execute("SELECT id, short_title, verification_date FROM financial_forecasts WHERE status = 'published' AND verification_date <= datetime('now') ORDER BY verification_date ASC", [])
-
-  let output = result
-  if length(due_forecasts) > 0 then {
-    let output = output + "\n\n── Прогнозы на верификацию ──\n" + to_string(due_forecasts)
-  }
-
-  let _ = AuditLog("fin_daily", "finance", "Overdue: " + to_string(length(overdue)) + ", Verifications due: " + to_string(length(due_forecasts)))
-  return output
+pattern FinanceClassifyIntent(query: String) -> String {
+  let t = lower(query)
+  // Cashflow forecasting
+  if contains(t, "cashflow") or contains(t, "cash flow") or contains(t, "денежн поток") or contains(t, "прогноз денеж") or contains(t, "сколько денег к конц") or contains(t, "сколько будет денег") or contains(t, "кассов разрыв") then { return "cashflow" }
+  // Invoice management
+  if contains(t, "инвойс") or contains(t, "invoice") or contains(t, "счёт на оплат") or contains(t, "просрочен") or contains(t, "overdue") or contains(t, "ар/ар") or contains(t, "дебиторск задолжен") then { return "invoice" }
+  // Tax calculation
+  if contains(t, "налог") or contains(t, "tax") or contains(t, "ндс") or contains(t, "vat") or contains(t, "налог на прибыль") or contains(t, "подоходн") or contains(t, "усн") or contains(t, "ерип") then { return "tax" }
+  // Unit economics
+  if contains(t, "cac") or contains(t, "ltv") or contains(t, "unit economics") or contains(t, "unit экономик") or contains(t, "стоимость привлечен") or contains(t, "окупаемост") or contains(t, "payback") then { return "unit_economics" }
+  // Runway
+  if contains(t, "runway") or contains(t, "ранвей") or contains(t, "burn rate") or contains(t, "скорость сжиган") or contains(t, "безубыточн") or contains(t, "сколько месяцев продерж") then { return "runway" }
+  // MRR/ARR
+  if contains(t, "mrr") or contains(t, "arr") or contains(t, "churn") or contains(t, "отток клиент") or contains(t, "подписк") or contains(t, "recurring") then { return "mrr_arr" }
+  // Verification
+  if contains(t, "верификац") or contains(t, "verify") or contains(t, "сверить прогноз") or contains(t, "факт vs прогноз") then { return "verify" }
+  // Archive search
+  if contains(t, "архив") or contains(t, "archive") or contains(t, "история расчёт") then { return "archive" }
+  // Score/metrics
+  if contains(t, "метрик") or contains(t, "score") or contains(t, "mape") or contains(t, "точность прогноз") then { return "score" }
+  return "general"
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 6: UNIT ECONOMICS (Tier 1 — unit-economics-calculation)
-// CAC/LTV/payback by cohort, not "average for period"
+// JURISDICTION EXTRACTOR — pulls jurisdiction from query or uses default
 // ═══════════════════════════════════════════════════════════════════════
 
-fn UnitEconomics(query: String, jurisdiction: String) -> String {
-  let prompt = "Вычисли unit economics (CAC/LTV/payback) по когортам.\n\n"
-  let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:\n"
-  let prompt = prompt + "1. Считай по когортам, не «в среднем за период». Средние метрики — враньё.\n"
-  let prompt = prompt + "2. CAC = (Marketing + Sales allocated) / Cohort customers. Окно атрибуции: ads 30-90д, content 6-12мес.\n"
-  let prompt = prompt + "3. LTV (SaaS) = ARPU × Gross Margin × (1 / Monthly Churn). Gross margin, не gross revenue.\n"
-  let prompt = prompt + "4. LTV/CAC: <1=катастрофа, 1-3=выживание, 3-5=здорово, >5=отлично или недоинвестируешь.\n"
-  let prompt = prompt + "5. CAC Payback = CAC / (ARPU × Gross Margin). <12мес=отлично, 12-24=ок для B2B, >24=долго.\n"
-  let prompt = prompt + "6. Коррекции: revenue churn (не self-reported), discount rate, когорта ≥6мес, разделение сегментов.\n"
-  let prompt = prompt + "7. Копейки до финального вывода.\n"
-  let prompt = prompt + "8. Антипаттерны: усреднение вместо когорт, gross revenue в LTV, игнор sales cycle, свежие когорты, free referrals.\n\n"
-  let prompt = prompt + "Юрисдикция: " + jurisdiction + "\n"
-  let prompt = prompt + "Вопрос: " + query + "\n\n"
-  let prompt = prompt + "Формат: JSON с полями cohort, cac, ltv, ltv_cac_ratio, payback_months, verdict, assumptions, missing_data."
+pattern FinanceExtractJurisdiction(query: String) -> String {
+  let t = lower(query)
+  if contains(t, " беларус") or contains(t, " by") or contains(t, "byn") or contains(t, " бнр") then { return "BY" }
+  if contains(t, " россия") or contains(t, " рф") or contains(t, " ru") or contains(t, "rub") or contains(t, " рублей") then { return "RU" }
+  if contains(t, " ес") or contains(t, " eu") or contains(t, " евросоюз") or contains(t, " европ") or contains(t, "eur") or contains(t, " герман") or contains(t, " польш") then { return "EU" }
+  if contains(t, " сша") or contains(t, " us") or contains(t, " usa") or contains(t, " usd") or contains(t, " америк") then { return "US" }
+  // Default from env or BY
+  let default_jx = kv_get("DEFAULT_JURISDICTION")
+  if to_string(default_jx) != "()" and to_string(default_jx) != "" then { return to_string(default_jx) }
+  return "BY"
+}
 
-  let llm_result = call_llm("finance-unit-econ", prompt, 3000)
-  let parsed = parse_json(llm_result)
-
-  let output = "═══ UNIT ECONOMICS ═══\n\n"
-  let output = output + to_string(json_get(parsed, "cohort", "N/A")) + "\n\n"
-  let output = output + "CAC: " + to_string(json_get(parsed, "cac", "N/A")) + "\n"
-  let output = output + "LTV: " + to_string(json_get(parsed, "ltv", "N/A")) + "\n"
-  let output = output + "LTV/CAC: " + to_string(json_get(parsed, "ltv_cac_ratio", "N/A")) + "\n"
-  let output = output + "Payback: " + to_string(json_get(parsed, "payback_months", "N/A")) + " мес.\n"
-  let output = output + "Вердикт: " + to_string(json_get(parsed, "verdict", "N/A")) + "\n\n"
-
-  let missing = to_string(json_get(parsed, "missing_data", ""))
-  if missing != "" and missing != "[]" then {
-    let output = output + "⚠️ Недостающие данные: " + missing + "\n\n"
-  }
-
-  let output = output + FINANCE_BOUNDARY
-
-  // Save
-  let vd = format_date(now() + 7776000.0, "%Y-%m-%d")  // +90 days
-  let save = SaveResult("Unit economics " + jurisdiction, output, "unit_economics", jurisdiction, "", "medium", vd, "0", "BYN")
-
-  return output + "\n\n" + save
+// Business form extractor
+pattern FinanceExtractBusinessForm(query: String) -> String {
+  let t = lower(query)
+  if contains(t, "ooo") or contains(t, "ооо") or contains(t, "обществ с ограниченн") then { return "ooo" }
+  if contains(t, "ип") or contains(t, "индивидуальн предпринимател") then { return "ip" }
+  if contains(t, "самозанят") or contains(t, "selfemployed") or contains(t, "self-employed") then { return "selfemployed" }
+  // Default from env or ooo
+  let default_bf = kv_get("DEFAULT_BUSINESS_FORM")
+  if to_string(default_bf) != "()" and to_string(default_bf) != "" then { return to_string(default_bf) }
+  return "ooo"
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 7: TAX CALCULATION (Tier 2 — tax-compliance-multi-jurisdiction)
-// Hard rules: #3 (never substitutes accountant), #6 (no tax declarations)
+// API ENDPOINTS — REST routes for external access
 // ═══════════════════════════════════════════════════════════════════════
 
-fn CalculateTax(jurisdiction: String, business_form: String, amount: String, tax_type: String, query: String) -> String {
-  let prompt = "Вычисли налог по заданным параметрам.\n\n"
-  let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:\n"
-  let prompt = prompt + "1. Это расчёт, не налоговая декларация. Подача декларации — действие бухгалтера/владельца.\n"
-  let prompt = prompt + "2. Уточни: сумма включает или исключает НДС? Это критично для расчёта.\n"
-  let prompt = prompt + "3. Юрисдикция: " + jurisdiction + ", бизнес-форма: " + business_form + ".\n"
+// GET /finance/forecasts?jurisdiction=BY&resultType=forecast&limit=20
+pattern FinanceForecastsAPI(jurisdiction: String, result_type: String, limit: Int) -> String {
+  let q = "SELECT id, short_title, confidence, result_type, status, jurisdiction, business_form, amount, currency, verification_date, created_at FROM financial_forecasts WHERE 1=1"
+  if jurisdiction != "" then { let q = q + " AND jurisdiction = '" + jurisdiction + "'" }
+  if result_type != "" then { let q = q + " AND result_type = '" + result_type + "'" }
+  let q = q + " ORDER BY created_at DESC LIMIT " + to_string(limit)
+  let rows = query(q, [])
+  return json_encode(rows)
+}
 
-  // Jurisdiction-specific rates
-  if jurisdiction == "BY" then {
-    let prompt = prompt + "4. Ставки РБ: Прибыль 18% (ПВТ 9%), НДС 20%, НДФЛ 13%, ФСЗН 28%+1%, УСН 6% доход / 15% доход-расход.\n"
+// GET /finance/invoices?status=overdue&limit=20
+pattern FinanceInvoicesAPI(status: String, limit: Int) -> String {
+  let q = "SELECT id, invoice_number, client_name, amount, currency, status, due_date, jurisdiction FROM invoices WHERE 1=1"
+  if status != "" then { let q = q + " AND status = '" + status + "'" }
+  let q = q + " ORDER BY due_date ASC LIMIT " + to_string(limit)
+  let rows = query(q, [])
+  return json_encode(rows)
+}
+
+// GET /finance/metrics — MAPE snapshot
+pattern FinanceMetricsAPI() -> String {
+  let rows = query("SELECT AVG(v.mape) as avg_mape, COUNT(*) as n FROM financial_forecast_verifications v JOIN financial_forecasts f ON v.forecast_id = f.id WHERE f.result_type = 'forecast' AND v.verified_at >= datetime('now', '-30 days') AND v.mape IS NOT NULL", [])
+  if len(rows) > 0.0 then {
+    let avg_mape = get(get(rows, 0.0), "avg_mape")
+    let n = get(get(rows, 0.0), "n")
+    return json_encode({metric: "mape-cashflow", value: avg_mape, sample_size: n, period: "last_30_days"})
   }
-  if jurisdiction == "RU" then {
-    let prompt = prompt + "4. Ставки РФ: Прибыль 20%, НДС 20%, НДФЛ 13%/15%, Страховые ~30-38%, УСН 6%/15%, ПСН по виду.\n"
-  }
-  if jurisdiction == "EU" then {
-    let prompt = prompt + "4. Ставки ЕС: VAT 19-27% по стране, CIT 9-30%, PIT 15-55% прогрессивный.\n"
-  }
-  if jurisdiction == "US" then {
-    let prompt = prompt + "4. Ставки США: CIT 21%, PIT 10-37% прогрессивный, SE Tax 15.3%, Sales Tax по штату.\n"
-  }
-
-  let prompt = prompt + "5. Копейки до финального вывода.\n"
-  let prompt = prompt + "6. Cross-jurisdictional: reverse charge, WHT, treaty rates.\n\n"
-  let prompt = prompt + "Тип налога: " + tax_type + "\n"
-  let prompt = prompt + "Сумма: " + amount + "\n"
-  let prompt = prompt + "Контекст: " + query + "\n\n"
-  let prompt = prompt + "Формат: JSON с полями tax_amount, effective_rate, breakdown, notes, is_estimate."
-
-  let llm_result = call_llm("finance-tax", prompt, 2000)
-  let parsed = parse_json(llm_result)
-
-  let output = "═══ РАСЧЁТ НАЛОГА (" + jurisdiction + "/" + business_form + ") ═══\n\n"
-  let output = output + "Тип: " + tax_type + "\n"
-  let output = output + "База: " + amount + "\n"
-  let output = output + "Налог: " + to_string(json_get(parsed, "tax_amount", "N/A")) + "\n"
-  let output = output + "Эфф. ставка: " + to_string(json_get(parsed, "effective_rate", "N/A")) + "\n"
-  let output = output + "Разбивка:\n" + to_string(json_get(parsed, "breakdown", "")) + "\n"
-  let output = output + "Заметки: " + to_string(json_get(parsed, "notes", "")) + "\n\n"
-  let output = output + "⚠️ Это расчёт, не налоговая декларация. Подача — действие бухгалтера/владельца.\n\n"
-  let output = output + FINANCE_BOUNDARY
-
-  let vd = format_date(now() + 2592000.0, "%Y-%m-%d")  // +30 days
-  let save = SaveResult("Tax " + tax_type + " " + jurisdiction, output, "tax", jurisdiction, business_form, "medium", vd, amount, "BYN")
-
-  return output + "\n\n" + save
+  return json_encode({metric: "mape-cashflow", value: null, sample_size: 0, period: "last_30_days", note: "insufficient data"})
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 8: RUNWAY & BURN (Tier 3 — runway-and-burn-analysis)
-// ═══════════════════════════════════════════════════════════════════════
-
-fn RunwayAndBurn(current_cash: Float, monthly_burn: Float, query: String) -> String {
-  // Simple formula: Runway = currentCash / monthlyBurn
-  if monthly_burn <= 0.0 then {
-    return "Monthly burn ≤ 0 — нет выгорания. Runway бесконечен при текущих темпах."
-  }
-
-  let runway_months = current_cash / monthly_burn
-  let breakeven_status = if runway_months < 6.0 then { "CRITICAL — менее 6 месяцев!" } else if runway_months < 12.0 then { "WARNING — менее 12 месяцев" } else { "OK — более года" }
-
-  let output = "═══ RUNWAY & BURN ═══\n\n"
-  let output = output + "Текущий остаток: " + substring(to_string(current_cash), 0.0, 15.0) + "\n"
-  let output = output + "Monthly burn: " + substring(to_string(monthly_burn), 0.0, 15.0) + "\n"
-  let output = output + "Runway: " + substring(to_string(runway_months), 0.0, 5.0) + " месяцев\n"
-  let output = output + "Статус: " + breakeven_status + "\n\n"
-
-  // Additional analysis via LLM
-  let prompt = "Дай рекомендации по runway: " + substring(to_string(runway_months), 0.0, 5.0) + " месяцев. Burn: " + substring(to_string(monthly_burn), 0.0, 15.0) + ". Контекст: " + query
-  let recs = call_llm("finance-runway", prompt, 1000)
-  let output = output + "Рекомендации:\n" + recs + "\n\n"
-  let output = output + FINANCE_BOUNDARY
-
-  let vd = format_date(now() + 2592000.0, "%Y-%m-%d")
-  let save = SaveResult("Runway " + substring(to_string(runway_months), 0.0, 5.0) + "mo", output, "runway", "", "", "high", vd, substring(to_string(current_cash), 0.0, 15.0), "BYN")
-
-  return output + "\n\n" + save
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SECTION 9: FORECAST VERIFICATION (forecast-verification-protocol)
-// Hard rule: #4 (no retroactive recalc — verify against original forecast)
-// ═══════════════════════════════════════════════════════════════════════
-
-fn VerifyForecast(forecast_id: String, actual_value: String) -> String {
-  // Get original forecast (hard rule 4: verify against original, not updated)
-  let row = db_execute("SELECT id, short_title, amount, status FROM financial_forecasts WHERE id = ?", [forecast_id])
-  if length(row) == 0 then { return "Прогноз не найден: #" + forecast_id }
-
-  let data = get(row, 0)
-  let forecast_amount = to_float(to_string(json_get(data, "amount", "0")))
-  let current_status = to_string(json_get(data, "status", ""))
-
-  if current_status == FC_SUPERSEDED then { return "Прогноз #" + forecast_id + " заменён более новым. Верификация не имеет смысла." }
-
-  let actual = to_float(actual_value)
-  let mape = if forecast_amount != 0.0 then { (actual - forecast_amount) / forecast_amount * 100.0 } else { 0.0 }
-  let abs_mape = if mape < 0.0 then { mape * -1.0 } else { mape }
-
-  // Outcome based on MAPE
-  let outcome = if abs_mape <= 5.0 then { FC_VERIFIED } else if abs_mape <= 15.0 then { FC_PARTIAL } else { FC_MISSED }
-
-  // Save verification
-  let _ = db_execute("INSERT INTO financial_forecast_verifications (forecast_id, outcome, actual_value, mape, verified_at) VALUES (?, ?, ?, ?, datetime('now'))", [forecast_id, outcome, actual_value, substring(to_string(abs_mape), 0.0, 6.0)])
-
-  // Update forecast status
-  let _ = db_execute("UPDATE financial_forecasts SET status = ? WHERE id = ?", [outcome, forecast_id])
-
-  let _ = AuditLog("fin_verify", "finance", "forecast_id=" + forecast_id + " mape=" + substring(to_string(abs_mape), 0.0, 6.0) + "% outcome=" + outcome)
-
-  let verdict_text = if outcome == FC_VERIFIED then { "✅ ВЕРИФИЦИРОВАН (MAPE ≤5%)" } else if outcome == FC_PARTIAL then { "⚠️ ЧАСТИЧНО (MAPE 5-15%)" } else { "❌ ПРОМАХ (MAPE >15%)" }
-
-  return "Верификация прогноза #" + forecast_id + ":\nПрогноз: " + to_string(forecast_amount) + "\nФакт: " + actual_value + "\nMAPE: " + substring(to_string(abs_mape), 0.0, 6.0) + "%\n" + verdict_text
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SECTION 10: METRICS & LEARNING LOOP
-// ═══════════════════════════════════════════════════════════════════════
-
-fn FinanceScore() -> String {
-  // MAPE metrics for cashflow forecasts (last 30/60/90 days)
-  let m30 = db_execute("SELECT AVG(mape) as avg_mape FROM financial_forecast_verifications WHERE verified_at >= datetime('now', '-30 days') AND outcome IN ('verified','partial','missed')", [])
-  let m60 = db_execute("SELECT AVG(mape) as avg_mape FROM financial_forecast_verifications WHERE verified_at >= datetime('now', '-60 days') AND outcome IN ('verified','partial','missed')", [])
-  let m90 = db_execute("SELECT AVG(mape) as avg_mape FROM financial_forecast_verifications WHERE verified_at >= datetime('now', '-90 days') AND outcome IN ('verified','partial','missed')", [])
-
-  let total = db_execute("SELECT COUNT(*) as c FROM financial_forecasts WHERE created_at >= datetime('now', '-90 days')", [])
-  let verified_count = db_execute("SELECT COUNT(*) as c FROM financial_forecast_verifications WHERE verified_at >= datetime('now', '-90 days')", [])
-
-  let mape_30 = substring(to_string(json_get(get(m30, 0), "avg_mape", "N/A")), 0.0, 5.0)
-  let mape_60 = substring(to_string(json_get(get(m60, 0), "avg_mape", "N/A")), 0.0, 5.0)
-  let mape_90 = substring(to_string(json_get(get(m90, 0), "avg_mape", "N/A")), 0.0, 5.0)
-  let total_c = to_string(json_get(get(total, 0), "c", "0"))
-  let verified_c = to_string(json_get(get(verified_count, 0), "c", "0"))
-
-  let output = "═══ МЕТРИКИ ФИНАНСОВОГО ОТДЕЛА (90 дней) ═══\n\n"
-  let output = output + "Всего прогнозов: " + total_c + "\n"
-  let output = output + "Верифицировано: " + verified_c + "\n\n"
-  let output = output + "MAPE (30д): " + mape_30 + "% (цель Y1: ≤5%)\n"
-  let output = output + "MAPE (60д): " + mape_60 + "% (цель Y1: ≤10%)\n"
-  let output = output + "MAPE (90д): " + mape_90 + "% (цель Y1: ≤15%)\n"
-
-  return output
-}
-
-fn MonthlyFinanceReview() -> String {
-  let score = FinanceScore()
-
-  let verifications = db_execute("SELECT outcome, COUNT(*) as c, AVG(mape) as avg_mape FROM financial_forecast_verifications WHERE verified_at >= datetime('now', '-30 days') GROUP BY outcome ORDER BY c DESC", [])
-
-  let prompt = "На основе метрик и верификаций, предложи 1-2 улучшения для финансового отдела. Метрики: " + score + " Верификации: " + to_string(verifications)
-  let improvements = call_llm("finance-monthly", prompt, 1500)
-
-  let _ = db_execute("INSERT INTO finance_monthly_reviews (period_start, period_end, total_forecasts, correct_forecasts, improvements, created_at) VALUES (datetime('now', '-30 days'), datetime('now'), ?, ?, ?, datetime('now'))", [to_string(length(verifications)), "0", improvements])
-
-  let _ = AuditLog("fin_monthly", "finance", "Monthly review completed")
-
-  return score + "\n── ВЕРИФИКАЦИИ ──\n" + to_string(verifications) + "\n\n── УЛУЧШЕНИЯ ──\n" + improvements
-}
-
-fn QuarterlyFinanceReview() -> String {
-  let prompt = "Квартальный обзор методологии финансового отдела.\n\n1. Проверь: какие классы ошибок повторяются (MAPE >10%)?\n2. Актуальны ли налоговые ставки для всех юрисдикций?\n3. Соблюдается ли психотип (Педант + Методист)?\n4. Нужны ли обновления skill-файлов?"
-
-  let verifications = db_execute("SELECT outcome, result_type, AVG(mape) as avg_mape FROM financial_forecast_verifications v JOIN financial_forecasts f ON v.forecast_id = f.id WHERE v.verified_at >= datetime('now', '-90 days') GROUP BY outcome, result_type ORDER BY avg_mape DESC", [])
-
-  let analysis = call_llm("finance-quarterly", prompt + "\n\nДанные: " + to_string(verifications), 2000)
-
-  let _ = db_execute("INSERT INTO finance_quarterly_methodology_reviews (period_start, period_end, patterns_summary, created_at) VALUES (datetime('now', '-90 days'), datetime('now'), ?, datetime('now'))", [analysis])
-
-  let _ = AuditLog("fin_quarterly", "finance", "Quarterly review completed")
-  return "═══ КВАРТАЛЬНЫЙ ОБЗОР ═══\n\n" + analysis
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SECTION 11: ARCHIVE & SEARCH
-// ═══════════════════════════════════════════════════════════════════════
-
-fn SearchArchive(filter: String, jurisdiction: String) -> String {
-  let rows = if filter != "" then {
-    db_execute("SELECT id, short_title, result_type, jurisdiction, status, created_at FROM financial_forecasts WHERE short_title LIKE ? ORDER BY created_at DESC LIMIT 10", ["%" + filter + "%"])
-  } else if jurisdiction != "" then {
-    db_execute("SELECT id, short_title, result_type, jurisdiction, status, created_at FROM financial_forecasts WHERE jurisdiction = ? ORDER BY created_at DESC LIMIT 10", [jurisdiction])
-  } else {
-    db_execute("SELECT id, short_title, result_type, jurisdiction, status, created_at FROM financial_forecasts ORDER BY created_at DESC LIMIT 10", [])
-  }
-
-  if length(rows) == 0 then { return "Архив пуст." }
-
-  let prompt = "Форматируй список архивных записей. JSON: " + to_string(rows)
-  let formatted = call_llm("finance-format", prompt, 1000)
-  return formatted
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SECTION 12: COMMAND ROUTER
-// ═══════════════════════════════════════════════════════════════════════
-
-fn RouteByCommand(parsed: Struct{
-  command: String,
-  domain: String,
-  jurisdiction: String,
-  business_form: String,
-  task_description: String,
-  forecast_id: String
-}, chat_id: String) -> String {
-  let jx = RequireJurisdiction(parsed.jurisdiction)
-  let form = RequireBusinessForm(parsed.business_form)
-  let cmd = parsed.command
-
-  // /finance-forecast <days>
-  if cmd == "forecast" then {
-    let days = 30  // default; could parse from query
-    return BuildCashflowForecast(days, jx, form, parsed.task_description)
-  }
-
-  // /finance-invoice [filter]
-  if cmd == "invoice" then {
-    return ListInvoices("", jx)
-  }
-
-  // /finance-tax <JX> <amount> <type>
-  if cmd == "tax" then {
-    return CalculateTax(jx, form, "0", "general", parsed.task_description)
-  }
-
-  // /finance-verify <id> [actual]
-  if cmd == "verify" then {
-    if parsed.forecast_id == "" then { return "Укажите ID прогноза: /finance-verify <id> <фактическое_значение>" }
-    return VerifyForecast(parsed.forecast_id, "0")
-  }
-
-  // /finance-archive [filter]
-  if cmd == "archive" then {
-    return SearchArchive("", jx)
-  }
-
-  // /finance-score
-  if cmd == "score" then {
-    return FinanceScore()
-  }
-
-  // /finance-unit
-  if cmd == "unit" then {
-    return UnitEconomics(parsed.task_description, jx)
-  }
-
-  // /finance-runway
-  if cmd == "runway" then {
-    return "Укажите остаток и burn: /finance-runway <cash> <monthly_burn>"
-  }
-
-  // /finance help
-  if cmd == "help" then {
-    return "Финансовый отдел — команды:\n\n/finance-forecast <дней> — cashflow-прогноз\n/finance-invoice [фильтр] — инвойсы\n/finance-tax — расчёт налога\n/finance-verify <id> <факт> — верификация\n/finance-archive [фильтр] — архив\n/finance-score — метрики MAPE\n/finance-unit — unit economics (CAC/LTV)\n/finance-runway <cash> <burn> — runway\n\nЮрисдикция: BY/RU/EU/US (по умолчанию: BY/ooo)\n\n" + FINANCE_BOUNDARY
-  }
-
-  // Free-text: dispatch by domain
-  let domain = parsed.domain
-  if domain == "forecast" then { return BuildCashflowForecast(30, jx, form, parsed.task_description) }
-  if domain == "invoice" then { return ListInvoices("", jx) }
-  if domain == "tax" then { return CalculateTax(jx, form, "0", "general", parsed.task_description) }
-  if domain == "unit_econ" then { return UnitEconomics(parsed.task_description, jx) }
-  if domain == "runway" then { return "Для расчёта runway нужны конкретные цифры: остаток на счёте и monthly burn rate." }
-  if domain == "mrr_arr" then {
-    let prompt = "Рассчитай MRR/ARR. Правила: MRR = ARPU × active subscribers, ARR = MRR × 12. Учти expansion/contraction/churn. " + parsed.task_description
-    let result = call_llm("finance-mrr", prompt, 2000)
-    return result + "\n\n" + FINANCE_BOUNDARY
-  }
-
-  // Default: cashflow forecast
-  return BuildCashflowForecast(30, jx, form, parsed.task_description)
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SECTION 13: ENTRY POINT (HandleFinance)
+// MAIN DISPATCHER — routes sub-commands within Finance
 // ═══════════════════════════════════════════════════════════════════════
 
 pattern HandleFinance(query: String, chat_id: String) -> String {
   let dept = "finance"
-  let _ = AuditLog("dept_entry", dept, "query: " + substring(query, 0, 100))
+  let t = lower(query)
 
-  // Parse query → domain + command + jurisdiction
-  let parsed = ParseFinanceQuery(query)
+  // ── Sub-command routing (specific first, general last) ──
+  if starts_with(t, "/finance forecast") or starts_with(t, "/finance-forecast") then {
+    let q = substring(query, 18.0, 300.0)
+    return FinanceCashflowForecast(q, chat_id)
+  }
+  if starts_with(t, "/finance invoice") or starts_with(t, "/finance-invoice") then {
+    let q = substring(query, 16.0, 300.0)
+    return FinanceInvoiceHandler(q, chat_id)
+  }
+  if starts_with(t, "/finance tax") or starts_with(t, "/finance-tax") then {
+    let q = substring(query, 12.0, 300.0)
+    return FinanceTaxCalc(q, chat_id)
+  }
+  if starts_with(t, "/finance verify") or starts_with(t, "/finance-verify") then {
+    let q = substring(query, 15.0, 300.0)
+    return FinanceVerifyForecast(q, chat_id)
+  }
+  if starts_with(t, "/finance archive") or starts_with(t, "/finance-archive") then {
+    let q = substring(query, 16.0, 300.0)
+    return FinanceArchiveSearch(q, chat_id)
+  }
+  if starts_with(t, "/finance score") or starts_with(t, "/finance-score") then {
+    return FinanceScore(chat_id)
+  }
+  if starts_with(t, "/finance runway") or starts_with(t, "/finance-runway") then {
+    let q = substring(query, 14.0, 300.0)
+    return FinanceRunwayCalc(q, chat_id)
+  }
+  if starts_with(t, "/finance unit") or starts_with(t, "/finance-unit") then {
+    let q = substring(query, 13.0, 300.0)
+    return FinanceUnitEconomics(q, chat_id)
+  }
+  if starts_with(t, "/finance mrr") or starts_with(t, "/finance-mrr") then {
+    let q = substring(query, 11.0, 300.0)
+    return FinanceMrrArr(q, chat_id)
+  }
 
-  // Route to command handler or domain logic
-  let result = RouteByCommand(parsed, chat_id)
+  // ── Help text (no arguments or bare /finance) ──
+  if t == "/finance" or t == "/finance " then {
+    return FinanceHelpText()
+  }
 
-  // Record for history
-  let _ = kv_set("last_model_" + dept, "native_call_llm")
-  let _ = RecordAssistantMessage(chat_id, dept, substring(result, 0, 4000))
-  let _ = SaveToGenericArchive(dept, query, substring(result, 0, 1000))
+  // ── Intent classification + enriched routing (default) ──
+  let intent = FinanceClassifyIntent(query)
+  let jurisdiction = FinanceExtractJurisdiction(query)
+  let business_form = FinanceExtractBusinessForm(query)
 
+  // Run hard gates
+  let gate_result = FinanceRunGates(query, jurisdiction, business_form, "deferred")
+  // For general queries, we don't require verification_date upfront
+  if gate_result != "PASS" and intent != "general" and intent != "archive" and intent != "score" then {
+    return "🚫 Gate FAIL: " + gate_result + "\n\nЗапрос не может быть выполнен. Устраните причину и повторите."
+  }
+
+  // Route by intent
+  if intent == "cashflow" then { return FinanceCashflowForecast(query, chat_id) }
+  if intent == "invoice" then { return FinanceInvoiceHandler(query, chat_id) }
+  if intent == "tax" then { return FinanceTaxCalc(query, chat_id) }
+  if intent == "unit_economics" then { return FinanceUnitEconomics(query, chat_id) }
+  if intent == "runway" then { return FinanceRunwayCalc(query, chat_id) }
+  if intent == "mrr_arr" then { return FinanceMrrArr(query, chat_id) }
+  if intent == "verify" then { return FinanceVerifyForecast(query, chat_id) }
+  if intent == "archive" then { return FinanceArchiveSearch(query, chat_id) }
+  if intent == "score" then { return FinanceScore(chat_id) }
+
+  // ── General free-text query (depth 1, LLM-routed) ──
+  let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
+  let disclaimer_top = FinanceDisclaimerTop()
+  let prompt = disclaimer_top + "\n\n" + context + "\n\n=== ЗАПРОС ===\n" + query + "\n\nПравила ответа:\n1. Юрисдикция: " + jurisdiction + ", форма: " + business_form + "\n2. Числа конкретные — никаких «приблизительно»\n3. Если не хватает данных — честно скажи, чего не хватает\n4. Не давай инвестиционных советов\n5. Уточняй любую неоднозначность (валюта, дата, юрисдикция)\n6. Каждое число должно иметь источник или допущение\n7. Если расчёт — назначь verification date"
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let model = FinanceSelectModel(1)
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+  let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
+  let reply = reply + "\n\n" + disclaimer_bottom
+  let reply = FinanceFinalSafetyCheck(reply)
+  let _ = RecordAssistantMessage(chat_id, dept, reply)
+  let _ = AuditLog("dept_query", dept, "intent=" + intent + " jx=" + jurisdiction + " bf=" + business_form + " model=" + model + " query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HELP TEXT
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceHelpText() -> String {
+  let h = "💰 *Finance Department*\n\n"
+  let h = h + "Базовый принцип: числа должны сходиться, прогнозы должны иметь verification date, юрисдикция всегда явная.\n\n"
+  let h = h + "Команды:\n"
+  let h = h + "/finance-forecast <30|60|90> [BY|RU|EU|US] [ooo|ip|selfemployed]\n"
+  let h = h + "/finance-invoice [overdue|open|paid]\n"
+  let h = h + "/finance-tax <BY|RU|EU|US> <amount> <type> [ooo|ip|selfemployed]\n"
+  let h = h + "/finance-verify <id> [actualAmount]\n"
+  let h = h + "/finance-archive [filter]\n"
+  let h = h + "/finance-score\n"
+  let h = h + "/finance-runway <currentCash> <monthlyBurn>\n"
+  let h = h + "/finance-unit <CAC|LTV|payback>\n"
+  let h = h + "/finance-mrr\n\n"
+  let h = h + "Или просто /finance <запрос> — определит intent автоматически.\n\n"
+  let h = h + "⚠️ Finance НЕ даёт инвестиционных советов, НЕ подаёт декларации, НЕ подменяет бухгалтера."
+  return h
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONTEXT BUILDER — enriched with jurisdiction KB + business form KB + skills
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern BuildFinanceContext(query: String, jurisdiction: String, business_form: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile("finance")
+  let skills = LoadFinanceSkills(query, 1)
+  let corrections = GetCorrections("finance")
+  let dialog = GetRecentDialog(chat_id, "10")
+  let memories = YanaRecallMemories(query)
+  let now_info = YanaNowInfo()
+
+  // Jurisdiction knowledge
+  let jx_kb = ""
+  let jx_file = "library/knowledge/finance/jurisdictions/" + jurisdiction + ".md"
+  let jx_content = read_file(jx_file)
+  if jx_content != "" then { let jx_kb = "\n\n=== JURISDICTION KB: " + jurisdiction + " ===\n" + jx_content }
+
+  // Business form knowledge
+  let bf_kb = ""
+  let bf_file = "library/knowledge/finance/business-forms/" + business_form + ".md"
+  let bf_content = read_file(bf_file)
+  if bf_content != "" then { let bf_kb = "\n\n=== BUSINESS FORM KB: " + business_form + " ===\n" + bf_content }
+
+  // Compatibility matrix
+  let compat_kb = ""
+  let compat_content = read_file("library/knowledge/finance/compatibility-matrix.md")
+  if compat_content != "" then { let compat_kb = "\n\n=== COMPATIBILITY MATRIX ===\n" + compat_content }
+
+  // Guard against Unit from try
+  let s_memories = to_string(memories)
+  if s_memories == "()" then { let s_memories = "" }
+  let s_corrections = to_string(corrections)
+  if s_corrections == "()" then { let s_corrections = "" }
+  let s_dialog = to_string(dialog)
+  if s_dialog == "()" then { let s_dialog = "" }
+  let s_now = to_string(now_info)
+  if s_now == "()" then { let s_now = "" }
+  let s_skills = to_string(skills)
+  if s_skills == "()" then { let s_skills = "" }
+
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + jx_kb + bf_kb + compat_kb + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
+
+  // CRITICAL: Temporal anchor — duplicate date at end of context so LLM doesn't forget
+  let context = context + "\n\n=== ПОВТОР: ТЕКУЩАЯ ДАТА ===\n" + s_now + "\nВНИМАНИЕ: Все verification dates рассчитываются от этой даты. Курс конвертации — на дату операции, не на сегодня. Не округляй суммы под комфортный отчёт — копейки сохраняются."
+
+  return context
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ENRICHED SKILL LOADING — 3-tier
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern LoadFinanceSkills(query: String, depth: Int) -> String {
+  let t = lower(query)
+  let result = ""
+  let budget = FinanceSkillBudget(depth)
+
+  // ── Tier 1: Methodological core (always loaded) ──
+  let s = read_file("skills/fosved/finance/cashflow-forecasting/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- cashflow-forecasting ---\n" + s }
+  let s = read_file("skills/fosved/finance/invoice-lifecycle-management/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- invoice-lifecycle-management ---\n" + s }
+  let s = read_file("skills/fosved/finance/unit-economics-calculation/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- unit-economics-calculation ---\n" + s }
+  let s = read_file("skills/fosved/finance/revenue-recognition-discipline/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- revenue-recognition-discipline ---\n" + s }
+  let s = read_file("skills/fosved/finance/forecast-verification-protocol/SKILL.md")
+  if s != "" and len(result) < budget then { let result = result + "\n--- forecast-verification-protocol ---\n" + s }
+
+  // ── Tier 2: Domain depth (by operation type) ──
+  // Tax / multi-jurisdiction
+  if (contains(t, "налог") or contains(t, "tax") or contains(t, "ндс") or contains(t, "vat") or contains(t, "комплаенс") or contains(t, "декларац") or contains(t, "profit tax")) and len(result) < budget then {
+    let s = read_file("skills/fosved/finance/tax-compliance-multi-jurisdiction/SKILL.md")
+    if s != "" then { let result = result + "\n--- tax-compliance-multi-jurisdiction ---\n" + s }
+  }
+  // Multi-currency
+  if (contains(t, "валют") or contains(t, "currency") or contains(t, "eur") or contains(t, "usd") or contains(t, "byn") or contains(t, "rub") or contains(t, "конверт") or contains(t, "курс") or contains(t, "hedg")) and len(result) < budget then {
+    let s = read_file("skills/fosved/finance/multi-currency-handling/SKILL.md")
+    if s != "" then { let result = result + "\n--- multi-currency-handling ---\n" + s }
+  }
+  // MRR/ARR
+  if (contains(t, "mrr") or contains(t, "arr") or contains(t, "churn") or contains(t, "подписк") or contains(t, "recurring") or contains(t, "saa")) and len(result) < budget then {
+    let s = read_file("skills/fosved/finance/mrr-arr-reporting/SKILL.md")
+    if s != "" then { let result = result + "\n--- mrr-arr-reporting ---\n" + s }
+  }
+
+  // ── Tier 3: Special techniques (by explicit request) ──
+  if (contains(t, "runway") or contains(t, "burn") or contains(t, "безубыточн") or contains(t, "ранвей")) and len(result) < budget then {
+    let s = read_file("skills/fosved/finance/runway-and-burn-analysis/SKILL.md")
+    if s != "" then { let result = result + "\n--- runway-and-burn-analysis ---\n" + s }
+  }
+
+  if result == "" then { return "No Finance skills loaded." }
   return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: CASHFLOW FORECAST
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceCashflowForecast(query: String, chat_id: String) -> String {
+  let t = lower(query)
+  let jurisdiction = FinanceExtractJurisdiction(query)
+  let business_form = FinanceExtractBusinessForm(query)
+
+  // Parse period (default 30)
+  let period = 30
+  if contains(t, "60") then { let period = 60 }
+  if contains(t, "90") then { let period = 90 }
+
+  // Hard gates
+  let compat = GateCompatibility(jurisdiction, business_form)
+  if compat != "PASS" then { return "🚫 " + compat + "\n\nУкажите совместимую комбинацию юрисдикция/форма бизнеса." }
+
+  let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
+  let disclaimer_top = FinanceDisclaimerTop()
+
+  // Verification date = today + period days
+  let now_date = to_string(date_now())
+  let verification_date = to_string(date_add_days(date_now(), period))
+
+  let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: CASHFLOW FORECAST\n\nПараметры:\n- Горизонт: " + to_string(period) + " дней\n- Юрисдикция: " + jurisdiction + "\n- Форма бизнеса: " + business_form + "\n- Verification date: " + verification_date + "\n\nСтруктура ответа:\n1. Opening balance (на сегодня)\n2. Недельный/месячный breakdown: inflows, outflows, net, cumulative\n3. Closing balance (через " + to_string(period) + " дней)\n4. Риски: что может пойти не так (3 сценария: optimistic/base/pessimistic)\n5. Кассовый разрыв?: да/нет, когда, сколько не хватает\n6. Рекомендации: конкретные действия\n7. Verification date: " + verification_date + " — именно в этот день сверим прогноз с фактом\n\nПРАВИЛА:\n- Все суммы с точностью до копеек\n- Конвертация по курсу на дату операции\n- Если данных не хватает — честно укажи, какие данные нужны\n- Не округляй под комфортный отчёт"
+
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let model = FinanceSelectModel(1)
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+
+  // Save to archive
+  let _ = db_execute("INSERT INTO financial_forecasts (short_title, full_result, confidence, result_type, status, verification_date, jurisdiction, business_form, created_at) VALUES (?, ?, 'medium', 'forecast', 'published', ?, ?, ?, datetime('now'))", ["Cashflow " + to_string(period) + "d " + business_form + "/" + jurisdiction, substring(reply, 0, 5000), verification_date, jurisdiction, business_form])
+
+  let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
+  let reply = reply + "\n\n" + disclaimer_bottom
+  let reply = FinanceFinalSafetyCheck(reply)
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
+  let _ = AuditLog("finance_forecast", "finance", "period=" + to_string(period) + " jx=" + jurisdiction + " bf=" + business_form + " vdate=" + verification_date + " model=" + model)
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: INVOICE HANDLER
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceInvoiceHandler(query: String, chat_id: String) -> String {
+  let t = lower(query)
+  let jurisdiction = FinanceExtractJurisdiction(query)
+  let business_form = FinanceExtractBusinessForm(query)
+
+  // List invoices with aging
+  let filter_status = ""
+  if contains(t, "overdue") or contains(t, "просрочен") then { let filter_status = "overdue" }
+  if contains(t, "open") or contains(t, "открыт") then { let filter_status = "issued" }
+  if contains(t, "paid") or contains(t, "оплачен") then { let filter_status = "paid" }
+
+  let q = "SELECT id, invoice_number, client_name, amount, currency, status, due_date, jurisdiction FROM invoices"
+  if filter_status != "" then { let q = q + " WHERE status = '" + filter_status + "'" }
+  let q = q + " ORDER BY due_date ASC LIMIT 15"
+
+  let invoices = query(q, [])
+
+  if len(invoices) == 0.0 then {
+    let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
+    let model = FinanceSelectModel(0)
+    let prompt = context + "\n\nРЕЖИМ: INVOICE MANAGEMENT\nНет инвойсов по указанному фильтру. Помоги владельцу:\n1. Объясни как создать инвойс\n2. Какие статусы инвойсов существуют\n3. Aging report: как читать"
+    let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+    let llm_result = call_llm(model, messages)
+    if to_string(llm_result) == "()" then { return "📭 Инвойсов нет. Используйте /finance-invoice для списка." }
+    let reply = to_string(llm_result)
+    let _ = RecordAssistantMessage(chat_id, "finance", reply)
+    return reply
+  }
+
+  // Format invoice list with aging
+  let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
+  let model = FinanceSelectModel(0)
+  let invoice_json = json_encode(invoices)
+  let prompt = context + "\n\nРЕЖИМ: INVOICE LIST + AGING REPORT\n\nИнвойсы из базы:\n" + invoice_json + "\n\nСтруктура ответа:\n1. Список инвойсов: номер, клиент, сумма, валюта, статус, due date\n2. Aging report: группировка по возрасту (0-30д, 31-60д, 61-90д, 90+д)\n3. Сумма по каждому bucket\n4. Рекомендации: какие инвойсы требуют внимания\n5. Автоматические действия: какие статусы должны быть обновлены (overdue → escalation after 14d, pre-legal after 60d)"
+
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+  let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
+  let reply = reply + "\n\n" + disclaimer_bottom
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
+  let _ = AuditLog("finance_invoice", "finance", "filter=" + filter_status + " count=" + to_string(len(invoices)))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// INVOICE LIFECYCLE STATE MACHINE
+// ═══════════════════════════════════════════════════════════════════════
+// States: drafted → issued → sent → partially_paid → paid → closed
+//                                     → overdue → escalation → pre_legal → written_off
+// Transitions are validated; invalid transitions are rejected.
+
+pattern FinanceInvoiceTransition(invoice_id: String, new_status: String, reason: String) -> String {
+  // Valid transitions map
+  let rows = query("SELECT status FROM invoices WHERE id = ?", [invoice_id])
+  if len(rows) == 0.0 then { return "FAIL: invoice not found" }
+  let current = get(get(rows, 0.0), "status")
+
+  // Validate transition
+  let valid = "false"
+  // drafted → issued
+  if current == "drafted" and new_status == "issued" then { let valid = "true" }
+  // issued → sent
+  if current == "issued" and new_status == "sent" then { let valid = "true" }
+  // sent → partially_paid
+  if current == "sent" and new_status == "partially_paid" then { let valid = "true" }
+  // sent/partially_paid → paid
+  if (current == "sent" or current == "partially_paid") and new_status == "paid" then { let valid = "true" }
+  // paid → closed
+  if current == "paid" and new_status == "closed" then { let valid = "true" }
+  // sent/partially_paid → overdue (automatic on due date)
+  if (current == "sent" or current == "partially_paid") and new_status == "overdue" then { let valid = "true" }
+  // overdue → escalation (>14 days)
+  if current == "overdue" and new_status == "escalation" then { let valid = "true" }
+  // escalation → pre_legal (>60 days)
+  if current == "escalation" and new_status == "pre_legal" then { let valid = "true" }
+  // any → written_off (explicit write-off)
+  if new_status == "written_off" then { let valid = "true" }
+  // partially_paid → paid
+  if current == "partially_paid" and new_status == "paid" then { let valid = "true" }
+
+  if valid == "false" then { return "FAIL: transition " + current + " → " + new_status + " is not allowed" }
+
+  // Record in status history
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?, ?, ?, ?, datetime('now'))", [invoice_id, current, new_status, reason])
+  // Update invoice
+  let _ = db_execute("UPDATE invoices SET status = ?, updated_at = datetime('now') WHERE id = ?", [new_status, invoice_id])
+  return "OK: " + current + " → " + new_status
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: TAX CALCULATION
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceTaxCalc(query: String, chat_id: String) -> String {
+  let jurisdiction = FinanceExtractJurisdiction(query)
+  let business_form = FinanceExtractBusinessForm(query)
+
+  // Hard gates
+  let g1 = GateJurisdiction(jurisdiction)
+  if g1 != "PASS" then { return "🚫 " + g1 }
+  let g2 = GateBusinessForm(business_form)
+  if g2 != "PASS" then { return "🚫 " + g2 }
+  let g3 = GateCompatibility(jurisdiction, business_form)
+  if g3 != "PASS" then { return "🚫 " + g3 }
+
+  let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
+  let disclaimer_top = FinanceDisclaimerTop()
+
+  let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: НАЛОГОВЫЙ РАСЧЁТ\n\nЮрисдикция: " + jurisdiction + "\nФорма бизнеса: " + business_form + "\n\nСтруктура ответа:\n1. Тип налога и ставка (из KB юрисдикции)\n2. Gross amount (до налога)\n3. Tax amount (сумма налога)\n4. Net amount (после налога)\n5. Если НДС — уточни: включая НДС или без? (расчёт разный)\n6. Дедлайн уплаты (из tax calendar)\n7. Куда платить (орган, реквизиты если есть в KB)\n8. Что нужно для подачи расчёта бухгалтеру\n\nПРАВИЛА:\n- Ставки берём ТОЛЬКО из jurisdiction KB\n- Если ставка изменилась недавно — предупреди\n- Не подаём декларацию — только расчёт\n- Уточняй ambiguous: «включая НДС или без?»"
+
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let model = FinanceSelectModel(1)
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+
+  // Save to archive
+  let _ = db_execute("INSERT INTO financial_forecasts (short_title, full_result, confidence, result_type, status, jurisdiction, business_form, created_at) VALUES (?, ?, 'low', 'tax', 'published', ?, ?, datetime('now'))", ["Tax calc " + jurisdiction + "/" + business_form, substring(reply, 0, 5000), jurisdiction, business_form])
+
+  let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
+  let reply = reply + "\n\n" + disclaimer_bottom
+  let reply = FinanceFinalSafetyCheck(reply)
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
+  let _ = AuditLog("finance_tax", "finance", "jx=" + jurisdiction + " bf=" + business_form + " model=" + model)
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: VERIFY FORECAST
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceVerifyForecast(query: String, chat_id: String) -> String {
+  let context = BuildFinanceContext(query, "BY", "ooo", chat_id)
+  let disclaimer_top = FinanceDisclaimerTop()
+
+  let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: ВЕРИФИКАЦИЯ ПРОГНОЗА\n\nСтруктура:\n1. Найти прошлый прогноз по теме (из архива financial_forecasts)\n2. Что предсказали: сумма, дата, юрисдикция, форма\n3. Что произошло на самом деле\n4. MAPE = |(actual - forecast) / forecast| × 100%\n5. Outcome: verified (MAPE ≤ target) / partial (MAPE ≤ 1.5×target) / missed (MAPE > 1.5×target)\n6. Систематическая ошибка: завышение/занижение\n7. Что сработало в прогнозе\n8. Что не сработало и почему\n9. Corrigendum: что исправить в методологии\n\nЦелевые MAPE: 30d ≤ 5%, 60d ≤ 10%, 90d ≤ 15%\nНе выдумывай actual values — если не знаешь факт, так и скажи."
+
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: "Верифицируй: " + query}])
+  let model = FinanceSelectModel(2)
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
+  let _ = AuditLog("finance_verify", "finance", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: ARCHIVE SEARCH
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceArchiveSearch(query: String, chat_id: String) -> String {
+  let rows = query("SELECT id, short_title, result_type, status, jurisdiction, business_form, confidence, verification_date, created_at FROM financial_forecasts ORDER BY created_at DESC LIMIT 20", [])
+  if len(rows) == 0.0 then { return "📭 Архив Finance пуст." }
+
+  let context = BuildFinanceContext(query, "BY", "ooo", chat_id)
+  let model = FinanceSelectModel(0)
+  let prompt = context + "\n\nРЕЖИМ: АРХИВ FINANCE\n\nЗаписи из архива:\n" + json_encode(rows) + "\n\nФильтр: " + query + "\n\nСтруктура ответа:\n1. Найденные записи (ID, тип, статус, юрисдикция, дата)\n2. Если запрос содержит фильтр — применить\n3. Краткая сводка: сколько записей каждого типа и статуса"
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
+  let _ = AuditLog("finance_archive", "finance", "query: " + substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: SCORE (METRIC SNAPSHOT)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceScore(chat_id: String) -> String {
+  // MAPE for cashflow forecasts
+  let mape_rows = query("SELECT AVG(v.mape) as avg_mape, COUNT(*) as n FROM financial_forecast_verifications v JOIN financial_forecasts f ON v.forecast_id = f.id WHERE f.result_type = 'forecast' AND v.verified_at >= datetime('now', '-30 days') AND v.mape IS NOT NULL", [])
+
+  // Overdue invoice ratio
+  let inv_rows = query("SELECT COUNT(*) as total FROM invoices WHERE status IN ('sent', 'issued', 'partially_paid', 'overdue')", [])
+  let overdue_rows = query("SELECT COUNT(*) as overdue FROM invoices WHERE status = 'overdue'", [])
+
+  // Tax filing on time
+  let tax_rows = query("SELECT COUNT(*) as total FROM tax_calendar_events WHERE completed = 0 AND deadline_date < datetime('now')", [])
+
+  let avg_mape = "N/A"
+  let mape_n = 0
+  if len(mape_rows) > 0.0 then {
+    let raw_mape = get(get(mape_rows, 0.0), "avg_mape")
+    let raw_n = get(get(mape_rows, 0.0), "n")
+    if to_string(raw_mape) != "null" then { let avg_mape = to_string(raw_mape) + "%" }
+    let mape_n = raw_n
+  }
+
+  let total_inv = 0
+  let overdue_inv = 0
+  if len(inv_rows) > 0.0 then { let total_inv = get(get(inv_rows, 0.0), "total") }
+  if len(overdue_rows) > 0.0 then { let overdue_inv = get(get(overdue_rows, 0.0), "overdue") }
+
+  let missed_tax = 0
+  if len(tax_rows) > 0.0 then { let missed_tax = get(get(tax_rows, 0.0), "total") }
+
+  let overdue_ratio = "0%"
+  if total_inv > 0.0 then {
+    let ratio = to_float(to_string(overdue_inv)) / to_float(to_string(total_inv)) * 100.0
+    let overdue_ratio = to_string(ratio) + "%"
+  }
+
+  let report = "📊 Finance — Metrics Snapshot\n\n"
+  let report = report + "1. MAPE-cashflow (30d): " + avg_mape + " (n=" + to_string(mape_n) + ", target ≤5%)\n"
+  let report = report + "2. Overdue invoice ratio: " + overdue_ratio + " (target ≤10%)\n"
+  let report = report + "3. Overdue invoices: " + to_string(overdue_inv) + " / Total open: " + to_string(total_inv) + "\n"
+  let report = report + "4. Missed tax deadlines: " + to_string(missed_tax) + " (target 0)\n\n"
+  let report = report + "Целевые показатели:\n- MAPE 30d: ≤5%, 60d: ≤10%, 90d: ≤15%\n- Overdue ratio: ≤10%\n- Recovery time: ≤14 дней\n- Tax filing on-time: 100%"
+
+  let _ = RecordAssistantMessage(chat_id, "finance", report)
+  let _ = AuditLog("finance_score", "finance", "mape=" + avg_mape + " overdue_ratio=" + overdue_ratio)
+  return report
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: RUNWAY CALCULATION
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceRunwayCalc(query: String, chat_id: String) -> String {
+  let jurisdiction = FinanceExtractJurisdiction(query)
+  let business_form = FinanceExtractBusinessForm(query)
+
+  let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
+  let disclaimer_top = FinanceDisclaimerTop()
+
+  let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: RUNWAY & BURN RATE\n\nСтруктура:\n1. Current cash (свободные средства)\n2. Monthly burn rate (расходы за последние 3 месяца / 3)\n3. Runway = current_cash / monthly_burn (в месяцах)\n4. Breakeven: когда доходы = расходы (если есть projection)\n5. Сценарии: optimistic/base/pessimistic burn\n6. Критические пороги: <6м — CRITICAL, <12м — WARNING, ≥12м — OK\n7. Действия если runway < 6м: конкретные шаги\n8. Verification date: +30 дней (пересчитать)\n\nЕсли данных не хватает — честно скажи. Не выдумывай cash и burn."
+
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let model = FinanceSelectModel(1)
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+
+  let verification_date = to_string(date_add_days(date_now(), 30))
+  let _ = db_execute("INSERT INTO financial_forecasts (short_title, full_result, confidence, result_type, status, verification_date, jurisdiction, business_form, created_at) VALUES (?, ?, 'medium', 'runway', 'published', ?, ?, ?, datetime('now'))", ["Runway calc " + business_form + "/" + jurisdiction, substring(reply, 0, 5000), verification_date, jurisdiction, business_form])
+
+  let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
+  let reply = reply + "\n\n" + disclaimer_bottom
+  let reply = FinanceFinalSafetyCheck(reply)
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
+  let _ = AuditLog("finance_runway", "finance", "jx=" + jurisdiction + " bf=" + business_form)
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: UNIT ECONOMICS
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceUnitEconomics(query: String, chat_id: String) -> String {
+  let jurisdiction = FinanceExtractJurisdiction(query)
+  let business_form = FinanceExtractBusinessForm(query)
+
+  let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
+  let disclaimer_top = FinanceDisclaimerTop()
+
+  let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: UNIT ECONOMICS\n\nСтруктура:\n1. CAC (Customer Acquisition Cost) = marketing_spend / new_customers\n2. LTV (Lifetime Value) = ARPU × average_lifetime\n3. Payback period = CAC / (ARPU × gross_margin)\n4. LTV/CAC ratio (target ≥ 3:1)\n5. Cohort analysis: по месяцам если есть данные\n6. Verification date: +90 дней (unit economics нужны 90+ дней для meaningful comparison)\n\nПРАВИЛА:\n- Если данных не хватает — честно скажи: 'нужны marketing_spend и new_customers за период'\n- Cohort-корректный расчёт (не смешивай когорты)\n- Не выдумывай ARPU и churn — возьми из данных или скажи что их нет"
+
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let model = FinanceSelectModel(2)
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+
+  let verification_date = to_string(date_add_days(date_now(), 90))
+  let _ = db_execute("INSERT INTO financial_forecasts (short_title, full_result, confidence, result_type, status, verification_date, jurisdiction, business_form, created_at) VALUES (?, ?, 'medium', 'unit_economics', 'published', ?, ?, ?, datetime('now'))", ["Unit economics " + business_form + "/" + jurisdiction, substring(reply, 0, 5000), verification_date, jurisdiction, business_form])
+
+  let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
+  let reply = reply + "\n\n" + disclaimer_bottom
+  let reply = FinanceFinalSafetyCheck(reply)
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
+  let _ = AuditLog("finance_unit", "finance", "jx=" + jurisdiction + " bf=" + business_form)
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUB-COMMAND: MRR/ARR REPORTING
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceMrrArr(query: String, chat_id: String) -> String {
+  let jurisdiction = FinanceExtractJurisdiction(query)
+  let business_form = FinanceExtractBusinessForm(query)
+
+  let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
+  let disclaimer_top = FinanceDisclaimerTop()
+
+  let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: MRR/ARR ОТЧЁТ\n\nСтруктура:\n1. MRR (Monthly Recurring Revenue) — разбивка по планам/тиерам\n2. ARR = MRR × 12\n3. Expansion revenue (upgrade revenue этот месяц)\n4. Contraction revenue (downgrade)\n5. Churn rate = lost_MRR / start_MRR × 100%\n6. Net MRR growth = new + expansion - contraction - churn\n7. MRR trend: последние 6 месяцев\n8. Прогноз MRR на +3 месяца (linear + churn-adjusted)\n\nТолько для подписочных продуктов. Если бизнес не подписочный — так и скажи."
+
+  let messages = json_encode([{role: "system", content: prompt}, {role: "user", content: query}])
+  let model = FinanceSelectModel(1)
+  let llm_result = call_llm(model, messages)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+
+  let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
+  let reply = reply + "\n\n" + disclaimer_bottom
+  let reply = FinanceFinalSafetyCheck(reply)
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
+  let _ = AuditLog("finance_mrr", "finance", "jx=" + jurisdiction)
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// VERIFICATION & MAPE CALCULATION (native, not LLM-driven)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceVerifyRecord(forecast_id: String, actual_amount: String) -> String {
+  // Retrieve forecast
+  let rows = query("SELECT id, amount, result_type, status, verification_date FROM financial_forecasts WHERE id = ?", [forecast_id])
+  if len(rows) == 0.0 then { return "Прогноз #" + forecast_id + " не найден." }
+
+  let forecast = get(rows, 0.0)
+  let forecast_amount = get(forecast, "amount")
+  let result_type = get(forecast, "result_type")
+  let current_status = get(forecast, "status")
+
+  // Cannot verify already-verified forecasts
+  if current_status == "verified" or current_status == "missed" or current_status == "partial" then {
+    return "Прогноз #" + forecast_id + " уже верифицирован (статус: " + current_status + "). Ретроактивная модификация запрещена."
+  }
+
+  // Calculate MAPE
+  let mape = 0.0
+  if to_string(forecast_amount) != "null" and to_string(forecast_amount) != "0" then {
+    let fa = to_float(to_string(forecast_amount))
+    let aa = to_float(actual_amount)
+    let diff = aa - fa
+    if diff < 0.0 then { let diff = 0.0 - diff }
+    let mape = diff / fa * 100.0
+  }
+
+  // Determine outcome based on MAPE targets
+  // Targets: 30d ≤ 5%, 60d ≤ 10%, 90d ≤ 15% — simplified: use 10% as base
+  let outcome = "verified"
+  if mape > 15.0 then { let outcome = "missed" }
+  if mape > 10.0 and mape <= 15.0 then { let outcome = "partial" }
+
+  // Save verification
+  let _ = db_execute("INSERT INTO financial_forecast_verifications (forecast_id, outcome, actual_value, mape, verified_at) VALUES (?, ?, ?, ?, datetime('now'))", [forecast_id, outcome, actual_amount, to_string(mape)])
+  // Update forecast status
+  let _ = db_execute("UPDATE financial_forecasts SET status = ? WHERE id = ?", [outcome, forecast_id])
+
+  let report = "✅ Verification #" + forecast_id + "\n\n"
+  let report = report + "Forecasted: " + to_string(forecast_amount) + "\n"
+  let report = report + "Actual: " + actual_amount + "\n"
+  let report = report + "MAPE: " + to_string(mape) + "%\n"
+  let report = report + "Outcome: " + outcome + "\n\n"
+  if outcome == "verified" then { let report = report + "Прогноз в пределах нормы (MAPE ≤ 10%)." }
+  if outcome == "partial" then { let report = report + "Прогнос в пределах допуска (MAPE ≤ 15%), но выше целевого. Рекомендуется анализ ошибки." }
+  if outcome == "missed" then { let report = report + "🚨 Прогноз серьёзно отклонился (MAPE > 15%). Требуется corrigendum — пересмотр методологии для данного типа прогноза." }
+
+  return report
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ERROR CLASSIFIER (on MISS/PARTIAL verification)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceClassifyError(forecast_id: String) -> String {
+  let rows = query("SELECT f.result_type, f.jurisdiction, f.business_form, v.mape, v.notes FROM financial_forecasts f JOIN financial_forecast_verifications v ON v.forecast_id = f.id WHERE f.id = ? ORDER BY v.verified_at DESC LIMIT 1", [forecast_id])
+  if len(rows) == 0.0 then { return "no data" }
+
+  let v = get(rows, 0.0)
+  let result_type = get(v, "result_type")
+  let jx = get(v, "jurisdiction")
+
+  // Heuristic error classification
+  if result_type == "forecast" then {
+    // Cashflow forecast error — likely: revenue overestimate, expense underestimate, or external shock
+    return "FORECAST_ERROR: likely cause = revenue_overestimate OR expense_underestimate OR external_shock. Check: did revenue assumptions hold? Were there unplanned expenses? Currency shift?"
+  }
+  if result_type == "tax" then {
+    return "TAX_ERROR: likely cause = rate_change OR wrong_jurisdiction_rule OR missing_deduction. Check: has tax rate changed in " + jx + "? Was the right regime applied?"
+  }
+  if result_type == "unit_economics" then {
+    return "UNIT_ECON_ERROR: likely cause = churn_underestimate OR cac_volatility OR cohort_mixing. Check: was churn rate correct? Were CAC inputs stable? Were cohorts properly separated?"
+  }
+  return "OTHER_ERROR: unclassified. Manual review needed."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SCHEDULER HOOKS — called by scheduler.js
+// ═══════════════════════════════════════════════════════════════════════
+
+// Daily check (8:00) — overdue invoices + verification reminders + tax deadlines
+pattern FinanceDailyCheck() -> String {
+  let alerts = ""
+
+  // 1. Check overdue invoices — auto-transition statuses
+  let overdue = query("SELECT id, invoice_number, client_name, amount, currency, status, due_date FROM invoices WHERE status IN ('sent', 'issued', 'partially_paid') AND due_date < datetime('now') ORDER BY due_date ASC", [])
+  if len(overdue) > 0.0 then {
+    let alerts = alerts + "📋 Overdue invoices: " + to_string(len(overdue)) + "\n"
+    // Auto-transition each overdue invoice
+    let i = 0.0
+    while i < len(overdue) and i < 20.0 then {
+      let inv = get(overdue, i)
+      let inv_id = to_string(get(inv, "id"))
+      let due = get(inv, "due_date")
+      // Calculate days overdue (simplified)
+      let current_status = get(inv, "status")
+      // Transition: sent/issued → overdue
+      if current_status == "sent" or current_status == "issued" then {
+        let _ = FinanceInvoiceTransition(inv_id, "overdue", "Auto: past due date")
+      }
+      let i = i + 1.0
+    }
+  }
+
+  // 2. Check escalation (>14 days overdue → escalation, >60d → pre_legal)
+  let escalation = query("SELECT id, status, due_date FROM invoices WHERE status = 'overdue' AND date(due_date, '+14 days') <= datetime('now')", [])
+  if len(escalation) > 0.0 then {
+    let j = 0.0
+    while j < len(escalation) and j < 10.0 then {
+      let inv = get(escalation, j)
+      let inv_id = to_string(get(inv, "id"))
+      let _ = FinanceInvoiceTransition(inv_id, "escalation", "Auto: 14+ days overdue")
+      let j = j + 1.0
+    }
+  }
+  let pre_legal = query("SELECT id, status, due_date FROM invoices WHERE status = 'escalation' AND date(due_date, '+60 days') <= datetime('now')", [])
+  if len(pre_legal) > 0.0 then {
+    let k = 0.0
+    while k < len(pre_legal) and k < 5.0 then {
+      let inv = get(pre_legal, k)
+      let inv_id = to_string(get(inv, "id"))
+      let _ = FinanceInvoiceTransition(inv_id, "pre_legal", "Auto: 60+ days overdue — pre-legal")
+      let k = k + 1.0
+    }
+  }
+
+  // 3. Forecasts due for verification today
+  let due_verify = query("SELECT id, short_title, result_type FROM financial_forecasts WHERE status = 'published' AND date(verification_date) <= date('now') LIMIT 10", [])
+  if len(due_verify) > 0.0 then {
+    let alerts = alerts + "\n📊 Forecasts due verification: " + to_string(len(due_verify)) + "\n"
+    let m = 0.0
+    while m < len(due_verify) and m < 5.0 then {
+      let f = get(due_verify, m)
+      let alerts = alerts + "  #" + to_string(get(f, "id")) + " " + get(f, "short_title") + "\n"
+      let m = m + 1.0
+    }
+  }
+
+  // 4. Upcoming tax deadlines (next 7 days)
+  let tax_soon = query("SELECT description, deadline_date, jurisdiction FROM tax_calendar_events WHERE completed = 0 AND deadline_date <= date('now', '+7 days') ORDER BY deadline_date ASC", [])
+  if len(tax_soon) > 0.0 then {
+    let alerts = alerts + "\n📅 Tax deadlines within 7 days: " + to_string(len(tax_soon)) + "\n"
+    let p = 0.0
+    while p < len(tax_soon) and p < 5.0 then {
+      let te = get(tax_soon, p)
+      let alerts = alerts + "  " + get(te, "description") + " (" + get(te, "jurisdiction") + ") — " + get(te, "deadline_date") + "\n"
+      let p = p + 1.0
+    }
+  }
+
+  if alerts == "" then { let alerts = "✅ No alerts: all invoices current, no verifications due, no tax deadlines within 7 days." }
+
+  let _ = AuditLog("finance_daily", "finance", "overdue=" + to_string(len(overdue)) + " due_verify=" + to_string(len(due_verify)) + " tax_soon=" + to_string(len(tax_soon)))
+  return alerts
+}
+
+// Monthly review (1st of month, 10:00) — MAPE report + error clustering
+pattern FinanceMonthlyReview() -> String {
+  // Gather verifications from last month
+  let verifications = query("SELECT v.forecast_id, v.outcome, v.mape, f.result_type, f.jurisdiction FROM financial_forecast_verifications v JOIN financial_forecasts f ON v.forecast_id = f.id WHERE v.verified_at >= datetime('now', '-30 days')", [])
+
+  // Count by outcome
+  let total = len(verifications)
+  let verified_count = 0.0
+  let missed_count = 0.0
+  let partial_count = 0.0
+  let i = 0.0
+  while i < total then {
+    let v = get(verifications, i)
+    let outcome = get(v, "outcome")
+    if outcome == "verified" then { let verified_count = verified_count + 1.0 }
+    if outcome == "missed" then { let missed_count = missed_count + 1.0 }
+    if outcome == "partial" then { let partial_count = partial_count + 1.0 }
+    let i = i + 1.0
+  }
+
+  // Average MAPE for forecasts
+  let mape_rows = query("SELECT AVG(v.mape) as avg_mape FROM financial_forecast_verifications v JOIN financial_forecasts f ON v.forecast_id = f.id WHERE f.result_type = 'forecast' AND v.verified_at >= datetime('now', '-30 days') AND v.mape IS NOT NULL", [])
+  let avg_mape = "N/A"
+  if len(mape_rows) > 0.0 then {
+    let raw = get(get(mape_rows, 0.0), "avg_mape")
+    if to_string(raw) != "null" then { let avg_mape = to_string(raw) }
+  }
+
+  // MAPE breakdown by type
+  let mape_by_type = query("SELECT f.result_type, AVG(v.mape) as avg_mape, COUNT(*) as n FROM financial_forecast_verifications v JOIN financial_forecasts f ON v.forecast_id = f.id WHERE v.verified_at >= datetime('now', '-30 days') AND v.mape IS NOT NULL GROUP BY f.result_type", [])
+
+  let report = "📊 Finance — Monthly Review\n\n"
+  let report = report + "Всего верификаций: " + to_string(total) + "\n"
+  let report = report + "Verified: " + to_string(verified_count) + " | Partial: " + to_string(partial_count) + " | Missed: " + to_string(missed_count) + "\n"
+  let report = report + "Avg MAPE (cashflow): " + avg_mape + "%\n\n"
+  let report = report + "MAPE by type:\n"
+  let j = 0.0
+  while j < len(mape_by_type) then {
+    let row = get(mape_by_type, j)
+    let report = report + "  " + get(row, "result_type") + ": " + to_string(get(row, "avg_mape")) + "% (n=" + to_string(get(row, "n")) + ")\n"
+    let j = j + 1.0
+  }
+
+  // Save review
+  let _ = db_execute("INSERT INTO finance_monthly_reviews (period_start, period_end, total_forecasts, correct_forecasts, avg_mape, mape_breakdown, created_at) VALUES (datetime('now', '-30 days'), datetime('now'), ?, ?, ?, ?, datetime('now'))", [to_string(total), to_string(verified_count), avg_mape, json_encode(mape_by_type)])
+
+  let _ = AuditLog("finance_monthly", "finance", "total=" + to_string(total) + " verified=" + to_string(verified_count) + " avg_mape=" + avg_mape)
+  return report
+}
+
+// Quarterly methodology review (1st of quarter, 10:30)
+pattern FinanceQuarterlyReview() -> String {
+  // Aggregate 3 monthly reviews
+  let reviews = query("SELECT id, total_forecasts, correct_forecasts, avg_mape FROM finance_monthly_reviews ORDER BY created_at DESC LIMIT 3", [])
+
+  let report = "📊 Finance — Quarterly Methodology Review\n\n"
+  let report = report + "Monthly reviews (last 3):\n"
+
+  let total_all = 0.0
+  let correct_all = 0.0
+  let i = 0.0
+  while i < len(reviews) then {
+    let r = get(reviews, i)
+    let total_r = get(r, "total_forecasts")
+    let correct_r = get(r, "correct_forecasts")
+    let mape_r = get(r, "avg_mape")
+    let report = report + "  Month " + to_string(i + 1.0) + ": " + to_string(correct_r) + "/" + to_string(total_r) + " correct, MAPE=" + to_string(mape_r) + "%\n"
+    let total_all = total_all + to_float(to_string(total_r))
+    let correct_all = correct_all + to_float(to_string(correct_r))
+    let i = i + 1.0
+  }
+
+  let accuracy = 0.0
+  if total_all > 0.0 then { let accuracy = correct_all / total_all * 100.0 }
+
+  let report = report + "\nQuarter accuracy: " + to_string(accuracy) + "%\n\n"
+  let report = report + "Methodology improvements:\n"
+  if accuracy < 70.0 then {
+    let report = report + "🚨 Accuracy below 70%. Critical review needed:\n"
+    let report = report + "1. Check systematic errors in forecast types with highest MAPE\n"
+    let report = report + "2. Review jurisdiction-specific assumptions\n"
+    let report = report + "3. Consider adding external data sources (exchange rates, market conditions)\n"
+    let report = report + "4. Tighten verification schedule (shorter horizons until accuracy improves)\n"
+  }
+  if accuracy >= 70.0 and accuracy < 85.0 then {
+    let report = report + "⚠️ Accuracy 70-85%. Room for improvement:\n"
+    let report = report + "1. Analyze missed forecasts for common error patterns\n"
+    let report = report + "2. Update jurisdiction KB with latest tax rates\n"
+    let report = report + "3. Refine cashflow model with actual expense patterns\n"
+  }
+  if accuracy >= 85.0 then {
+    let report = report + "✅ Accuracy ≥85%. Maintain and refine:\n"
+    let report = report + "1. Continue verification discipline\n"
+    let report = report + "2. Expand forecast types (MRR/ARR, unit economics)\n"
+    let report = report + "3. Test longer horizons (90d cashflow)\n"
+  }
+
+  let _ = db_execute("INSERT INTO finance_quarterly_methodology_reviews (period_start, period_end, patterns_summary, created_at) VALUES (datetime('now', '-90 days'), datetime('now'), ?, datetime('now'))", [substring(report, 0, 5000)])
+
+  let _ = AuditLog("finance_quarterly", "finance", "accuracy=" + to_string(accuracy))
+  return report
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CROSS-DEPARTMENT COLLABORATION
+// ═══════════════════════════════════════════════════════════════════════
+
+// Marketing: Finance verifies Marketing's CAC/LTV against reality
+pattern FinanceVerifyMarketingMetrics(period: String) -> String {
+  // Get Marketing's claimed CAC/LTV
+  let marketing_claims = query("SELECT id, short_title, amount FROM financial_forecasts WHERE result_type = 'unit_economics' AND status = 'published' AND short_title LIKE '%Marketing%' ORDER BY created_at DESC LIMIT 5", [])
+  if len(marketing_claims) == 0.0 then { return "No Marketing unit economics claims to verify." }
+  return "Marketing claims pending verification: " + to_string(len(marketing_claims)) + ". Use /finance-verify with actual data."
+}
+
+// Legal: tax disputes, contractual payments
+pattern FinanceLegalContext(query_text: String) -> String {
+  // Return structured financial context for Legal department
+  let overdue_invoices = query("SELECT id, invoice_number, client_name, amount, currency, status, due_date FROM invoices WHERE status IN ('escalation', 'pre_legal') ORDER BY due_date ASC", [])
+  return json_encode({department: "finance", context: "pre_legal_invoices", data: overdue_invoices, query: query_text})
+}
+
+// OSP: strategic financial forecasts (3+ months)
+pattern FinanceOSPContext() -> String {
+  let cashflow_forecasts = query("SELECT id, short_title, confidence, jurisdiction, business_form, amount, currency, verification_date FROM financial_forecasts WHERE result_type = 'forecast' AND status IN ('published', 'verified', 'partial') ORDER BY created_at DESC LIMIT 5", [])
+  let mape_data = query("SELECT AVG(v.mape) as avg_mape, COUNT(*) as n FROM financial_forecast_verifications v WHERE v.verified_at >= datetime('now', '-90 days') AND v.mape IS NOT NULL", [])
+  return json_encode({department: "finance", forecasts: cashflow_forecasts, mape: mape_data, note: "Finance provides cashflow data and MAPE accuracy for OSP's strategic analysis. Investment decisions remain OSP domain."})
 }
