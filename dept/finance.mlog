@@ -1,10 +1,15 @@
-// Fosved Office v2 — Finance Dispatcher (ENRICHED v1.0)
+// Fosved Office v2 — Finance Dispatcher (NATIVE v2.0)
 // Full financial engine: 9 skills (3 tiers) + jurisdiction routing + business form validation
 // + cashflow forecasting with MAPE verification + invoice lifecycle state machine
 // + multi-currency + tax compliance + unit economics + scheduler hooks
 // + PROJECT PARAMS: per-operation token budgets, depth→model mapping,
 //   hard rule gates (jurisdiction, business form, verification date, no investment advice),
 //   API endpoints, invoice state machine, forecast→verification learning loop
+// + v2.0 additions: DB schema reference, Gate 8 (no rounding for comfort),
+//   multi-currency conversion pattern, revenue recognition pattern,
+//   tax calendar event management, compatibility matrix lookup,
+//   enhanced MAPE by horizon (30d/60d/90d), bot handler registry,
+//   department registry entry, Yana/upravlenie routing
 
 // ═══════════════════════════════════════════════════════════════════════
 // PROJECT PARAMETERS V1.0 — Token budgets, Models, Hard gates
@@ -1100,4 +1105,337 @@ pattern FinanceOSPContext() -> String {
   let cashflow_forecasts = query("SELECT id, short_title, confidence, jurisdiction, business_form, amount, currency, verification_date FROM financial_forecasts WHERE result_type = 'forecast' AND status IN ('published', 'verified', 'partial') ORDER BY created_at DESC LIMIT 5", [])
   let mape_data = query("SELECT AVG(v.mape) as avg_mape, COUNT(*) as n FROM financial_forecast_verifications v WHERE v.verified_at >= datetime('now', '-90 days') AND v.mape IS NOT NULL", [])
   return json_encode({department: "finance", forecasts: cashflow_forecasts, mape: mape_data, note: "Finance provides cashflow data and MAPE accuracy for OSP's strategic analysis. Investment decisions remain OSP domain."})
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+//  V2.0 ADDITIONS — New sections added for NATIVE v2.0
+// ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// 1. DB SCHEMA REFERENCE — inline SQL DDL for the 7 Prisma models
+// ═══════════════════════════════════════════════════════════════════════
+// These CREATE TABLE statements document the DB schema used by Finance patterns.
+// The actual Prisma schema lives in prisma/schema.prisma; this is the SQL DDL equivalent.
+
+// CREATE TABLE financial_forecasts (
+//   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+//   short_title     TEXT NOT NULL,
+//   full_result     TEXT,
+//   confidence      TEXT DEFAULT 'medium',        -- low/medium/high
+//   result_type     TEXT NOT NULL,                 -- forecast/tax/unit_economics/runway/mrr
+//   status          TEXT DEFAULT 'published',      -- published/verified/partial/missed/superseded
+//   amount          REAL,                          -- numeric result for MAPE calc
+//   currency        TEXT DEFAULT 'BYN',
+//   verification_date TEXT,                        -- mandatory for forecasts (Gate 4)
+//   jurisdiction    TEXT NOT NULL,                 -- BY/RU/EU/US (Gate 1)
+//   business_form   TEXT NOT NULL,                 -- ooo/ip/selfemployed (Gate 2)
+//   created_at      TEXT DEFAULT (datetime('now')),
+//   updated_at      TEXT
+// );
+
+// CREATE TABLE financial_forecast_verifications (
+//   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+//   forecast_id     INTEGER NOT NULL REFERENCES financial_forecasts(id),
+//   outcome         TEXT NOT NULL,                  -- verified/partial/missed
+//   actual_value    REAL,                           -- actual amount observed
+//   mape            REAL,                           -- |(actual-forecast)/forecast| * 100
+//   notes           TEXT,
+//   verified_at     TEXT DEFAULT (datetime('now'))
+// );
+
+// CREATE TABLE finance_monthly_reviews (
+//   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+//   period_start    TEXT NOT NULL,
+//   period_end      TEXT NOT NULL,
+//   total_forecasts INTEGER DEFAULT 0,
+//   correct_forecasts INTEGER DEFAULT 0,
+//   avg_mape        REAL,
+//   mape_breakdown  TEXT,                           -- JSON: {type: {avg_mape, n}}
+//   created_at      TEXT DEFAULT (datetime('now'))
+// );
+
+// CREATE TABLE finance_quarterly_methodology_reviews (
+//   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+//   period_start    TEXT NOT NULL,
+//   period_end      TEXT NOT NULL,
+//   patterns_summary TEXT,                          -- methodology findings
+//   created_at      TEXT DEFAULT (datetime('now'))
+// );
+
+// CREATE TABLE invoices (
+//   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+//   invoice_number  TEXT NOT NULL UNIQUE,
+//   client_name     TEXT NOT NULL,
+//   amount          REAL NOT NULL,
+//   currency        TEXT DEFAULT 'BYN',
+//   status          TEXT DEFAULT 'drafted',         -- state machine: drafted/issued/sent/partially_paid/paid/closed/overdue/escalation/pre_legal/written_off
+//   jurisdiction    TEXT NOT NULL,                  -- BY/RU/EU/US
+//   issue_date      TEXT,
+//   due_date        TEXT NOT NULL,
+//   paid_at         TEXT,
+//   paid_amount     REAL,
+//   created_at      TEXT DEFAULT (datetime('now')),
+//   updated_at      TEXT
+// );
+
+// CREATE TABLE invoice_status_history (
+//   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+//   invoice_id      INTEGER NOT NULL REFERENCES invoices(id),
+//   from_status     TEXT NOT NULL,
+//   to_status       TEXT NOT NULL,
+//   reason          TEXT,
+//   changed_at      TEXT DEFAULT (datetime('now'))
+// );
+
+// CREATE TABLE tax_calendar_events (
+//   id              INTEGER PRIMARY KEY AUTOINCREMENT,
+//   jurisdiction    TEXT NOT NULL,                  -- BY/RU/EU/US
+//   tax_type        TEXT NOT NULL,                  -- vat/profit/payroll/property/other
+//   description     TEXT NOT NULL,
+//   deadline_date   TEXT NOT NULL,
+//   completed       INTEGER DEFAULT 0,             -- 0=pending, 1=completed
+//   completed_at    TEXT,
+//   notify_days_before INTEGER DEFAULT 7,
+//   created_at      TEXT DEFAULT (datetime('now'))
+// );
+
+// ═══════════════════════════════════════════════════════════════════════
+// 2. GATE 8: No Rounding for Comfort
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern GateNoRoundingForComfort(reply: String) -> String {
+  let r = lower(reply)
+  if contains(r, "округлено до") or contains(r, "приблизительн") or contains(r, "прим.") or contains(r, "~") then {
+    return "FAIL: Finance never rounds for comfort. Every копейка counts. Remove approximate language and provide exact figures."
+  }
+  return "PASS"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 3. MULTI-CURRENCY CONVERSION PATTERN
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceConvertCurrency(amount: String, from_currency: String, to_currency: String, date: String) -> String {
+  // Same currency — no conversion
+  if from_currency == to_currency then { return amount }
+  // Get exchange rate from DB (stored by scheduler)
+  let rate_rows = query("SELECT rate FROM exchange_rates WHERE from_currency = ? AND to_currency = ? AND rate_date <= ? ORDER BY rate_date DESC LIMIT 1", [from_currency, to_currency, date])
+  if len(rate_rows) > 0.0 then {
+    let rate = get(get(rate_rows, 0.0), "rate")
+    let result = to_float(amount) * to_float(to_string(rate))
+    return to_string(result)
+  }
+  // Fallback: try reverse rate
+  let reverse_rows = query("SELECT rate FROM exchange_rates WHERE from_currency = ? AND to_currency = ? AND rate_date <= ? ORDER BY rate_date DESC LIMIT 1", [to_currency, from_currency, date])
+  if len(reverse_rows) > 0.0 then {
+    let rev_rate = get(get(reverse_rows, 0.0), "rate")
+    let result = to_float(amount) / to_float(to_string(rev_rate))
+    return to_string(result)
+  }
+  return "NO_RATE: exchange rate " + from_currency + "->" + to_currency + " not found for " + date + ". Enter rate manually or update exchange_rates table."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 4. REVENUE RECOGNITION PATTERN
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceRevenueRecognition(amount: String, currency: String, basis: String, period_start: String, period_end: String) -> String {
+  // basis: "cash" or "accrual"
+  if basis == "cash" then {
+    // Cash basis: recognize when payment received
+    let payments = query("SELECT SUM(paid_amount) as total FROM invoices WHERE paid_at >= ? AND paid_at <= ? AND currency = ? AND status = 'paid'", [period_start, period_end, currency])
+    if len(payments) > 0.0 then {
+      let total = get(get(payments, 0.0), "total")
+      return "CASH_BASIS: recognized " + to_string(total) + " " + currency + " (payments received " + period_start + " to " + period_end + ")"
+    }
+    return "CASH_BASIS: no payments in period"
+  }
+  // Accrual basis: recognize when earned (issued date)
+  let earned = query("SELECT SUM(amount) as total FROM invoices WHERE issue_date >= ? AND issue_date <= ? AND currency = ? AND status NOT IN ('drafted', 'written_off')", [period_start, period_end, currency])
+  if len(earned) > 0.0 then {
+    let total = get(get(earned, 0.0), "total")
+    // Deferred revenue: invoices issued but not yet due
+    let deferred = query("SELECT SUM(amount) as total FROM invoices WHERE issue_date < ? AND due_date > ? AND currency = ? AND status NOT IN ('drafted', 'written_off', 'paid', 'closed')", [period_end, period_end, currency])
+    let deferred_amount = "0"
+    if len(deferred) > 0.0 then { let deferred_amount = to_string(get(get(deferred, 0.0), "total")) }
+    return "ACCRUAL_BASIS: recognized " + to_string(total) + " " + currency + " (earned " + period_start + " to " + period_end + "). Deferred: " + deferred_amount + " " + currency
+  }
+  return "ACCRUAL_BASIS: no revenue in period"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 5. TAX CALENDAR EVENT MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceTaxCalendarList(jurisdiction: String, limit: Int) -> String {
+  let rows = query("SELECT id, tax_type, description, deadline_date, completed, notify_days_before FROM tax_calendar_events WHERE jurisdiction = ? ORDER BY deadline_date ASC LIMIT ?", [jurisdiction, limit])
+  if len(rows) == 0.0 then { return "No tax calendar events for " + jurisdiction }
+  let result = "📅 Tax Calendar (" + jurisdiction + "):\n"
+  let i = 0.0
+  while i < len(rows) then {
+    let row = get(rows, i)
+    let status_icon = "⬜"
+    if get(row, "completed") == 1.0 then { let status_icon = "✅" }
+    let result = result + status_icon + " #" + to_string(get(row, "id")) + " " + get(row, "tax_type") + ": " + get(row, "description") + " — " + to_string(get(row, "deadline_date")) + "\n"
+    let i = i + 1.0
+  }
+  return result
+}
+
+pattern FinanceTaxCalendarComplete(event_id: String) -> String {
+  let rows = query("SELECT id, completed FROM tax_calendar_events WHERE id = ?", [event_id])
+  if len(rows) == 0.0 then { return "Tax event #" + event_id + " not found" }
+  let current = get(get(rows, 0.0), "completed")
+  if current == 1.0 then { return "Tax event #" + event_id + " already completed" }
+  let _ = db_execute("UPDATE tax_calendar_events SET completed = 1, completed_at = datetime('now') WHERE id = ?", [event_id])
+  let _ = AuditLog("finance_tax_complete", "finance", "event_id=" + event_id)
+  return "✅ Tax event #" + event_id + " marked as completed"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 6. NATIVE COMPATIBILITY MATRIX LOOKUP
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceCompatibilityLookup(jurisdiction: String, business_form: String) -> String {
+  // BY
+  if jurisdiction == "BY" and business_form == "ooo" then { return "COMPATIBLE: ООО in BY (ОСН 18% profit / УСН 3-5% / ПВТ 9%). Full double-entry accounting." }
+  if jurisdiction == "BY" and business_form == "ip" then { return "COMPATIBLE: ИП in BY (13% НДФЛ + НДС or единый налог). Simplified accounting (КУДиР)." }
+  if jurisdiction == "BY" and business_form == "selfemployed" then { return "INCOMPATIBLE: самозанятый does not exist in BY. Nearest: ремесленник (единый налог) or ИП." }
+  // RU
+  if jurisdiction == "RU" and business_form == "ooo" then { return "COMPATIBLE: ООО in RU (ОСН 20% profit / УСН 6%/15% / IT 0% profit). Full accounting." }
+  if jurisdiction == "RU" and business_form == "ip" then { return "COMPATIBLE: ИП in RU (ОСН / УСН 6%/15% / ПСН / НПД 4%/6%). Simplified accounting." }
+  if jurisdiction == "RU" and business_form == "selfemployed" then { return "COMPATIBLE: самозанятый (НПД) in RU. 4% for individuals, 6% for business clients. No employees allowed. Limit 2.4M RUB/year." }
+  // EU
+  if jurisdiction == "EU" and business_form == "ooo" then { return "COMPATIBLE: GmbH/SARL/SpA equivalent in EU. VAT OSS for B2C, reverse charge B2B. CIT varies 9-30% by member state." }
+  if jurisdiction == "EU" and business_form == "ip" then { return "COMPATIBLE: Freiberufler/Auto-entrepreneur/Einzelunternehmen in EU. Varies by member state. Simplified regimes available." }
+  if jurisdiction == "EU" and business_form == "selfemployed" then { return "PARTIAL: самозанятый concept varies in EU. NL: ZZP, DE: Freiberufler, FR: Auto-entrepreneur. Check specific country." }
+  // US
+  if jurisdiction == "US" and business_form == "ooo" then { return "COMPATIBLE: LLC in US (disregarded/partnership/S-Corp/C-Corp). CIT 21% for C-Corp, pass-through for others. State taxes vary." }
+  if jurisdiction == "US" and business_form == "ip" then { return "COMPATIBLE: Sole Proprietorship in US. Personal income tax (10-37%) + SE tax 15.3%. Simplest form." }
+  if jurisdiction == "US" and business_form == "selfemployed" then { return "COMPATIBLE: Independent Contractor / 1099 in US. SE tax 15.3% + income tax. Quarterly estimated payments required." }
+  return "UNKNOWN: combination " + jurisdiction + "/" + business_form + " not in compatibility matrix."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 7. ENHANCED MAPE BY HORIZON (30d/60d/90d targets)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FinanceVerifyByHorizon(forecast_id: String, actual_amount: String) -> String {
+  let rows = query("SELECT id, amount, result_type, status, verification_date, created_at FROM financial_forecasts WHERE id = ?", [forecast_id])
+  if len(rows) == 0.0 then { return "Forecast #" + forecast_id + " not found" }
+  let f = get(rows, 0.0)
+  let forecast_amount = get(f, "amount")
+  let created = get(f, "created_at")
+  let vdate = get(f, "verification_date")
+  // Determine horizon from created_at to verification_date
+  let horizon = "30" // default
+  let days_diff = to_float(to_string(vdate)) - to_float(to_string(created))
+  if days_diff > 60.0 then { let horizon = "90" }
+  if days_diff > 30.0 and days_diff <= 60.0 then { let horizon = "60" }
+  // MAPE targets by horizon
+  let mape_target = 5.0
+  if horizon == "60" then { let mape_target = 10.0 }
+  if horizon == "90" then { let mape_target = 15.0 }
+  // Calculate MAPE
+  let fa = to_float(to_string(forecast_amount))
+  let aa = to_float(actual_amount)
+  let diff = aa - fa
+  if diff < 0.0 then { let diff = 0.0 - diff }
+  let mape = diff / fa * 100.0
+  // Outcome with horizon-aware targets
+  let outcome = "verified"
+  if mape > mape_target * 1.5 then { let outcome = "missed" }
+  if mape > mape_target and mape <= mape_target * 1.5 then { let outcome = "partial" }
+  // Save
+  let _ = db_execute("INSERT INTO financial_forecast_verifications (forecast_id, outcome, actual_value, mape, verified_at) VALUES (?, ?, ?, ?, datetime('now'))", [forecast_id, outcome, actual_amount, to_string(mape)])
+  let _ = db_execute("UPDATE financial_forecasts SET status = ? WHERE id = ?", [outcome, forecast_id])
+  let report = "📊 Verification #" + forecast_id + " (" + horizon + "d horizon)\n\n"
+  let report = report + "Forecasted: " + to_string(forecast_amount) + "\n"
+  let report = report + "Actual: " + actual_amount + "\n"
+  let report = report + "MAPE: " + to_string(mape) + "% (target ≤" + to_string(mape_target) + "%)\n"
+  let report = report + "Outcome: " + outcome + "\n"
+  return report
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 8. BOT HANDLER REGISTRY — Telegram command binding
+// ═══════════════════════════════════════════════════════════════════════
+// These patterns define the command-to-handler mapping for bot.js
+// Actual JS implementation: patches/bot-finance-handlers.js
+
+pattern FinanceBotHandlers() -> String {
+  let handlers = ""
+  let handlers = handlers + "/finance-forecast <days> [BY|RU|EU|US] [ooo|ip|selfemployed] → FinanceCashflowForecast\n"
+  let handlers = handlers + "/finance-invoice [overdue|open|paid] → FinanceInvoiceHandler\n"
+  let handlers = handlers + "/finance-tax <jurisdiction> <amount> <type> [form] → FinanceTaxCalc\n"
+  let handlers = handlers + "/finance-verify <id> [actualAmount] → FinanceVerifyForecast (inline keyboard for outcome)\n"
+  let handlers = handlers + "/finance-archive [filter] → FinanceArchiveSearch\n"
+  let handlers = handlers + "/finance-score → FinanceScore\n"
+  let handlers = handlers + "/finance-runway <cash> <burn> → FinanceRunwayCalc\n"
+  let handlers = handlers + "/finance-unit <CAC|LTV|payback> → FinanceUnitEconomics\n"
+  let handlers = handlers + "/finance-mrr → FinanceMrrArr\n"
+  let handlers = handlers + "/finance [free text] → HandleFinance (intent classification)\n"
+  return handlers
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 9. DEPARTMENT REGISTRY ENTRY — metadata for departments-registry.js
+// ═══════════════════════════════════════════════════════════════════════
+// Source: patches/registry-finance-patch.md
+
+pattern FinanceRegistryEntry() -> String {
+  return json_encode({slug: "finance", title: "Финансы", shortName: "ФИН", status: "active", psychotype_primary: "Педант", psychotype_secondary: "Методист", metric_name: "mape-cashflow", metric_targets: "30d ≤5%, 60d ≤10%, 90d ≤15%", archiveModel: "FinancialForecast", verificationModel: "FinancialForecastVerification", monthlyReviewModel: "FinanceMonthlyReview", aliases: "финансы,финанс,фин,бухгалтерия,finance", routingTriggers: "счёт,инвойс,оплата,выручка,бюджет,MRR,ARR,cashflow,налог,ндс,CAC,LTV,маржа,прибыль,доход,расход,ROI,payback,runway,burn rate", requiredContext: "jurisdiction (BY/RU/EU/US) + businessForm (ooo/ip/selfemployed)", commands: "/finance,/finance-forecast,/finance-invoice,/finance-tax,/finance-verify,/finance-archive,/finance-score,/finance-runway,/finance-unit", schedule: "daily 8:00, monthly 1st 10:00, quarterly 1st 11:00"})
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 10. UPRAVLENIE ROUTING — Yana integration
+// ═══════════════════════════════════════════════════════════════════════
+// Source: patches/upravlenie-finance-routing-patch.md
+
+pattern FinanceYanaRouting(query: String) -> String {
+  let t = lower(query)
+  // Direct Finance patterns
+  if contains(t, "сколько денег") or contains(t, "хватит ли денег") or contains(t, "кассов разрыв") then { return "ROUTE:finance:cashflow" }
+  if contains(t, "просрочен") and contains(t, "инвойс") then { return "ROUTE:finance:invoice" }
+  if contains(t, "какой vat") or contains(t, "какой ндс") then { return "ROUTE:finance:tax" }
+  if contains(t, "окупаемост") or contains(t, "стоимость привлечен") then { return "ROUTE:finance:unit_economics" }
+  // Cross-department patterns
+  if contains(t, "окупается ли реклам") then { return "ROUTE:finance+marketing:unit_economics_verify" }
+  if contains(t, "договор") and (contains(t, "eur") or contains(t, "usd")) then { return "ROUTE:legal+finance:contract_with_tax" }
+  // Not Finance scope
+  if contains(t, "куда вложить") or contains(t, "инвестиционн") then { return "ROUTE:osp:investment_advice" }
+  if contains(t, "аудит отчётност") then { return "ROUTE:qa:audit" }
+  return "NO_ROUTE"
+}
+
+// Yana's context question protocol — must ask before Finance work
+pattern FinanceYanaContextCheck(query: String, chat_id: String) -> String {
+  let jurisdiction = FinanceExtractJurisdiction(query)
+  let business_form = FinanceExtractBusinessForm(query)
+  let needs_context = ""
+  if jurisdiction == "BY" then {
+    // Check if default was used (no explicit jurisdiction in query)
+    let t = lower(query)
+    if not (contains(t, "беларус") or contains(t, "by") or contains(t, "byn")) then {
+      let default_jx = kv_get("DEFAULT_JURISDICTION")
+      if to_string(default_jx) == "()" or to_string(default_jx) == "" then {
+        let needs_context = needs_context + "jurisdiction "
+      }
+    }
+  }
+  if business_form == "ooo" then {
+    let t = lower(query)
+    if not (contains(t, "ooo") or contains(t, "ооо") or contains(t, "обществ")) then {
+      let default_bf = kv_get("DEFAULT_BUSINESS_FORM")
+      if to_string(default_bf) == "()" or to_string(default_bf) == "" then {
+        let needs_context = needs_context + "businessForm"
+      }
+    }
+  }
+  if needs_context != "" then {
+    return "YANA_ASK: перед финансовым расчётом уточните: " + needs_context + ". Без этих параметров расчёт может быть систематически неверным."
+  }
+  return "CONTEXT_OK"
 }
