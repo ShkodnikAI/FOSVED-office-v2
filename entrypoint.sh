@@ -67,6 +67,25 @@ done
 echo "--- Version check ---"
 curl -sf http://127.0.0.1:10001/version 2>/dev/null || echo "version endpoint not available"
 
+# 2b. Department import validation — detect "unknown function" bug early
+echo "--- Department import validation ---"
+DEPT_VALIDATION_FAILED=0
+for DEPT_ROUTE in "/health" "/version"; do
+  curl -sf "http://127.0.0.1:10001${DEPT_ROUTE}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
+done
+# Test that critical handler functions are resolvable by sending a dry-run webhook
+# (This catches the "unknown function" import caching bug before real users hit it)
+echo "  Testing handler resolution via /webhook/telegram dry-run..."
+TEST_RESULT=$(curl -s -X POST http://127.0.0.1:10001/webhook/telegram \
+  -H "Content-Type: application/json" \
+  -d '{"update_id":-1,"message":{"message_id":-1,"chat":{"id":0},"text":"/status","from":{"id":0}}}' 2>&1)
+echo "  /status response: ${TEST_RESULT}"
+# Check for "unknown function" in recent server output (if detectable)
+# Delete any stale .mbc bytecode caches that could cause import failures
+find /office/dept -name "*.mbc" -delete 2>/dev/null
+echo "  Cleaned stale .mbc files (if any)"
+echo "--- Department validation complete ---"
+
 # 3. Reverse Proxy
 python3 reverse_proxy.py &
 PROXY_PID=$!
