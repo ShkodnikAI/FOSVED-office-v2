@@ -1,6 +1,18 @@
-// Fosved Office v2 — Expert Department (Enriched)
+// Fosved Office v2 — Expert Department v2.0 (NATIVE)
 // Автопром + сравнительный анализ + графики остаточной стоимости/эксплуатации + брифинг lifecycle
 // MEGA-4: 12 Transition Pack skills + automotive domain + comparative engine + chart data
+// ENRICHED: 0 CallLLMProxy, 4 native call_llm, disclaimer, hard gates
+
+// ── Model Selector ────────────────────────────────────────────────────
+pattern ExpertSelectModel(complexity: Int) -> String {
+  if complexity == 1 then { return "claude-sonnet-4-20250514" }
+  return "claude-sonnet-4-20250514"
+}
+
+// ── Disclaimer ────────────────────────────────────────────────────────
+pattern ExpertDisclaimer() -> String {
+  return "FOSVED ЭКСПЕРТ — брифинг для подготовки к встрече. Не заменяет собственное суждение владельца."
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // MAIN DISPATCHER — routes sub-commands within Expert
@@ -68,12 +80,12 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
   // ── Default: full Expert pipeline (LLM with automotive-enriched context) ──
   let context = BuildExpertContext(query, chat_id)
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
+  let disclaimer = ExpertDisclaimer()
+  let model = ExpertSelectModel(2)
+  let llm_result = call_llm(model, messages, 0.7, 4000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+  kv_set("last_model_" + dept, model)
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
   return reply
@@ -223,10 +235,12 @@ pattern ExpertAutomotiveLookup(query: String, chat_id: String) -> String {
   let auto_kb = ExpertAutomotiveKB()
   let system_prompt = "Ты — Эксперт-автомобилист отдела Fosved. Специализация: российский авторынок, сравнительный анализ автомобилей, расчёт остаточной стоимости и стоимости владения. Отвечай конкретно, с цифрами. Используй данные из базы знаний.\n\n" + auto_kb
   let messages = json_encode([{role: "system", content: system_prompt}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy("expert", messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error")
-  let _ = RecordAssistantMessage(chat_id, "expert", reply)
+  let disclaimer = ExpertDisclaimer()
+  let model = ExpertSelectModel(2)
+  let llm_result = call_llm(model, messages, 0.7, 4000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "expert", reply + "\n\n" + disclaimer)
   let _ = AuditLog("expert_auto", "expert", "query: " + substring(query, 0.0, 100.0))
   return reply
 }
@@ -243,9 +257,11 @@ pattern ExpertCompareVehicles(query: String, chat_id: String) -> String {
   let compare_prompt = compare_prompt + "4. КРАСНЫЕ ФЛАГИ: что может увеличить реальные затраты сверх расчётных\n\n"
   let compare_prompt = compare_prompt + "Используй данные из базы знаний. Все цифры — для российского рынка 2024-2026.\n\n" + auto_kb
   let messages = json_encode([{role: "system", content: compare_prompt}, {role: "user", content: "Сравни: " + query}])
-  let proxy_result = CallLLMProxy("expert", messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let disclaimer = ExpertDisclaimer()
+  let model = ExpertSelectModel(2)
+  let llm_result = call_llm(model, messages, 0.7, 6000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
 
   // Save comparison to DB
   let save_body = json_encode({vehicles: query, result: substring(reply, 0.0, 2000.0), dept: "expert"})
@@ -448,9 +464,11 @@ pattern ExpertCreateBriefing(topic: String, depth: String, chat_id: String) -> S
   let system_prompt = "Ты — Эксперт Fosved (Технический Препаратор). Готовишь боевой брифинг.\nГлубина: " + depth_name + "\n\nЖёсткие правила:\n1. Не выдаёт брифинг без дедлайна встречи\n2. Не использует упрощения которые исказят суть\n3. Не генерирует вопросы без указания правильного/уклончивого ответа\n4. Не игнорирует экономическую сторону\n5. Не доверяет официальным презентациям — ищи независимые источники\n6. Не использует абстрактные формулировки — каждое утверждение проверяемое\n7. Вопросы звучат естественно из уст понимающего человека\n\nПротокол:\nPhase 1: Rapid Domain Immersion (4 слоя: основы → state-of-art → школы/дебаты → числовые якоря)\nPhase 2: Project Deconstruction (что реально утверждают vs что показывают)\nPhase 3: Failure Modes Mapping (7 категорий)\nPhase 4: Combat Questions Design (5-7 вопросов с ожидаемыми ответами)\n\n" + skills + "\n\n" + auto_kb
 
   let messages = json_encode([{role: "system", content: system_prompt}, {role: "user", content: "Подготовь брифинг на тему: " + topic}])
-  let proxy_result = CallLLMProxy("expert", messages)
-  if to_string(proxy_result) == "()" then { return "Ошибка генерации брифинга." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error")
+  let disclaimer = ExpertDisclaimer()
+  let model = ExpertSelectModel(3)
+  let llm_result = call_llm(model, messages, 0.7, 8000)
+  if to_string(llm_result) == "()" then { return "Ошибка генерации брифинга." }
+  let reply = to_string(llm_result)
 
   // Update briefing status and content
   let esc_reply = escape_json(substring(reply, 0.0, 5000.0))

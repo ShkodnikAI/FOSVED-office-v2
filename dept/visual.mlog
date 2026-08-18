@@ -1,5 +1,6 @@
-// Fosved Office v2 — Visual Department (ENRICHED v2.0)
+// Fosved Office v2 — Visual Department v2.0 (NATIVE)
 // Нативная графическая подсистема Metalogos — 44 SVG builtin функции
+// ENRICHED: 0 CallLLMProxy, 4 native call_llm, disclaimer
 //
 // Архитектура: Metalogos SVG builtins (chart_bar, chart_line, chart_donut,
 //   chart_area, chart_scatter, chart_radar, chart_boxplot, chart_heatmap,
@@ -18,6 +19,15 @@
 //   Type 3 — Analysis Card: auto-генерация card при каждом анализе
 //   Type 4 — Reference Sheet: entity profile → structured SVG → PDF
 //   Type 5 — Premium Spec: JSON spec для Midjourney+Figma ручного производства
+
+// ── Model Selector & Disclaimer ────────────────────────────────────
+pattern VisualSelectModel() -> String {
+  return "claude-sonnet-4-20250514"
+}
+
+pattern VisualDisclaimer() -> String {
+  return "FOSVED VISUAL — визуальная компрессия данных. Инфографики — представления, не выводы."
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // BRAND IDENTITY — фиксированная палитра Fosved
@@ -129,9 +139,11 @@ pattern GenerateCompressionVisual(source_type: String, source_id: String) -> Str
   // Use LLM to extract structured data for visualization
   let llm_prompt = "Извлеки из анализа данные для 3 визуализаций. Формат JSON:\n{\n  \"kpi\": [{\"label\":\"...\",\"value\":\"...\"}],\n  \"bar_data\": [{\"label\":\"...\",\"value\": N}],\n  \"line_data\": [{\"label\":\"...\",\"value\": N}],\n  \"donut_data\": [{\"label\":\"...\",\"value\": N}]\n}\n\nАНАЛИЗ:\n" + substring(full_result, 0.0, 3000.0)
   let messages = json_encode([{role: "system", content: "Ты — визуальный компрессор. Извлекаешь данные для чартов."}, {role: "user", content: llm_prompt}])
-  let proxy_result = CallLLMProxy("visual", messages)
-  let reply = to_string(json_get(parse_json(proxy_result), "reply", "{}"))
-  let viz_data = parse_json(reply)
+  let disclaimer = VisualDisclaimer()
+  let model = VisualSelectModel()
+  let llm_result = call_llm(model, messages, 0.7, 4000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let viz_data = parse_json(to_string(llm_result))
 
   // Generate style
   let style = color_palette("energy", "light")
@@ -195,9 +207,11 @@ pattern GenerateMemorableInfographic(source_type: String, source_id: String) -> 
   // LLM generates structured data for native charts
   let llm_prompt = "Создай данные для запоминающейся инфографики. Формат JSON:\n{\n  \"headline\": \"...\",\n  \"chart_type\": \"bar|line|donut|area|radar|pyramid\",\n  \"chart_data\": [{\"label\":\"...\",\"value\": N}],\n  \"insight\": \"...\",\n  \"secondary_chart_type\": \"donut|bar|line\",\n  \"secondary_chart_data\": [{\"label\":\"...\",\"value\": N}]\n}\n\nТема: " + topic + "\nДанные:\n" + substring(full_result, 0.0, 2000.0)
   let messages = json_encode([{role: "system", content: "Ты — дизайнер-методист. Tufte principles, F-pattern, 5-second rule."}, {role: "user", content: llm_prompt}])
-  let proxy_result = CallLLMProxy("visual", messages)
-  let reply = to_string(json_get(parse_json(proxy_result), "reply", "{}"))
-  let spec = parse_json(reply)
+  let disclaimer = VisualDisclaimer()
+  let model = VisualSelectModel()
+  let llm_result = call_llm(model, messages, 0.7, 4000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let spec = parse_json(to_string(llm_result))
 
   let headline = to_string(json_get(spec, "headline", topic))
   let chart_type = to_string(json_get(spec, "chart_type", "bar"))
@@ -344,8 +358,11 @@ pattern GeneratePremiumSpec(source_type: String, source_id: String) -> String {
   let llm_prompt = "Создай premium spec JSON для публикации-качественной инфографики.\n\nФормат JSON:\n{\n  \"title\": \"...\",\n  \"dimensions\": {\"width\": 2400, \"height\": 3000},\n  \"palette\": {\"primary\": \"" + ink + "\", \"accent\": \"" + accent + "\"},\n  \"sections\": [\n    {\"type\": \"hero\", \"headline\": \"...\"},\n    {\"type\": \"data\", \"headline\": \"...\", \"data_points: [{\"label\":\"...\",\"value\": N}]\"}\n  ],\n  \"midjourney_prompt\": \"...\",\n  \"figma_overlays\": [{\"layer\": \"...\", \"text\": \"...\"}]\n}\n\nТема: " + topic + "\nДанные: " + substring(full_result, 0.0, 2000.0)
 
   let messages = json_encode([{role: "system", content: "Ты — premium visual designer."}, {role: "user", content: llm_prompt}])
-  let proxy_result = CallLLMProxy("visual", messages)
-  let spec = to_string(json_get(parse_json(proxy_result), "reply", "{}"))
+  let disclaimer = VisualDisclaimer()
+  let model = VisualSelectModel()
+  let llm_result = call_llm(model, messages, 0.7, 4000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let spec = to_string(llm_result)
 
   let output_path = "visuals/premium_spec_" + source_type + "_" + source_id + ".json"
   let _ = try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["premium_spec", source_type, source_id, output_path])
@@ -498,12 +515,14 @@ pattern HandleVisual(query: String, chat_id: String) -> String {
 
   // Fallback: general LLM query about visuals
   let dept = "visual"
+  let disclaimer = VisualDisclaimer()
   let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let _ = RecordAssistantMessage(chat_id, dept, to_string(reply))
+  let model = VisualSelectModel()
+  let messages = json_encode([{role: "system", content: disclaimer + "\n\n" + context}, {role: "user", content: query}])
+  let llm_result = call_llm(model, messages, 0.7, 4000)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
-  return to_string(reply)
+  return reply
 }
