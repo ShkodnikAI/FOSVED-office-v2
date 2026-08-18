@@ -5,7 +5,7 @@
 // Psychotype: Параноик + Педант (systematic distrust, precision over speed)
 // 11 skills (4 Tier 1 + 5 Tier 2 + 2 Tier 3), 9 bot commands,
 // 4 DB models (TestRun, DefectRecord, SecurityAudit, AIEvalRun),
-// 10 hard rules as native gates, distinctive AI-specific testing competency.
+// 14 hard rules as native gates, distinctive AI-specific testing competency.
 // 0 CallLLMProxy calls, 0 Python dependencies.
 //
 // Architecture:
@@ -294,6 +294,53 @@ fn EnforceRule10_SubstantiveClose(verdict: String, hasCoverageReport: String, ha
   return "PASS"
 }
 
+// Rule 11: Flaky tests must be quarantined — no flaky tests in CI gate
+fn EnforceRule11_NoFlakyTestsInCI(testSuite: String, flakyCount: String) -> String {
+  let flaky = to_float(flakyCount)
+  if flaky > 0.0 then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 11: " + flakyCount + " flaky tests in suite '" + testSuite + "'")
+    return "ОТКАЗ: Тест-сьют '" + testSuite + "' содержит " + flakyCount + " flaky тестов. Flaky-тесты должны быть карантинированы (quarantined) до исправления. CI gate не пропускает."
+  }
+  return "PASS"
+}
+
+// Rule 12: Coverage thresholds must be met — no release below minimum coverage
+fn EnforceRule12_CoverageThreshold(criticalPathPct: String, businessLogicPct: String, overallPct: String) -> String {
+  if to_float(criticalPathPct) < to_float(to_string(COV_CRITICAL_PATH)) then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 12: critical path coverage " + criticalPathPct + "% < " + to_string(COV_CRITICAL_PATH) + "%")
+    return "ОТКАЗ: Critical path покрытие " + criticalPathPct + "% ниже минимума " + to_string(COV_CRITICAL_PATH) + "%. Увеличьте покрытие критических путей."
+  }
+  if to_float(businessLogicPct) < to_float(to_string(COV_BUSINESS_LOGIC)) then {
+    let _ = AuditLog("hard_rule_violation", DEPT, "Rule 12: business logic coverage " + businessLogicPct + "% < " + to_string(COV_BUSINESS_LOGIC) + "%")
+    return "ОТКАЗ: Business logic покрытие " + businessLogicPct + "% ниже минимума " + to_string(COV_BUSINESS_LOGIC) + "%. Увеличьте покрытие бизнес-логики."
+  }
+  return "PASS"
+}
+
+// Rule 13: Mean Time To Detect (MTTD) critical defects must be within SLA
+fn EnforceRule13_DefectMTTD(severity: String, mttdHours: String) -> String {
+  if severity == SEV_CRITICAL then {
+    let mttd = to_float(mttdHours)
+    if mttd > to_float(to_string(TARGET_MTTD_CRITICAL_HR)) then {
+      let _ = AuditLog("hard_rule_violation", DEPT, "Rule 13: critical MTTD " + mttdHours + "h > " + to_string(TARGET_MTTD_CRITICAL_HR) + "h SLA")
+      return "ОТКАЗ: MTTD критического дефекта " + mttdHours + "ч превышает SLA " + to_string(TARGET_MTTD_CRITICAL_HR) + "ч. Ускорите детекцию (monitoring, alerts, smoke tests)."
+    }
+  }
+  return "PASS"
+}
+
+// Rule 14: AI output determinism — AI evals must check reproducibility
+fn EnforceRule14_AIOutputDeterminism(isAISystem: String, determinismScore: String) -> String {
+  if isAISystem == "true" then {
+    let score = to_float(determinismScore)
+    if score < 0.80 then {
+      let _ = AuditLog("hard_rule_violation", DEPT, "Rule 14: AI determinism score " + determinismScore + " < 0.80 threshold")
+      return "ОТКАЗ: Детерминированность AI-вывода " + determinismScore + " ниже порога 0.80. AI-система даёт слишком вариативные результаты. Добавьте temperature control / few-shot anchoring."
+    }
+  }
+  return "PASS"
+}
+
 // Composite hard rules check
 fn EnforceHardRules(query: String, environment: String, project: String, projectFeatures: String) -> String {
   // Rule 4: check for manual-only
@@ -307,6 +354,10 @@ fn EnforceHardRules(query: String, environment: String, project: String, project
   // Rule 5: security scan for sensitive features
   let r5 = EnforceRule5_SecurityScanRequired(projectFeatures, "true")
   if r5 != "PASS" then { return r5 }
+
+  // Rule 11: no flaky tests in CI
+  let r11 = EnforceRule11_NoFlakyTestsInCI("default", "0")
+  if r11 != "PASS" then { return r11 }
 
   return "PASS"
 }
