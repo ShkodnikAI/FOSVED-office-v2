@@ -147,7 +147,7 @@ let LI_LOW = "Low"
 // No LLM can override these. They are structural constraints of Legal.
 
 // Rule 1: Never sign contracts on behalf of owner
-fn EnforceRule1_NoSigning(context: String) -> String {
+pattern EnforceRule1_NoSigning(context: String) -> String {
   if contains(lower(context), "подписать от имени") then {
     let _ = AuditLog("hard_rule_violation", DEPT, "Rule 1: no signing on behalf of owner")
     return "ОТКАЗ: Legal не подписывает договоры от имени владельца. Мы готовим draft + risk map, подписание — ответственность владельца с юристом."
@@ -159,7 +159,7 @@ fn EnforceRule1_NoSigning(context: String) -> String {
 }
 
 // Rule 2: Never represent in court
-fn EnforceRule2_NoCourtRepresentation(context: String) -> String {
+pattern EnforceRule2_NoCourtRepresentation(context: String) -> String {
   if contains(lower(context), "представлять в суде") then {
     let _ = AuditLog("hard_rule_violation", DEPT, "Rule 2: no court representation")
     return "ОТКАЗ: Судебное представительство требует лицензии адвоката. Legal готовит позицию, но в суд идёт лицензированный адвокат."
@@ -171,7 +171,7 @@ fn EnforceRule2_NoCourtRepresentation(context: String) -> String {
 }
 
 // Rule 3: Never work without jurisdiction
-fn EnforceRule3_JurisdictionRequired(jurisdiction: String) -> String {
+pattern EnforceRule3_JurisdictionRequired(jurisdiction: String) -> String {
   if length(jurisdiction) == 0 then {
     let _ = AuditLog("hard_rule_violation", DEPT, "Rule 3: no jurisdiction specified")
     return "ОТКАЗ: Без указания юрисдикции анализ невозможен. Норма закона применима в стране, без страны нет анализа. Укажите юрисдикцию: BY, RU, EU, US."
@@ -183,7 +183,7 @@ fn EnforceRule3_JurisdictionRequired(jurisdiction: String) -> String {
 }
 
 // Rule 4: Never work with criminal cases
-fn EnforceRule4_NoCriminal(context: String) -> String {
+pattern EnforceRule4_NoCriminal(context: String) -> String {
   if contains(lower(context), "уголовн") then {
     let _ = AuditLog("hard_rule_violation", DEPT, "Rule 4: criminal case attempt")
     return "ОТКАЗ: Legal не работает с уголовными делами. Наша область — гражданское и хозяйственное право."
@@ -195,7 +195,7 @@ fn EnforceRule4_NoCriminal(context: String) -> String {
 }
 
 // Rule 5: Never give 100% guarantees
-fn EnforceRule5_NoGuarantees(context: String) -> String {
+pattern EnforceRule5_NoGuarantees(context: String) -> String {
   if contains(lower(context), "100% гарантия") then {
     let _ = AuditLog("hard_rule_violation", DEPT, "Rule 5: 100% guarantee claim")
     return "ПРЕДУПРЕЖДЕНИЕ: Правовая работа всегда вероятностна. Мы оцениваем риски, не их отсутствие. '100% гарантия' в юридическом контексте — признак непрофессионализма."
@@ -207,7 +207,7 @@ fn EnforceRule5_NoGuarantees(context: String) -> String {
 }
 
 // Rule 6: Never produce final texts without legal review marker
-fn EnforceRule6_DraftOnlyMarker(result: String) -> String {
+pattern EnforceRule6_DraftOnlyMarker(result: String) -> String {
   if contains(result, "DRAFT") == false then {
     return result + "\n\nDRAFT — требуется проверка лицензированного юриста."
   }
@@ -215,7 +215,7 @@ fn EnforceRule6_DraftOnlyMarker(result: String) -> String {
 }
 
 // Rule 7: Never ignore cross-jurisdictional risks
-fn EnforceRule7_CrossJurisdictionCheck(jx: String, cpJx: String, result: String) -> String {
+pattern EnforceRule7_CrossJurisdictionCheck(jx: String, cpJx: String, result: String) -> String {
   if length(cpJx) > 0 && jx != cpJx then {
     if contains(result, "cross-jurisdiction") == false && contains(result, "применимое право") == false then {
       return result + "\n\n⚠ КРОСС-ЮРИСДИКЦИОННЫЙ КЕЙС: стороны из " + jx + " и " + cpJx + ". Необходимо явно указать применимое право (choice of law) и юрисдикцию разрешения споров (forum). Это обязательное требование."
@@ -225,7 +225,7 @@ fn EnforceRule7_CrossJurisdictionCheck(jx: String, cpJx: String, result: String)
 }
 
 // Composite hard rules check
-fn EnforceHardRules(query: String, jurisdiction: String, cpJx: String) -> String {
+pattern EnforceHardRules(query: String, jurisdiction: String, cpJx: String) -> String {
   let r1 = EnforceRule1_NoSigning(query)
   if r1 != "PASS" then { return r1 }
   let r2 = EnforceRule2_NoCourtRepresentation(query)
@@ -243,7 +243,7 @@ fn EnforceHardRules(query: String, jurisdiction: String, cpJx: String) -> String
 // SECTION 2: QUERY PARSER & COMMAND ROUTER
 // ═══════════════════════════════════════════════════════════════════════
 
-fn ParseLegalQuery(query: String) -> String {
+pattern ParseLegalQuery(query: String) -> String {
   let q = lower(query)
   if contains(q, "/legal-nda") then { return "cmd:nda" }
   if contains(q, "/legal-msa") then { return "cmd:msa" }
@@ -274,7 +274,7 @@ fn ParseLegalQuery(query: String) -> String {
 // Legal requires: jurisdiction + businessForm (mandatory)
 // Optional: counterpartyJurisdiction + counterpartyForm + documentType + positionInDeal
 
-fn BuildLegalContext(query: String, chat_id: String) -> String {
+pattern BuildLegalContext(query: String, chat_id: String) -> String {
   let base = BuildContext(DEPT, query, chat_id)
   let q = lower(query)
 
@@ -320,7 +320,7 @@ fn BuildLegalContext(query: String, chat_id: String) -> String {
 // SECTION 4: KNOWLEDGE LOADER
 // ═══════════════════════════════════════════════════════════════════════
 
-fn LoadJurisdictionKnowledge(jurisdiction: String) -> String {
+pattern LoadJurisdictionKnowledge(jurisdiction: String) -> String {
   // Load jurisdiction knowledge from KV store (populated at startup from .md files)
   let key = "legal_jx_" + jurisdiction
   let cached = kv_get(key)
@@ -342,7 +342,7 @@ fn LoadJurisdictionKnowledge(jurisdiction: String) -> String {
   return "Юрисдикция " + jurisdiction + " — knowledge pack не загружен."
 }
 
-fn LoadBusinessFormKnowledge(form: String, jx: String) -> String {
+pattern LoadBusinessFormKnowledge(form: String, jx: String) -> String {
   if form == BF_OOO then {
     return "ООО — ограниченная ответственность. Уставный капитал (BY: 100 БВ). Директор на основании Устава/доверенности. Договоры от имени директора. Переход долей по нотариальной форме. Ликвидация через регистрирующий орган."
   }
@@ -362,7 +362,7 @@ fn LoadBusinessFormKnowledge(form: String, jx: String) -> String {
   return "Бизнес-форма " + form + " — knowledge pack не загружен."
 }
 
-fn LoadCompatibilityMatrix(jx: String, bf: String, cpJx: String, cpBf: String) -> String {
+pattern LoadCompatibilityMatrix(jx: String, bf: String, cpJx: String, cpBf: String) -> String {
   let matrix = "Compatibility matrix: "
 
   // Cross-jurisdictional situations
@@ -602,20 +602,20 @@ pattern DisputeResolutionStrategy(disputeContext: String, jx: String, chat_id: S
 // drafted → published → under-lawyer-review → signed →
 //   verified-clean / rewrite / dispute → superseded
 
-fn TransitionLifecycle(assessmentId: String, newStatus: String) -> String {
+pattern TransitionLifecycle(assessmentId: String, newStatus: String) -> String {
   let _ = db_execute("UPDATE legal_assessments SET status = ?, updated_at = NOW() WHERE id = ?", [newStatus, assessmentId])
   let _ = AuditLog("legal_lifecycle", DEPT, "Assessment #" + assessmentId + " → " + newStatus)
   return newStatus
 }
 
-fn SetVerificationDate(assessmentId: String, signingDate: String) -> String {
+pattern SetVerificationDate(assessmentId: String, signingDate: String) -> String {
   // Verification = 90 days after signing
   let verDate = format_date(to_float(signingDate) + (86400.0 * to_float(to_string(VERIFICATION_DAYS))), "yyyy-MM-dd")
   let _ = db_execute("UPDATE legal_assessments SET verification_date = ?, status = ? WHERE id = ?", [verDate, ST_SIGNED, assessmentId])
   return verDate
 }
 
-fn GetCurrentStatus(assessmentId: String) -> String {
+pattern GetCurrentStatus(assessmentId: String) -> String {
   let rows = db_execute("SELECT status FROM legal_assessments WHERE id = ?", [assessmentId])
   if length(rows) > 0 then { return json_get(parse_json(rows), "0.status", ST_DRAFTED) }
   return "not_found"
@@ -625,7 +625,7 @@ fn GetCurrentStatus(assessmentId: String) -> String {
 // SECTION 10: VERIFICATION & LEARNING LOOP
 // ═══════════════════════════════════════════════════════════════════════
 
-fn VerifyLegalResult(assessmentId: String, outcome: String, wasPredictable: String, disputeNature: String, notes: String) -> String {
+pattern VerifyLegalResult(assessmentId: String, outcome: String, wasPredictable: String, disputeNature: String, notes: String) -> String {
   // outcome: clean | rewrite | dispute
   let _ = db_execute(
     "INSERT INTO legal_assessment_verifications (assessment_id, outcome, rewrite_was_predictable, dispute_nature, notes, verified_at) VALUES (?, ?, ?, ?, ?, NOW())",
@@ -642,7 +642,7 @@ fn VerifyLegalResult(assessmentId: String, outcome: String, wasPredictable: Stri
 }
 
 // Per-assessment learning: if rewrite was predictable → methodology gap
-fn CheckMethodologyGap(assessmentId: String, wasPredictable: String) -> String {
+pattern CheckMethodologyGap(assessmentId: String, wasPredictable: String) -> String {
   if wasPredictable == "true" then {
     let _ = db_execute(
       "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, predictable_rewrites_count, improvements, created_at) VALUES (NOW(), NOW(), 0, 1, 'Methodology gap: predictable rewrite missed in risk map', NOW())",
@@ -657,7 +657,7 @@ fn CheckMethodologyGap(assessmentId: String, wasPredictable: String) -> String {
 // SECTION 11: METRIC & SCORING
 // ═══════════════════════════════════════════════════════════════════════
 
-fn GetLegalMetric() -> String {
+pattern GetLegalMetric() -> String {
   // pct-clean-signings = clean / total × 100
   let rows = db_execute(
     "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable FROM legal_assessment_verifications WHERE verified_at >= NOW() - INTERVAL '30 days'",
@@ -690,7 +690,7 @@ fn GetLegalMetric() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Task 1: Daily check — verifications due
-fn RunDailyCheck() -> String {
+pattern RunDailyCheck() -> String {
   let rows = db_execute(
     "SELECT id, short_title, jurisdiction, document_type FROM legal_assessments WHERE status = 'published' AND verification_date::date = CURRENT_DATE",
     []
@@ -715,7 +715,7 @@ fn RunDailyCheck() -> String {
 }
 
 // Task 2: Monthly review — compute pct-clean-signings
-fn RunMonthlyReview() -> String {
+pattern RunMonthlyReview() -> String {
   let rows = db_execute(
     "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean_signings, SUM(CASE WHEN outcome = 'rewrite' THEN 1 ELSE 0 END) as rewrites, SUM(CASE WHEN outcome = 'dispute' THEN 1 ELSE 0 END) as disputes, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable_rewrites FROM legal_assessment_verifications WHERE verified_at >= NOW() - INTERVAL '30 days'",
     []
@@ -752,7 +752,7 @@ fn RunMonthlyReview() -> String {
 }
 
 // Task 3: Quarterly methodology review
-fn RunQuarterlyMethodologyReview() -> String {
+pattern RunQuarterlyMethodologyReview() -> String {
   let rows = db_execute(
     "SELECT SUM(predictable_rewrites_count) as total_predictable, SUM(total_assessments) as total FROM legal_monthly_reviews WHERE created_at >= NOW() - INTERVAL '90 days'",
     []
@@ -784,7 +784,7 @@ fn RunQuarterlyMethodologyReview() -> String {
 // SECTION 13: BOT COMMANDS
 // ═══════════════════════════════════════════════════════════════════════
 
-fn ShowHelp() -> String {
+pattern ShowHelp() -> String {
   return "⚖️ Юрист. Договорная работа и правовая защита.\n\n" +
     "Команды:\n" +
     "/legal-nda — быстрый NDA\n" +
@@ -799,7 +799,7 @@ fn ShowHelp() -> String {
     "⚠ Все результаты — draft + risk map. Перед подписанием — обязательная проверка лицензированным юристом."
 }
 
-fn QuickNDA(query: String, chat_id: String) -> String {
+pattern QuickNDA(query: String, chat_id: String) -> String {
   let ctx = BuildLegalContext(query, chat_id)
   let parsed = parse_json(ctx)
   let jx = json_get(parsed, "jurisdiction", JX_BY)
@@ -814,7 +814,7 @@ fn QuickNDA(query: String, chat_id: String) -> String {
   return withDisclaimer
 }
 
-fn QuickMSA(query: String, chat_id: String) -> String {
+pattern QuickMSA(query: String, chat_id: String) -> String {
   let ctx = BuildLegalContext(query, chat_id)
   let parsed = parse_json(ctx)
   let jx = json_get(parsed, "jurisdiction", JX_BY)
@@ -831,7 +831,7 @@ fn QuickMSA(query: String, chat_id: String) -> String {
   return withDisclaimer
 }
 
-fn RedFlagAnalysis(query: String, chat_id: String) -> String {
+pattern RedFlagAnalysis(query: String, chat_id: String) -> String {
   let ctx = BuildLegalContext(query, chat_id)
   let parsed = parse_json(ctx)
   let jx = json_get(parsed, "jurisdiction", JX_BY)
@@ -849,7 +849,7 @@ fn RedFlagAnalysis(query: String, chat_id: String) -> String {
   return withDisclaimer
 }
 
-fn RiskMapping(query: String, chat_id: String) -> String {
+pattern RiskMapping(query: String, chat_id: String) -> String {
   let ctx = BuildLegalContext(query, chat_id)
   let parsed = parse_json(ctx)
   let jx = json_get(parsed, "jurisdiction", JX_BY)
@@ -865,7 +865,7 @@ fn RiskMapping(query: String, chat_id: String) -> String {
   return withDisclaimer
 }
 
-fn VerifyResult(query: String) -> String {
+pattern VerifyResult(query: String) -> String {
   // Parse: /legal-verify <id> [outcome] [notes]
   let parts = split(query, " ")
   if length(parts) < 2 then { return "Использование: /legal-verify <id> <clean|rewrite|dispute> [notes]" }
@@ -890,7 +890,7 @@ fn VerifyResult(query: String) -> String {
   return result
 }
 
-fn SearchArchive(filter: String) -> String {
+pattern SearchArchive(filter: String) -> String {
   let rows = db_execute(
     "SELECT id, short_title, document_type, status, jurisdiction, risk_level, created_at FROM legal_assessments WHERE short_title ILIKE '%' || ? || '%' ORDER BY created_at DESC LIMIT 10",
     [filter]
@@ -899,7 +899,7 @@ fn SearchArchive(filter: String) -> String {
   return "📚 Legal архив:\n" + rows
 }
 
-fn LegalScore() -> String {
+pattern LegalScore() -> String {
   let metric = GetLegalMetric()
   let data = parse_json(metric)
   let value = json_get(data, "value", "N/A")
@@ -917,7 +917,7 @@ fn LegalScore() -> String {
     "Methodology gap (predictable missed): " + predictableMissed + "%"
 }
 
-fn ListTemplates() -> String {
+pattern ListTemplates() -> String {
   let rows = db_execute(
     "SELECT id, document_type, jurisdiction, business_form, name, version, status FROM contract_templates WHERE status = 'active' ORDER BY document_type, jurisdiction",
     []
@@ -932,11 +932,11 @@ fn ListTemplates() -> String {
 // SECTION 14: DISCLAIMER WRAPPER & ARCHIVE
 // ═══════════════════════════════════════════════════════════════════════
 
-fn ApplyDisclaimer(text: String) -> String {
+pattern ApplyDisclaimer(text: String) -> String {
   return text + "\n\n" + DISCLAIMER_BOTTOM
 }
 
-fn SaveToLegalArchive(shortTitle: String, fullResult: String, docType: String, jx: String, bf: String, cpJx: String, cpBf: String, riskLevel: String, confidence: String, chat_id: String) -> String {
+pattern SaveToLegalArchive(shortTitle: String, fullResult: String, docType: String, jx: String, bf: String, cpJx: String, cpBf: String, riskLevel: String, confidence: String, chat_id: String) -> String {
   let resultWithDisclaimer = ApplyDisclaimer(fullResult)
 
   let _ = db_execute(
@@ -962,7 +962,7 @@ fn SaveToLegalArchive(shortTitle: String, fullResult: String, docType: String, j
 // ═══════════════════════════════════════════════════════════════════════
 // For free-text queries: context → knowledge → risk map → route by intent → disclaimer → archive
 
-fn FullLegalPipeline(query: String, chat_id: String, intent: String) -> String {
+pattern FullLegalPipeline(query: String, chat_id: String, intent: String) -> String {
   let ctx = BuildLegalContext(query, chat_id)
   let parsed = parse_json(ctx)
   let jx = json_get(parsed, "jurisdiction", "")

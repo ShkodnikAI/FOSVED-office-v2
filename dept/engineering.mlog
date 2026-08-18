@@ -88,7 +88,7 @@ let ERROR_CLASSES = "missed_load_case,wrong_coefficient,wrong_norm,dimensional_e
 // SECTION 1: NLP QUERY PARSER & DISCIPLINE DETECTION
 // ═══════════════════════════════════════════════════════════════════════
 
-fn DetectDiscipline(query: String) -> String {
+pattern DetectDiscipline(query: String) -> String {
   let q = lower(query)
   // Structural keywords
   if contains(q, "несущ") or contains(q, "кровл") or contains(q, "теплиц") or contains(q, "каркас") then { return "structural" }
@@ -107,7 +107,7 @@ fn DetectDiscipline(query: String) -> String {
   return "unknown"
 }
 
-fn DetectCommand(query: String) -> String {
+pattern DetectCommand(query: String) -> String {
   let q = lower(query)
   if contains(q, "/calc-norms") then { return "norms" }
   if contains(q, "/calc-loadcases") then { return "loadcases" }
@@ -120,7 +120,7 @@ fn DetectCommand(query: String) -> String {
   return "free_text"
 }
 
-fn ParseEngineeringQuery(query: String) -> Struct{
+pattern ParseEngineeringQuery(query: String) -> Struct{
   command: String,
   discipline: String,
   task_description: String,
@@ -157,11 +157,11 @@ fn ParseEngineeringQuery(query: String) -> Struct{
 // Hard rules: #1 (mandatory disclaimer), #6 (out-of-scope refusal), #10 (plain fails)
 // ═══════════════════════════════════════════════════════════════════════
 
-fn WrapWithDisclaimer(content: String) -> String {
+pattern WrapWithDisclaimer(content: String) -> String {
   return DISCLAIMER_TOP + "\n\n" + content + "\n\n" + DISCLAIMER_BOTTOM
 }
 
-fn DeclineOutOfScope(query: String) -> String {
+pattern DeclineOutOfScope(query: String) -> String {
   let msg = "Запрос отклонён: задача выходит за рамки трёх дисциплин инженерного отдела (строительная механика, гидравлика, силовая электроника).\n\n"
   let msg = msg + "Запрошенная задача требует профильного инженера-специалиста. Инженерный отдел — проектный ассистент в строго определённых дисциплинах, не инженер-универсал.\n\n"
   let msg = msg + "Доступные дисциплины:\n"
@@ -171,7 +171,7 @@ fn DeclineOutOfScope(query: String) -> String {
   return WrapWithDisclaimer(msg)
 }
 
-fn FormatVerdict(verdict: String) -> String {
+pattern FormatVerdict(verdict: String) -> String {
   // Hard rule 10: plain verdict, no softening
   if verdict == "passes" then { return "✅ КОНСТРУКЦИЯ ПРОХОДИТ — при условии проверки дипломированным инженером." }
   if verdict == "fails" then { return "❌ КОНСТРУКЦИЯ НЕ ПРОХОДИТ — требуется изменение концепции или параметров." }
@@ -185,7 +185,7 @@ fn FormatVerdict(verdict: String) -> String {
 // Hard rule: #2 (no calculation without a stated norm)
 // ═══════════════════════════════════════════════════════════════════════
 
-fn GetDefaultNorms(discipline: String) -> String {
+pattern GetDefaultNorms(discipline: String) -> String {
   // Returns JSON array of default norms for RF jurisdiction
   if discipline == "structural" then {
     return "[{\"code\":\"СП 20.13330\",\"edition\":\"2016\",\"title\":\"Нагрузки и воздействия\",\"governs\":\"load_combinations\"},{\"code\":\"СП 16.13330\",\"edition\":\"2017\",\"title\":\"Стальные конструкции\",\"governs\":\"steel_design\"},{\"code\":\"СП 64.13330\",\"edition\":\"2017\",\"title\":\"Деревянные конструкции\",\"governs\":\"timber_design\"},{\"code\":\"СП 70.13330\",\"edition\":\"2016\",\"title\":\"Несущие и ограждающие конструкции\",\"governs\":\"execution\"}]"
@@ -199,7 +199,7 @@ fn GetDefaultNorms(discipline: String) -> String {
   return "[]"
 }
 
-fn SetNormBase(calc_id: String, discipline: String, norm_system: String, norms_json: String) -> String {
+pattern SetNormBase(calc_id: String, discipline: String, norm_system: String, norms_json: String) -> String {
   // Hard rule 2: no calculation without a fixed norm base
   // Gate: if norms_json is empty, use discipline defaults
   let norms = if norms_json == "" or norms_json == "[]" then { GetDefaultNorms(discipline) } else { norms_json }
@@ -224,7 +224,7 @@ fn SetNormBase(calc_id: String, discipline: String, norm_system: String, norms_j
 // Hard rule: #3 (every load case enumerated before calculation)
 // ═══════════════════════════════════════════════════════════════════════
 
-fn GetDefaultLoadCases(discipline: String, object_type: String) -> String {
+pattern GetDefaultLoadCases(discipline: String, object_type: String) -> String {
   // Returns JSON array of default load cases by discipline
   if discipline == "structural" then {
     return "[{\"case\":\"Собственный вес\",\"type\":\"permanent\",\"source\":\"вес конструкции\"},{\"case\":\"Снеговая нагрузка\",\"type\":\"snow\",\"source\":\"СП 20.13330\"},{\"case\":\"Ветровая нагрузка\",\"type\":\"wind\",\"source\":\"СП 20.13330\"},{\"case\":\"Эксплуатационная\",\"type\":\"operational\",\"source\":\"нормативная\"},{\"case\":\"Аварийная (обрыв связи)\",\"type\":\"emergency\",\"source\":\"СП 20.13330\"}]"
@@ -238,7 +238,7 @@ fn GetDefaultLoadCases(discipline: String, object_type: String) -> String {
   return "[]"
 }
 
-fn SetLoadCases(calc_id: String, discipline: String, load_cases_json: String, input_data_json: String, missing_data: String) -> String {
+pattern SetLoadCases(calc_id: String, discipline: String, load_cases_json: String, input_data_json: String, missing_data: String) -> String {
   // Hard rule 3: every load case enumerated before calculation
   let lc = if load_cases_json == "" or load_cases_json == "[]" then { GetDefaultLoadCases(discipline, "") } else { load_cases_json }
 
@@ -272,7 +272,7 @@ fn SetLoadCases(calc_id: String, discipline: String, load_cases_json: String, in
 // Hard rules: #7 (independent method), #8 (dimensional check)
 // ═══════════════════════════════════════════════════════════════════════
 
-fn IndependentVerify(calc_id: String, result_summary: String, discipline: String) -> Struct{
+pattern IndependentVerify(calc_id: String, result_summary: String, discipline: String) -> Struct{
   verification_method: String,
   verification_agrees: Bool,
   dimensional_check_ok: Bool,
@@ -337,7 +337,7 @@ fn IndependentVerify(calc_id: String, result_summary: String, discipline: String
 // Hard rules: #1, #5, #9, #10 — final assembly
 // ═══════════════════════════════════════════════════════════════════════
 
-fn AssembleDocumentation(
+pattern AssembleDocumentation(
   calc_id: String,
   discipline: String,
   norm_system: String,
@@ -412,7 +412,7 @@ fn AssembleDocumentation(
   return doc
 }
 
-fn DisciplineNameRU(discipline: String) -> String {
+pattern DisciplineNameRU(discipline: String) -> String {
   if discipline == "structural" then { return "Строительная механика" }
   if discipline == "hydraulic" then { return "Гидравлика" }
   if discipline == "power_electronics" then { return "Силовая электроника" }
@@ -427,7 +427,7 @@ fn DisciplineNameRU(discipline: String) -> String {
 // Checks: ULS (strength, stability, buckling, shear, connections),
 //         SLS (deflection, vibration)
 
-fn StructuralLoadBearing(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
+pattern StructuralLoadBearing(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
   result_summary: String,
   result_details: String,
   safety_factor: String,
@@ -484,7 +484,7 @@ fn StructuralLoadBearing(calc_id: String, query: String, norms: String, load_cas
 // ── 7b: Structural — Elements Sizing ─────────────────────────────────
 // Select from REAL standard section ranges, iterate to find smallest passing
 
-fn StructuralElementsSizing(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
+pattern StructuralElementsSizing(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
   result_summary: String,
   result_details: String,
   safety_factor: String,
@@ -537,7 +537,7 @@ fn StructuralElementsSizing(calc_id: String, query: String, norms: String, load_
 // ── 7c: Hydraulic — Drive Design ─────────────────────────────────────
 // Full chain: F → P → Q → pump → components → holding → safety
 
-fn HydraulicDriveDesign(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
+pattern HydraulicDriveDesign(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
   result_summary: String,
   result_details: String,
   safety_factor: String,
@@ -592,7 +592,7 @@ fn HydraulicDriveDesign(calc_id: String, query: String, norms: String, load_case
 // ── 7d: Power Electronics — Inverter ─────────────────────────────────
 // Rate for PEAKS, cold-day Voc, thermal at T_max, fault analysis
 
-fn PowerElectronicsInverter(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
+pattern PowerElectronicsInverter(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
   result_summary: String,
   result_details: String,
   safety_factor: String,
@@ -646,7 +646,7 @@ fn PowerElectronicsInverter(calc_id: String, query: String, norms: String, load_
 // ── 7e: Power Electronics — Renewable System Matching ────────────────
 // Three matching questions: source→converter, converter→load, energy balance
 
-fn RenewableSystemMatching(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
+pattern RenewableSystemMatching(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
   result_summary: String,
   result_details: String,
   safety_factor: String,
@@ -701,7 +701,7 @@ fn RenewableSystemMatching(calc_id: String, query: String, norms: String, load_c
 
 // ── 7f: Discipline dispatcher ─────────────────────────────────────────
 
-fn ExecuteDisciplineCalc(calc_id: String, discipline: String, query: String, norms: String, load_cases: String) -> Struct{
+pattern ExecuteDisciplineCalc(calc_id: String, discipline: String, query: String, norms: String, load_cases: String) -> Struct{
   result_summary: String,
   result_details: String,
   safety_factor: String,
@@ -748,7 +748,7 @@ fn ExecuteDisciplineCalc(calc_id: String, discipline: String, query: String, nor
 // ── 8a: Feasibility Estimation ────────────────────────────────────────
 // PRECEDES the full pipeline; estimate ≠ calculation
 
-fn FeasibilityEstimate(discipline: String, query: String) -> Struct{
+pattern FeasibilityEstimate(discipline: String, query: String) -> Struct{
   feasible: Bool,
   verdict: String,
   details: String
@@ -783,7 +783,7 @@ fn FeasibilityEstimate(discipline: String, query: String) -> Struct{
 // ── 8b: Third-Party Calc Review ──────────────────────────────────────
 // Review ≠ approval
 
-fn ThirdPartyCalcReview(discipline: String, document: String) -> Struct{
+pattern ThirdPartyCalcReview(discipline: String, document: String) -> Struct{
   findings: String,
   gross_errors: Int,
   verdict: String,
@@ -824,7 +824,7 @@ fn ThirdPartyCalcReview(discipline: String, document: String) -> Struct{
 // ═══════════════════════════════════════════════════════════════════════
 
 // ── /calc — Create or list calculations ───────────────────────────────
-fn CreateCalculation(discipline: String, title: String, chat_id: String) -> String {
+pattern CreateCalculation(discipline: String, title: String, chat_id: String) -> String {
   // Validate discipline
   if discipline != "structural" and discipline != "hydraulic" and discipline != "power_electronics" then {
     return WrapWithDisclaimer("Неизвестная дисциплина: " + discipline + "\n\nДоступные: structural (строймеханика), hydraulic (гидравлика), power_electronics (силовая электроника)")
@@ -848,7 +848,7 @@ fn CreateCalculation(discipline: String, title: String, chat_id: String) -> Stri
   return WrapWithDisclaimer(msg)
 }
 
-fn ListCalculations(chat_id: String, limit: Int) -> String {
+pattern ListCalculations(chat_id: String, limit: Int) -> String {
   let rows = db_execute("SELECT id, title, discipline, status, verdict FROM engineering_calculations ORDER BY created_at DESC LIMIT ?", [to_string(limit)])
   if length(rows) == 0 then {
     return "Нет сохранённых расчётов. Создайте: /calc <дисциплина> <задача>"
@@ -860,7 +860,7 @@ fn ListCalculations(chat_id: String, limit: Int) -> String {
 }
 
 // ── /calc-show — Display calculation ─────────────────────────────────
-fn ShowCalculation(calc_id: String) -> String {
+pattern ShowCalculation(calc_id: String) -> String {
   let row = db_execute("SELECT * FROM engineering_calculations WHERE id = ?", [calc_id])
   if length(row) == 0 then {
     return "Расчёт не найден: " + calc_id
@@ -882,7 +882,7 @@ fn ShowCalculation(calc_id: String) -> String {
 }
 
 // ── /eng-score — Department metrics ──────────────────────────────────
-fn EngineeringScore() -> String {
+pattern EngineeringScore() -> String {
   // Aggregate 90-day metrics
   let total = db_execute("SELECT COUNT(*) as c FROM engineering_calculations WHERE created_at >= datetime('now', '-90 days')", [])
   let verified = db_execute("SELECT COUNT(*) as c FROM engineering_calculations WHERE status IN ('self_verified','sent_for_review','engineer_approved','engineer_corrected') AND created_at >= datetime('now', '-90 days')", [])
@@ -911,7 +911,7 @@ fn EngineeringScore() -> String {
 }
 
 // ── /eng-archive — Search archive ────────────────────────────────────
-fn SearchArchive(discipline: String, limit: Int) -> String {
+pattern SearchArchive(discipline: String, limit: Int) -> String {
   let rows = if discipline != "" then {
     db_execute("SELECT id, title, discipline, verdict, created_at FROM engineering_calculations WHERE discipline = ? AND status IN ('engineer_approved','engineer_corrected','archived') ORDER BY created_at DESC LIMIT ?", [discipline, to_string(limit)])
   } else {
@@ -928,7 +928,7 @@ fn SearchArchive(discipline: String, limit: Int) -> String {
 }
 
 // ── /calc-review — Engineer review handoff ────────────────────────────
-fn EngineerReview(calc_id: String, engineer_verdict: String, engineer_notes: String) -> String {
+pattern EngineerReview(calc_id: String, engineer_verdict: String, engineer_notes: String) -> String {
   // Gate: calculation must be self_verified
   let row = db_execute("SELECT status FROM engineering_calculations WHERE id = ?", [calc_id])
   if length(row) == 0 then { return "Расчёт не найден: " + calc_id }
@@ -957,7 +957,7 @@ fn EngineerReview(calc_id: String, engineer_verdict: String, engineer_notes: Str
 // ═══════════════════════════════════════════════════════════════════════
 
 // ── Weekly: Thursday 10:00 MSK — engineer correction review ──────────
-fn WeeklyCorrectionReview() -> String {
+pattern WeeklyCorrectionReview() -> String {
   let corrected = db_execute("SELECT id, title, discipline, engineer_notes FROM engineering_calculations WHERE status = 'engineer_corrected' AND updated_at >= datetime('now', '-7 days') ORDER BY updated_at DESC", [])
 
   if length(corrected) == 0 then {
@@ -975,7 +975,7 @@ fn WeeklyCorrectionReview() -> String {
 }
 
 // ── Monthly: 1st 10:30 MSK — performance review ─────────────────────
-fn MonthlyPerformanceReview() -> String {
+pattern MonthlyPerformanceReview() -> String {
   let score = EngineeringScore()
 
   let clusters = db_execute("SELECT error_class, COUNT(*) as c FROM engineering_calculation_verifications WHERE created_at >= datetime('now', '-30 days') AND error_was_substantive = 'true' GROUP BY error_class ORDER BY c DESC", [])
@@ -995,7 +995,7 @@ fn MonthlyPerformanceReview() -> String {
 }
 
 // ── Quarterly: Q-start 11:00 MSK — methodology review ───────────────
-fn QuarterlyMethodologyReview() -> String {
+pattern QuarterlyMethodologyReview() -> String {
   let prompt = "Выполни квартальный обзор методологии инженерного отдела.\n\n"
   let prompt = prompt + "1. Проверь: не устарели ли применяемые нормы (новые редакции СП/ГОСТ/ПУЭ/IEC)?\n"
   let prompt = prompt + "2. Проанализируй: какие классы ошибок повторяются?\n"
@@ -1016,7 +1016,7 @@ fn QuarterlyMethodologyReview() -> String {
 // SECTION 11: FULL PIPELINE (for free-text engineering queries)
 // ═══════════════════════════════════════════════════════════════════════
 
-fn FullPipeline(query: String, discipline: String, chat_id: String) -> String {
+pattern FullPipeline(query: String, discipline: String, chat_id: String) -> String {
   // Step 0: Create calculation
   let calc_id = "eng_" + to_string(hash(query + to_string(now())))
 
@@ -1075,7 +1075,7 @@ fn FullPipeline(query: String, discipline: String, chat_id: String) -> String {
 // SECTION 12: COMMAND ROUTER
 // ═══════════════════════════════════════════════════════════════════════
 
-fn RouteByCommand(parsed: Struct{
+pattern RouteByCommand(parsed: Struct{
   command: String,
   discipline: String,
   task_description: String,
