@@ -87,6 +87,13 @@ pattern InitDB() -> String {
   let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
   let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
 
+  // Yana metrics — delegation accuracy & forgetting incidents
+  db_execute("CREATE TABLE IF NOT EXISTS yana_delegation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, query TEXT, delegated_to TEXT, dept_response_summary TEXT, was_correct INTEGER, feedback_source TEXT, delegated_at TEXT DEFAULT (datetime('now')), verified_at TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS yana_forgetting_incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, query TEXT, forgotten_topic TEXT, memory_existed INTEGER, yana_answer_summary TEXT, correct_info TEXT, reported_at TEXT DEFAULT (datetime('now')), verified_at TEXT)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_yana_deleg_delegated_to ON yana_delegation_log(delegated_to)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_yana_deleg_was_correct ON yana_delegation_log(was_correct)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_yana_forget_chat_id ON yana_forgetting_incidents(chat_id)")
+
   // OSP — analysis archive & research sources (per METHODOLOGY v3, hard rule #8)
   // NOTE: db_execute/db_insert in this file — interpreter-only functions. Works because serve = interpreter (confirmed 2026-06-22). If backend changes — re-verify (METALOGOS_INSTRUCTIONS.md §6.9).
   db_execute("CREATE TABLE IF NOT EXISTS analysis (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
@@ -1012,6 +1019,7 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let delegate_target = YanaCheckDelegate(reply)
   if delegate_target != "" then {
     let _ = AuditLog("yana_delegate", dept, "to=" + delegate_target + " query=" + substring(query, 0.0, 80.0))
+    let _ = YanaRecordDelegation(chat_id, query, delegate_target, "")
     return delegate_target
   }
   // F-3: check for [REMIND: ...] marker after delegation check
@@ -1262,6 +1270,94 @@ pattern DeliverDueReminders() -> String {
   }
   let _ = AuditLog("reminders_delivered", "system", "sent=" + to_string(count))
   return "sent=" + to_string(count)
+}
+
+// ============================================================
+// YANA METRICS — delegation accuracy & forgetting incidents
+// ============================================================
+
+pattern YanaRecordDelegation(chat_id: String, query_text: String, target: String, dept_summary: String) -> String {
+  let q = substring(query_text, 0.0, 200.0)
+  let s = substring(dept_summary, 0.0, 300.0)
+  let _ = query("INSERT INTO yana_delegation_log (chat_id, query, delegated_to, dept_response_summary, was_correct) VALUES (?, ?, ?, ?, NULL)", [chat_id, q, target, s])
+  let _ = AuditLog("yana_delegation", "yana", "to=" + target + " query=" + q)
+  return "ok"
+}
+
+pattern YanaRecordForgetting(chat_id: String, query_text: String, yana_answer: String, correction: String) -> String {
+  let q = substring(query_text, 0.0, 200.0)
+  let a = substring(yana_answer, 0.0, 300.0)
+  let c = substring(correction, 0.0, 500.0)
+  let mem_check = try recall_top_k(q, "3")
+  let mem_count = len(mem_check)
+  let mem_existed = 0
+  if mem_count > 0.0 then { let mem_existed = 1 }
+  let _ = query("INSERT INTO yana_forgetting_incidents (chat_id, query, forgotten_topic, memory_existed, yana_answer_summary, correct_info) VALUES (?, ?, ?, ?, ?, ?)", [chat_id, q, q, mem_existed, a, c])
+  let _ = AuditLog("yana_forgetting", "yana", "memory_existed=" + to_string(mem_existed) + " query=" + q)
+  return "ok"
+}
+
+pattern YanaGetMetrics() -> String {
+  let deleg_total = query("SELECT COUNT(*) AS c FROM yana_delegation_log", [])
+  let deleg_total_n = to_float(json_get(deleg_total[0], "c", "0"))
+  let deleg_correct = query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 1", [])
+  let deleg_correct_n = to_float(json_get(deleg_correct[0], "c", "0"))
+  let deleg_wrong = query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 0", [])
+  let deleg_wrong_n = to_float(json_get(deleg_wrong[0], "c", "0"))
+  let deleg_pending = deleg_total_n - deleg_correct_n - deleg_wrong_n
+  let deleg_accuracy = 0.0
+  if deleg_correct_n + deleg_wrong_n > 0.0 then {
+    let deleg_accuracy = deleg_correct_n / (deleg_correct_n + deleg_wrong_n) * 100.0
+  }
+  let deleg_by_dept = query("SELECT delegated_to, COUNT(*) AS c FROM yana_delegation_log GROUP BY delegated_to ORDER BY c DESC LIMIT 5", [])
+  let dept_breakdown = ""
+  each row in deleg_by_dept {
+    let d = json_get(row, "delegated_to", "?")
+    let dc = json_get(row, "c", "0")
+    let dept_breakdown = dept_breakdown + d + ": " + dc + "  "
+  }
+  let forget_total = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents", [])
+  let forget_total_n = to_float(json_get(forget_total[0], "c", "0"))
+  let forget_with_mem = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE memory_existed = 1", [])
+  let forget_with_mem_n = to_float(json_get(forget_with_mem[0], "c", "0"))
+  let forget_without_mem = forget_total_n - forget_with_mem_n
+  let forget_7d = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE reported_at >= datetime('now', '-7 days')", [])
+  let forget_7d_n = to_float(json_get(forget_7d[0], "c", "0"))
+  let gate_violations = query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation'", [])
+  let gate_violations_n = to_float(json_get(gate_violations[0], "c", "0"))
+  let gate_7d = query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation' AND timestamp >= datetime('now', '-7 days')", [])
+  let gate_7d_n = to_float(json_get(gate_7d[0], "c", "0"))
+  let result = "Метрики Яны:\n\n"
+  let result = result + "ДЕЛЕГИРОВАНИЕ:\n"
+  let result = result + "  Всего: " + to_string(deleg_total_n) + "\n"
+  if deleg_correct_n + deleg_wrong_n > 0.0 then {
+    let result = result + "  Точность: " + substring(to_string(deleg_accuracy), 0.0, 5.0) + "% (" + to_string(deleg_correct_n) + "/" + to_string(deleg_correct_n + deleg_wrong_n) + " верифицировано)\n"
+  }
+  let result = result + "  Ожидают верификации: " + to_string(deleg_pending) + "\n"
+  if dept_breakdown != "" then {
+    let result = result + "  По отделам: " + dept_breakdown + "\n"
+  }
+  let result = result + "\nЗАБЫВЧИВОСТЬ:\n"
+  let result = result + "  Всего инцидентов: " + to_string(forget_total_n) + "\n"
+  let result = result + "  За 7 дней: " + to_string(forget_7d_n) + "\n"
+  let result = result + "  Память была (не использовала): " + to_string(forget_with_mem_n) + "\n"
+  let result = result + "  Памяти не было (незнание): " + to_string(forget_without_mem) + "\n"
+  let result = result + "\nЖЁСТКИЕ ГЕЙТЫ:\n"
+  let result = result + "  Нарушений всего: " + to_string(gate_violations_n) + "\n"
+  let result = result + "  За 7 дней: " + to_string(gate_7d_n) + "\n"
+  return result
+}
+
+// ============================================================
+// call_python — universal mlog->Python bridge (Variant B)
+// Delegates to llm_proxy.py /call-python endpoint via http_post
+// Whitelisted modules only — security enforced server-side
+// ============================================================
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  let body = json_encode({module: module, function: function, args: parse_json(args_json)})
+  let resp = try http_post("http://127.0.0.1:4000/call-python", body, "application/json")
+  if to_string(resp) == "()" then { return "{\"error\": \"call_python endpoint unavailable\"}" }
+  return resp
 }
 
 // ============================================================
@@ -1539,7 +1635,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg | /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam | /osp bet | /osp watch | /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept>\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg | /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam | /osp bet | /osp watch | /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -1600,6 +1696,14 @@ mlogserver {
           let error_type = json_get(parse_json(fix_result), "error_type", "classified")
           let suggestion = json_get(parse_json(fix_result), "suggestion", "")
           let _ = AuditLog("correction_fix", recent_dept, "type=" + error_type + " text=" + substring(correction_text, 0.0, 80.0))
+          // If correction targets Yana, record forgetting incident
+          if recent_dept == "yana" then {
+            let recent_user_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [chat_id])
+            let recent_query = json_get(parse_json(to_string(recent_user_rows)), "[0].content", "")
+            let recent_yana_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' AND dept = 'yana' ORDER BY id DESC LIMIT 1", [chat_id])
+            let yana_answer = json_get(parse_json(to_string(recent_yana_rows)), "[0].content", "")
+            let _ = YanaRecordForgetting(chat_id, recent_query, yana_answer, correction_text)
+          }
           let msg = "Correction saved.\nType: " + error_type
           if suggestion != "" then {
             let msg = msg + "\nSuggestion: " + substring(suggestion, 0.0, 200.0)
@@ -1635,6 +1739,13 @@ mlogserver {
       let msg = msg + "- Positive examples: " + positive_count + "\n"
       let msg = msg + "- Error types: see office dashboard"
       let _ = SendTelegramReply(chat_id, msg)
+      return respond("200 ok")
+    }
+
+    // /yana-metrics — delegation accuracy & forgetting incidents
+    if text == "/yana-metrics" then {
+      let metrics = YanaGetMetrics()
+      let _ = SendTelegramReply(chat_id, metrics)
       return respond("200 ok")
     }
 

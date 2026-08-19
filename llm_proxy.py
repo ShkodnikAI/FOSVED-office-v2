@@ -5733,6 +5733,71 @@ def expert_chart():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================
+# call_python — universal mlog->Python bridge (Variant B)
+# Whitelisted modules only. No arbitrary code execution.
+# ============================================================
+CALL_PYTHON_ALLOWED = {
+    # LLM-as-a-Verifier
+    "llm_verifier": {"select", "score", "verify", "rank"},
+    # Data processing
+    "json": {"dumps", "loads"},
+    "statistics": {"mean", "median", "stdev", "variance"},
+    "math": {"ceil", "floor", "log", "log10", "sqrt", "exp", "pow", "factorial", "gcd", "comb", "perm"},
+    "datetime": {"datetime", "timedelta", "timezone"},
+    # Text
+    "re": {"match", "search", "findall", "sub", "split"},
+    "difflib": {"SequenceMatcher", "get_close_matches"},
+    # File
+    "csv": {"reader", "writer", "DictReader", "DictWriter"},
+    # Finance/math
+    "decimal": {"Decimal"},
+    "fractions": {"Fraction"},
+}
+
+@app.post("/call-python")
+def call_python_endpoint():
+    """Universal Python bridge for mlog. Executes module.function(args) with strict whitelist.
+    Body: {"module": "statistics", "function": "mean", "args": [[1,2,3,4,5]], "kwargs": {}}
+    Returns: {"result": <value>, "type": <python type name>}
+    """
+    d = request.get_json(force=True) or {}
+    module_name = d.get('module', '')
+    func_name = d.get('function', '')
+    args = d.get('args', [])
+    kwargs = d.get('kwargs', {})
+
+    # Security: whitelist check
+    if module_name not in CALL_PYTHON_ALLOWED:
+        _log_audit("call_python_blocked", {"module": module_name, "function": func_name}, "system")
+        return jsonify({"error": f"Module '{module_name}' not allowed. Allowed: {list(CALL_PYTHON_ALLOWED.keys())}"}), 403
+
+    allowed_funcs = CALL_PYTHON_ALLOWED[module_name]
+    if func_name not in allowed_funcs:
+        _log_audit("call_python_blocked", {"module": module_name, "function": func_name}, "system")
+        return jsonify({"error": f"Function '{func_name}' not allowed in '{module_name}'. Allowed: {list(allowed_funcs)}"}), 403
+
+    try:
+        import importlib
+        mod = importlib.import_module(module_name)
+        func = getattr(mod, func_name)
+        result = func(*args, **kwargs)
+        _log_audit("call_python", {"module": module_name, "function": func_name}, "system")
+        # Serialize result
+        if isinstance(result, (list, dict, str, int, float, bool, type(None))):
+            serialized = result
+        elif isinstance(result, tuple):
+            serialized = list(result)
+        elif hasattr(result, '__dict__'):
+            serialized = str(result)
+        else:
+            serialized = str(result)
+        return jsonify({"result": serialized, "type": type(result).__name__})
+    except Exception as e:
+        _log_audit("call_python_error", {"module": module_name, "function": func_name, "error": str(e)[:200]}, "system")
+        return jsonify({"error": str(e)[:500]}), 500
+
+
 if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
