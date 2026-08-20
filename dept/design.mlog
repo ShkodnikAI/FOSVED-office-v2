@@ -1701,6 +1701,14 @@ pattern HandleDesign(query: String, chat_id: String) -> String {
   let has_disclaimer = contains(result, "Дизайн-спецификация генерируется")
   let output = if has_disclaimer then { result } else { WrapWithDisclaimer(result) }
 
+  // ── LLM-Verifier: UX/design quality ──
+  let dsiv_resp = try call_python("llm_verifier", "score", json_encode([query, output, "Usability: Are interaction patterns user-centered with clear hierarchy? Accessibility: Are WCAG AA considerations included? Design system: Does it reference consistent components/tokens?"]))
+  if to_string(dsiv_resp) != "()" and contains(to_string(dsiv_resp), "error") == false then {
+    let dsiv_parsed = try parse_json(dsiv_resp)
+    let dsiv_score = to_float(try json_get(dsiv_parsed, "result", "0.5"))
+    let _ = AuditLog("design_verify_score", dept, "score=" + to_string(dsiv_score))
+  }
+
   let _ = kv_set("last_model_" + dept, "native_call_llm")
   let _ = RecordAssistantMessage(chat_id, dept, substring(output, 0.0, 4000.0))
 

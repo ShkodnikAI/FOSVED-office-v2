@@ -1998,6 +1998,14 @@ pattern HandleDev(query: String, chat_id: String) -> String {
   let has_disclaimer = contains(result, "Код генерируется проектным ассистентом") or contains(result, "проектного ассистента")
   let output = if has_disclaimer then { result } else { WrapWithDisclaimer(result) }
 
+  // ── LLM-Verifier: code/architecture quality ──
+  let dv_resp = try call_python("llm_verifier", "score", json_encode([query, output, "Technical accuracy: Are code snippets/architecture patterns correct? Security awareness: Are common vulnerabilities (injection, auth, data exposure) addressed? Best practices: Does it follow established patterns for the stated tech stack?"]))
+  if to_string(dv_resp) != "()" and contains(to_string(dv_resp), "error") == false then {
+    let dv_parsed = try parse_json(dv_resp)
+    let dv_score = to_float(try json_get(dv_parsed, "result", "0.5"))
+    let _ = AuditLog("dev_verify_score", dept, "score=" + to_string(dv_score))
+  }
+
   let _ = kv_set("last_model_" + dept, "native_call_llm")
   let _ = RecordAssistantMessage(chat_id, dept, substring(output, 0.0, 4000.0))
 

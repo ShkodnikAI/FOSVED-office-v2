@@ -387,6 +387,13 @@ pattern KKDebrief(dept_name: String, chat_id: String) -> String {
   let reply = to_string(llm_result)
   let tone_check = KKValidateDebriefTone(reply)
   if contains(tone_check, "FAIL") then { let reply = reply + "\n\n[⚠️ TONE GATE: " + tone_check + " — перепиши в структурном ключе]" }
+  // ── LLM-Verifier: debrief methodology quality ──
+  let kkv_resp = try call_python("llm_verifier", "score", json_encode(["Debrief " + dept_name, reply, "Root cause analysis: Are structural errors identified with first-principles thinking? Actionability: Are specific corrective actions proposed? Psychological insight: Does it consider specialist psychotype and skill gaps?"]))
+  if to_string(kkv_resp) != "()" and contains(to_string(kkv_resp), "error") == false then {
+    let kkv_parsed = try parse_json(kkv_resp)
+    let kkv_score = to_float(try json_get(kkv_parsed, "result", "0.5"))
+    let _ = AuditLog("kk_verify_score", "kavalnya", "score=" + to_string(kkv_score) + " dept=" + dept_name)
+  }
   let _ = db_execute("INSERT INTO training_sessions (dept_name, session_type, status, debrief_notes) VALUES (?, 'debrief', 'completed', ?)", [dept_name, substring(reply, 0, 3000)])
   let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
   let _ = AuditLog("kk_debrief", "kavalnya", "dept=" + dept_name + " tone=" + tone_check)

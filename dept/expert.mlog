@@ -184,12 +184,29 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   kv_set("last_model_" + dept, model)
-  // ── LLM-Verifier: confidence scoring for briefing quality ──
-  let ev_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Factual correctness of automotive data? Completeness: All requested aspects covered? Actionability: Usable for meeting preparation?"]))
-  if to_string(ev_resp) != "()" and contains(to_string(ev_resp), "error") == false then {
-    let ev_parsed = try parse_json(ev_resp)
-    let ev_score = to_float(try json_get(ev_parsed, "result", "0.5"))
-    let _ = AuditLog("expert_verify_score", dept, "score=" + to_string(ev_score) + " query=" + substring(query, 0.0, 60.0))
+  // ── LLM-Verifier: score + conditional best-of-2 for substantive queries ──
+  if len(query) > 80.0 then {
+    let ev_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Factual correctness of automotive data? Completeness: All requested aspects covered? Actionability: Usable for meeting preparation?"]))
+    let ev_score = 0.5
+    if to_string(ev_resp) != "()" and contains(to_string(ev_resp), "error") == false then {
+      let ev_parsed = try parse_json(ev_resp)
+      let ev_score = to_float(try json_get(ev_parsed, "result", "0.5"))
+      let _ = AuditLog("expert_verify_score", dept, "score=" + to_string(ev_score) + " query=" + substring(query, 0.0, 60.0))
+    }
+    // Conditional regeneration: if score < 0.55, generate 2nd candidate and select best-of-2
+    if ev_score < 0.55 then {
+      let llm_result2 = try call_llm(model, messages, 0.5, 4000)
+      if to_string(llm_result2) != "()" then {
+        let reply2 = to_string(llm_result2)
+        let sel_resp = try call_python("llm_verifier", "select", json_encode([query, json_encode([reply, reply2]), "Accuracy: Factual correctness? Completeness: All aspects covered? Actionability: Usable for meeting prep?"]))
+        if to_string(sel_resp) != "()" and contains(to_string(sel_resp), "error") == false then {
+          let sel_parsed = try parse_json(sel_resp)
+          let best_idx = to_int(try json_get(sel_parsed, "result", "0"))
+          if best_idx == 1 then { let reply = reply2 }
+          let _ = AuditLog("expert_bestof2", dept, "original_score=" + to_string(ev_score) + " selected=" + to_string(best_idx) + " query=" + substring(query, 0.0, 60.0))
+        }
+      }
+    }
   }
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
@@ -589,9 +606,23 @@ pattern ExpertCreateBriefing(topic: String, depth: String, chat_id: String) -> S
   let messages = json_encode([{role: "system", content: system_prompt}, {role: "user", content: "Подготовь брифинг на тему: " + topic}])
   let disclaimer = ExpertDisclaimer()
   let model = ExpertSelectModel(3)
+  // ── Deep briefing: best-of-2 with LLM-Verifier select ──
   let llm_result = call_llm(model, messages, 0.7, 8000)
   if to_string(llm_result) == "()" then { return "Ошибка генерации брифинга." }
   let reply = to_string(llm_result)
+  if depth == "3" then {
+    let llm_result2 = try call_llm(model, messages, 0.4, 8000)
+    if to_string(llm_result2) != "()" then {
+      let reply2 = to_string(llm_result2)
+      let sel_resp = try call_python("llm_verifier", "select", json_encode(["Подготовь брифинг на тему: " + topic, json_encode([reply, reply2]), "Completeness: All 4 phases covered (immersion, deconstruction, failure modes, combat questions)? Depth: Sufficient technical detail? Actionability: Usable combat questions with expected answers?"]))
+      if to_string(sel_resp) != "()" and contains(to_string(sel_resp), "error") == false then {
+        let sel_parsed = try parse_json(sel_resp)
+        let best_idx = to_int(try json_get(sel_parsed, "result", "0"))
+        if best_idx == 1 then { let reply = reply2 }
+        let _ = AuditLog("expert_briefing_bestof2", "expert", "id=" + brief_id + " selected=" + to_string(best_idx))
+      }
+    }
+  }
 
   // Update briefing status and content
   let esc_reply = escape_json(substring(reply, 0.0, 5000.0))

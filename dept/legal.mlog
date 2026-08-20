@@ -1050,6 +1050,14 @@ pattern FullLegalPipeline(query: String, chat_id: String, intent: String) -> Str
     result = call_llm(prompt, chat_id)
   }
 
+  // Step 2.5: LLM-Verifier — legal analysis quality
+  let legv_resp = try call_python("llm_verifier", "score", json_encode([query, result, "Jurisdictional accuracy: Are legal references correct for stated jurisdiction? Risk identification: Are key risks (liability, IP, termination) addressed? DRAFT marker: Is the output marked as non-binding draft?"]))
+  if to_string(legv_resp) != "()" and contains(to_string(legv_resp), "error") == false then {
+    let legv_parsed = try parse_json(legv_resp)
+    let legv_score = to_float(try json_get(legv_parsed, "result", "0.5"))
+    let _ = AuditLog("legal_verify_score", DEPT, "score=" + to_string(legv_score) + " intent=" + intent + " jx=" + jx)
+  }
+
   // Step 3: Apply hard rules to output
   let final = EnforceRule6_DraftOnlyMarker(result)
   final = EnforceRule7_CrossJurisdictionCheck(jx, cpJx, final)

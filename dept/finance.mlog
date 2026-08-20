@@ -342,6 +342,13 @@ pattern HandleFinance(query: String, chat_id: String) -> String {
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
   let reply = reply + "\n\n" + disclaimer_bottom
   let reply = FinanceFinalSafetyCheck(reply)
+  // ── LLM-Verifier: financial analysis quality ──
+  let finv_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Numerical precision: Are all numbers specific with sources or explicit assumptions? Jurisdiction awareness: Correct tax/legal context for stated jurisdiction? Cashflow logic: Do revenue/expense/cash flows connect logically?"]))
+  if to_string(finv_resp) != "()" and contains(to_string(finv_resp), "error") == false then {
+    let finv_parsed = try parse_json(finv_resp)
+    let finv_score = to_float(try json_get(finv_parsed, "result", "0.5"))
+    let _ = AuditLog("finance_verify_score", dept, "score=" + to_string(finv_score) + " intent=" + intent)
+  }
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "intent=" + intent + " jx=" + jurisdiction + " bf=" + business_form + " model=" + model + " query: " + substring(query, 0, 100))
   return reply

@@ -1171,6 +1171,14 @@ pattern HandleEngineering(query: String, chat_id: String) -> String {
   let has_disclaimer = contains(result, "ПРЕДВАРИТЕЛЬНО") or contains(result, "предварительный")
   let output = if has_disclaimer then { result } else { WrapWithDisclaimer(result) }
 
+  // ── LLM-Verifier: engineering calculation quality ──
+  let engv_resp = try call_python("llm_verifier", "score", json_encode([query, output, "Formula correctness: Are engineering formulas and units applied correctly? Safety margins: Are appropriate safety factors included? Unit consistency: Are all values in consistent units throughout?"]))
+  if to_string(engv_resp) != "()" and contains(to_string(engv_resp), "error") == false then {
+    let engv_parsed = try parse_json(engv_resp)
+    let engv_score = to_float(try json_get(engv_parsed, "result", "0.5"))
+    let _ = AuditLog("engineering_verify_score", dept, "score=" + to_string(engv_score))
+  }
+
   let _ = kv_set("last_model_" + dept, "native_call_llm")
   let _ = RecordAssistantMessage(chat_id, dept, substring(output, 0.0, 4000.0))
 
