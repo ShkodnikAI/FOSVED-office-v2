@@ -21,6 +21,10 @@ log_mem.info(f"FosvedMemory loaded: {len(memory.TYPES)} types, db={_MEMORY_DB}")
 
 from flask import Flask, request, jsonify, Response
 import requests as http_requests
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("llm_proxy")
+
 try:
     from auto_enricher import auto_enrich as _auto_enrich_fn
     _has_enricher = True
@@ -43,8 +47,6 @@ def auto_enrich(text, dept='yana', accent_color='#6366f1'):
 # ──────────────────────────── APP & CONFIG ────────────────────────────
 app = Flask(__name__, static_folder=None)
 app.url_map.strict_slashes = False
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("llm_proxy")
 
 # ── Auth middleware (before_request) ──────────────────────────
 @app.before_request
