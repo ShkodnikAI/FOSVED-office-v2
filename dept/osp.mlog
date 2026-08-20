@@ -365,9 +365,17 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   let gates = OSPCheckQualityGates(reply, depth)
   let safety = OSPFinalSafetyCheck(reply)
   if safety != "PASS" then { let reply = reply + "\n\n[SAFETY: " + safety + "]" }
+  // ── LLM-Verifier: confidence scoring for strategic analysis ──
+  let ov_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Analytical rigor: Logic and evidence quality? Probability calibration: Reasonable confidence levels? Actionability: Decision-relevant conclusions?"]))
+  let ov_score = 0.0
+  if to_string(ov_resp) != "()" and contains(to_string(ov_resp), "error") == false then {
+    let ov_parsed = try parse_json(ov_resp)
+    let ov_score = to_float(try json_get(ov_parsed, "result", "0.5"))
+    let _ = AuditLog("osp_verify_score", dept, "score=" + to_string(ov_score) + " domain=" + domain + " depth=" + to_string(depth))
+  }
   let reply = reply + "\n\n" + OSPDisclaimerBottom()
   let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=" + to_string(depth) + " gates=" + gates + " safety=" + safety)
+  let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=" + to_string(depth) + " gates=" + gates + " safety=" + safety + " verify=" + to_string(ov_score))
   return reply
 }
 

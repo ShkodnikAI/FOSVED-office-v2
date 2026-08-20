@@ -184,6 +184,13 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   kv_set("last_model_" + dept, model)
+  // ── LLM-Verifier: confidence scoring for briefing quality ──
+  let ev_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Factual correctness of automotive data? Completeness: All requested aspects covered? Actionability: Usable for meeting preparation?"]))
+  if to_string(ev_resp) != "()" and contains(to_string(ev_resp), "error") == false then {
+    let ev_parsed = try parse_json(ev_resp)
+    let ev_score = to_float(try json_get(ev_parsed, "result", "0.5"))
+    let _ = AuditLog("expert_verify_score", dept, "score=" + to_string(ev_score) + " query=" + substring(query, 0.0, 60.0))
+  }
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
   return reply

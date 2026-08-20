@@ -1835,6 +1835,21 @@ pattern FullQAPipeline(query: String, chat_id: String, intent: String) -> String
     result = call_llm(prompt, chat_id)
   }
 
+  // Step 2.5: LLM-Verifier probabilistic gate — score QA output quality
+  // Non-blocking: logs score, adds warning if quality is critically low
+  let qv_resp = try call_python("llm_verifier", "score", json_encode([query, result, "Testing rigor: Are test cases specific and repeatable? Coverage: Are critical paths covered? Discipline: Do recommendations follow QA hard rules?"]))
+  let qv_score = 0.5
+  if to_string(qv_resp) != "()" and contains(to_string(qv_resp), "error") == false then {
+    let qv_parsed = try parse_json(qv_resp)
+    let qv_score = to_float(try json_get(qv_parsed, "result", "0.5"))
+    let _ = AuditLog("qa_verify_score", QA_DEPT(), "score=" + to_string(qv_score) + " intent=" + intent)
+  }
+  // If verification score is critically low, prepend a warning
+  let result = result
+  if qv_score < 0.4 then {
+    let result = "[ВЕРИФИКАЦИЯ: низкая оценка качества анализа — рекомендуется ручная проверка]\n\n" + result
+  }
+
   // Step 3: Disclaimer
   let withDisclaimer = ApplyDisclaimer(result)
 
