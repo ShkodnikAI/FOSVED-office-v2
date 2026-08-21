@@ -79,12 +79,14 @@ def is_internal_only(path):
 
 # Routes that go to Metalogos
 # NOTE: mlog routes checked BEFORE LLM routes (specific > catch-all)
+# "/" is exact-only — see is_mlog_route (must not swallow /miniapp, /api, …)
 MLOG_ROUTES_PREFIXES = [
     "/api/expert/",  # Expert automotive API — served by mlog (dept/expert.mlog)
     "/api/lz/",      # LZ multi-domain API — served by mlog (dept/lz.mlog)
     "/webhook/",    # Telegram webhook — mlog handler
     "/cron/",
     "/health",
+    "/version",
     "/",
 ]
 
@@ -98,8 +100,17 @@ def is_llm_route(path):
 
 
 def is_mlog_route(path):
-    """Check if path should go to Metalogos."""
+    """Check if path should go to Metalogos.
+
+    Prefix "/" matches only the exact root path. Without this guard,
+    path.startswith("/") is true for every URL and Mini App / LLM routes
+    never reach port 4000 (net::ERR_HTTP_RESPONSE_CODE_FAILURE / 404).
+    """
     for prefix in MLOG_ROUTES_PREFIXES:
+        if prefix == "/":
+            if path == "/":
+                return True
+            continue
         if path == prefix or path.startswith(prefix):
             return True
     return False
@@ -129,11 +140,14 @@ def proxy(path):
     if full_path == "/webhook/":
         full_path = "/webhook/telegram"
 
-    # Determine target — mlog routes checked FIRST (specific routes > catch-all /api/)
-    if is_mlog_route(full_path):
-        target_url = MLOG_URL + full_path
-    elif is_llm_route(full_path):
+    # Determine target:
+    # 1) LLM-specific prefixes first (miniapp, dashboards, …)
+    # 2) then mlog-specific prefixes
+    # 3) default → mlog
+    if is_llm_route(full_path):
         target_url = LLM_URL + full_path
+    elif is_mlog_route(full_path):
+        target_url = MLOG_URL + full_path
     else:
         target_url = MLOG_URL + full_path
 
