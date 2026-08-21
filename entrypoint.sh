@@ -8,6 +8,8 @@ echo "app.mlog:       $(md5sum app.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "dept/yana.mlog: $(md5sum dept/yana.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "llm_proxy.py:   $(md5sum llm_proxy.py 2>/dev/null | cut -d' ' -f1)"
 echo "miniapp.mlog:   $(md5sum dept/miniapp.mlog 2>/dev/null | cut -d' ' -f1)"
+echo "osp.mlog:       $(md5sum dept/osp.mlog 2>/dev/null | cut -d' ' -f1)"
+echo "expert.mlog:    $(md5sum dept/expert.mlog 2>/dev/null | cut -d' ' -f1)"
 
 if grep -q "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА" dept/yana.mlog 2>/dev/null; then
   echo "!!! WARNING: dept/yana.mlog still has anti-format code !!!"
@@ -16,29 +18,51 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# HOTFIX 2026-08-20: mlog 0.17.0 — imported HandleOSP/HandleExpert not visible
-# at runtime (same class of bug that forced inlining HandleYana).
-# Disable broken imports and load dept/handlers_fallback.mlog instead.
+# HOTFIX 2026-08-21: mlog 0.17.0 — imported patterns from dept/osp and
+# dept/expert are NOT visible at runtime (same class of bug as HandleYana).
+#
+# Restore FULL native functionality by inlining both files into app.mlog
+# at boot (Yana pattern). Subcommands restored:
+#   Expert: auto, compare, residual, cost, chart, briefing, quick/deep
+#   OSP:    native gates, Brier, deep/full analysis paths
 # ---------------------------------------------------------------------------
-echo "--- HOTFIX: department import regression (HandleOSP/HandleExpert) ---"
-# Clean bytecode caches BEFORE serve (was previously after start)
+echo "--- HOTFIX: inline native OSP + Expert (full handlers) ---"
+# Clean bytecode caches BEFORE serve
 find . -path './dept/*.mbc' -delete 2>/dev/null || true
 find /office/dept -name '*.mbc' -delete 2>/dev/null || true
 echo "  Cleaned stale .mbc files"
 
-if [ -f dept/handlers_fallback.mlog ]; then
-  # Comment out broken imports (idempotent)
-  sed -i 's|^import dept/osp$|// import dept/osp  # HOTFIX mlog-0.17 import regression|' app.mlog
-  sed -i 's|^import dept/expert$|// import dept/expert  # HOTFIX mlog-0.17 import regression|' app.mlog
-  # Ensure fallback is imported (after admin import line, once)
-  if ! grep -q 'import dept/handlers_fallback' app.mlog; then
-    sed -i '/import dept\/admin/a import dept/handlers_fallback' app.mlog
+# Comment broken imports (idempotent)
+sed -i 's|^import dept/osp$|// import dept/osp  # inlined below — mlog-0.17 import regression|g' app.mlog
+sed -i 's|^import dept/expert$|// import dept/expert  # inlined below — mlog-0.17 import regression|g' app.mlog
+# Drop thin fallback import if present from previous hotfix
+sed -i '/import dept\/handlers_fallback/d' app.mlog
+
+if ! grep -q 'INLINED_DEPT_OSP_EXPERT' app.mlog; then
+  if [ -f dept/osp.mlog ] && [ -f dept/expert.mlog ]; then
+    {
+      echo ""
+      echo "// === INLINED_DEPT_OSP_EXPERT ==="
+      echo "// Boot-time inline of dept/osp.mlog + dept/expert.mlog"
+      echo "// Bypasses mlog 0.17 cross-file pattern export regression."
+      echo "// Source of truth remains dept/osp.mlog and dept/expert.mlog."
+      echo ""
+      cat dept/osp.mlog
+      echo ""
+      cat dept/expert.mlog
+      echo ""
+      echo "// === END INLINED_DEPT_OSP_EXPERT ==="
+    } >> app.mlog
+    echo "  Inlined full dept/osp.mlog + dept/expert.mlog into app.mlog"
+    echo "  app.mlog size after inline: $(wc -c < app.mlog) bytes"
+  else
+    echo "  FATAL: dept/osp.mlog or dept/expert.mlog missing — cannot restore handlers"
   fi
-  echo "  app.mlog: OSP/Expert routed via handlers_fallback"
-  grep -n 'handlers_fallback\|import dept/osp\|import dept/expert' app.mlog | head -20
 else
-  echo "  WARNING: dept/handlers_fallback.mlog missing — HandleOSP/HandleExpert may fail"
+  echo "  Already inlined (marker INLINED_DEPT_OSP_EXPERT present)"
 fi
+
+grep -n 'INLINED_DEPT_OSP_EXPERT\|import dept/osp\|import dept/expert\|import dept/handlers_fallback' app.mlog | head -30 || true
 
 if [ ! -f data/memory.db ]; then
   echo "--- Seeding FosvedMemory ---"
@@ -47,7 +71,7 @@ fi
 
 python3 scripts/migrate_schema.py "${DATABASE_PATH:-./data}/fosved.db"
 
-# 0. Prisma migrate deploy (PostgreSQL OSP schema) — runs only if DATABASE_URL is a PG connection string
+# 0. Prisma migrate deploy (PostgreSQL OSP schema)
 if echo "$DATABASE_URL" | grep -q "^postgres"; then
   echo "--- Prisma migrate deploy (PostgreSQL) ---"
   npx prisma migrate deploy 2>&1 || echo "Prisma migrate failed (may already be up-to-date)"
@@ -55,7 +79,7 @@ else
   echo "--- Skipping Prisma (DATABASE_URL is not PostgreSQL) ---"
 fi
 
-# 1. LLM Proxy (native circuit breaker + combo chains + compression)
+# 1. LLM Proxy
 if ! python3 -c "import llm_proxy" 2>/tmp/llm_import_err.log; then
   echo "FATAL: llm_proxy import error"; cat /tmp/llm_import_err.log | tail -10; exit 1
 fi
@@ -71,8 +95,6 @@ for i in {1..10}; do
 done
 
 # 2. Metalogos
-# NOTE: mlog check uses stricter parsing than mlog serve (rejects 'fn' and top-level 'let').
-# mlog serve interpreter supports these fine. Log warnings but don't exit.
 if ./bin/mlog check app.mlog 2>&1 | grep -q "parse error"; then
   echo "WARNING: mlog check found parse errors (mlog serve may still work — interpreter is more lenient)"
   ./bin/mlog check app.mlog 2>&1 | head -5
@@ -92,7 +114,6 @@ done
 echo "--- Version check ---"
 curl -sf http://127.0.0.1:10001/version 2>/dev/null || echo "version endpoint not available"
 
-# 2b. Department import validation — detect "unknown function" bug early
 echo "--- Department import validation ---"
 for DEPT_ROUTE in "/health" "/version"; do
   curl -sf "http://127.0.0.1:10001${DEPT_ROUTE}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
