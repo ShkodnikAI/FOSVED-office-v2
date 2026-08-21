@@ -15,6 +15,31 @@ else
   echo "dept/yana.mlog: clean (no anti-format)"
 fi
 
+# ---------------------------------------------------------------------------
+# HOTFIX 2026-08-20: mlog 0.17.0 — imported HandleOSP/HandleExpert not visible
+# at runtime (same class of bug that forced inlining HandleYana).
+# Disable broken imports and load dept/handlers_fallback.mlog instead.
+# ---------------------------------------------------------------------------
+echo "--- HOTFIX: department import regression (HandleOSP/HandleExpert) ---"
+# Clean bytecode caches BEFORE serve (was previously after start)
+find . -path './dept/*.mbc' -delete 2>/dev/null || true
+find /office/dept -name '*.mbc' -delete 2>/dev/null || true
+echo "  Cleaned stale .mbc files"
+
+if [ -f dept/handlers_fallback.mlog ]; then
+  # Comment out broken imports (idempotent)
+  sed -i 's|^import dept/osp$|// import dept/osp  # HOTFIX mlog-0.17 import regression|' app.mlog
+  sed -i 's|^import dept/expert$|// import dept/expert  # HOTFIX mlog-0.17 import regression|' app.mlog
+  # Ensure fallback is imported (after admin import line, once)
+  if ! grep -q 'import dept/handlers_fallback' app.mlog; then
+    sed -i '/import dept\/admin/a import dept/handlers_fallback' app.mlog
+  fi
+  echo "  app.mlog: OSP/Expert routed via handlers_fallback"
+  grep -n 'handlers_fallback\|import dept/osp\|import dept/expert' app.mlog | head -20
+else
+  echo "  WARNING: dept/handlers_fallback.mlog missing — HandleOSP/HandleExpert may fail"
+fi
+
 if [ ! -f data/memory.db ]; then
   echo "--- Seeding FosvedMemory ---"
   python3 scripts/seed_memory.py data/memory.db
@@ -69,21 +94,14 @@ curl -sf http://127.0.0.1:10001/version 2>/dev/null || echo "version endpoint no
 
 # 2b. Department import validation — detect "unknown function" bug early
 echo "--- Department import validation ---"
-DEPT_VALIDATION_FAILED=0
 for DEPT_ROUTE in "/health" "/version"; do
   curl -sf "http://127.0.0.1:10001${DEPT_ROUTE}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
 done
-# Test that critical handler functions are resolvable by sending a dry-run webhook
-# (This catches the "unknown function" import caching bug before real users hit it)
 echo "  Testing handler resolution via /webhook/telegram dry-run..."
 TEST_RESULT=$(curl -s -X POST http://127.0.0.1:10001/webhook/telegram \
   -H "Content-Type: application/json" \
   -d '{"update_id":-1,"message":{"message_id":-1,"chat":{"id":0},"text":"/status","from":{"id":0}}}' 2>&1)
 echo "  /status response: ${TEST_RESULT}"
-# Check for "unknown function" in recent server output (if detectable)
-# Delete any stale .mbc bytecode caches that could cause import failures
-find /office/dept -name "*.mbc" -delete 2>/dev/null
-echo "  Cleaned stale .mbc files (if any)"
 echo "--- Department validation complete ---"
 
 # 3. Reverse Proxy
