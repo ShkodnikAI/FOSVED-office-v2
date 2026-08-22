@@ -17,53 +17,6 @@ else
   echo "dept/yana.mlog: clean (no anti-format)"
 fi
 
-# ---------------------------------------------------------------------------
-# HOTFIX 2026-08-21: mlog 0.17.0 — imported patterns from dept/osp and
-# dept/expert are NOT visible at runtime (same class of bug as HandleYana).
-#
-# Restore FULL native functionality by inlining both files into app.mlog
-# at boot (Yana pattern). Subcommands restored:
-#   Expert: auto, compare, residual, cost, chart, briefing, quick/deep
-#   OSP:    native gates, Brier, deep/full analysis paths
-# ---------------------------------------------------------------------------
-echo "--- HOTFIX: inline native OSP + Expert (full handlers) ---"
-# Clean bytecode caches BEFORE serve
-find . -path './dept/*.mbc' -delete 2>/dev/null || true
-find /office/dept -name '*.mbc' -delete 2>/dev/null || true
-echo "  Cleaned stale .mbc files"
-
-# Comment broken imports (idempotent)
-sed -i 's|^import dept/osp$|// import dept/osp  # inlined below — mlog-0.17 import regression|g' app.mlog
-sed -i 's|^import dept/expert$|// import dept/expert  # inlined below — mlog-0.17 import regression|g' app.mlog
-# Drop thin fallback import if present from previous hotfix
-sed -i '/import dept\/handlers_fallback/d' app.mlog
-
-if ! grep -q 'INLINED_DEPT_OSP_EXPERT' app.mlog; then
-  if [ -f dept/osp.mlog ] && [ -f dept/expert.mlog ]; then
-    {
-      echo ""
-      echo "// === INLINED_DEPT_OSP_EXPERT ==="
-      echo "// Boot-time inline of dept/osp.mlog + dept/expert.mlog"
-      echo "// Bypasses mlog 0.17 cross-file pattern export regression."
-      echo "// Source of truth remains dept/osp.mlog and dept/expert.mlog."
-      echo ""
-      cat dept/osp.mlog
-      echo ""
-      cat dept/expert.mlog
-      echo ""
-      echo "// === END INLINED_DEPT_OSP_EXPERT ==="
-    } >> app.mlog
-    echo "  Inlined full dept/osp.mlog + dept/expert.mlog into app.mlog"
-    echo "  app.mlog size after inline: $(wc -c < app.mlog) bytes"
-  else
-    echo "  FATAL: dept/osp.mlog or dept/expert.mlog missing — cannot restore handlers"
-  fi
-else
-  echo "  Already inlined (marker INLINED_DEPT_OSP_EXPERT present)"
-fi
-
-grep -n 'INLINED_DEPT_OSP_EXPERT\|import dept/osp\|import dept/expert\|import dept/handlers_fallback' app.mlog | head -30 || true
-
 if [ ! -f data/memory.db ]; then
   echo "--- Seeding FosvedMemory ---"
   python3 scripts/seed_memory.py data/memory.db
