@@ -297,7 +297,7 @@ _breaker = CircuitBreaker(threshold=3, reset_after_ms=60000)
 # call_llm walks the chain: for each provider, try each model until one works.
 COMBO_CHAINS = {
     "fosved-free": [
-        ("groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
+        ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("deepseek", ["deepseek-chat"]),
     ],
@@ -305,14 +305,14 @@ COMBO_CHAINS = {
         ("kimi", ["kimi-k3"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6", "glm-4-plus"]),
-        ("groq", ["llama-3.3-70b-versatile"]),
+        ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
     ],
     "fosved-deep": [
         ("kimi", ["kimi-k3"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6"]),
-        ("groq", ["llama-3.3-70b-versatile"]),
+        ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
@@ -320,7 +320,7 @@ COMBO_CHAINS = {
         ("kimi", ["kimi-k3"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6"]),
-        ("groq", ["llama-3.3-70b-versatile"]),
+        ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
@@ -402,7 +402,7 @@ def _compress_messages(messages, dept='yana'):
 
     try:
         # Use cheap provider for compression
-        summary_result = _call_single_provider("groq", "llama-3.3-70b-versatile", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
+        summary_result = _call_single_provider("groq", "openai/gpt-oss-20b", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
         if summary_result and summary_result.get("reply"):
             summary_msg = {"role": "system", "content": f"[Earlier conversation summary]: {summary_result['reply'][:2000]}"}
             compressed = system_msgs + [summary_msg] + to_keep
@@ -1054,8 +1054,8 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
             use_model = "claude-sonnet-4-20250514"
         elif prov_name == "deepseek" and not use_model.startswith("deepseek"):
             use_model = "deepseek-chat"
-        elif prov_name == "groq" and not any(m in use_model for m in ("llama", "mixtral", "gemma")):
-            use_model = "llama-3.3-70b-versatile"
+        elif prov_name == "groq" and not any(m in use_model for m in ("openai/gpt-oss", "llama", "mixtral", "gemma")):
+            use_model = "openai/gpt-oss-20b"
         elif prov_name == "nvidia" and not use_model.startswith("nvidia/"):
             use_model = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
         elif prov_name == "cerebras" and not use_model.startswith("gpt-oss"):
@@ -4725,7 +4725,7 @@ def yana_auto_memorize():
                 "When a fact is a commitment or reminder with a date/time, include a \"date\" key with the date in YYYY-MM-DD HH:MM format (or YYYY-MM-DD if no time). If the date is relative (tomorrow, next week), calculate the actual date based on today being 2026-07-06. If nothing worth remembering, output: []"},
             {"role": "user", "content": f"User: {query[:500]}\nYana: {reply[:500]}"}
         ]
-        result = _call_single_provider("groq", "llama-3.3-70b-versatile", prompt, dept="yana", max_tokens=300, is_internal=True)
+        result = _call_single_provider("groq", "openai/gpt-oss-20b", prompt, dept="yana", max_tokens=300, is_internal=True)
         if result and result.get('reply'):
             import json as _json
             text = result['reply'].strip()
