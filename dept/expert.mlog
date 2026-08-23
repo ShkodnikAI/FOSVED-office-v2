@@ -177,10 +177,8 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
 
   // ── Default: full Expert pipeline (LLM with automotive-enriched context) ──
   let context = BuildExpertContext(query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let disclaimer = ExpertDisclaimer()
-  let model = ExpertSelectModel(2)
-  let llm_result = call_llm(model, messages, 0.7, 4000)
+  let llm_result = call_llm(context, query)
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   kv_set("last_model_" + dept, model)
@@ -195,7 +193,7 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
     }
     // Conditional regeneration: if score < 0.55, generate 2nd candidate and select best-of-2
     if ev_score < 0.55 then {
-      let llm_result2 = try call_llm(model, messages, 0.5, 4000)
+      let llm_result2 = try call_llm(context, query)
       if to_string(llm_result2) != "()" then {
         let reply2 = to_string(llm_result2)
         let sel_resp = try call_python("llm_verifier", "select", json_encode([query, json_encode([reply, reply2]), "Accuracy: Factual correctness? Completeness: All aspects covered? Actionability: Usable for meeting prep?"]))
@@ -356,10 +354,8 @@ pattern ExpertAutomotiveSkillSet() -> String {
 pattern ExpertAutomotiveLookup(query: String, chat_id: String) -> String {
   let auto_kb = ExpertAutomotiveKB()
   let system_prompt = "Ты — Эксперт-автомобилист отдела Fosved. Специализация: российский авторынок, сравнительный анализ автомобилей, расчёт остаточной стоимости и стоимости владения. Отвечай конкретно, с цифрами. Используй данные из базы знаний.\n\n" + auto_kb
-  let messages = json_encode([{role: "system", content: system_prompt}, {role: "user", content: query}])
   let disclaimer = ExpertDisclaimer()
-  let model = ExpertSelectModel(2)
-  let llm_result = call_llm(model, messages, 0.7, 4000)
+  let llm_result = call_llm(system_prompt, query)
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   let _ = RecordAssistantMessage(chat_id, "expert", reply + "\n\n" + disclaimer)
@@ -378,10 +374,8 @@ pattern ExpertCompareVehicles(query: String, chat_id: String) -> String {
   let compare_prompt = compare_prompt + "3. РЕКОМЕНДАЦИЯ: какой вариант оптимален по соотношению цена/качество, какой по TCO, какой по ликвидности\n\n"
   let compare_prompt = compare_prompt + "4. КРАСНЫЕ ФЛАГИ: что может увеличить реальные затраты сверх расчётных\n\n"
   let compare_prompt = compare_prompt + "Используй данные из базы знаний. Все цифры — для российского рынка 2024-2026.\n\n" + auto_kb
-  let messages = json_encode([{role: "system", content: compare_prompt}, {role: "user", content: "Сравни: " + query}])
   let disclaimer = ExpertDisclaimer()
-  let model = ExpertSelectModel(2)
-  let llm_result = call_llm(model, messages, 0.7, 6000)
+  let llm_result = call_llm(compare_prompt, "Сравни: " + query)
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
@@ -603,15 +597,13 @@ pattern ExpertCreateBriefing(topic: String, depth: String, chat_id: String) -> S
 
   let system_prompt = "Ты — Эксперт Fosved (Технический Препаратор). Готовишь боевой брифинг.\nГлубина: " + depth_name + "\n\nЖёсткие правила:\n1. Не выдаёт брифинг без дедлайна встречи\n2. Не использует упрощения которые исказят суть\n3. Не генерирует вопросы без указания правильного/уклончивого ответа\n4. Не игнорирует экономическую сторону\n5. Не доверяет официальным презентациям — ищи независимые источники\n6. Не использует абстрактные формулировки — каждое утверждение проверяемое\n7. Вопросы звучат естественно из уст понимающего человека\n\nПротокол:\nPhase 1: Rapid Domain Immersion (4 слоя: основы → state-of-art → школы/дебаты → числовые якоря)\nPhase 2: Project Deconstruction (что реально утверждают vs что показывают)\nPhase 3: Failure Modes Mapping (7 категорий)\nPhase 4: Combat Questions Design (5-7 вопросов с ожидаемыми ответами)\n\n" + skills + "\n\n" + auto_kb
 
-  let messages = json_encode([{role: "system", content: system_prompt}, {role: "user", content: "Подготовь брифинг на тему: " + topic}])
   let disclaimer = ExpertDisclaimer()
-  let model = ExpertSelectModel(3)
   // ── Deep briefing: best-of-2 with LLM-Verifier select ──
-  let llm_result = call_llm(model, messages, 0.7, 8000)
+  let llm_result = call_llm(system_prompt, "Подготовь брифинг на тему: " + topic)
   if to_string(llm_result) == "()" then { return "Ошибка генерации брифинга." }
   let reply = to_string(llm_result)
   if depth == "3" then {
-    let llm_result2 = try call_llm(model, messages, 0.4, 8000)
+    let llm_result2 = try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic)
     if to_string(llm_result2) != "()" then {
       let reply2 = to_string(llm_result2)
       let sel_resp = try call_python("llm_verifier", "select", json_encode(["Подготовь брифинг на тему: " + topic, json_encode([reply, reply2]), "Completeness: All 4 phases covered (immersion, deconstruction, failure modes, combat questions)? Depth: Sufficient technical detail? Actionability: Usable combat questions with expected answers?"]))

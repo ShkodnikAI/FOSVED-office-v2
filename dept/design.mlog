@@ -584,7 +584,7 @@ pattern ValidateTokenUsage(styles_json: String) -> Struct{
 pattern ComputeContrastRatio(color1: String, color2: String) -> Float {
   // Prompt LLM to compute contrast ratio (we can't do real math in Metalogos)
   let prompt = "Вычисли контрастное отношение (contrast ratio) между цветами " + color1 + " и " + color2 + ". Верни только число (например 4.5). Без пояснений."
-  let result = call_llm("design-a11y", prompt, 200)
+  let result = call_llm(prompt)
   return to_float(result)
 }
 
@@ -667,7 +667,7 @@ pattern RunAccessibilityAudit(artifact_id: String, wcag_level: String) -> Struct
 
   // Use LLM for comprehensive a11y audit
   let audit_prompt = "Проведи аудит доступности (WCAG " + wcag_level + ") для следующего дизайн-артефакта.\n\nТип: " + artifact_type + "\nСодержимое: " + substring(content, 0.0, 2000.0) + "\n\nПроверь:\n1. Контрастность цветов (4.5:1 для AA, 7:1 для AAA)\n2. Альтернативные тексты для изображений\n3. Навигация с клавиатуры\n4. ARIA-атрибуты\n5. Семантическая разметка\n6. Фокус-индикаторы\n7. Размеры touch-областей (≥44px)\n8. Совместимость со скринридерами\n\nВерни JSON: {\"score\": 0.0-1.0, \"issues\": [\"...\"], \"recommendations\": [\"...\"]}"
-  let audit_result = call_llm("design-a11y", audit_prompt, 1500)
+  let audit_result = call_llm(audit_prompt)
 
   let audit_parsed = parse_json(audit_result)
   let score = to_float(json_get(audit_parsed, "score", 0.0))
@@ -861,7 +861,7 @@ pattern RunPreApprovalGate(artifact_id: String, wcag_level: String) -> Struct{
 pattern CreateDesignArtifact(artifact_type: String, description: String, chat_id: String) -> String {
   // Gate: hard rule 6 — no design without user task
   let user_tasks_prompt = "Для описанного дизайна извлеки пользовательские задачи: какую проблему решает пользователь, какой результат ожидает.\n\nОписание: " + description + "\n\nВерни JSON массив задач: [{\"task\": \"...\", \"user_goal\": \"...\", \"success_criteria\": \"...\"}]"
-  let user_tasks_result = call_llm("design-tasks", user_tasks_prompt, 800)
+  let user_tasks_result = call_llm(user_tasks_prompt)
   let user_tasks = user_tasks_result
 
   // Gate: hard rule 12 — new domain requires research
@@ -887,7 +887,7 @@ pattern CreateDesignArtifact(artifact_type: String, description: String, chat_id
   // Build design generation prompt
   let design_prompt = "Создай дизайн-артефакт типа '" + artifact_type + "' для следующего описания:\n\n" + description + "\n\n" + skill_context + "\n\nБренд-токены Fosved:\n" + FOSVED_TOKENS_JSON + "\n\nТребования:\n1. Используй ТОЛЬКО дизайн-токены (никаких raw-значений)\n2. Укажи мобильную версию (mobile-first)\n3. Для component_spec — специфицируй все 7 состояний\n4. Для AI-продуктов — включи trust calibration паттерны\n5. Укажи пользовательские задачи\n\nВерни JSON: {\"name\": \"...\", \"content\": \"...\", \"tokens_used\": [...], \"interaction_states\": [...], \"user_tasks\": [...], \"mobile_variant\": \"...\", \"a11y_notes\": \"...\"}"
 
-  let design_result = call_llm("design-create", design_prompt, 3000)
+  let design_result = call_llm(design_prompt)
   let design_parsed = parse_json(design_result)
   let name = to_string(json_get(design_parsed, "name", "Untitled"))
   let content = to_string(json_get(design_parsed, "content", ""))
@@ -952,7 +952,7 @@ pattern GenerateComponentSpec(artifact_id: String, chat_id: String) -> String {
   // Build component spec prompt with hard rule 4 enforcement (7 states)
   let spec_prompt = "Создай полную спецификацию компонента для Dev-хэндоффа.\n\nКомпонент: " + name + "\nТекущий дизайн: " + substring(content, 0.0, 1500.0) + "\n\nТокены: " + tokens + "\n\nОБЯЗАТЕЛЬНО специфицируй ВСЕ 7 состояний:\n1. default — базовое состояние\n2. hover — при наведении\n3. focus — при фокусе (клавиатура!)\n4. active — при нажатии\n5. disabled — недоступен\n6. loading — загрузка данных\n7. error — состояние ошибки\n\nДля каждого состояния укажи: визуальные изменения, токены, transition, ARIA-атрибуты.\n\nТакже укажи:\n• Props/API\n• Размеры и варианты\n• Ограничения и анти-паттерны\n• Доступность (ARIA roles, keyboard nav)\n• Responsive поведение\n\nВерни JSON: {\"spec\": \"...\", \"states\": {...}, \"props\": [...], \"a11y\": {...}, \"anti_patterns\": [...]}"
 
-  let spec_result = call_llm("design-spec", spec_prompt, 3000)
+  let spec_result = call_llm(spec_prompt)
   let spec_parsed = parse_json(spec_result)
   let spec_content = to_string(json_get(spec_parsed, "spec", ""))
   let states_spec = to_string(json_get(spec_parsed, "states", "{}"))
@@ -1024,7 +1024,7 @@ pattern ManageDesignSystem(action: String, chat_id: String) -> String {
   if action == "audit" then {
     // Run design system audit (hard rule 7: examples + anti-patterns)
     let audit_prompt = "Проведи аудит дизайн-системы Fosved.\n\nТекущие токены: " + FOSVED_TOKENS_JSON + "\n\nПроверь:\n1. Все ли компоненты имеют примеры использования?\n2. Все ли компоненты имеют анти-паттерны?\n3. Есть ли orphan-токены (неиспользуемые)?\n4. Есть ли дублирование токенов?\n5. Полнота: покрытие всех UI-элементов\n6. Согласованность: нет ли конфликтов между токенами\n\nВерни JSON: {\"completeness\": 0.0-1.0, \"issues\": [...], \"recommendations\": [...], \"orphan_tokens\": [...], \"missing_components\": [...]}"
-    let audit_result = call_llm("design-system-audit", audit_prompt, 2000)
+    let audit_result = call_llm(audit_prompt)
     let output = "═══════════════════════════════════════\n"
     let output = output + "АУДИТ ДИЗАЙН-СИСТЕМЫ FOSVED\n"
     let output = output + "═══════════════════════════════════════\n\n"
@@ -1122,7 +1122,7 @@ pattern ConductUserResearch(domain: String, research_type: String, chat_id: Stri
 
   let research_prompt = "Проведи пользовательское исследование для домена: " + domain + "\n\nТип исследования: " + research_type + "\n\nОпредели:\n1. Целевая аудитория (сегменты)\n2. Ключевые пользовательские задачи\n3. Текущие решения и их ограничения\n4. Боли и потребности\n5. Поведенческие паттерны\n6. Контекст использования (устройства, среда)\n7. Метрики успеха\n\nДля каждого сегмента укажи:\n• Демографический профиль\n• Поведенческие характеристики\n• Уровень цифровой грамотности\n• Критические задачи\n\nВерни JSON: {\"segments\": [...], \"tasks\": [...], \"pain_points\": [...], \"current_solutions\": [...], \"context\": {...}, \"success_metrics\": [...]}"
 
-  let research_result = call_llm("design-research", research_prompt, 3000)
+  let research_result = call_llm(research_prompt)
   let research_parsed = parse_json(research_result)
   let segments = to_string(json_get(research_parsed, "segments", "[]"))
   let tasks = to_string(json_get(research_parsed, "tasks", "[]"))
@@ -1183,7 +1183,7 @@ pattern IterateDesignArtifact(artifact_id: String, feedback: String, chat_id: St
   // Generate iteration with LLM
   let iter_prompt = "Итерация дизайна на основе обратной связи.\n\nАртефакт: " + name + " (тип: " + artifact_type + ")\nТекущий дизайн:\n" + substring(content, 0.0, 2000.0) + "\n\nОбратная связь: " + feedback + "\n\nТокены: " + tokens + "\nПользовательские задачи: " + substring(user_tasks, 0.0, 500.0) + "\n\nУчти обратную связь, но:\n1. Не нарушай дизайн-токены\n2. Не убирай мобильную версию\n3. Не убирай пользовательские задачи\n4. Улучши доступность если возможно\n\nВерни JSON: {\"content\": \"...\", \"changes_summary\": \"...\", \"a11y_improvements\": \"...\"}"
 
-  let iter_result = call_llm("design-iterate", iter_prompt, 3000)
+  let iter_result = call_llm(iter_prompt)
   let iter_parsed = parse_json(iter_result)
   let new_content = to_string(json_get(iter_parsed, "content", ""))
   let changes = to_string(json_get(iter_parsed, "changes_summary", ""))
@@ -1313,7 +1313,7 @@ pattern ApplyCognitiveLaws(context: String) -> String {
   // Tier 1 skill: cognitive-laws-application
   // Apply Fitts, Hick, Miller, Von Restorff, Jakob's Law, Doherty Threshold
   let prompt = "Примени когнитивные законы к дизайн-контексту:\n\n" + context + "\n\nЗаконы для применения:\n1. Закон Фиттса — размер и расстояние до click-областей\n2. Закон Хика — количество выборов → время решения\n3. Закон Миллера — 7±2 элемента в рабочей памяти\n4. Эффект фон Ресторфф — выделение важного среди однородного\n5. Закон Якоба — пользователи ожидают, что сайт работает как другие\n6. Порог Дохерти — время отклика <400мс воспринимается как мгновенный\n\nДля каждого закона укажи конкретные рекомендации по данному контексту."
-  return call_llm("design-cognitive", prompt, 1500)
+  return call_llm(prompt)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1400,7 +1400,7 @@ pattern RecordDesignVerification(artifact_id: String, implemented_hash: String, 
   if implemented_hash != design_hash then {
     // Estimate drift using LLM
     let drift_prompt = "Сравни дизайн-спецификацию с реализацией и оцени степень дрифта (насколько реализация совпадает с дизайном).\n\nВерни число от 0.0 до 1.0, где 1.0 = полное совпадение, 0.0 = полное расхождение."
-    let drift_result = call_llm("design-drift", drift_prompt, 300)
+    let drift_result = call_llm(drift_prompt)
     let drift_score = to_float(drift_result)
     let verdict = if drift_score >= TARGET_DRIFT then { "acceptable" } else { "drift_detected" }
   }
@@ -1464,7 +1464,7 @@ pattern RunQuarterlyMethodologyReview() -> String {
   let metrics = ComputeDesignMetrics()
 
   let prompt = "Проведи квартальный обзор методологии дизайн-отдела Fosved.\n\nМетрики:\n• Всего артефактов: " + to_string(metrics.total_artifacts) + "\n• Средние итерации: " + to_string(metrics.avg_iteration_count) + "\n• Средний a11y: " + to_string(metrics.avg_a11y_score) + "\n• % ≤3 итераций: " + to_string(metrics.pct_under_3_iterations) + "%\n• DS reuse: " + to_string(metrics.design_system_reuse) + "%\n• Drift: " + to_string(metrics.drift_score) + "\n\nЖёсткие правила:\n1. Нет финализации без a11y\n2. Каждый компонент → дизайн-система\n3. Только токены, никаких свободных стилей\n4. 7 состояний для хэндоффа\n5. Mobile-first обязателен\n6. Пользовательские задачи обязательны\n7. Примеры + анти-паттерны для DS\n8. Итерации записаны\n9. Ревью с Dev обязателен\n10. Стоковые фото с обоснованием\n11. Trust calibration для AI\n12. Исследование для нового домена\n\nОцени adherence каждого правила (0-10) и дай рекомендации."
-  let review = call_llm("design-methodology", prompt, 3000)
+  let review = call_llm(prompt)
 
   let output = "═══════════════════════════════════════\n"
   let output = output + "КВАРТАЛЬНЫЙ ОБЗОР МЕТОДОЛОГИИ ДИЗАЙНА\n"
@@ -1538,7 +1538,7 @@ pattern DesignPipeline(query: String, artifact_type: String, chat_id: String) ->
 
   // Step 4: Enforce hard rule 6 — user tasks
   let user_tasks_prompt = "Определи пользовательские задачи для:\n" + query + "\n\nВерни JSON массив: [{\"task\": \"...\", \"user_goal\": \"...\", \"success_criteria\": \"...\"}]"
-  let user_tasks = call_llm("design-tasks", user_tasks_prompt, 800)
+  let user_tasks = call_llm(user_tasks_prompt)
 
   // Step 5: Apply cognitive laws (Tier 1)
   let cognitive = ApplyCognitiveLaws(query)
@@ -1546,7 +1546,7 @@ pattern DesignPipeline(query: String, artifact_type: String, chat_id: String) ->
   // Step 6: Generate design
   let design_prompt = "Спроектируй UI/UX для:\n\n" + query + "\n\nТип артефакта: " + atype + "\n\n" + skill_context + "\n\nБренд-токены Fosved:\n" + FOSVED_TOKENS_JSON + "\n\nПользовательские задачи:\n" + substring(user_tasks, 0.0, 500.0) + "\n\nКогнитивные законы:\n" + substring(cognitive, 0.0, 500.0) + "\n\nТребования:\n1. ТОЛЬКО дизайн-токены (никаких raw-значений)\n2. Mobile-first + responsive\n3. Для component_spec — 7 состояний\n4. Для AI — trust calibration\n5. WCAG AA минимум\n6. Сетко: 12 колонок, 24px gutter\n\nВерни JSON: {\"name\": \"...\", \"content\": \"...\", \"mobile\": \"...\", \"states\": {...}, \"a11y\": {...}, \"tokens_used\": [...]}"
 
-  let design_result = call_llm("design-generate", design_prompt, 4000)
+  let design_result = call_llm(design_prompt)
   let design_parsed = parse_json(design_result)
   let name = to_string(json_get(design_parsed, "name", "Untitled"))
   let content = to_string(json_get(design_parsed, "content", ""))
