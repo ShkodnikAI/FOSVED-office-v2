@@ -64,25 +64,25 @@ pattern EngGateSafetyFactor(factor: String) -> String {
 // SECTION 0: CONSTANTS & DISCLAIMER
 // ═══════════════════════════════════════════════════════════════════════
 
-let DISCLAIMER_TOP = "⚠️ ПРЕДВАРИТЕЛЬНО. Расчёт подлежит проверке и утверждению дипломированным инженером соответствующей специальности. Не является основанием для строительства/производства без такой проверки."
+pattern DISCLAIMER_TOP() -> String { return "⚠️ ПРЕДВАРИТЕЛЬНО. Расчёт подлежит проверке и утверждению дипломированным инженером соответствующей специальности. Не является основанием для строительства/производства без такой проверки." }
 
-let DISCLAIMER_BOTTOM = "⚠️ Данный результат — предварительный расчёт проектного ассистента. Ответственность за конструкцию несёт дипломированный инженер после проверки и подписи."
+pattern DISCLAIMER_BOTTOM() -> String { return "⚠️ Данный результат — предварительный расчёт проектного ассистента. Ответственность за конструкцию несёт дипломированный инженер после проверки и подписи." }
 
-let DISCIPLINES = "structural,hydraulic,power_electronics"
+pattern DISCIPLINES() -> String { return "structural,hydraulic,power_electronics" }
 
-let DISCIPLINE_NAMES_RU = "строймеханика=structural,строительная=structural,несущая=structural,кровля=structural,теплица=structural,каркас=structural,балка=structural,ферма=structural,снеговая=structural,ветровая=structural,гидравлика=hydraulic,гидропривод=hydraulic,гидроцилиндр=hydraulic,подъёмник=hydraulic,подъемник=hydraulic,инвертор=power_electronics,коммутатор=power_electronics,преобразователь=power_electronics,ветрогенератор=power_electronics,солнечн=power_electronics,электроника=power_electronics,фотоэлектрич=power_electronics"
+pattern DISCIPLINE_NAMES_RU() -> String { return "строймеханика=structural,строительная=structural,несущая=structural,кровля=structural,теплица=structural,каркас=structural,балка=structural,ферма=structural,снеговая=structural,ветровая=structural,гидравлика=hydraulic,гидропривод=hydraulic,гидроцилиндр=hydraulic,подъёмник=hydraulic,подъемник=hydraulic,инвертор=power_electronics,коммутатор=power_electronics,преобразователь=power_electronics,ветрогенератор=power_electronics,солнечн=power_electronics,электроника=power_electronics,фотоэлектрич=power_electronics" }
 
 // Lifecycle states
-let STATUS_DRAFTED = "drafted"
-let STATUS_CALCULATED = "calculated"
-let STATUS_SELF_VERIFIED = "self_verified"
-let STATUS_SENT_FOR_REVIEW = "sent_for_review"
-let STATUS_ENGINEER_APPROVED = "engineer_approved"
-let STATUS_ENGINEER_CORRECTED = "engineer_corrected"
-let STATUS_ARCHIVED = "archived"
+pattern STATUS_DRAFTED() -> String { return "drafted" }
+pattern STATUS_CALCULATED() -> String { return "calculated" }
+pattern STATUS_SELF_VERIFIED() -> String { return "self_verified" }
+pattern STATUS_SENT_FOR_REVIEW() -> String { return "sent_for_review" }
+pattern STATUS_ENGINEER_APPROVED() -> String { return "engineer_approved" }
+pattern STATUS_ENGINEER_CORRECTED() -> String { return "engineer_corrected" }
+pattern STATUS_ARCHIVED() -> String { return "archived" }
 
 // Error classes for learning loop
-let ERROR_CLASSES = "missed_load_case,wrong_coefficient,wrong_norm,dimensional_error,wrong_assumption,method_error,none"
+pattern ERROR_CLASSES() -> String { return "missed_load_case,wrong_coefficient,wrong_norm,dimensional_error,wrong_assumption,method_error,none" }
 
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 1: NLP QUERY PARSER & DISCIPLINE DETECTION
@@ -120,13 +120,7 @@ pattern DetectCommand(query: String) -> String {
   return "free_text"
 }
 
-pattern ParseEngineeringQuery(query: String) -> Struct{
-  command: String,
-  discipline: String,
-  task_description: String,
-  calc_id: String,
-  is_out_of_scope: Bool
-} {
+pattern ParseEngineeringQuery(query: String) -> Dict {
   let command = DetectCommand(query)
   let discipline = DetectDiscipline(query)
 
@@ -158,7 +152,7 @@ pattern ParseEngineeringQuery(query: String) -> Struct{
 // ═══════════════════════════════════════════════════════════════════════
 
 pattern WrapWithDisclaimer(content: String) -> String {
-  return DISCLAIMER_TOP + "\n\n" + content + "\n\n" + DISCLAIMER_BOTTOM
+  return DISCLAIMER_TOP() + "\n\n" + content + "\n\n" + DISCLAIMER_BOTTOM()
 }
 
 pattern DeclineOutOfScope(query: String) -> String {
@@ -202,7 +196,8 @@ pattern GetDefaultNorms(discipline: String) -> String {
 pattern SetNormBase(calc_id: String, discipline: String, norm_system: String, norms_json: String) -> String {
   // Hard rule 2: no calculation without a fixed norm base
   // Gate: if norms_json is empty, use discipline defaults
-  let norms = if norms_json == "" or norms_json == "[]" then { GetDefaultNorms(discipline) } else { norms_json }
+  let norms = norms_json
+  if norms_json == "" or norms_json == "[]" then { norms = GetDefaultNorms(discipline) }
 
   // Validate: at least 1 norm must be present
   let norms_parsed = parse_json(norms)
@@ -211,7 +206,7 @@ pattern SetNormBase(calc_id: String, discipline: String, norm_system: String, no
   }
 
   // Persist to DB
-  let _ = db_execute("UPDATE engineering_calculations SET norm_system = ?, norms_applied = ?, status = ? WHERE id = ?", [norm_system, norms, STATUS_DRAFTED, calc_id])
+  let _ = db_execute("UPDATE engineering_calculations SET norm_system = ?, norms_applied = ?, status = ? WHERE id = ?", [norm_system, norms, STATUS_DRAFTED(), calc_id])
 
   // Log norm fixation
   let _ = AuditLog("eng_norm_fix", "engineering", "calc_id=" + calc_id + " norm_system=" + norm_system + " norms_count=" + to_string(length(norms_parsed)))
@@ -240,7 +235,8 @@ pattern GetDefaultLoadCases(discipline: String, object_type: String) -> String {
 
 pattern SetLoadCases(calc_id: String, discipline: String, load_cases_json: String, input_data_json: String, missing_data: String) -> String {
   // Hard rule 3: every load case enumerated before calculation
-  let lc = if load_cases_json == "" or load_cases_json == "[]" then { GetDefaultLoadCases(discipline, "") } else { load_cases_json }
+  let lc = load_cases_json
+  if load_cases_json == "" or load_cases_json == "[]" then { lc = GetDefaultLoadCases(discipline, "") }
 
   let lc_parsed = parse_json(lc)
   if length(lc_parsed) == 0 then {
@@ -251,11 +247,13 @@ pattern SetLoadCases(calc_id: String, discipline: String, load_cases_json: Strin
   let has_permanent = contains(lc, "permanent")
   let has_variable = contains(lc, "snow") or contains(lc, "wind") or contains(lc, "operational")
   let has_emergency = contains(lc, "emergency")
-  let completeness = if has_permanent and has_variable and has_emergency then { "likely_complete" } else { "likely_incomplete" }
+  let completeness = "likely_incomplete"
+  if has_permanent and has_variable and has_emergency then { completeness = "likely_complete" }
 
-  let data_complete = if missing_data == "" or missing_data == "[]" then { "true" } else { "false" }
+  let data_complete = "false"
+  if missing_data == "" or missing_data == "[]" then { data_complete = "true" }
 
-  let _ = db_execute("UPDATE engineering_calculations SET load_cases = ?, input_data = ?, data_complete = ?, missing_data = ?, status = ? WHERE id = ?", [lc, input_data_json, data_complete, missing_data, STATUS_DRAFTED, calc_id])
+  let _ = db_execute("UPDATE engineering_calculations SET load_cases = ?, input_data = ?, data_complete = ?, missing_data = ?, status = ? WHERE id = ?", [lc, input_data_json, data_complete, missing_data, STATUS_DRAFTED(), calc_id])
 
   let _ = AuditLog("eng_loadcases", "engineering", "calc_id=" + calc_id + " cases=" + to_string(length(lc_parsed)) + " completeness=" + completeness)
 
@@ -272,13 +270,7 @@ pattern SetLoadCases(calc_id: String, discipline: String, load_cases_json: Strin
 // Hard rules: #7 (independent method), #8 (dimensional check)
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern IndependentVerify(calc_id: String, result_summary: String, discipline: String) -> Struct{
-  verification_method: String,
-  verification_agrees: Bool,
-  dimensional_check_ok: Bool,
-  verdict: String,
-  details: String
-} {
+pattern IndependentVerify(calc_id: String, result_summary: String, discipline: String) -> Dict {
   // Three verification routes (hard rule 7 + 8):
   // 1. Dimensional analysis — ALWAYS mandatory
   // 2. Order-of-magnitude estimate
@@ -314,8 +306,14 @@ pattern IndependentVerify(calc_id: String, result_summary: String, discipline: S
 
   // Gate: all three must agree for self_verified
   let all_agree = dimensional_check_ok and verification_agrees
-  let verdict = if all_agree then { STATUS_SELF_VERIFIED } else { STATUS_CALCULATED }
-  let details = "Размерностная проверка: " + if dimensional_check_ok then { "ПРОЙДЕНА" } else { "НЕ ПРОЙДЕНА" } + "\n"
+  let verdict = STATUS_CALCULATED()
+  if all_agree then { verdict = STATUS_SELF_VERIFIED() }
+  pattern _ternary_310() -> String {
+    let _t = "НЕ ПРОЙДЕНА"
+    if dimensional_check_ok then { _t = "ПРОЙДЕНА" }
+    return _t
+  }
+  let details = "Размерностная проверка: " + _ternary_310() + "\n"
   let details = details + "Порядок величины: проверен\n"
   let details = details + "Независимый метод: " + independent_method + "\n"
   let details = details + "Вердикт: " + if all_agree then { "self_verified — расчёт может быть передан инженеру" } else { "НЕ верифицирован — требуется доработка" }
@@ -361,7 +359,7 @@ pattern AssembleDocumentation(
   let doc = doc + "═══════════════════════════════════════\n\n"
 
   // Section 1: Disclaimer (top) — hard rule 1
-  let doc = doc + DISCLAIMER_TOP + "\n\n"
+  let doc = doc + DISCLAIMER_TOP() + "\n\n"
 
   // Section 2: Task description
   let doc = doc + "── ЗАДАЧА ──\n"
@@ -396,7 +394,12 @@ pattern AssembleDocumentation(
   let doc = doc + "── РЕЗУЛЬТАТ ──\n"
   let doc = doc + result_summary + "\n"
   let doc = doc + "Запас прочности: " + safety_factor + " (требуемый: " + safety_factor_required + ")\n"
-  let doc = doc + "Запас соответствует норме: " + if safety_factor_ok then { "ДА" } else { "НЕТ" } + "\n"
+  pattern _ternary_391() -> String {
+    let _t = "НЕТ"
+    if safety_factor_ok then { _t = "ДА" }
+    return _t
+  }
+  let doc = doc + "Запас соответствует норме: " + _ternary_391() + "\n"
   let doc = doc + "\nВЕРДИКТ: " + FormatVerdict(verdict) + "\n\n"
 
   // Section 10: Verification — hard rules 7, 8
@@ -404,10 +407,10 @@ pattern AssembleDocumentation(
   let doc = doc + verification_details + "\n\n"
 
   // Section 11: Disclaimer (bottom) — hard rule 1
-  let doc = doc + DISCLAIMER_BOTTOM
+  let doc = doc + DISCLAIMER_BOTTOM()
 
   // Update DB: status → sent_for_review
-  let _ = db_execute("UPDATE engineering_calculations SET disclaimer_included = ?, status = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, method = ?, assumptions = ? WHERE id = ?", ["true", STATUS_SENT_FOR_REVIEW, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, method, assumptions, calc_id])
+  let _ = db_execute("UPDATE engineering_calculations SET disclaimer_included = ?, status = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, method = ?, assumptions = ? WHERE id = ?", ["true", STATUS_SENT_FOR_REVIEW(), result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, method, assumptions, calc_id])
 
   return doc
 }
@@ -427,16 +430,7 @@ pattern DisciplineNameRU(discipline: String) -> String {
 // Checks: ULS (strength, stability, buckling, shear, connections),
 //         SLS (deflection, vibration)
 
-pattern StructuralLoadBearing(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
-  result_summary: String,
-  result_details: String,
-  safety_factor: String,
-  safety_factor_required: String,
-  safety_factor_ok: Bool,
-  verdict: String,
-  method: String,
-  assumptions: String
-} {
+pattern StructuralLoadBearing(calc_id: String, query: String, norms: String, load_cases: String) -> Dict {
   // Build structured prompt for LLM with all constraints
   let prompt = "Выполни расчёт несущей способности по предельным состояниям.\n\n"
   let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ТРЕБОВАНИЯ:\n"
@@ -467,7 +461,7 @@ pattern StructuralLoadBearing(calc_id: String, query: String, norms: String, loa
   let assumptions = to_string(json_get(parsed, "assumptions", "См. ход расчёта"))
 
   // Update DB
-  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["structural", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED, calc_id])
+  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["structural", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED(), calc_id])
 
   return {
     result_summary: result_summary,
@@ -484,16 +478,7 @@ pattern StructuralLoadBearing(calc_id: String, query: String, norms: String, loa
 // ── 7b: Structural — Elements Sizing ─────────────────────────────────
 // Select from REAL standard section ranges, iterate to find smallest passing
 
-pattern StructuralElementsSizing(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
-  result_summary: String,
-  result_details: String,
-  safety_factor: String,
-  safety_factor_required: String,
-  safety_factor_ok: Bool,
-  verdict: String,
-  method: String,
-  assumptions: String
-} {
+pattern StructuralElementsSizing(calc_id: String, query: String, norms: String, load_cases: String) -> Dict {
   let prompt = "Выполни подбор сечений из стандартного сортамента.\n\n"
   let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ТРЕБОВАНИЯ:\n"
   let prompt = prompt + "1. Подбирай ТОЛЬКО из реального сортамента (ГОСТ на прокат, трубы, и т.д.).\n"
@@ -520,7 +505,7 @@ pattern StructuralElementsSizing(calc_id: String, query: String, norms: String, 
   let method = to_string(json_get(parsed, "method", "Sortament iteration per СП"))
   let assumptions = to_string(json_get(parsed, "assumptions", "См. ход расчёта"))
 
-  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["structural", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED, calc_id])
+  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["structural", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED(), calc_id])
 
   return {
     result_summary: result_summary,
@@ -537,16 +522,7 @@ pattern StructuralElementsSizing(calc_id: String, query: String, norms: String, 
 // ── 7c: Hydraulic — Drive Design ─────────────────────────────────────
 // Full chain: F → P → Q → pump → components → holding → safety
 
-pattern HydraulicDriveDesign(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
-  result_summary: String,
-  result_details: String,
-  safety_factor: String,
-  safety_factor_required: String,
-  safety_factor_ok: Bool,
-  verdict: String,
-  method: String,
-  assumptions: String
-} {
+pattern HydraulicDriveDesign(calc_id: String, query: String, norms: String, load_cases: String) -> Dict {
   let prompt = "Выполни расчёт гидропривода / гидравлического подъёмника.\n\n"
   let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ТРЕБОВАНИЯ:\n"
   let prompt = prompt + "1. Вся цепь: нагрузка → сила → давление → расход → насос → компоненты → удержание → безопасность.\n"
@@ -575,7 +551,7 @@ pattern HydraulicDriveDesign(calc_id: String, query: String, norms: String, load
   let method = to_string(json_get(parsed, "method", "Hydraulic chain calculation"))
   let assumptions = to_string(json_get(parsed, "assumptions", "См. ход расчёта"))
 
-  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["hydraulic", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED, calc_id])
+  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["hydraulic", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED(), calc_id])
 
   return {
     result_summary: result_summary,
@@ -592,16 +568,7 @@ pattern HydraulicDriveDesign(calc_id: String, query: String, norms: String, load
 // ── 7d: Power Electronics — Inverter ─────────────────────────────────
 // Rate for PEAKS, cold-day Voc, thermal at T_max, fault analysis
 
-pattern PowerElectronicsInverter(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
-  result_summary: String,
-  result_details: String,
-  safety_factor: String,
-  safety_factor_required: String,
-  safety_factor_ok: Bool,
-  verdict: String,
-  method: String,
-  assumptions: String
-} {
+pattern PowerElectronicsInverter(calc_id: String, query: String, norms: String, load_cases: String) -> Dict {
   let prompt = "Выполни расчёт инвертора / силовой электроники для ВИЭ.\n\n"
   let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ТРЕБОВАНИЯ:\n"
   let prompt = prompt + "1. Номиналь по ПИКАМ, не по средним. PV cold-day Voc — опасный пик.\n"
@@ -629,7 +596,7 @@ pattern PowerElectronicsInverter(calc_id: String, query: String, norms: String, 
   let method = to_string(json_get(parsed, "method", "Power electronics rating"))
   let assumptions = to_string(json_get(parsed, "assumptions", "См. ход расчёта"))
 
-  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["power_electronics", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED, calc_id])
+  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["power_electronics", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED(), calc_id])
 
   return {
     result_summary: result_summary,
@@ -646,16 +613,7 @@ pattern PowerElectronicsInverter(calc_id: String, query: String, norms: String, 
 // ── 7e: Power Electronics — Renewable System Matching ────────────────
 // Three matching questions: source→converter, converter→load, energy balance
 
-pattern RenewableSystemMatching(calc_id: String, query: String, norms: String, load_cases: String) -> Struct{
-  result_summary: String,
-  result_details: String,
-  safety_factor: String,
-  safety_factor_required: String,
-  safety_factor_ok: Bool,
-  verdict: String,
-  method: String,
-  assumptions: String
-} {
+pattern RenewableSystemMatching(calc_id: String, query: String, norms: String, load_cases: String) -> Dict {
   let prompt = "Выполни согласование ВИЭ (ветрогенератор/солнечные панели) с нагрузкой и инвертором.\n\n"
   let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ТРЕБОВАНИЯ:\n"
   let prompt = prompt + "1. Три вопроса согласования — ВСЕ должны сойтись:\n"
@@ -685,7 +643,7 @@ pattern RenewableSystemMatching(calc_id: String, query: String, norms: String, l
   let method = to_string(json_get(parsed, "method", "Renewable system matching"))
   let assumptions = to_string(json_get(parsed, "assumptions", "См. ход расчёта"))
 
-  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["power_electronics", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED, calc_id])
+  let _ = db_execute("UPDATE engineering_calculations SET discipline = ?, method = ?, result_summary = ?, result_details = ?, safety_factor = ?, safety_factor_required = ?, safety_factor_ok = ?, verdict = ?, assumptions = ?, status = ? WHERE id = ?", ["power_electronics", method, result_summary, result_details, safety_factor, safety_factor_required, if safety_factor_ok then { "true" } else { "false" }, verdict, assumptions, STATUS_CALCULATED(), calc_id])
 
   return {
     result_summary: result_summary,
@@ -701,16 +659,7 @@ pattern RenewableSystemMatching(calc_id: String, query: String, norms: String, l
 
 // ── 7f: Discipline dispatcher ─────────────────────────────────────────
 
-pattern ExecuteDisciplineCalc(calc_id: String, discipline: String, query: String, norms: String, load_cases: String) -> Struct{
-  result_summary: String,
-  result_details: String,
-  safety_factor: String,
-  safety_factor_required: String,
-  safety_factor_ok: Bool,
-  verdict: String,
-  method: String,
-  assumptions: String
-} {
+pattern ExecuteDisciplineCalc(calc_id: String, discipline: String, query: String, norms: String, load_cases: String) -> Dict {
   // Determine which Tier 2 skill to invoke based on query content
   let q = lower(query)
 
@@ -748,11 +697,7 @@ pattern ExecuteDisciplineCalc(calc_id: String, discipline: String, query: String
 // ── 8a: Feasibility Estimation ────────────────────────────────────────
 // PRECEDES the full pipeline; estimate ≠ calculation
 
-pattern FeasibilityEstimate(discipline: String, query: String) -> Struct{
-  feasible: Bool,
-  verdict: String,
-  details: String
-} {
+pattern FeasibilityEstimate(discipline: String, query: String) -> Dict {
   let disclaimer = "ОЦЕНКА ОСУЩЕСТВИМОСТИ — это НЕ расчёт. Не может служить основанием для проектного решения."
 
   let prompt = "Выполни прикидочную оценку осуществимости. Это НЕ расчёт — грубая прикидка порядка величин.\n\n"
@@ -783,12 +728,7 @@ pattern FeasibilityEstimate(discipline: String, query: String) -> Struct{
 // ── 8b: Third-Party Calc Review ──────────────────────────────────────
 // Review ≠ approval
 
-pattern ThirdPartyCalcReview(discipline: String, document: String) -> Struct{
-  findings: String,
-  gross_errors: Int,
-  verdict: String,
-  recommendation: String
-} {
+pattern ThirdPartyCalcReview(discipline: String, document: String) -> Dict {
   let prompt = "Выполни проверку чужого расчёта (sanity-check).\n\n"
   let prompt = prompt + "ПРАВИЛА:\n"
   let prompt = prompt + "1. Проверка ≠ утверждение. Самое сильное заключение: «грубых ошибок не найдено», НИКОГДА «расчёт верен».\n"
@@ -832,13 +772,13 @@ pattern CreateCalculation(discipline: String, title: String, chat_id: String) ->
 
   // Create calculation in DB
   let calc_id = "eng_" + to_string(hash(title + to_string(now())))
-  let _ = db_execute("INSERT INTO engineering_calculations (id, title, discipline, norm_system, status, disclaimer_included, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))", [calc_id, title, discipline, "not_set", STATUS_DRAFTED, "false"])
+  let _ = db_execute("INSERT INTO engineering_calculations (id, title, discipline, norm_system, status, disclaimer_included, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))", [calc_id, title, discipline, "not_set", STATUS_DRAFTED(), "false"])
 
   let _ = AuditLog("eng_create", "engineering", "calc_id=" + calc_id + " discipline=" + discipline)
 
   let msg = "Расчёт создан: " + calc_id + "\n"
   let msg = msg + "Дисциплина: " + DisciplineNameRU(discipline) + "\n"
-  let msg = msg + "Статус: " + STATUS_DRAFTED + "\n\n"
+  let msg = msg + "Статус: " + STATUS_DRAFTED() + "\n\n"
   let msg = msg + "Следующие шаги:\n"
   let msg = msg + "1. /calc-norms " + calc_id + " — зафиксировать нормативную базу\n"
   let msg = msg + "2. /calc-loadcases " + calc_id + " — определить расчётные случаи\n"
@@ -896,9 +836,12 @@ pattern EngineeringScore() -> String {
   let dim_ok_count = to_int(to_string(json_get(get(dim_ok, 0), "c", "0")))
   let disclaimer_ok_count = to_int(to_string(json_get(get(disclaimer_ok, 0), "c", "0")))
 
-  let correction_rate = if total_count > 0 then { to_float(to_string(corrected_count)) / to_float(to_string(total_count)) * 100.0 } else { 0.0 }
-  let agreement_rate = if total_count > 0 then { to_float(to_string(dim_ok_count)) / to_float(to_string(total_count)) * 100.0 } else { 0.0 }
-  let disclaimer_rate = if total_count > 0 then { to_float(to_string(disclaimer_ok_count)) / to_float(to_string(total_count)) * 100.0 } else { 0.0 }
+  let correction_rate = 0.0
+  if total_count > 0 then { correction_rate = to_float(to_string(corrected_count)) / to_float(to_string(total_count)) * 100.0 }
+  let agreement_rate = 0.0
+  if total_count > 0 then { agreement_rate = to_float(to_string(dim_ok_count)) / to_float(to_string(total_count)) * 100.0 }
+  let disclaimer_rate = 0.0
+  if total_count > 0 then { disclaimer_rate = to_float(to_string(disclaimer_ok_count)) / to_float(to_string(total_count)) * 100.0 }
 
   let msg = "═══ МЕТРИКИ ИНЖЕНЕРНОГО ОТДЕЛА (90 дней) ═══\n\n"
   let msg = msg + "Всего расчётов: " + to_string(total_count) + "\n"
@@ -933,12 +876,13 @@ pattern EngineerReview(calc_id: String, engineer_verdict: String, engineer_notes
   let row = db_execute("SELECT status FROM engineering_calculations WHERE id = ?", [calc_id])
   if length(row) == 0 then { return "Расчёт не найден: " + calc_id }
   let current_status = to_string(json_get(get(row, 0), "status", ""))
-  if current_status != STATUS_SELF_VERIFIED and current_status != STATUS_SENT_FOR_REVIEW then {
+  if current_status != STATUS_SELF_VERIFIED() and current_status != STATUS_SENT_FOR_REVIEW() then {
     return "Расчёт " + calc_id + " в статусе " + current_status + " — не готов для передачи инженеру. Нужен статус self_verified."
   }
 
   // Record engineer verdict
-  let new_status = if engineer_verdict == "approved" then { STATUS_ENGINEER_APPROVED } else { STATUS_ENGINEER_CORRECTED }
+  let new_status = STATUS_ENGINEER_CORRECTED()
+  if engineer_verdict == "approved" then { new_status = STATUS_ENGINEER_APPROVED() }
   let _ = db_execute("UPDATE engineering_calculations SET engineer_verdict = ?, engineer_notes = ?, status = ? WHERE id = ?", [engineer_verdict, engineer_notes, new_status, calc_id])
 
   // Create verification record (learning loop input)
@@ -1028,7 +972,7 @@ pattern FullPipeline(query: String, discipline: String, chat_id: String) -> Stri
   }
 
   // Step 2: Create in DB
-  let _ = db_execute("INSERT INTO engineering_calculations (id, title, discipline, status, disclaimer_included, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))", [calc_id, substring(query, 0.0, 200.0), discipline, STATUS_DRAFTED, "false"])
+  let _ = db_execute("INSERT INTO engineering_calculations (id, title, discipline, status, disclaimer_included, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))", [calc_id, substring(query, 0.0, 200.0), discipline, STATUS_DRAFTED(), "false"])
 
   // Step 3: Norm-base fixation (Tier 1, hard rule 2)
   let norms = GetDefaultNorms(discipline)
@@ -1169,7 +1113,8 @@ pattern HandleEngineering(query: String, chat_id: String) -> String {
 
   // Final safety: ensure disclaimer is present (hard rule 1)
   let has_disclaimer = contains(result, "ПРЕДВАРИТЕЛЬНО") or contains(result, "предварительный")
-  let output = if has_disclaimer then { result } else { WrapWithDisclaimer(result) }
+  let output = WrapWithDisclaimer(result)
+  if has_disclaimer then { output = result }
 
   // ── LLM-Verifier: engineering calculation quality ──
   let engv_resp = try call_python("llm_verifier", "score", json_encode([query, output, "Formula correctness: Are engineering formulas and units applied correctly? Safety margins: Are appropriate safety factors included? Unit consistency: Are all values in consistent units throughout?"]))
