@@ -311,10 +311,10 @@ pattern GateRepoHasRequiredFiles(repo_name: String) -> Dict {
       return { passed: true, message: "Repository " + repo_name + " has all required files" }
     }
     let missing = ""
-    let missing = if has_readme == false then { missing + "README.md " } else { missing }
-    let missing = if has_license == false then { missing + "LICENSE " } else { missing }
-    let missing = if has_gitignore == false then { missing + ".gitignore " } else { missing }
-    let missing = if has_ci == false then { missing + "CI/CD " } else { missing }
+    if has_readme == false then { let missing = missing + "README.md " }
+    if has_license == false then { let missing = missing + "LICENSE " }
+    if has_gitignore == false then { let missing = missing + ".gitignore " }
+    if has_ci == false then { let missing = missing + "CI/CD " }
     return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 7: Репозиторий " + repo_name + " не имеет обязательных файлов: " + missing }
   }
   return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 7: Репозиторий " + repo_name + " не найден в базе." }
@@ -510,11 +510,8 @@ pattern AddTechRadarEntry(name: String, category: String, radar_state: String, d
 }
 
 pattern ShowTechRadar(category: String) -> String {
-  let rows = if category != "" then {
-    db_execute("SELECT name, category, radar_state, description FROM tech_radar_entries WHERE category = ? ORDER BY radar_state, name", [category])
-  } else {
-    db_execute("SELECT name, category, radar_state, description FROM tech_radar_entries ORDER BY radar_state, category, name", [])
-  }
+  let rows = db_execute("SELECT name, category, radar_state, description FROM tech_radar_entries ORDER BY radar_state, category, name", [])
+  if category != "" then { let rows = db_execute("SELECT name, category, radar_state, description FROM tech_radar_entries WHERE category = ? ORDER BY radar_state, name", [category]) }
 
   if length(rows) == 0 then {
     return "Tech Radar пуст. Добавьте: /dev-radar-add <name> <category> <adopt|trial|assess|hold>"
@@ -641,7 +638,9 @@ pattern CreateEstimate(task_id: String, task_description: String, confidence: St
   let msg = msg + "Expected: " + substring(to_string(expected_hours), 0.0, 6.0) + " ч\n"
   let msg = msg + "High: " + substring(to_string(high_hours), 0.0, 6.0) + " ч\n"
   let msg = msg + "Confidence: " + confidence + "\n"
-  let msg = msg + "Жёсткое правило 2: " + if gate.passed then { "✅ диапазон предоставлен" } else { gate.message }
+  let gate_str = gate.message
+  if gate.passed then { let gate_str = "✅ диапазон предоставлен" }
+  let msg = msg + "Жёсткое правило 2: " +gate_str
 
   let _ = AuditLog("dev_estimate", DEPT_NAME(), "task=" + task_id + " expected=" + to_string(expected_hours) + "h range=" + to_string(low_hours) + "-" + to_string(high_hours))
 
@@ -689,7 +688,15 @@ pattern EnforceRepoStandards(repo_name: String, repo_url: String, task_type: Str
   let ci_yml = to_string(json_get(parsed, "ci_yml", ""))
 
   // Update repo record
-  let _ = db_execute("UPDATE code_repositories SET has_readme = ?, has_license = ?, has_gitignore = ?, has_ci = ? WHERE name = ?", [if readme != "" then { "true" } else { "false" }, if license_content != "" then { "true" } else { "false" }, if gitignore != "" then { "true" } else { "false" }, if ci_yml != "" then { "true" } else { "false" }, repo_name])
+  let readme_bool = "false"
+  if readme != "" then { let readme_bool = "true" }
+  let license_content_bool = "false"
+  if license_content != "" then { let license_content_bool = "true" }
+  let gitignore_bool = "false"
+  if gitignore != "" then { let gitignore_bool = "true" }
+  let ci_yml_bool = "false"
+  if ci_yml != "" then { let ci_yml_bool = "true" }
+  let _ = db_execute("UPDATE code_repositories SET has_readme = ?, has_license = ?, has_gitignore = ?, has_ci = ? WHERE name = ?", [readme_bool, license_content_bool, gitignore_bool, ci_yml_bool, repo_name])
 
   let msg = "Стандартные файлы для " + repo_name + ":\n\n"
   let msg = msg + "── README.md ──\n" + substring(readme, 0.0, 500.0) + "\n\n"
@@ -771,8 +778,12 @@ pattern ImplementIteration(task_id: String, iteration_num: Int, iteration_plan: 
   }
 
   let msg = "Итерация #" + to_string(iteration_num) + ":\n"
-  let msg = msg + "Тесты: " + if test_passed then { "✅ ПРОЙДЕНЫ" } else { "❌ НЕ ПРОЙДЕНЫ" } + "\n"
-  let msg = msg + "Жёсткое правило 4: " + if gate.passed then { "✅ коммит содержит тест" } else { gate.message }
+  let test_str = "❌ НЕ ПРОЙДЕНЫ"
+  if test_passed then { let test_str = "✅ ПРОЙДЕНЫ" }
+  let msg = msg + "Тесты: " +test_str + "\n"
+  let gate_str = gate.message
+  if gate.passed then { let gate_str = "✅ коммит содержит тест" }
+  let msg = msg + "Жёсткое правило 4: " +gate_str
 
   return {
     success: test_passed,
@@ -1276,11 +1287,8 @@ pattern DevDashboard(chat_id: String) -> String {
 
 // ── /dev-tasks — List tasks ────────────────────────────────────────────
 pattern ListTasks(status_filter: String, limit: Int) -> String {
-  let rows = if status_filter != "" then {
-    db_execute("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status = ? ORDER BY updated_at DESC LIMIT ?", [status_filter, to_string(limit)])
-  } else {
-    db_execute("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status NOT IN ('archived','abandoned') ORDER BY updated_at DESC LIMIT ?", [to_string(limit)])
-  }
+  let rows = db_execute("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status NOT IN ('archived','abandoned') ORDER BY updated_at DESC LIMIT ?", [to_string(limit)])
+  if status_filter != "" then { let rows = db_execute("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status = ? ORDER BY updated_at DESC LIMIT ?", [status_filter, to_string(limit)]) }
 
   if length(rows) == 0 then {
     return "Нет задач. Создайте через свободный запрос или /dev-implement."
@@ -1703,7 +1711,9 @@ pattern FullPipeline(query: String, task_type: String, chat_id: String, explicit
 
   // Tech Radar check (hard rule 3)
   let doc = doc + "── TECH RADAR CHECK (правило 3) ──\n"
-  let doc = doc + if radar_gate.passed then { "✅ " + radar_gate.message } else { radar_gate.message } + "\n\n"
+  let radar_str = radar_gate.message
+  if radar_gate.passed then { let radar_str = "✅ " + radar_gate.message }
+  let doc = doc +radar_str + "\n\n"
 
   // Architecture (Tier 2)
   let doc = doc + "── АРХИТЕКТУРА ──\n"
