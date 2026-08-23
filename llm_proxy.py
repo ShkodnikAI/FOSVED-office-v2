@@ -5,6 +5,7 @@ Flask server on port 4000 with native circuit breaker, combo chains, token compr
 TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
 import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import doc_extract
 import html as html_lib
 from datetime import datetime, timedelta
@@ -1022,12 +1023,53 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
     if combo is None:
         combo = _combo_for_task(dept, command=command, depth=depth)
 
-    # 4. Walk combo chain
+    # 4. Walk combo chain — race first 2 providers in parallel, then sequential fallback
     chain = COMBO_CHAINS.get(combo, COMBO_CHAINS["fosved-standard"])
+    # Parallel race: launch first 2 (provider, model) pairs concurrently
+    race_entries = []
     for prov_name, models in chain:
         if not _breaker.can_call(prov_name):
             continue
         for model in models:
+            max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
+            cap = PROVIDER_MAX_TOKENS.get(prov_name)
+            if cap:
+                max_tok = min(max_tok, cap)
+            race_entries.append((prov_name, model, max_tok))
+            if len(race_entries) >= 2:
+                break
+        if len(race_entries) >= 2:
+            break
+
+    if len(race_entries) >= 2:
+        def _race_call(entry):
+            prov_name, model, max_tok = entry
+            return _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = {pool.submit(_race_call, e): e for e in race_entries}
+                for fut in as_completed(futures, timeout=30):
+                    try:
+                        result = fut.result(timeout=25)
+                        if result and result.get("reply"):
+                            if compression_saved > 0:
+                                result["compression_saved"] = compression_saved
+                            result["combo"] = combo
+                            log.info(f"Race winner: {result.get('provider')}/{result.get('model')}")
+                            return result
+                    except Exception:
+                        continue
+        except Exception:
+            pass  # Fall through to sequential
+
+    # Sequential fallback for remaining chain entries (skip already-raced)
+    raced_set = {(p, m) for p, m, _ in race_entries}
+    for prov_name, models in chain:
+        if not _breaker.can_call(prov_name):
+            continue
+        for model in models:
+            if (prov_name, model) in raced_set:
+                continue
             max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
             cap = PROVIDER_MAX_TOKENS.get(prov_name)
             if cap:
@@ -5249,8 +5291,10 @@ def cron_collect_news():
         return "Forbidden", 403
     rss_count = collect_rss()
     gdelt_count = collect_gdelt_themes()
-    _log_audit("news_collection", {"rss": rss_count, "gdelt": gdelt_count}, "collector")
-    return jsonify({"rss": rss_count, "gdelt": gdelt_count, "total": rss_count + gdelt_count})
+    tavily_count = collect_tavily()
+    enrich_count = enrich_news_with_fulltext(limit=5)
+    _log_audit("news_collection", {"rss": rss_count, "gdelt": gdelt_count, "tavily": tavily_count, "enriched": enrich_count}, "collector")
+    return jsonify({"rss": rss_count, "gdelt": gdelt_count, "tavily": tavily_count, "enriched": enrich_count, "total": rss_count + gdelt_count + tavily_count})
 
 
 # ── Fresh news for mlog BuildContext ──
@@ -5276,14 +5320,14 @@ def lz_news():
     elif category:
         rows = _query("""SELECT source, title, summary, url, published FROM news_cache
                          WHERE category = ? ORDER BY published DESC LIMIT ?""", (category, limit), fetch=True)
-        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}" for r in rows) if rows else "Нет событий"
+        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}\n  {r[3] or ''}" for r in rows) if rows else "Нет событий"
     else:
         rows = _query("""SELECT source, title, summary, url, published FROM news_cache
                          ORDER BY published DESC LIMIT ?""", (limit,), fetch=True)
-        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}" for r in rows) if rows else "Нет событий"
+        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}\n  {r[3] or ''}" for r in rows) if rows else "Нет событий"
 
     lz_prompt = get_dept_prompt("lz")
-    analysis_prompt = lz_prompt + "\n\nПроанализируй свежие события. Выдели тренды, аномалии, сигналы. Маркируй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ].\n\n" + news
+    analysis_prompt = lz_prompt + "\n\nПроанализируй свежие события. Выдели тренды, аномалии, сигналы. Маркируй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ].\nВАЖНО: в конце каждого пункта включай прямую ссылку на источник из предоставленных данных (строка Ссылка: ...). Если ссылка отсутствует — не придумывай.\n\n" + news
     try:
         result = call_llm("lz", [{"role": "user", "content": analysis_prompt}])
         analysis = result.get("reply", "Ошибка анализа")
@@ -5344,6 +5388,74 @@ DEPT_CATEGORIES = {
     "legal": ("geopolitics", "news_ru"),
     "marketing": ("tech", "news_en"),
 }
+
+
+# ── Tavily collection (merged into cron_collect_news, no extra cron slot needed) ──
+def collect_tavily():
+    """Collect real-time web results via Tavily API. Uses same DEPT_QUERIES as GDELT."""
+    tavily_key = os.environ.get("TAVILY_API_KEY", "")
+    if not tavily_key:
+        return 0
+    collected = 0
+    for dept, query in DEPT_QUERIES.items():
+        try:
+            resp = http_requests.post("https://api.tavily.com/search",
+                json={"api_key": tavily_key, "query": query,
+                      "search_depth": "basic", "max_results": 5,
+                      "days": 1}, timeout=15)
+            if resp.status_code != 200:
+                continue
+            for r in resp.json().get("results", []):
+                title = r.get("title", "").strip()
+                url = r.get("url", "").strip()
+                summary = re.sub(r"<[^>]+>", "", r.get("content", ""))[:500]
+                if not title:
+                    continue
+                content_hash = hashlib.md5((title + url).encode()).hexdigest()
+                cat = DEPT_CATEGORIES.get(dept, ("tech",))[0]
+                try:
+                    _query("""INSERT OR IGNORE INTO news_cache
+                        (source,title,summary,url,category,language,published,hash)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                        (f"Tavily", title, summary, url, cat, "en", None, content_hash))
+                    collected += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            _log_audit("tavily_error", {"dept": dept, "error": str(e)[:100]}, "collector")
+    if collected:
+        _log_audit("tavily_collected", {"collected": collected}, "collector")
+    return collected
+
+
+def enrich_news_with_fulltext(limit=5):
+    """Extract full text from top news URLs missing body content.
+    Merges into existing collect cycle — no extra cron needed."""
+    rows = _query("""SELECT id, url FROM news_cache
+                      WHERE (summary IS NULL OR length(summary) < 100)
+                      AND url IS NOT NULL AND url != ''
+                      AND collected > datetime('now', '-6 hours')
+                      ORDER BY published DESC LIMIT ?""", (limit,), fetch=True)
+    enriched = 0
+    for row_id, url in (rows or []):
+        try:
+            resp = http_requests.get(url, timeout=10, headers={"User-Agent": "FosvedBot/1.0"})
+            if resp.status_code == 200 and len(resp.text) > 200:
+                tmp = f"/tmp/news_enrich_{row_id}.html"
+                with open(tmp, "w", encoding="utf-8", errors="replace") as f:
+                    f.write(resp.text)
+                text = doc_extract.extract_text(tmp, url)
+                try: os.remove(tmp)
+                except Exception: pass
+                if text and len(text) > 50:
+                    summary = text[:800]
+                    _query("UPDATE news_cache SET summary = ? WHERE id = ?", (summary, row_id))
+                    enriched += 1
+        except Exception:
+            pass
+    if enriched:
+        _log_audit("news_enriched", {"enriched": enriched}, "collector")
+    return enriched
 
 
 def collect_rss():
@@ -5483,6 +5595,8 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
     current_len = 0
     for r in rows:
         entry = f"[{r[0]}] {r[1]}\n"
+        if r[3]:
+            entry += f"  Ссылка: {r[3]}\n"
         if r[2] and r[2] != r[1]:
             entry += f"  {r[2][:150]}\n"
         if r[4]:
