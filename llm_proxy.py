@@ -636,7 +636,7 @@ def _tg_send_formatted(chat_id, text, dept=None):
 COMMAND_DEPT = {
     '/yana': 'yana', '/osp': 'osp', '/lz': 'lz', '/expert': 'expert',
     '/marketing': 'marketing', '/finance': 'finance', '/legal': 'legal',
-    '/dev': 'dev', '/design': 'design', '/qa': 'qa', '/visual': 'visual',
+    '/dev': 'dev', '/design': 'design', '/design-image': 'design-image', '/qa': 'qa', '/visual': 'visual', '/visual-image': 'visual-image',
     '/engineering': 'engineering', '/forge': 'kavalnya',
     '/analyze': 'osp', '/scan': 'lz', '/deep': 'osp',
     '/quickanalyze': 'osp', '/wargame': 'osp',

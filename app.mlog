@@ -1705,7 +1705,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg | /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam | /osp bet | /osp watch | /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — список открытых\n  /наряд готов <ID> | /наряд отмена <ID>\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg | /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam | /osp bet | /osp watch | /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — список открытых\n  /наряд готов <ID> | /наряд отмена <ID>\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -2938,9 +2938,17 @@ mlogserver {
           let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
         }
         if delegate_dept == "visual" then {
-          let del_reply = HandleDeptQuery("visual", query, chat_id)
-          let _ = SendVoiceReply(chat_id, del_reply, delegate_dept)
-          let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
+          let is_img = IsImageRequest(query)
+          if is_img == "true" then {
+            let err = HandleDesignImage(query, chat_id)
+            if len(err) > 0.0 then {
+              let _ = SendVoiceReply(chat_id, err, delegate_dept)
+            }
+          } else {
+            let del_reply = HandleDeptQuery("visual", query, chat_id)
+            let _ = SendVoiceReply(chat_id, del_reply, delegate_dept)
+            let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
+          }
         }
         if delegate_dept == "engineering" then {
           let del_reply = HandleDeptQuery("engineering", query, chat_id)
@@ -3052,11 +3060,31 @@ mlogserver {
       let _ = SendReport(reply, "qa", query, "2.0", chat_id)
       let handled = 1.0
     }
+    if dept == "visual-image" then {
+      let _ = RecordUserMessage(chat_id, "visual", text)
+      // Extract prompt: everything after /visual-image or the full text
+      let img_prompt = substring(text, 14.0, 0.0)
+      if len(trim(img_prompt)) < 3.0 then { let img_prompt = query }
+      let err = HandleDesignImage(img_prompt, chat_id)
+      if len(err) > 0.0 then {
+        let _ = SendTelegramReply(chat_id, err)
+      }
+      let handled = 1.0
+    }
     if dept == "visual" then {
       let _ = RecordUserMessage(chat_id, "visual", text)
-      let reply = HandleDeptQuery("visual", query, chat_id)
-      let _ = SendVoiceReply(chat_id, reply, "visual")
-      let _ = SendReport(reply, "visual", query, "2.0", chat_id)
+      // Auto-detect image generation requests within visual dept
+      let is_img = IsImageRequest(query)
+      if is_img == "true" then {
+        let err = HandleDesignImage(query, chat_id)
+        if len(err) > 0.0 then {
+          let _ = SendTelegramReply(chat_id, err)
+        }
+      } else {
+        let reply = HandleDeptQuery("visual", query, chat_id)
+        let _ = SendVoiceReply(chat_id, reply, "visual")
+        let _ = SendReport(reply, "visual", query, "2.0", chat_id)
+      }
       let handled = 1.0
     }
     if dept == "engineering" then {
