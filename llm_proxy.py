@@ -4455,10 +4455,40 @@ def scheduler_lz_daily():
             "github_api_ok": github_ok,
         }
 
+        # ── Phase 1.5: Collect world news from news_cache (RSS + Tavily + GDELT) ──
+        world_news_text = ""
+        try:
+            news_rows = _query("""SELECT source, title, summary, url, category, published
+                                  FROM news_cache
+                                  WHERE collected > datetime('now', '-24 hours')
+                                  ORDER BY published DESC LIMIT 20""", fetch=True)
+            if news_rows:
+                cats_order = {"tech": 0, "science": 1, "geopolitics": 2, "news_ru": 3, "news_en": 4, "finance": 5}
+                news_rows.sort(key=lambda r: (cats_order.get(r[4], 9), r[5] or ""))
+                world_news_text = f"=== МИРОВЫЕ НОВОСТИ И СОБЫТИЯ ({len(news_rows)} за 24ч) ===\n\n"
+                for nr in news_rows:
+                    src, title, summary, url, cat, pub = nr
+                    entry = f"[{src}] {title}\n"
+                    if url:
+                        entry += f"  Ссылка: {url}\n"
+                    if summary and summary != title:
+                        entry += f"  {summary[:200]}\n"
+                    if pub:
+                        entry += f"  Дата: {pub[:10]}\n"
+                    world_news_text += entry + "\n"
+        except Exception as e:
+            log.warning(f"LZ Daily: world news query failed: {e}")
+
+        # Count world news items
+        news_count = len(world_news_text.split("[")) - 1 if world_news_text else 0
+
+        # Update scan_summary with news count
+        scan_summary["world_news"] = news_count
+
         # ── Phase 2: LLM Analysis ─────────────────────────────
         lz_prompt = get_dept_prompt("lz")
 
-        if github_ok:
+        if github_ok or world_news_text:
             # Direct API worked — analyze the data we collected
             repos_text = ""
             for i, r in enumerate(all_repos[:15], 1):
@@ -4470,48 +4500,53 @@ def scheduler_lz_daily():
             if monitor_topics:
                 monitors_text = "Custom monitors: " + ", ".join(monitor_topics)
 
+            # Build world news section for prompt
+            news_section = ""
+            if world_news_text:
+                news_section = f"\n{world_news_text}\n"
+
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub.\n\n"
-                 "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ, которые Админ должен изучить для применения в офисе.\n\n"
+                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан мира.\n\n"
+                 "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ и СОБЫТИЯ, которые Админ должен знать.\n\n"
                  "Структура отчёта:\n"
-                 "1. 🔥 TOP-3 находки (с disrupting potential 1-10) — что полезно для Фосвед Офиса\n"
-                 "2. 📦 Новые релизы — что обновилось в ключевых проектах\n"
-                 "3. 💡 Рекомендации — что Админу стоит изучить и почему\n"
-                 "4. 📊 Статистика скана\n\n"
-                 "Фильтруй: только релевантное для AI-офиса, multi-agent систем, Telegram ботов, DSL, memory systems.\n"
+                 "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — с disrupting potential 1-10\n"
+                 "2. 📦 Новые релизы и обновления — что вышло\n"
+                 "3. 🌍 Ключевые мировые события — экономика, политика, breakthrough\n"
+                 "4. 💡 Рекомендации — что Админу стоит изучить и почему\n"
+                 "5. 📊 Статистика скана\n\n"
+                 "ПРАВИЛО ССЫЛОК: для КАЖДОГО упомянутого проекта/события ОБЯЗАТЕЛЬНО включай прямую ссылку на источник в формате: https://...\n"
+                 "Используй ТОЛЬКО ссылки из предоставленных данных. Не придумывай ссылки.\n\n"
+                 "Фильтруй: релевантное для AI-офиса, технологий, мировых событий.\n"
                  "Язык: русский."},
                 {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
                  f"=== НОВЫЕ РЕПОЗИТОРИИ ({len(all_repos)} найдено) ===\n"
                  f"{repos_text}\n\n"
                  f"=== НОВЫЕ РЕЛИЗЫ ({len(all_releases)}) ===\n"
                  f"{releases_text}\n\n"
+                 f"{news_section}"
                  f"{monitors_text}"}
             ]
         else:
-            # GitHub API failed — LLM researches directly
-            log.info("LZ Daily: using LLM fallback for GitHub research")
+            # GitHub API failed — but we may have world news from news_cache
+            log.info("LZ Daily: GitHub API failed, using available data")
+            news_section = ""
+            if world_news_text:
+                news_section = f"\n{world_news_text}\n"
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория Загадок Фосвед Офиса. GitHub API недоступен, поэтому ты проводишь "
-                 "исследование САМОСТОЯТЕЛЬНО, используя свои знания.\n\n"
-                 "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: найти НОВИНКИ за последнюю неделю, которые Админ должен изучить.\n\n"
-                 "Ищи в областях:\n"
-                 "- LLM agent frameworks (Python): новые фреймворки, мажорные обновления\n"
-                 "- Telegram bot AI assistants\n"
-                 "- Multi-agent systems, MCP protocol\n"
-                 "- RAG, memory systems (mem0 и аналоги)\n"
-                 "- Rust DSL / интерпретаторы\n\n"
+                 "Ты — Лаборатория Загадок Фосвед Офиса. Проведи ежедневный обзор новинок и событий.\n\n"
                  "Структура отчёта:\n"
-                 "1. 🔥 TOP-3 находки (с disrupting potential 1-10)\n"
-                 "2. 📦 Ключевые обновления проектов\n"
+                 "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — с disrupting potential 1-10\n"
+                 "2. 🌍 Ключевые мировые события — экономика, политика, breakthrough\n"
                  "3. 💡 Рекомендации Админу\n\n"
-                 "Если не знаешь конкретных новостей за последнюю неделю — так и скажи.\n"
+                 "ПРАВИЛО ССЫЛОК: для КАЖДОГО упомянутого проекта/события ОБЯЗАТЕЛЬНО включай прямую ссылку на источник.\n"
+                 "Используй ТОЛЬКО ссылки из предоставленных данных. Если данных нет — укажи поисковый запрос.\n\n"
                  "Язык: русский."},
-                {"role": "user", "content": f"Сделай ежедневный обзор новинок на GitHub за последнюю неделю.\n"
-                 f"Дата: {datetime.utcnow().isoformat()[:10]}\n"
-                 f"Фокус: AI agents, LLM, Telegram bots, memory systems, MCP, RAG.\n\n"
-                 f"Для каждого проекта укажи: название, URL, что нового, почему релевантно Фосвед Офису."}
+                {"role": "user", "content": f"Сделай ежедневный обзор новинок и событий за {datetime.utcnow().isoformat()[:10]}.\n\n"
+                 f"{news_section}"
+                 f"Фокус: AI, технологии, мировые события, breakthrough.\n\n"
+                 f"Для каждого пункта укажи: название, прямую ссылку на источник, что нового, почему важно."}
             ]
 
         result = call_llm("lz", analysis_messages)
@@ -4563,7 +4598,7 @@ def scheduler_lz_daily():
         report += f"{'=' * 40}\n\n"
         report += analysis
         report += f"\n\n{'─' * 40}\n"
-        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {len(monitor_topics)} monitors\n"
+        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {news_count} новостей, {len(monitor_topics)} monitors\n"
         report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
 
         # ── Phase 5: Send to Owner (Admin) ────────────────────
@@ -4576,7 +4611,8 @@ def scheduler_lz_daily():
 
         _log_audit("lz_daily_report", {
             "repos": len(all_repos), "releases": len(all_releases),
-            "monitors": len(monitor_topics), "provider": result.get("provider"),
+            "world_news": news_count, "monitors": len(monitor_topics),
+            "provider": result.get("provider"),
             "msg_id": msg_id, "dry_run": dry_run
         })
 
@@ -5327,7 +5363,7 @@ def lz_news():
         news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}\n  {r[3] or ''}" for r in rows) if rows else "Нет событий"
 
     lz_prompt = get_dept_prompt("lz")
-    analysis_prompt = lz_prompt + "\n\nПроанализируй свежие события. Выдели тренды, аномалии, сигналы. Маркируй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ].\nВАЖНО: в конце каждого пункта включай прямую ссылку на источник из предоставленных данных (строка Ссылка: ...). Если ссылка отсутствует — не придумывай.\n\n" + news
+    analysis_prompt = lz_prompt + "\n\nПроанализируй свежие события. Выдели тренды, аномалии, сигналы. Маркируй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ].\n\nПРАВИЛО ССЫЛОК: для КАЖДОГО упомянутого события/факта ОБЯЗАТЕЛЬНО включай прямую ссылку на источник в формате: Ссылка: https://...\nИспользуй ТОЛЬКО ссылки из предоставленных данных (строка Ссылка: ...). Если ссылка отсутствует в данных — не придумывай, просто укажи источник в квадратных скобках.\n\n" + news
     try:
         result = call_llm("lz", [{"role": "user", "content": analysis_prompt}])
         analysis = result.get("reply", "Ошибка анализа")
