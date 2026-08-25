@@ -37,7 +37,6 @@ import dept/visual
 import dept/engineering
 import dept/kavalnya
 import dept/admin
-import dept/project
 
 // ============================================================
 // MEMORY — SQLite via db_execute() in InitDB()
@@ -92,9 +91,7 @@ pattern InitDB() -> String {
 
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
-  // Project pipeline
-  db_execute("CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, platform TEXT, github_repo TEXT, description TEXT, status TEXT DEFAULT 'planning', chat_id TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
-  db_execute("CREATE TABLE IF NOT EXISTS project_phases (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER, phase TEXT, dept TEXT, status TEXT DEFAULT 'pending', result TEXT, started_at TEXT, completed_at TEXT, FOREIGN KEY(project_id) REFERENCES projects(id))")
+  // Yana events - alter table extensions
   let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
   let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
   let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
@@ -448,40 +445,103 @@ pattern LogModelFailure(chat_id: String, dept: String, model: String, error: Str
   return "ok"
 }
 
-// ── FOIP-003.13: Analytics helpers (wired early for metering) ──
+// ── FOIP-003.13: Enhanced Analytics ──
+pattern GetModelCostPer1M(model: String, direction: String) -> String {
+  // direction: "in" or "out"
+  let key = "model_cost:" + model + ":" + direction
+  let val = kv_get(key)
+  if val == "" then {
+    if direction == "in" then { return "0.000002" }
+    return "0.000006"
+  }
+  return val
+}
+
+pattern AggregateDailyStats() -> String {
+  let rows = query("SELECT id, model, total_tokens_in, total_tokens_out FROM daily_stats WHERE estimated_cost_usd = 0.0", [])
+  let updated = "0"
+  each row in rows {
+    let rid = to_string(json_get(row, "id", "0"))
+    let m = to_string(json_get(row, "model", ""))
+    let ti = to_float(json_get(row, "total_tokens_in", "0"))
+    let to_ = to_float(json_get(row, "total_tokens_out", "0"))
+    let cost_in_rate = to_float(GetModelCostPer1M(m, "in"))
+    let cost_out_rate = to_float(GetModelCostPer1M(m, "out"))
+    let cost = ti * cost_in_rate + to_ * cost_out_rate
+    let _ = db_execute("UPDATE daily_stats SET estimated_cost_usd = ? WHERE id = ?", [to_string(cost), rid])
+    let updated = to_string(to_float(updated) + 1.0)
+  }
+  return "recalculated_" + updated + "_rows"
+}
+
 pattern ShowStats(chat_id: String) -> String {
   let _ = InitDB()
   let today = substring(to_string(now()), 0.0, 10.0)
-  let rows = query("SELECT dept, model, total_calls, total_tokens_in, total_tokens_out, total_errors FROM daily_stats WHERE date = ? ORDER BY total_calls DESC", [today])
-  if length(rows) == 0.0 then { return "Статистика за сегодня пуста." }
-  let out = "Статистика за " + today + ":\n"
+  let _ = AggregateDailyStats()
+  let rows = query("SELECT dept, SUM(total_calls) as calls, SUM(total_tokens_in) as ti, SUM(total_tokens_out) as to_, SUM(total_errors) as errs, SUM(estimated_cost_usd) as cost FROM daily_stats WHERE date = ? GROUP BY dept ORDER BY calls DESC", [today])
+  if len(rows) == 0.0 then { return "Статистика за сегодня (" + today + ") пуста." }
+  let out = "Статистика за " + today + "\n"
+  let out = out + "==============================\n"
+  let grand_calls = 0.0
+  let grand_ti = 0.0
+  let grand_to = 0.0
+  let grand_errs = 0.0
+  let grand_cost = 0.0
   each row in rows {
     let d = to_string(json_get(row, "dept", "?"))
-    let m = to_string(json_get(row, "model", "?"))
-    let c = to_string(json_get(row, "total_calls", "0"))
-    let ti = to_string(json_get(row, "total_tokens_in", "0"))
-    let to_ = to_string(json_get(row, "total_tokens_out", "0"))
-    let e = to_string(json_get(row, "total_errors", "0"))
-    let out = out + d + " [" + m + "] calls:" + c + " tokens:" + ti + "+" + to_ + " err:" + e + "\n"
+    let c = to_float(json_get(row, "calls", "0"))
+    let ti = to_float(json_get(row, "ti", "0"))
+    let to_ = to_float(json_get(row, "to_", "0"))
+    let e = to_float(json_get(row, "errs", "0"))
+    let cost = to_float(json_get(row, "cost", "0"))
+    let grand_calls = grand_calls + c
+    let grand_ti = grand_ti + ti
+    let grand_to = grand_to + to_
+    let grand_errs = grand_errs + e
+    let grand_cost = grand_cost + cost
+    let err_str = to_string(to_int(e))
+    if e > 0.0 then { let err_str = "! " + err_str }
+    let out = out + d + ": " + to_string(to_int(c)) + " calls | " + to_string(to_int(ti)) + "+" + to_string(to_int(to_)) + " tokens | " + err_str + " errors\n"
   }
+  let out = out + "==============================\n"
+  let out = out + "TOTAL: " + to_string(to_int(grand_calls)) + " calls | " + to_string(to_int(grand_ti)) + "+" + to_string(to_int(grand_to)) + " tokens | " + to_string(to_int(grand_errs)) + " errors\n"
   return out
 }
 
 pattern ShowCosts(chat_id: String) -> String {
   let _ = InitDB()
-  let rows = query("SELECT date, dept, model, total_tokens_in, total_tokens_out, total_calls FROM daily_stats ORDER BY date DESC, total_tokens_in + total_tokens_out DESC LIMIT 20", [])
-  if length(rows) == 0.0 then { return "Данных о расходах нет." }
-  let out = "Расходы (последние записи):\n"
+  let _ = AggregateDailyStats()
+  let today = substring(to_string(now()), 0.0, 10.0)
+  let rows = query("SELECT model, SUM(total_calls) as calls, SUM(total_tokens_in) as ti, SUM(total_tokens_out) as to_, SUM(estimated_cost_usd) as cost FROM daily_stats WHERE date = ? GROUP BY model ORDER BY cost DESC", [today])
+  if len(rows) == 0.0 then { return "Данных о расходах за сегодня нет." }
+  let out = "Расходы за " + today + "\n"
+  let out = out + "==============================\n"
+  let total_cost = 0.0
+  let total_calls = 0.0
+  let total_tokens = 0.0
   each row in rows {
-    let d = to_string(json_get(row, "date", "?"))
-    let dept = to_string(json_get(row, "dept", "?"))
     let m = to_string(json_get(row, "model", "?"))
-    let ti = to_int(json_get(row, "total_tokens_in", "0"))
-    let to_ = to_int(json_get(row, "total_tokens_out", "0"))
-    let total = ti + to_
-    // Rough cost estimate: assume ~$2/1M input, ~$6/1M output (adjust per model)
-    let cost_est = to_string(to_float(ti) * 0.000002 + to_float(to_) * 0.000006)
-    let out = out + d + " " + dept + " [" + m + "] " + to_string(total) + " tokens ~$" + cost_est + " (" + to_string(json_get(row, "total_calls", "0")) + " calls)\n"
+    let c = to_float(json_get(row, "calls", "0"))
+    let ti = to_float(json_get(row, "ti", "0"))
+    let to_ = to_float(json_get(row, "to_", "0"))
+    let cost = to_float(json_get(row, "cost", "0"))
+    let total_cost = total_cost + cost
+    let total_calls = total_calls + c
+    let total_tokens = total_tokens + ti + to_
+    let out = out + m + ": " + to_string(to_int(c)) + " calls | " + to_string(to_int(ti + to_)) + " tokens | ~$" + to_string(cost) + "\n"
+  }
+  let out = out + "==============================\n"
+  let out = out + "TOTAL: ~$" + to_string(total_cost) + " | " + to_string(to_int(total_calls)) + " calls | " + to_string(to_int(total_tokens)) + " tokens\n"
+  // Last 7 days trend
+  let trend_rows = query("SELECT date, SUM(estimated_cost_usd) as cost, SUM(total_calls) as calls FROM daily_stats GROUP BY date ORDER BY date DESC LIMIT 7", [])
+  if len(trend_rows) > 0.0 then {
+    let out = out + "\nLast 7 days:\n"
+    each tr in trend_rows {
+      let td = to_string(json_get(tr, "date", "?"))
+      let tc = to_string(json_get(tr, "cost", "0"))
+      let tcl = to_string(to_int(to_float(json_get(tr, "calls", "0"))))
+      let out = out + "  " + td + ": ~$" + tc + " (" + tcl + " calls)\n"
+    }
   }
   return out
 }
@@ -490,7 +550,7 @@ pattern ShowCosts(chat_id: String) -> String {
 pattern GetModelErrorRate(model: String) -> String {
   let today = substring(to_string(now()), 0.0, 10.0)
   let rows = query("SELECT total_calls, total_errors FROM daily_stats WHERE date = ? AND model = ?", [today, model])
-  if length(rows) == 0.0 then { return "0" }
+  if len(rows) == 0.0 then { return "0" }
   let calls = to_int(json_get(rows[0], "total_calls", "0"))
   let errors = to_int(json_get(rows[0], "total_errors", "0"))
   if calls == 0 then { return "0" }
@@ -2012,7 +2072,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg | /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam | /osp bet | /osp watch | /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /cost /budget /model\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — список открытых\n  /наряд готов <ID> | /наряд отмена <ID>\n\nProjects: /project — список проектов\n  /project new <platform> <github_url> <description> — создать проект\n  /project <ID> — статус\n  /project <ID> run — запустить следующую фазу\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg | /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam | /osp bet | /osp watch | /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /stats /cost /costs /budget /model
       return respond("200 ok")
     }
 
@@ -2168,80 +2228,6 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // ════════════════════════════════════════════════════════════
-    // PROJECT PIPELINE — /project new|list|status|run
-    // ════════════════════════════════════════════════════════════
-
-    // /project — list all projects
-    if text == "/project" then {
-      let _ = InitDB()
-      let list = ProjectList(chat_id)
-      let _ = SendTelegramReply(chat_id, list)
-      return respond("200 ok")
-    }
-
-    // /project new <platform> <repo_url> <description>
-    if starts_with(text, "/project new ") then {
-      let _ = InitDB()
-      let rest = trim(substring(text, 13.0, len(text)))
-      // Parse: first word = platform, second = repo URL (optional), rest = description
-      let parts = split(rest, _sp)
-      if len(parts) < 2.0 then {
-        let _ = SendTelegramReply(chat_id, "Формат: /project new <platform> <github_repo_url> <description>\nПример: /project new android https://github.com/user/myapp Приложение для учёта расходов")
-        return respond("200 ok")
-      }
-      let platform = to_string(json_get(parts, 0.0))
-      let second = to_string(json_get(parts, 1.0))
-      let repo = ""
-      let desc_start = 1.0
-      // Check if second part looks like a URL
-      if contains(second, "github.com") or contains(second, "/") then {
-        let repo = second
-        let desc_start = 2.0
-      }
-      // Build description from remaining parts
-      let desc = ""
-      let di = desc_start
-      while di < to_float(len(parts)) {
-        if desc != "" then { let desc = desc + " " }
-        let desc = desc + to_string(json_get(parts, di))
-        let di = di + 1.0
-      }
-      if desc == "" then { let desc = platform + " project" }
-      let pid = ProjectCreate(platform + " project", platform, repo, desc, chat_id)
-      let msg = "Проект [" + pid + "] создан.\nПлатформа: " + platform
-      if repo != "" then { let msg = msg + "\nРепо: " + repo }
-      let msg = msg + "\nОписание: " + desc + "\n\nФазы: planning -> design -> development -> review -> done\n\nЗапустить: /project " + pid + " run"
-      let _ = SendTelegramReply(chat_id, msg)
-      return respond("200 ok")
-    }
-
-    // /project <id> run — execute next phase
-    if starts_with(text, "/project ") then {
-      let rest = trim(substring(text, 9.0, len(text)))
-      let pparts = split(rest, _sp)
-      if len(pparts) >= 2.0 then {
-        let pid = to_string(json_get(pparts, 0.0))
-        let action = to_string(json_get(pparts, 1.0))
-        if action == "run" then {
-          let _ = InitDB()
-          let result = ProjectRun(pid, chat_id)
-          // Send result as report (can be long)
-          if len(result) > 800.0 then {
-            let _ = SendReport(result, "project", "Phase execution", "2.0", chat_id)
-          } else {
-            let _ = SendTelegramReply(chat_id, result)
-          }
-          return respond("200 ok")
-        }
-      }
-      // /project <id> — show status (single arg after /project that is a number)
-      let maybe_id = rest
-      let _ = InitDB()
-      let status = ProjectStatus(maybe_id)
-      let _ = SendTelegramReply(chat_id, status)
-      return respond("200 ok")
-    }
 
     // /learning — stats (MEGA-3)
     if text == "/learning" then {
@@ -2631,14 +2617,41 @@ mlogserver {
     }
 
     // /cost — token costs by department
-    if text == "/cost" then {
+    if text == "/cost" or text == "/costs" then {
       let _ = SendTelegramReply(chat_id, ShowCosts(chat_id))
+      return respond("200 ok")
+    }
+
+    // /stats-aggregate — force recalculate costs
+    if text == "/stats-aggregate" then {
+      let result = AggregateDailyStats()
+      let _ = SendTelegramReply(chat_id, "Recalculated: " + result)
       return respond("200 ok")
     }
 
     // /stats — daily usage statistics
     if text == "/stats" then {
       let _ = SendTelegramReply(chat_id, ShowStats(chat_id))
+      return respond("200 ok")
+    }
+
+    // /model-cost set <model> <in|out> <price_per_1M>
+    if starts_with(text, "/model-cost set ") then {
+      let rest = substring(text, 17.0, 10000.0)
+      let parts = split(rest, " ")
+      if len(parts) >= 3.0 then {
+        let mc_model = trim(get(parts, 0.0))
+        let mc_dir = trim(get(parts, 1.0))
+        let mc_price = trim(get(parts, 2.0))
+        if mc_dir == "in" or mc_dir == "out" then {
+          let _ = kv_set("model_cost:" + mc_model + ":" + mc_dir, mc_price)
+          let _ = SendTelegramReply(chat_id, "Model pricing: " + mc_model + " (" + mc_dir + ") = $" + mc_price + "/1M tokens")
+        } else {
+          let _ = SendTelegramReply(chat_id, "Direction: in or out. Example: /model-cost set gpt-4o in 2.5")
+        }
+      } else {
+        let _ = SendTelegramReply(chat_id, "Format: /model-cost set <model> <in|out> <price per 1M>")
+      }
       return respond("200 ok")
     }
 
