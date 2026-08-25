@@ -832,6 +832,90 @@ pattern MarketingClassifyMissSource(campaign_id: String) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// FOIP-003 Phase 4: Product Context, Ideas Library, CRO Audit
+// ═══════════════════════════════════════════════════════════════════════
+
+// FOIP-003.10: Set product context (called from app.mlog /marketing-context set)
+pattern SetProductContext(chat_id: String, text: String) -> String {
+  let _ = kv_set("product_context:" + chat_id, text)
+  return "ok"
+}
+
+// FOIP-003.10: Get product context for marketing responses
+pattern GetProductContext(chat_id: String) -> String {
+  let pc = kv_get("product_context:" + chat_id)
+  if pc == "" then { let pc = kv_get("product_context:default") }
+  if to_string(pc) == "()" then { return "" }
+  return pc
+}
+
+// FOIP-003.11: Seed 139 marketing ideas (called lazily on first /marketing-ideas)
+pattern SeedMarketingIdeas() -> String {
+  let check = query("SELECT COUNT(*) as cnt FROM marketing_ideas", [])
+  if len(check) > 0.0 then {
+    let row = get(check, 0.0)
+    let cnt = to_float(to_string(json_get(row, "cnt", "0")))
+    if cnt > 0.0 then { return "already_seeded" }
+  }
+  let seed_sql = read_file("data/marketing_ideas_seed.sql")
+  let batches = split(seed_sql, "
+")
+  let seeded = 0.0
+  each batch in batches {
+    let batch_str = to_string(batch)
+    if starts_with(batch_str, "INSERT") then {
+      let _ = try db_execute(batch_str)
+      let seeded = seeded + 1.0
+    }
+  }
+  return "seeded_" + to_string(seeded) + "_batches"
+}
+
+// FOIP-003.11: Get relevant marketing ideas via LLM
+pattern GetRelevantIdeas(query: String, count: String, chat_id: String) -> String {
+  let _ = SeedMarketingIdeas()
+  let rows = query("SELECT name, aarr_stage, budget_level, business_stage, description, tags FROM marketing_ideas", [])
+  if len(rows) == 0.0 then { return "База идей пуста. Попробуйте позже." }
+
+  // Build a compact ideas catalog for the LLM prompt
+  let catalog = ""
+  each row in rows {
+    let rname = json_get(row, "name", "")
+    let rstage = json_get(row, "aarr_stage", "")
+    let rbudget = json_get(row, "budget_level", "")
+    let rbstage = json_get(row, "business_stage", "")
+    let rdesc = json_get(row, "description", "")
+    let rtags = json_get(row, "tags", "")
+    let catalog = catalog + "- [" + rstage + "] [" + rbudget + "] [" + rbstage + "] " + rname + ": " + rdesc + " (" + rtags + ")" + "\n"
+  }
+
+  // Get product context for personalization
+  let pc = GetProductContext(chat_id)
+  let pc_section = ""
+  if pc != "" then { let pc_section = "\nКонтекст продукта: " + pc + "\n" }
+
+  let prompt = "Ты — маркетинговый стратег. Подбери " + count + " наиболее релевантных маркетинговых идей из каталога ниже." + "\n\nЗапрос: " + query + pc_section + "\nКаталог идей:\n" + catalog + "\nВыбери ТОЛЬКО " + count + " самых подходящих идей. Для каждой укажи: 1) Название, 2) AARRR стадия, 3) Бюджет, 4) Почему подходит к запросу (1-2 предложения), 5) Первый шаг реализации. Формат — нумерованный список."
+
+  let result = call_llm(prompt, query)
+  return result
+}
+
+// FOIP-003.12: CRO Audit — 7-dimensional conversion analysis
+pattern CROAudit(text: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile("marketing")
+  let pc = GetProductContext(chat_id)
+  let pc_section = ""
+  if pc != "" then { let pc_section = "\nКонтекст продукта: " + pc + "\n" }
+
+  let cro_prompt = profile + "\n\nТы — CRO-аудитор (Conversion Rate Optimization). Проведи 7-мерный анализ конверсии следующего текста/страницы." + pc_section + "\n\nАНАЛИЗИРУЕМЫЙ ТЕКСТ/СТРАНИЦА:\n" + text + "\n\n7 КРИТЕРИЕВ CRO-АУДИТА:\n\n1. VALUE PROPOSITION (Ценностное предложение)\n   - Ясно ли с первых 3 секунд, что продукт делает и для кого?\n   - Есть ли конкретные цифры/доказательства ценности?\n   - Отличается ли от конкурентов?\n\n2. CALL-TO-ACTION (Призыв к действию)\n   - Один ли главный CTA? Или их несколько (путаница)?\n   - Формулируется ли действие, а не абстракция?\n   - Контрастный ли визуально?\n\n3. ДОВЕРИЕ И СОЦИАЛЬНОЕ ДОКАЗАТЕЛЬСТВО\n   - Есть ли отзывы, кейсы, логотипы клиентов, цифры?\n   - Есть ли гарантии (возврат, пробный период)?\n   - Видны ли контакты/поддержка?\n\n4. ФРИКЦИЯ И БАРЬЕРЫ\n   - Сколько полей в формах? Можно ли сократить?\n   - Есть ли необязательные шаги перед конверсией?\n   - Требуется ли регистрация/карта до демонстрации ценности?\n\n5. ВИЗУАЛЬНАЯ ИЕРАРХИЯ\n   - Направляет ли взгляд к CTA? (F-паттерн, Z-паттерн)\n   - Нет ли визуального шума, отвлекающего от главного?\n   - Адаптивен ли дизайн для мобильных?\n\n6. КОПИРАЙТИНГ И ТОН\n   - Пишет ли на языке клиента (выгоды, а не функции)?\n   - Есть ли конкретика?\n   - Нет ли профессионального жаргона без объяснения?\n\n7. МИКРОКОНВЕРСНЫЕ ВОЗМОЖНОСТИ\n   - Есть ли ступени перед основной конверсией?\n   - Используется ли прогрессивное раскрытие (progressive disclosure)?\n   - Есть ли exit-intent или чат для сомневающихся?\n\nФОРМАТ ОТВЕТА:\nДля каждого из 7 критериев: оценка 1-10, конкретные замечания, рекомендация.\nВ конце: общая оценка конверсионного потенциала, топ-3 приоритетных улучшения с ожидаемым эффектом."
+
+  let result = call_llm(cro_prompt, "CRO-аудит страницы")
+  return result
+}
+
+
 // SCHEDULER HOOKS — called by scheduler.js
 // ═══════════════════════════════════════════════════════════════════════
 
