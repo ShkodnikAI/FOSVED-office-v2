@@ -1,0 +1,273 @@
+// Fosved Office v2 — Project Pipeline Engine
+// Automated multi-phase project execution: planning → design → development → review → done
+// Each phase calls the appropriate department, saves results, and reports progress.
+
+// Phase definitions
+// planning → design → development → review → done
+
+pattern ProjectCreate(name: String, platform: String, repo: String, desc: String, chat_id: String) -> String {
+  let _ = InitDB()
+  db_execute("INSERT INTO projects (name, platform, github_repo, description, chat_id, status) VALUES (?1, ?2, ?3, ?4, ?5, 'planning')", [name, platform, repo, desc, chat_id])
+  let rows = query("SELECT last_insert_rowid()", [])
+  let pid = to_string(json_get(json_get(rows, 0.0), "last_insert_rowid()", "0"))
+  let _ = AuditLog("project_created", "project", "id=" + pid + " name=" + name + " platform=" + platform)
+  return pid
+}
+
+pattern ProjectList(chat_id: String) -> String {
+  let _ = InitDB()
+  let rows = query("SELECT id, name, platform, status, created_at FROM projects WHERE chat_id = ?1 ORDER BY id DESC", [chat_id])
+  if length(rows) == 0.0 then { return "Нет проектов." }
+  let out = ""
+  let phase_names = json_encode({"planning": "Планирование", "design": "Дизайн", "development": "Разработка", "review": "Ревью", "done": "Готово"})
+  each row in rows {
+    let rid = to_string(json_get(row, "id", "?"))
+    let rname = json_get(row, "name", "?")
+    let rplat = json_get(row, "platform", "?")
+    let rstat = json_get(row, "status", "?")
+    let rdate = json_get(row, "created_at", "?")
+    let date_short = substring(to_string(rdate), 0.0, 10.0)
+    let phase_label = to_string(json_get(parse_json(phase_names), to_string(rstat), to_string(rstat)))
+    let out = out + "[" + rid + "] " + to_string(rname) + " (" + to_string(rplat) + ") - " + phase_label + " - " + date_short + "\n"
+  }
+  return out
+}
+
+pattern ProjectStatus(project_id: String) -> String {
+  let _ = InitDB()
+  let rows = query("SELECT id, name, platform, github_repo, description, status, created_at FROM projects WHERE id = ?1", [project_id])
+  if length(rows) == 0.0 then { return "Проект не найден." }
+  let proj = json_get(rows, 0.0)
+  let pid = to_string(json_get(proj, "id", ""))
+  let pname = to_string(json_get(proj, "name", ""))
+  let pplat = to_string(json_get(proj, "platform", ""))
+  let prepo = to_string(json_get(proj, "github_repo", ""))
+  let pdesc = to_string(json_get(proj, "description", ""))
+  let pstat = to_string(json_get(proj, "status", ""))
+
+  let phase_names = json_encode({"planning": "1. Планирование (Expert)", "design": "2. Дизайн (Design+Visual)", "development": "3. Разработка (Dev)", "review": "4. Ревью (QA)", "done": "5. Готово"})
+  let current_phase = to_string(json_get(parse_json(phase_names), pstat, pstat))
+
+  let out = "Проект [" + pid + "] " + pname + "\n"
+  let out = out + "Платформа: " + pplat + "\n"
+  if prepo != "" then { let out = out + "Репозиторий: " + prepo + "\n" }
+  let out = out + "Описание: " + pdesc + "\n"
+  let out = out + "Текущая фаза: " + current_phase + "\n\n"
+
+  // Show completed phases
+  let phases = query("SELECT phase, dept, status, completed_at FROM project_phases WHERE project_id = ?1 ORDER BY id", [project_id])
+  if length(phases) > 0.0 then {
+    let out = out + "Фазы:\n"
+    each ph in phases {
+      let ph_name = to_string(json_get(ph, "phase", ""))
+      let ph_dept = to_string(json_get(ph, "dept", ""))
+      let ph_status = to_string(json_get(ph, "status", ""))
+      let ph_done = to_string(json_get(ph, "completed_at", ""))
+      let icon = "  "  
+      if ph_status == "done" then { let icon = "[+]" }
+      if ph_status == "running" then { let icon = "[~]" }
+      if ph_status == "failed" then { let icon = "[-]" }
+      let date_short = ""
+      if ph_done != "" then { let date_short = " (" + substring(ph_done, 0.0, 10.0) + ")" }
+      let out = out + icon + " " + ph_name + " (" + ph_dept + ")" + date_short + "\n"
+    }
+  }
+
+  let out = out + "\n/project " + pid + " run - запустить следующую фазу"
+  return out
+}
+
+pattern ProjectRun(project_id: String, chat_id: String) -> String {
+  let _ = InitDB()
+  let rows = query("SELECT id, name, platform, github_repo, description, status FROM projects WHERE id = ?1", [project_id])
+  if length(rows) == 0.0 then { return "Проект не найден." }
+  let proj = json_get(rows, 0.0)
+  let pstat = to_string(json_get(proj, "status", ""))
+
+  if pstat == "done" then { return "Проект уже завершён." }
+
+  let pname = to_string(json_get(proj, "name", ""))
+  let pplat = to_string(json_get(proj, "platform", ""))
+  let prepo = to_string(json_get(proj, "github_repo", ""))
+  let pdesc = to_string(json_get(proj, "description", ""))
+
+  // Load previous phase results for context
+  let prev_planning = ""
+  let prev_design = ""
+  let prev_dev = ""
+  let phase_rows = query("SELECT phase, result FROM project_phases WHERE project_id = ?1 AND status = 'done'", [project_id])
+  each pr in phase_rows {
+    let pr_phase = to_string(json_get(pr, "phase", ""))
+    let pr_result = to_string(json_get(pr, "result", ""))
+    if pr_phase == "planning" then { let prev_planning = pr_result }
+    if pr_phase == "design" then { let prev_design = pr_result }
+    if pr_phase == "development" then { let prev_dev = pr_result }
+  }
+
+  // Mark phase as running
+  db_execute("INSERT INTO project_phases (project_id, phase, dept, status, started_at) VALUES (?1, ?2, ?3, 'running', datetime('now'))", [project_id, pstat, pstat])
+  let _ = SendTelegramReply(chat_id, "Запускаю фазу: " + pstat + "...")
+  let _ = AuditLog("project_phase_start", "project", "id=" + project_id + " phase=" + pstat)
+
+  let result = ""
+  let next_status = ""
+
+  if pstat == "planning" then {
+    let result = ExecPlanning(project_id, pdesc, pplat, chat_id)
+    let next_status = "design"
+  }
+  if pstat == "design" then {
+    let result = ExecDesign(project_id, pdesc, pplat, prev_planning, chat_id)
+    let next_status = "development"
+  }
+  if pstat == "development" then {
+    let result = ExecDevelopment(project_id, pdesc, pplat, prepo, prev_planning, prev_design, chat_id)
+    let next_status = "review"
+  }
+  if pstat == "review" then {
+    let result = ExecReview(project_id, pdesc, pplat, prev_planning, prev_design, prev_dev, chat_id)
+    let next_status = "done"
+  }
+
+  // Save phase result
+  if result != "" and result != "Error" then {
+    db_execute("UPDATE project_phases SET status = 'done', result = ?1, completed_at = datetime('now') WHERE project_id = ?2 AND phase = ?3 AND status = 'running'", [result, project_id, pstat])
+    db_execute("UPDATE projects SET status = ?1, updated_at = datetime('now') WHERE id = ?2", [next_status, project_id])
+    let _ = AuditLog("project_phase_done", "project", "id=" + project_id + " phase=" + pstat + " next=" + next_status)
+    return result
+  } else {
+    db_execute("UPDATE project_phases SET status = 'failed' WHERE project_id = ?1 AND phase = ?2 AND status = 'running'", [project_id, pstat])
+    return "Фаза '" + pstat + "' завершилась с ошибкой. Попробуйте /project " + project_id + " run ещё раз."
+  }
+}
+
+// ── Phase 1: Planning (Expert) ─────────────────────────────────
+pattern ExecPlanning(project_id: String, desc: String, platform: String, chat_id: String) -> String {
+  let sys = "Ты — технический архитектор. Создай детальную архитектуру проекта.\n\nПРАВИЛО ВЫВОДА: Структурируй ответ чётко.\n\nВыведи ОБЯЗАТЕЛЬНО:\n1. Стек технологий (язык, фреймворк, библиотеки)\n2. Структура модулей/пакетов\n3. Список всех экранов/компонентов\n4. План файлов: для КАЖДОГО файла укажи путь и краткое описание что в нём\n\nПлатформа: " + platform + "\nОписание: " + desc
+
+  let llm_result = call_llm(sys, "Создай архитектуру для: " + desc)
+  if to_string(llm_result) == "()" then { return "Error" }
+  let result = to_string(llm_result)
+
+  let report = "*Фаза 1: Планирование - Завершено*\n\n" + result + "\n\nСледующая фаза: Дизайн. Запустите: /project " + project_id + " run"
+  return report
+}
+
+// ── Phase 2: Design (Design + Visual) ───────────────────────────
+pattern ExecDesign(project_id: String, desc: String, platform: String, planning: String, chat_id: String) -> String {
+  let sys = "Ты — lead UI/UX дизайнер. На основе архитектуры создай дизайн-систему.\n\nВыведи ОБЯЗАТЕЛЬНО:\n1. Цветовая палитра (primary, secondary, accent, background, surface, text)\n2. Типографика (шрифты, размеры для заголовков/тела/_caption)\n3. Компоненты: кнопки, поля ввода, карточки, навигация (опиши стиль)\n4. Navigation pattern\n5. Описание 3-5 ключевых экранов с компоновкой элементов\n\nПлатформа: " + platform + "\nОписание: " + desc
+
+  let query = "Создай дизайн-систему. Архитектура проекта:\n" + substring(planning, 0.0, 3000.0)
+  let llm_result = call_llm(sys, query)
+  if to_string(llm_result) == "()" then { return "Error" }
+  let result = to_string(llm_result)
+
+  // Generate 1 design preview image
+  let _ = try HandleDesignImage("Mobile app UI mockup for " + desc + ", clean modern design, light theme, professional", chat_id)
+
+  let report = "*Фаза 2: Дизайн - Завершено*\n\n" + result + "\n\nСледующая фаза: Разработка. Запустите: /project " + project_id + " run"
+  return report
+}
+
+// ── Phase 3: Development (Dev) ─────────────────────────────────
+pattern ExecDevelopment(project_id: String, desc: String, platform: String, repo: String, planning: String, design: String, chat_id: String) -> String {
+  let sys = "Ты — senior developer. Создай ПОЛНЫЙ исходный код на основе архитектуры и дизайна.\n\nКРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА:\nДля КАЖДОГО файла выводи строго так:\nFILE: path/to/file.ext\n```language
+код здесь
+```\n\nМежду файлами - пустая строка. Создай ВСЕ файлы из архитектуры. Полный рабочий код, НЕ заглушки и НЕ комментарии-заполнители.\n\nПлатформа: " + platform
+
+  let query = "Создай полный исходный код. Архитектура:\n" + substring(planning, 0.0, 2000.0) + "\n\nДизайн-система:\n" + substring(design, 0.0, 2000.0)
+  let llm_result = call_llm(sys, query)
+  if to_string(llm_result) == "()" then { return "Error" }
+  let code_output = to_string(llm_result)
+
+  // Parse and push files to GitHub
+  let push_summary = ""
+  if repo != "" then {
+    let push_summary = ParseAndPushFiles(repo, code_output, chat_id)
+  } else {
+    let push_summary = "GitHub репозиторий не указан. Файлы не отправлены."
+  }
+
+  // Save code output (truncated) to phase result
+  let code_summary = substring(code_output, 0.0, 6000.0)
+  if len(code_output) > 6000.0 then { let code_summary = code_summary + "\n... (обрезано, всего " + to_string(len(code_output)) + " символов)" }
+
+  let report = "*Фаза 3: Разработка - Завершено*\n\n" + push_summary + "\n\n*Сгенерированный код:*\n" + code_summary + "\n\nСледующая фаза: Ревью. Запустите: /project " + project_id + " run"
+  return report
+}
+
+// ── Phase 4: Review (QA) ───────────────────────────────────────
+pattern ExecReview(project_id: String, desc: String, platform: String, planning: String, design: String, dev: String, chat_id: String) -> String {
+  let sys = "Ты — QA lead. Проанализируй проект и выдай итоговый ревью.\n\nВыведи ОБЯЗАТЕЛЬНО:\n1. Критические проблемы (блокеры)\n2. Потенциальные баги\n3. Улучшения (приоритизированные)\n4. Что missing для production\n5. Итоговая оценка готовности (процент)"
+
+  let query = "Ревью проекта: " + desc + "\n\nАрхитектура:\n" + substring(planning, 0.0, 1500.0) + "\n\nДизайн:\n" + substring(design, 0.0, 1000.0) + "\n\nКод (фрагмент):\n" + substring(dev, 0.0, 2000.0)
+  let llm_result = call_llm(sys, query)
+  if to_string(llm_result) == "()" then { return "Error" }
+  let result = to_string(llm_result)
+
+  let report = "*Фаза 4: Ревью - Завершено*\n\n" + result + "\n\n*Проект завершён!* Все фазы пройдены."
+  return report
+}
+
+// ── File Parser & GitHub Push ───────────────────────────────────
+pattern ParseAndPushFiles(repo: String, code_output: String, chat_id: String) -> String {
+  let _nl = "\n"
+  let sections = split_by(code_output, "FILE: ")
+  let pushed = 0.0
+  let failed = 0.0
+  let pushed_list = ""
+
+  each section in sections {
+    let lines = split_by(section, _nl)
+    let filepath = trim(to_string(json_get(lines, 0.0)))
+    // Skip if doesn't look like a file path
+    if contains(filepath, ".") and len(filepath) > 2.0 and contains(filepath, "/") then {
+      // Extract code between backtick fences
+      let in_code = 0.0
+      let code_lines = ""
+      let line_idx = 0.0
+      while line_idx < to_float(len(lines)) {
+        let line = to_string(json_get(lines, line_idx))
+        if in_code == 1.0 then {
+          if starts_with(trim(line), "```") then {
+            let in_code = 0.0
+          } else {
+            if code_lines != "" then { let code_lines = code_lines + "\n" }
+            let code_lines = code_lines + line
+          }
+        } else {
+          if starts_with(trim(line), "```") then {
+            let in_code = 1.0
+          }
+        }
+        let line_idx = line_idx + 1.0
+      }
+
+      if code_lines != "" then {
+        let push_result = PushFileToGithub(repo, filepath, code_lines, chat_id)
+        if contains(push_result, "ok") then {
+          let pushed = pushed + 1.0
+          if pushed_list != "" then { let pushed_list = pushed_list + ", " }
+          let pushed_list = pushed_list + filepath
+        } else {
+          let failed = failed + 1.0
+        }
+      }
+    }
+  }
+
+  let summary = "GitHub push: " + to_string(pushed) + " файлов отправлено"
+  if failed > 0.0 then { let summary = summary + ", " + to_string(failed) + " ошибок" }
+  if pushed_list != "" then { let summary = summary + "\nФайлы: " + pushed_list }
+  return summary
+}
+
+pattern PushFileToGithub(repo: String, filepath: String, content: String, chat_id: String) -> String {
+  let body = json_encode({repo: repo, path: filepath, content: content, message: "Add " + filepath})
+  let result = try http_post("http://127.0.0.1:4000/github/push-file", body, "application/json", 60.0)
+  if to_string(result) == "()" then { return "error: no response" }
+  let parsed = try parse_json(result)
+  if parsed == "()" then { return "error: parse failed" }
+  let status = to_string(json_get(parsed, "status", "error"))
+  return status
+}

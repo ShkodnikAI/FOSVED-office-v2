@@ -644,6 +644,7 @@ COMMAND_DEPT = {
     '/competitors': 'marketing', '/campaign': 'marketing',
     '/calc': 'engineering', '/simulate': 'engineering',
     '/admin': 'admin',
+    '/project': 'project',
 }
 
 RUSSIAN_KEYWORDS = {
@@ -4907,6 +4908,79 @@ def generate_image_endpoint():
     msg_id = _tg_send_photo(chat_id, fpath, caption or None)
     _log_audit('image_generated', {'prompt': prompt[:100], 'size': size, 'path': fpath, 'chat_id': chat_id, 'tg_msg_id': msg_id}, dept='design')
     return jsonify({'status': 'ok', 'path': fpath, 'tg_msg_id': msg_id})
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  GITHUB FILE PUSH ENDPOINT — for project pipeline
+# ══════════════════════════════════════════════════════════════════════
+
+_GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
+_GITHUB_HEADERS = {'Authorization': f'token {_GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'} if _GITHUB_TOKEN else {}
+
+
+def _parse_github_repo(repo_url):
+    """Extract owner/repo from GitHub URL or 'owner/repo' string."""
+    repo_url = repo_url.strip().rstrip('/')
+    # Handle 'https://github.com/owner/repo' or 'github.com/owner/repo'
+    if 'github.com/' in repo_url:
+        parts = repo_url.split('github.com/')[-1].split('/')
+        if len(parts) >= 2:
+            return parts[0], parts[1]
+    # Handle 'owner/repo' format
+    parts = repo_url.split('/')
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return None, None
+
+
+@app.route('/github/push-file', methods=['POST'])
+def github_push_file():
+    """Push a single file to GitHub repo via Contents API.
+    Request: {repo, path, content, message?, branch?}
+    Returns: {status, sha?, url?, error?}"""
+    if not _GITHUB_TOKEN:
+        return jsonify({'status': 'error', 'error': 'GITHUB_TOKEN not set'}), 400
+    d = request.get_json(force=True) or {}
+    repo = d.get('repo', '').strip()
+    path = d.get('path', '').strip()
+    content = d.get('content', '')
+    message = d.get('message', f'Add {path}').strip()
+    branch = d.get('branch', 'main').strip()
+    if not repo or not path or content is None:
+        return jsonify({'status': 'error', 'error': 'repo, path, content required'}), 400
+    owner, repo_name = _parse_github_repo(repo)
+    if not owner:
+        return jsonify({'status': 'error', 'error': f'Cannot parse repo: {repo}'}), 400
+    api_url = f'https://api.github.com/repos/{owner}/{repo_name}/contents/{path}'
+    # Check if file exists (need SHA for update)
+    sha = None
+    try:
+        check = http_requests.get(api_url, headers=_GITHUB_HEADERS, params={'ref': branch}, timeout=15)
+        if check.status_code == 200:
+            sha = check.json().get('sha')
+    except Exception:
+        pass
+    # Create/update file
+    import base64
+    payload = {
+        'message': message,
+        'content': base64.b64encode(content.encode('utf-8')).decode('ascii'),
+        'branch': branch,
+    }
+    if sha:
+        payload['sha'] = sha
+    try:
+        resp = http_requests.put(api_url, json=payload, headers=_GITHUB_HEADERS, timeout=30)
+        data = resp.json()
+        if resp.status_code in (200, 201):
+            log.info(f'GitHub push OK: {owner}/{repo_name}/{path}')
+            return jsonify({'status': 'ok', 'sha': data.get('content', {}).get('sha'), 'url': data.get('content', {}).get('html_url')})
+        else:
+            log.error(f'GitHub push failed: {resp.status_code} {data}')
+            return jsonify({'status': 'error', 'error': data.get('message', f'HTTP {resp.status_code}')})
+    except Exception as e:
+        log.error(f'GitHub push error: {e}')
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
 # ══════════════════════════════════════════════════════════════════════
