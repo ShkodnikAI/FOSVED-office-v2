@@ -479,6 +479,104 @@ pattern ShowCosts(chat_id: String) -> String {
   return out
 }
 
+// ── FOIP-003.4: Smart Model Routing — stats-aware fallback ──
+pattern GetModelErrorRate(model: String) -> String {
+  let today = substring(to_string(now()), 0.0, 10.0)
+  let rows = query("SELECT total_calls, total_errors FROM daily_stats WHERE date = ? AND model = ?", [today, model])
+  if length(rows) == 0.0 then { return "0" }
+  let calls = to_int(json_get(rows[0], "total_calls", "0"))
+  let errors = to_int(json_get(rows[0], "total_errors", "0"))
+  if calls == 0 then { return "0" }
+  return to_string(to_float(errors) / to_float(calls) * 100.0)
+}
+
+pattern RecordModelResult(dept: String, model: String, success: String) -> String {
+  if success != "ok" then {
+    let _ = LogModelFailure(dept, dept, model, "fallback triggered")
+  }
+  return "ok"
+}
+
+// ── FOIP-003.5: Context Compaction ──
+pattern EstimateTokens(text: String) -> String {
+  return to_string(len(text) / 4.0)
+}
+
+pattern GetCompactedHistory(chat_id: String, limit: String) -> String {
+  let total_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ?", [chat_id])
+  let total = to_int(json_get(total_rows[0], "cnt", "0"))
+  let lim = to_int(limit)
+  if total <= lim * 2 then {
+    return GetRecentDialog(chat_id, limit)
+  }
+  let early_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at ASC LIMIT 3", [chat_id])
+  let recent_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?", [chat_id, limit])
+  let out = ""
+  each row in early_rows {
+    let role = to_string(json_get(row, "role", ""))
+    let content = to_string(json_get(row, "content", ""))
+    if len(content) > 300.0 then { let content = substring(content, 0.0, 300.0) + "..." }
+    let out = out + role + ": " + content + "\n"
+  }
+  let skipped = total - 3 - lim
+  if skipped > 0 then {
+    let out = out + "\n[... " + to_string(skipped) + " messages skipped for context economy ...]\n\n"
+  }
+  each row in recent_rows {
+    let role = to_string(json_get(row, "role", ""))
+    let content = to_string(json_get(row, "content", ""))
+    let out = out + role + ": " + content + "\n"
+  }
+  return out
+}
+
+// ── FOIP-003.6: Three input channels (followup/steer/inject) ──
+pattern InjectContext(target_dept: String, context_text: String) -> String {
+  let existing = kv_get("inject:" + target_dept)
+  if existing != "" then {
+    let _ = kv_set("inject:" + target_dept, existing + "\n---\n" + context_text)
+  } else {
+    let _ = kv_set("inject:" + target_dept, context_text)
+  }
+  return "ok"
+}
+
+pattern GetInjectedContext(dept: String) -> String {
+  let ctx = kv_get("inject:" + dept)
+  if ctx != "" then {
+    let _ = kv_set("inject:" + dept, "")
+  }
+  return ctx
+}
+
+pattern SteerDept(dept: String, correction: String) -> String {
+  let _ = kv_set("steer:" + dept, correction)
+  return "ok"
+}
+
+pattern GetSteerContext(dept: String) -> String {
+  let ctx = kv_get("steer:" + dept)
+  if ctx != "" then {
+    let _ = kv_set("steer:" + dept, "")
+  }
+  return ctx
+}
+}
+
+pattern SteerDept(dept: String, correction: String) -> String {
+  let _ = kv_set("steer:" + dept, correction)
+  return "ok"
+}
+
+pattern GetSteerContext(dept: String) -> String {
+  let ctx = kv_get("steer:" + dept)
+  if ctx != "" then {
+    let _ = kv_set("steer:" + dept, "")
+  }
+  return ctx
+}
+
+
 pattern IsImageRequest(text: String) -> String {
   // Returns "true" if text asks for image generation, "" otherwise
   let t = lower(text)
@@ -534,7 +632,11 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   }
 
   let corrections = GetCorrections(dept)
-  let dialog = GetRecentDialog(chat_id, "10")
+  // FOIP-003.6: Cross-dept inject + mid-turn steer
+  let injected = GetInjectedContext(dept)
+  let steer = GetSteerContext(dept)
+  // FOIP-003.5: Use compacted history for long conversations
+  let dialog = GetCompactedHistory(chat_id, "10")
   let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
 
@@ -560,7 +662,11 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   if s_now == "()" then { let s_now = "" }
   let s_skills = to_string(skills)
   if s_skills == "()" then { let s_skills = "" }
-  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
+  let s_injected = to_string(injected)
+  if s_injected == "()" then { let s_injected = "" }
+  let s_steer = to_string(steer)
+  if s_steer == "()" then { let s_steer = "" }
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Cross-dept Context ===" + s_injected + "\n\n=== Steering ===" + s_steer + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
 
   // Append fresh news if available
   if news != "" then {
@@ -2515,6 +2621,22 @@ mlogserver {
       let _ = SendTelegramReply(chat_id, ShowStats(chat_id))
       return respond("200 ok")
     }
+
+    // /inject <dept> <text> — FOIP-003.6: inject cross-dept context
+    if starts_with(text, "/inject ") then {
+      let rest = substring(text, 8.0, 10000.0)
+      let parts = split(rest, _sp)
+      if len(parts) >= 2.0 then {
+        let target_dept = get(parts, 0.0)
+        let ctx_text = substring(rest, len(target_dept) + 1.0, 10000.0)
+        let _ = InjectContext(target_dept, ctx_text)
+        let _ = SendTelegramReply(chat_id, "Injected context into " + target_dept + ". Will be used on next query.")
+      } else {
+        let _ = SendTelegramReply(chat_id, "Usage: /inject <dept> <context text>")
+      }
+      return respond("200 ok")
+    }
+
 
     // /budget
     if starts_with(text, "/budget") then {
