@@ -427,7 +427,9 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
 
 // ── FOIP-003.3: Token Metering ──
 pattern LogTokenUsage(chat_id: String, dept: String, model: String, tokens_in: String, tokens_out: String) -> String {
-  let today = substring(to_string(now()), 0.0, 10.0)
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
   let _ = LogSessionEvent(chat_id, "token_usage", dept, "", model, tokens_in, tokens_out)
   let _ = db_execute("INSERT INTO daily_stats (date, dept, model, total_calls, total_tokens_in, total_tokens_out) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(date, dept, model) DO UPDATE SET total_calls = total_calls + 1, total_tokens_in = total_tokens_in + ?, total_tokens_out = total_tokens_out + ?", [today, dept, model, tokens_in, tokens_out, tokens_in, tokens_out])
   return "ok"
@@ -439,7 +441,9 @@ pattern LogModelSuccess(chat_id: String, dept: String, model: String, tokens_in:
 }
 
 pattern LogModelFailure(chat_id: String, dept: String, model: String, error: String) -> String {
-  let today = substring(to_string(now()), 0.0, 10.0)
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
   let _ = LogSessionEvent(chat_id, "model_error", dept, error, model, "0", "0")
   let _ = db_execute("INSERT INTO daily_stats (date, dept, model, total_errors) VALUES (?, ?, ?, 1) ON CONFLICT(date, dept, model) DO UPDATE SET total_errors = total_errors + 1", [today, dept, model])
   return "ok"
@@ -476,7 +480,9 @@ pattern AggregateDailyStats() -> String {
 
 pattern ShowStats(chat_id: String) -> String {
   let _ = InitDB()
-  let today = substring(to_string(now()), 0.0, 10.0)
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
   let _ = AggregateDailyStats()
   let rows = query("SELECT dept, SUM(total_calls) as calls, SUM(total_tokens_in) as ti, SUM(total_tokens_out) as to_, SUM(total_errors) as errs, SUM(estimated_cost_usd) as cost FROM daily_stats WHERE date = ? GROUP BY dept ORDER BY calls DESC", [today])
   if len(rows) == 0.0 then { return "Статистика за сегодня (" + today + ") пуста." }
@@ -511,7 +517,9 @@ pattern ShowStats(chat_id: String) -> String {
 pattern ShowCosts(chat_id: String) -> String {
   let _ = InitDB()
   let _ = AggregateDailyStats()
-  let today = substring(to_string(now()), 0.0, 10.0)
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
   let rows = query("SELECT model, SUM(total_calls) as calls, SUM(total_tokens_in) as ti, SUM(total_tokens_out) as to_, SUM(estimated_cost_usd) as cost FROM daily_stats WHERE date = ? GROUP BY model ORDER BY cost DESC", [today])
   if len(rows) == 0.0 then { return "Данных о расходах за сегодня нет." }
   let out = "Расходы за " + today + "\n"
@@ -548,7 +556,9 @@ pattern ShowCosts(chat_id: String) -> String {
 
 // ── FOIP-003.4: Smart Model Routing — stats-aware fallback ──
 pattern GetModelErrorRate(model: String) -> String {
-  let today = substring(to_string(now()), 0.0, 10.0)
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
   let rows = query("SELECT total_calls, total_errors FROM daily_stats WHERE date = ? AND model = ?", [today, model])
   if len(rows) == 0.0 then { return "0" }
   let calls = to_int(json_get(rows[0], "total_calls", "0"))
@@ -2058,7 +2068,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam / /unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /stats /cost /costs /budget /model\nAnalytics: /stats-aggregate /model-cost\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — список открытых\n  /наряд готов <ID> | /наряд отмена <ID>\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam /osp bet /osp watch /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /stats /cost /costs /budget /model\nAnalytics: /stats-aggregate /model-cost\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — список открытых\n  /наряд готов <ID> | /наряд отмена <ID>\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -2623,7 +2633,7 @@ mlogserver {
 
     // /model-cost set <model> <in|out> <price_per_1M>
     if starts_with(text, "/model-cost set ") then {
-      let rest = substring(text, 17.0, 10000.0)
+      let rest = substring(text, 16.0, 10000.0)
       let parts = split(rest, " ")
       if len(parts) >= 3.0 then {
         let mc_model = trim(get(parts, 0.0))
