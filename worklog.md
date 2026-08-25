@@ -194,3 +194,38 @@ Stage Summary:
 - 11 Prisma models referenced (4 dev + 3 design + 4 qa)
 - 0 CallLLMProxy calls, 0 Python dependencies
 - Cross-department pipeline: Design→Dev→QA with auto-hooks
+
+---
+Task ID: foip003-phase4
+Agent: Super Z (main)
+Task: FOIP-003 Phase 4 — Marketing improvements (3 нарядов)
+
+Work Log:
+- Read Phase 3 & 4 specs from docs/foip/FOIP-003-batch-implementation.md
+- Confirmed Phase 3 (Plan Mode, Templates, Design Tokens) already implemented
+- Implemented FOIP-003.10: Product Marketing Context
+  - KV-based storage: product_context:<chat_id> and product_context:default
+  - /marketing-context set <text>, /marketing-context show, /marketing-context default <text> commands
+  - BuildContext integration: product context injected for marketing dept
+  - SetProductContext(), GetProductContext() patterns in dept/marketing.mlog
+- Implemented FOIP-003.11: 139 marketing ideas library
+  - marketing_ideas table (InitDB) + indexes
+  - 139 ideas across AARRR (Acquisition:30, Activation:28, Retention:28, Revenue:28, Referral:26)
+  - data/marketing_ideas_seed.sql (10 batches, lazy seed via SeedMarketingIdeas)
+  - GetRelevantIdeas(query, count, chat_id) — LLM-powered relevance matching with product context
+  - /marketing-ideas <query> command
+- Implemented FOIP-003.12: CRO Audit
+  - CROAudit(text, chat_id) — 7-dimension conversion analysis via call_llm
+  - Dimensions: Value Proposition, CTA, Trust, Friction, Visual Hierarchy, Copywriting, Micro-conversions
+  - /cro <text> command
+- Fixed critical \n escaping: Python heredocs converted \n to actual newlines, rewrote affected patterns
+- All code uses native Metalogos (no http_get, no bare try/catch, no indexed array access)
+- Added 3 new routes to DetectDepartment: /cro, /marketing-context, /marketing-ideas
+
+Stage Summary:
+- app.mlog: 3659 → 3725 lines (+66)
+- dept/marketing.mlog: 1141 → 1224 lines (+83)
+- data/marketing_ideas_seed.sql: 22 lines (139 ideas in 10 batches)
+- 5 new patterns: SetProductContext, GetProductContext, SeedMarketingIdeas, GetRelevantIdeas, CROAudit
+- 4 new commands: /marketing-context set|show|default, /marketing-ideas, /cro
+- Yana not touched (rule: must not degrade)

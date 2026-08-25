@@ -31,6 +31,7 @@ import dept/finance
 import dept/legal
 import dept/dev
 import dept/design
+import dept/templates
 import dept/qa
 import dept/visual
 import dept/engineering
@@ -169,6 +170,12 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS daily_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, dept TEXT, model TEXT, total_calls INTEGER DEFAULT 0, total_tokens_in INTEGER DEFAULT 0, total_tokens_out INTEGER DEFAULT 0, total_errors INTEGER DEFAULT 0, total_latency_ms INTEGER DEFAULT 0, estimated_cost_usd REAL DEFAULT 0.0)")
   db_execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dstats_date_dept ON daily_stats(date, dept, model)")
 
+  // FOIP-003.9: Design tokens table
+  db_execute("CREATE TABLE IF NOT EXISTS design_tokens (name TEXT PRIMARY KEY, tokens_json TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  // FOIP-003.11: Marketing ideas library
+  db_execute("CREATE TABLE IF NOT EXISTS marketing_ideas (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, aarr_stage TEXT, budget_level TEXT, business_stage TEXT, description TEXT, tags TEXT)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_mideas_stage ON marketing_ideas(aarr_stage)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_mideas_tags ON marketing_ideas(tags)")
   return "ok"
 }
 
@@ -670,6 +677,16 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
 
   // Append fresh news if available
   if news != "" then {
+  // FOIP-003.10: Product context for marketing dept
+  if dept == "marketing" then {
+    let pc = kv_get("product_context:" + chat_id)
+    if pc == "" then { let pc = kv_get("product_context:default") }
+    if to_string(pc) != "()" then {
+      if pc != "" then {
+        let context = context + "\n\n=== Product Context ===\n" + pc
+      }
+    }
+  }
     let context = context + "\n\n" + news + "\nУчитывай эти свежие события в своём анализе. Ссылайся на них если релевантны."
   }
 
@@ -1071,6 +1088,9 @@ pattern DetectDepartment(text: String) -> String {
   if starts_with(text, "/segment") then { return "marketing" }
   if starts_with(text, "/competitors") then { return "marketing" }
   if starts_with(text, "/campaign") then { return "marketing" }
+  if starts_with(text, "/cro") then { return "marketing" }
+  if starts_with(text, "/marketing-context") then { return "marketing" }
+  if starts_with(text, "/marketing-ideas") then { return "marketing" }
   if starts_with(text, "/calc") then { return "engineering" }
   if starts_with(text, "/simulate") then { return "engineering" }
 
@@ -3225,6 +3245,57 @@ mlogserver {
     }
 
     // ============================================================
+
+    // ── FOIP-003.10: /marketing-context set|show ──
+    if starts_with(text, "/marketing-context set ") then {
+      let ctx_text = trim(substring(text, 23.0, len(text)))
+      if ctx_text == "" then { send_message(chat_id, "Формат: /marketing-context set <текст продукта>")
+return respond("200 ok") }
+      let _ = kv_set("product_context:" + chat_id, ctx_text)
+      send_message(chat_id, "Контекст продукта сохранён (" + to_string(len(ctx_text)) + " символов).")
+      return respond("200 ok")
+    }
+    if text == "/marketing-context show" then {
+      let pc = kv_get("product_context:" + chat_id)
+      if pc == "" then { let pc = kv_get("product_context:default") }
+      if to_string(pc) == "()" or pc == "" then {
+        send_message(chat_id, "Контекст продукта не задан. Используйте /marketing-context set <текст>")
+      } else {
+        send_message(chat_id, "Текущий контекст продукта:\n" + pc)
+      }
+      return respond("200 ok")
+    }
+    if starts_with(text, "/marketing-context default ") then {
+      let def_text = trim(substring(text, 28.0, len(text)))
+      if def_text == "" then { send_message(chat_id, "Формат: /marketing-context default <текст по умолчанию>")
+return respond("200 ok") }
+      let _ = kv_set("product_context:default", def_text)
+      send_message(chat_id, "Контекст продукта по умолчанию сохранён.")
+      return respond("200 ok")
+    }
+
+    // ── FOIP-003.11: /marketing-ideas <запрос> ──
+    if starts_with(text, "/marketing-ideas ") then {
+      let ideas_query = trim(substring(text, 17.0, len(text)))
+      if ideas_query == "" then { send_message(chat_id, "Формат: /marketing-ideas <запрос, например: как привлечь первых пользователей>")
+return respond("200 ok") }
+      send_message(chat_id, "Подбираю релевантные маркетинговые идеи...")
+      let ideas_result = GetRelevantIdeas(ideas_query, "5", chat_id)
+      send_message(chat_id, ideas_result)
+      return respond("200 ok")
+    }
+
+    // ── FOIP-003.12: /cro <текст страницы> ──
+    if starts_with(text, "/cro ") then {
+      let cro_text = trim(substring(text, 5.0, len(text)))
+      if cro_text == "" then { send_message(chat_id, "Формат: /cro <текст страницы или описания для CRO-аудита>")
+return respond("200 ok") }
+      send_message(chat_id, "CRO-аудит: анализирую конверсионный потенциал...")
+      let cro_result = CROAudit(cro_text, chat_id)
+      send_message(chat_id, cro_result)
+      return respond("200 ok")
+    }
+
     // DEPARTMENT ROUTING (13 depts)
     // ============================================================
 
