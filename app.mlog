@@ -162,6 +162,13 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS quest_files (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, filename TEXT, file_type TEXT, version INTEGER DEFAULT 1, storage_path TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(quest_id) REFERENCES quests(id))")
   db_execute("CREATE TABLE IF NOT EXISTS quest_checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, step_num INTEGER, step_label TEXT, status TEXT DEFAULT 'pending', approved_by TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, FOREIGN KEY(quest_id) REFERENCES quests(id))")
 
+  // ── FOIP-003 Phase 1: Session Log + Token Metering ──
+  db_execute("CREATE TABLE IF NOT EXISTS session_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, session_seq INTEGER DEFAULT 0, event_type TEXT, dept TEXT, data TEXT, model TEXT, tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0, latency_ms INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_slog_chat ON session_log(chat_id, session_seq)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_slog_type ON session_log(event_type)")
+  db_execute("CREATE TABLE IF NOT EXISTS daily_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, dept TEXT, model TEXT, total_calls INTEGER DEFAULT 0, total_tokens_in INTEGER DEFAULT 0, total_tokens_out INTEGER DEFAULT 0, total_errors INTEGER DEFAULT 0, total_latency_ms INTEGER DEFAULT 0, estimated_cost_usd REAL DEFAULT 0.0)")
+  db_execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dstats_date_dept ON daily_stats(date, dept, model)")
+
   return "ok"
 }
 
@@ -311,6 +318,265 @@ pattern CallLLMProxy(dept: String, messages: String) -> String {
   return result
 }
 
+// ── FOIP-003.1: Session Log ──
+pattern LogSessionEvent(chat_id: String, event_type: String, dept: String, data: String, model: String, tokens_in: String, tokens_out: String) -> String {
+  db_execute("INSERT INTO session_log (chat_id, session_seq, event_type, dept, data, model, tokens_in, tokens_out, created_at) VALUES (?, (SELECT COALESCE(MAX(session_seq),0)+1 FROM session_log WHERE chat_id=?), ?, ?, ?, ?, ?, ?, datetime('now'))", [chat_id, chat_id, event_type, dept, data, model, tokens_in, tokens_out])
+  return "ok"
+}
+
+// ── FOIP-003.2: Resilient LLM Calling with fallback + cooldown ──
+pattern GetModelFallbackChain(dept: String) -> String {
+  // Read dept-specific override, fallback to global priority_model
+  let override_file = "config/override_" + dept + ".txt"
+  let override_content = read_file(override_file)
+  if override_content != "" then {
+    // Extract model lines (skip comments and empty)
+    let lines = split(override_content, "\n")
+    let models = ""
+    each line in lines {
+      let trimmed = trim(line)
+      if len(trimmed) > 0 and starts_with(trimmed, "#") == false then {
+        if models != "" then { let models = models + "," }
+        let models = models + trimmed
+      }
+    }
+    if models != "" then { return models }
+  }
+  let global = read_file("config/priority_model.txt")
+  if global != "" then { return trim(global) }
+  return "glm-4.6"
+}
+
+
+pattern IsModelCooled(model: String) -> String {
+  let fails = kv_get("fails:" + model)
+  if fails == "" then { return "available" }
+  if to_int(fails) >= 3 then { return "cooled" }
+  return "available"
+}
+
+pattern MarkModelFail(model: String) -> String {
+  let fails = kv_get("fails:" + model)
+  let count = 0
+  if fails != "" then { let count = to_int(fails) }
+  let _ = kv_set("fails:" + model, to_string(count + 1))
+  return "ok"
+}
+
+pattern ClearModelFails(model: String) -> String {
+  let _ = kv_set("fails:" + model, "")
+  return "ok"
+}
+
+pattern CallLLMResilient(dept: String, messages: String) -> String {
+  let chain = GetModelFallbackChain(dept)
+  let models = split(chain, ",")
+  let last_error = ""
+  let reply = ""
+  let used_model = ""
+  let tokens_in = "0"
+  let tokens_out = "0"
+  let found = ""
+
+  each raw_model in models {
+    let model = trim(raw_model)
+    if model != "" and found == "" then {
+      let status = IsModelCooled(model)
+      if status == "cooled" then {
+        let last_error = "model " + model + " cooled (3+ fails)"
+      } else {
+        let body = json_encode({dept: dept, messages: parse_json(messages), model_override: model})
+        let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
+        if to_string(result) == "()" then {
+          let last_error = "no response from " + model
+          let _ = MarkModelFail(model)
+          let _ = AuditLog("model_fail", dept, model + " no response")
+        } else {
+          let parsed = try parse_json(result)
+          if parsed == "()" then {
+            let last_error = "parse error from " + model
+            let _ = MarkModelFail(model)
+          } else {
+            let r = to_string(json_get(parsed, "reply", ""))
+            if r == "" then {
+              let last_error = "empty reply from " + model
+              let _ = MarkModelFail(model)
+            } else {
+              let reply = r
+              let used_model = to_string(json_get(parsed, "model", model))
+              let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
+              let tokens_out = to_string(json_get(parsed, "tokens_out", "0"))
+              let _ = ClearModelFails(model)
+              let found = "yes"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if reply == "" then {
+    return json_encode({reply: "Error: all models failed (" + last_error + "). Try again later.", model: "", tokens_in: "0", tokens_out: "0", error: last_error})
+  }
+  return json_encode({reply: reply, model: used_model, tokens_in: tokens_in, tokens_out: tokens_out})
+}
+
+// ── FOIP-003.3: Token Metering ──
+pattern LogTokenUsage(chat_id: String, dept: String, model: String, tokens_in: String, tokens_out: String) -> String {
+  let today = substring(to_string(now()), 0.0, 10.0)
+  let _ = LogSessionEvent(chat_id, "token_usage", dept, "", model, tokens_in, tokens_out)
+  let _ = db_execute("INSERT INTO daily_stats (date, dept, model, total_calls, total_tokens_in, total_tokens_out) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(date, dept, model) DO UPDATE SET total_calls = total_calls + 1, total_tokens_in = total_tokens_in + ?, total_tokens_out = total_tokens_out + ?", [today, dept, model, tokens_in, tokens_out, tokens_in, tokens_out])
+  return "ok"
+}
+
+pattern LogModelSuccess(chat_id: String, dept: String, model: String, tokens_in: String, tokens_out: String) -> String {
+  let _ = LogTokenUsage(chat_id, dept, model, tokens_in, tokens_out)
+  return "ok"
+}
+
+pattern LogModelFailure(chat_id: String, dept: String, model: String, error: String) -> String {
+  let today = substring(to_string(now()), 0.0, 10.0)
+  let _ = LogSessionEvent(chat_id, "model_error", dept, error, model, "0", "0")
+  let _ = db_execute("INSERT INTO daily_stats (date, dept, model, total_errors) VALUES (?, ?, ?, 1) ON CONFLICT(date, dept, model) DO UPDATE SET total_errors = total_errors + 1", [today, dept, model])
+  return "ok"
+}
+
+// ── FOIP-003.13: Analytics helpers (wired early for metering) ──
+pattern ShowStats(chat_id: String) -> String {
+  let _ = InitDB()
+  let today = substring(to_string(now()), 0.0, 10.0)
+  let rows = query("SELECT dept, model, total_calls, total_tokens_in, total_tokens_out, total_errors FROM daily_stats WHERE date = ? ORDER BY total_calls DESC", [today])
+  if length(rows) == 0.0 then { return "Статистика за сегодня пуста." }
+  let out = "Статистика за " + today + ":\n"
+  each row in rows {
+    let d = to_string(json_get(row, "dept", "?"))
+    let m = to_string(json_get(row, "model", "?"))
+    let c = to_string(json_get(row, "total_calls", "0"))
+    let ti = to_string(json_get(row, "total_tokens_in", "0"))
+    let to_ = to_string(json_get(row, "total_tokens_out", "0"))
+    let e = to_string(json_get(row, "total_errors", "0"))
+    let out = out + d + " [" + m + "] calls:" + c + " tokens:" + ti + "+" + to_ + " err:" + e + "\n"
+  }
+  return out
+}
+
+pattern ShowCosts(chat_id: String) -> String {
+  let _ = InitDB()
+  let rows = query("SELECT date, dept, model, total_tokens_in, total_tokens_out, total_calls FROM daily_stats ORDER BY date DESC, total_tokens_in + total_tokens_out DESC LIMIT 20", [])
+  if length(rows) == 0.0 then { return "Данных о расходах нет." }
+  let out = "Расходы (последние записи):\n"
+  each row in rows {
+    let d = to_string(json_get(row, "date", "?"))
+    let dept = to_string(json_get(row, "dept", "?"))
+    let m = to_string(json_get(row, "model", "?"))
+    let ti = to_int(json_get(row, "total_tokens_in", "0"))
+    let to_ = to_int(json_get(row, "total_tokens_out", "0"))
+    let total = ti + to_
+    // Rough cost estimate: assume ~$2/1M input, ~$6/1M output (adjust per model)
+    let cost_est = to_string(to_float(ti) * 0.000002 + to_float(to_) * 0.000006)
+    let out = out + d + " " + dept + " [" + m + "] " + to_string(total) + " tokens ~$" + cost_est + " (" + to_string(json_get(row, "total_calls", "0")) + " calls)\n"
+  }
+  return out
+}
+
+// ── FOIP-003.4: Smart Model Routing — stats-aware fallback ──
+pattern GetModelErrorRate(model: String) -> String {
+  let today = substring(to_string(now()), 0.0, 10.0)
+  let rows = query("SELECT total_calls, total_errors FROM daily_stats WHERE date = ? AND model = ?", [today, model])
+  if length(rows) == 0.0 then { return "0" }
+  let calls = to_int(json_get(rows[0], "total_calls", "0"))
+  let errors = to_int(json_get(rows[0], "total_errors", "0"))
+  if calls == 0 then { return "0" }
+  return to_string(to_float(errors) / to_float(calls) * 100.0)
+}
+
+pattern RecordModelResult(dept: String, model: String, success: String) -> String {
+  if success != "ok" then {
+    let _ = LogModelFailure(dept, dept, model, "fallback triggered")
+  }
+  return "ok"
+}
+
+// ── FOIP-003.5: Context Compaction ──
+pattern EstimateTokens(text: String) -> String {
+  return to_string(len(text) / 4.0)
+}
+
+pattern GetCompactedHistory(chat_id: String, limit: String) -> String {
+  let total_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ?", [chat_id])
+  let total = to_int(json_get(total_rows[0], "cnt", "0"))
+  let lim = to_int(limit)
+  if total <= lim * 2 then {
+    return GetRecentDialog(chat_id, limit)
+  }
+  let early_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at ASC LIMIT 3", [chat_id])
+  let recent_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?", [chat_id, limit])
+  let out = ""
+  each row in early_rows {
+    let role = to_string(json_get(row, "role", ""))
+    let content = to_string(json_get(row, "content", ""))
+    if len(content) > 300.0 then { let content = substring(content, 0.0, 300.0) + "..." }
+    let out = out + role + ": " + content + "\n"
+  }
+  let skipped = total - 3 - lim
+  if skipped > 0 then {
+    let out = out + "\n[... " + to_string(skipped) + " messages skipped for context economy ...]\n\n"
+  }
+  each row in recent_rows {
+    let role = to_string(json_get(row, "role", ""))
+    let content = to_string(json_get(row, "content", ""))
+    let out = out + role + ": " + content + "\n"
+  }
+  return out
+}
+
+// ── FOIP-003.6: Three input channels (followup/steer/inject) ──
+pattern InjectContext(target_dept: String, context_text: String) -> String {
+  let existing = kv_get("inject:" + target_dept)
+  if existing != "" then {
+    let _ = kv_set("inject:" + target_dept, existing + "\n---\n" + context_text)
+  } else {
+    let _ = kv_set("inject:" + target_dept, context_text)
+  }
+  return "ok"
+}
+
+pattern GetInjectedContext(dept: String) -> String {
+  let ctx = kv_get("inject:" + dept)
+  if ctx != "" then {
+    let _ = kv_set("inject:" + dept, "")
+  }
+  return ctx
+}
+
+pattern SteerDept(dept: String, correction: String) -> String {
+  let _ = kv_set("steer:" + dept, correction)
+  return "ok"
+}
+
+pattern GetSteerContext(dept: String) -> String {
+  let ctx = kv_get("steer:" + dept)
+  if ctx != "" then {
+    let _ = kv_set("steer:" + dept, "")
+  }
+  return ctx
+}
+}
+
+pattern SteerDept(dept: String, correction: String) -> String {
+  let _ = kv_set("steer:" + dept, correction)
+  return "ok"
+}
+
+pattern GetSteerContext(dept: String) -> String {
+  let ctx = kv_get("steer:" + dept)
+  if ctx != "" then {
+    let _ = kv_set("steer:" + dept, "")
+  }
+  return ctx
+}
+
+
 pattern IsImageRequest(text: String) -> String {
   // Returns "true" if text asks for image generation, "" otherwise
   let t = lower(text)
@@ -366,7 +632,11 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   }
 
   let corrections = GetCorrections(dept)
-  let dialog = GetRecentDialog(chat_id, "10")
+  // FOIP-003.6: Cross-dept inject + mid-turn steer
+  let injected = GetInjectedContext(dept)
+  let steer = GetSteerContext(dept)
+  // FOIP-003.5: Use compacted history for long conversations
+  let dialog = GetCompactedHistory(chat_id, "10")
   let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
 
@@ -392,7 +662,11 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   if s_now == "()" then { let s_now = "" }
   let s_skills = to_string(skills)
   if s_skills == "()" then { let s_skills = "" }
-  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
+  let s_injected = to_string(injected)
+  if s_injected == "()" then { let s_injected = "" }
+  let s_steer = to_string(steer)
+  if s_steer == "()" then { let s_steer = "" }
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Cross-dept Context ===" + s_injected + "\n\n=== Steering ===" + s_steer + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
 
   // Append fresh news if available
   if news != "" then {
@@ -739,13 +1013,22 @@ pattern FormatArchiveRows(rows: Any) -> String {
 pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String {
   let context = BuildContext(dept, query, chat_id)
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
+  // FOIP-003.1: Log user message to session
+  let _ = LogSessionEvent(chat_id, "user_message", dept, substring(query, 0.0, 2000.0), "", "0", "0")
+  // FOIP-003.2: Use resilient LLM with fallback
+  let proxy_result = CallLLMResilient(dept, messages)
   if to_string(proxy_result) == "()" then { return "" }
   let parsed = parse_json(proxy_result)
-  let reply = json_get(parsed, "reply", "Error: empty reply")
+  let reply = to_string(json_get(parsed, "reply", "Error: empty reply"))
   let used_model = to_string(json_get(parsed, "model", ""))
   let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
   let tokens_out = to_string(json_get(parsed, "tokens_out", "0"))
+  // FOIP-003.3: Log token usage
+  if used_model != "" then {
+    let _ = LogModelSuccess(chat_id, dept, used_model, tokens_in, tokens_out)
+  }
+  // FOIP-003.1: Log assistant message to session
+  let _ = LogSessionEvent(chat_id, "assistant_message", dept, substring(reply, 0.0, 2000.0), used_model, tokens_in, tokens_out)
   // Store model info for SendReport meta section
   if used_model != "" then { let _ = kv_set("last_model_" + dept, used_model) }
   let _ = kv_set("last_tokens_" + dept, tokens_in + "+" + tokens_out)
@@ -2327,11 +2610,33 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // /cost — with OmniRoute compression stats
+    // /cost — token costs by department
     if text == "/cost" then {
-      let _ = SendTelegramReply(chat_id, "Cost tracking: " + env("RENDER_URL") + "/office-dashboard\n\nOmniRoute: token compression enabled (rolling-summary). Compression savings tracked in token_usage.compression_saved column.")
+      let _ = SendTelegramReply(chat_id, ShowCosts(chat_id))
       return respond("200 ok")
     }
+
+    // /stats — daily usage statistics
+    if text == "/stats" then {
+      let _ = SendTelegramReply(chat_id, ShowStats(chat_id))
+      return respond("200 ok")
+    }
+
+    // /inject <dept> <text> — FOIP-003.6: inject cross-dept context
+    if starts_with(text, "/inject ") then {
+      let rest = substring(text, 8.0, 10000.0)
+      let parts = split(rest, _sp)
+      if len(parts) >= 2.0 then {
+        let target_dept = get(parts, 0.0)
+        let ctx_text = substring(rest, len(target_dept) + 1.0, 10000.0)
+        let _ = InjectContext(target_dept, ctx_text)
+        let _ = SendTelegramReply(chat_id, "Injected context into " + target_dept + ". Will be used on next query.")
+      } else {
+        let _ = SendTelegramReply(chat_id, "Usage: /inject <dept> <context text>")
+      }
+      return respond("200 ok")
+    }
+
 
     // /budget
     if starts_with(text, "/budget") then {
