@@ -37,7 +37,6 @@ import dept/visual
 import dept/engineering
 import dept/kavalnya
 import dept/admin
-import dept/project
 
 // ============================================================
 // MEMORY — SQLite via db_execute() in InitDB()
@@ -92,9 +91,7 @@ pattern InitDB() -> String {
 
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
-  // Project pipeline
-  db_execute("CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, platform TEXT, github_repo TEXT, description TEXT, status TEXT DEFAULT 'planning', chat_id TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
-  db_execute("CREATE TABLE IF NOT EXISTS project_phases (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER, phase TEXT, dept TEXT, status TEXT DEFAULT 'pending', result TEXT, started_at TEXT, completed_at TEXT, FOREIGN KEY(project_id) REFERENCES projects(id))")
+  // Yana events - alter table extensions
   let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
   let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
   let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
@@ -2076,7 +2073,6 @@ mlogserver {
     // /help
     if text == "/help" then {
       let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg | /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam | /osp bet | /osp watch | /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /stats /cost /costs /budget /model
-Analytics: /stats-aggregate /model-cost\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — список открытых\n  /наряд готов <ID> | /наряд отмена <ID>\n\nProjects: /project — список проектов\n  /project new <platform> <github_url> <description> — создать проект\n  /project <ID> — статус\n  /project <ID> run — запустить следующую фазу\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -2232,80 +2228,6 @@ Analytics: /stats-aggregate /model-cost\n\nChain: /chain dept1+dept2 <query>\n\n
       return respond("200 ok")
     }
 
-    // ════════════════════════════════════════════════════════════
-    // PROJECT PIPELINE — /project new|list|status|run
-    // ════════════════════════════════════════════════════════════
-
-    // /project — list all projects
-    if text == "/project" then {
-      let _ = InitDB()
-      let list = ProjectList(chat_id)
-      let _ = SendTelegramReply(chat_id, list)
-      return respond("200 ok")
-    }
-
-    // /project new <platform> <repo_url> <description>
-    if starts_with(text, "/project new ") then {
-      let _ = InitDB()
-      let rest = trim(substring(text, 13.0, len(text)))
-      // Parse: first word = platform, second = repo URL (optional), rest = description
-      let parts = split(rest, _sp)
-      if len(parts) < 2.0 then {
-        let _ = SendTelegramReply(chat_id, "Формат: /project new <platform> <github_repo_url> <description>\nПример: /project new android https://github.com/user/myapp Приложение для учёта расходов")
-        return respond("200 ok")
-      }
-      let platform = to_string(json_get(parts, 0.0))
-      let second = to_string(json_get(parts, 1.0))
-      let repo = ""
-      let desc_start = 1.0
-      // Check if second part looks like a URL
-      if contains(second, "github.com") or contains(second, "/") then {
-        let repo = second
-        let desc_start = 2.0
-      }
-      // Build description from remaining parts
-      let desc = ""
-      let di = desc_start
-      while di < to_float(len(parts)) {
-        if desc != "" then { let desc = desc + " " }
-        let desc = desc + to_string(json_get(parts, di))
-        let di = di + 1.0
-      }
-      if desc == "" then { let desc = platform + " project" }
-      let pid = ProjectCreate(platform + " project", platform, repo, desc, chat_id)
-      let msg = "Проект [" + pid + "] создан.\nПлатформа: " + platform
-      if repo != "" then { let msg = msg + "\nРепо: " + repo }
-      let msg = msg + "\nОписание: " + desc + "\n\nФазы: planning -> design -> development -> review -> done\n\nЗапустить: /project " + pid + " run"
-      let _ = SendTelegramReply(chat_id, msg)
-      return respond("200 ok")
-    }
-
-    // /project <id> run — execute next phase
-    if starts_with(text, "/project ") then {
-      let rest = trim(substring(text, 9.0, len(text)))
-      let pparts = split(rest, _sp)
-      if len(pparts) >= 2.0 then {
-        let pid = to_string(json_get(pparts, 0.0))
-        let action = to_string(json_get(pparts, 1.0))
-        if action == "run" then {
-          let _ = InitDB()
-          let result = ProjectRun(pid, chat_id)
-          // Send result as report (can be long)
-          if len(result) > 800.0 then {
-            let _ = SendReport(result, "project", "Phase execution", "2.0", chat_id)
-          } else {
-            let _ = SendTelegramReply(chat_id, result)
-          }
-          return respond("200 ok")
-        }
-      }
-      // /project <id> — show status (single arg after /project that is a number)
-      let maybe_id = rest
-      let _ = InitDB()
-      let status = ProjectStatus(maybe_id)
-      let _ = SendTelegramReply(chat_id, status)
-      return respond("200 ok")
-    }
 
     // /learning — stats (MEGA-3)
     if text == "/learning" then {
