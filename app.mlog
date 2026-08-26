@@ -709,8 +709,10 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
     let news_body = json_encode({query: query, dept: dept, limit: 5})
     let news_result = try http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json")
     if to_string(news_result) != "()" then {
-      let news_parsed = parse_json(news_result)
-      let news = json_get(news_parsed, "news", "")
+      let news_parsed = try parse_json(news_result)
+      if to_string(news_parsed) != "()" then {
+        let news = json_get(news_parsed, "news", "")
+      }
     }
   }
 
@@ -1089,9 +1091,16 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   // FOIP-003.1: Log user message to session
   let _ = LogSessionEvent(chat_id, "user_message", dept, substring(query, 0.0, 2000.0), "", "0", "0")
   // FOIP-003.2: Use resilient LLM with fallback
-  let proxy_result = CallLLMResilient(dept, messages)
-  if to_string(proxy_result) == "()" then { return "" }
-  let parsed = parse_json(proxy_result)
+  let proxy_result = try CallLLMResilient(dept, messages)
+  if to_string(proxy_result) == "()" then {
+    let _ = AuditLog("llm_fail", dept, "CallLLMResilient crashed")
+    return ""
+  }
+  let parsed = try parse_json(proxy_result)
+  if to_string(parsed) == "()" then {
+    let _ = AuditLog("llm_fail", dept, "parse_json on proxy_result failed: " + substring(to_string(proxy_result), 0.0, 100.0))
+    return ""
+  }
   let reply = to_string(json_get(parsed, "reply", "Error: empty reply"))
   let used_model = to_string(json_get(parsed, "model", ""))
   let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
