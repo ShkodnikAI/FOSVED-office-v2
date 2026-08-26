@@ -1730,7 +1730,7 @@ pattern YanaGetMetrics() -> String {
   let dept_breakdown = ""
   each row in deleg_by_dept {
     let d = json_get(row, "delegated_to", "?")
-    let dc = json_get(row, "c", "0")
+    let dc = to_string(json_get(row, "c", "0"))
     let dept_breakdown = dept_breakdown + d + ": " + dc + "  "
   }
   let forget_total = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents", [])
@@ -2251,35 +2251,8 @@ mlogserver {
 
     // /yana-metrics — delegation accuracy & forgetting incidents
     if text == "/yana-metrics" then {
-      // Granular debug: run each query from YanaGetMetrics individually
-      let d1 = try query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 1", [])
-      let d1s = "d1=" + substring(to_string(d1), 0.0, 60.0)
-      let d2 = try query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 0", [])
-      let d2s = "d2=" + substring(to_string(d2), 0.0, 60.0)
-      let d3 = try query("SELECT delegated_to, COUNT(*) AS c FROM yana_delegation_log GROUP BY delegated_to ORDER BY c DESC LIMIT 5", [])
-      let d3s = "d3=" + substring(to_string(d3), 0.0, 60.0)
-      let d4 = try query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents", [])
-      let d4s = "d4=" + substring(to_string(d4), 0.0, 60.0)
-      let d5 = try query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE memory_existed = 1", [])
-      let d5s = "d5=" + substring(to_string(d5), 0.0, 60.0)
-      let d6 = try query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE reported_at >= datetime('now', '-7 days')", [])
-      let d6s = "d6=" + substring(to_string(d6), 0.0, 60.0)
-      let d7 = try query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation'", [])
-      let d7s = "d7=" + substring(to_string(d7), 0.0, 60.0)
-      let d8 = try query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation' AND timestamp >= datetime('now', '-7 days')", [])
-      let d8s = "d8=" + substring(to_string(d8), 0.0, 60.0)
-      // Now test json_get + to_float on each
-      let v1 = 0.0
-      each r in d1 { let v1 = try to_float(json_get(r, "c", "0")) }
-      let v2 = 0.0
-      each r in d2 { let v2 = try to_float(json_get(r, "c", "0")) }
-      let v3 = 0.0
-      each r in d4 { let v3 = try to_float(json_get(r, "c", "0")) }
-      let v4 = 0.0
-      each r in d7 { let v4 = try to_float(json_get(r, "c", "0")) }
-      // Test concatenation with to_string on floats
-      let ts = "v1=" + to_string(v1) + " v2=" + to_string(v2) + " v3=" + to_string(v3) + " v4=" + to_string(v4)
-      let _ = SendTelegramReply(chat_id, d1s + "\n" + d2s + "\n" + d3s + "\n" + d4s + "\n" + d5s + "\n" + d6s + "\n" + d7s + "\n" + d8s + "\n\n" + ts)
+      let metrics = YanaGetMetrics()
+      let _ = SendTelegramReply(chat_id, metrics)
       return respond("200 ok")
     }
 
@@ -2298,43 +2271,23 @@ mlogserver {
 
     // /digest
     if text == "/digest" then {
-      // Granular debug for EveningSummary
-      let s1 = try env("OWNER_TELEGRAM_ID")
-      let s1s = "s1(env)=" + substring(to_string(s1), 0.0, 40.0)
-      let s2 = try query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-12 hours')", [])
-      let s2s = "s2(tasks_q)=" + substring(to_string(s2), 0.0, 40.0)
-      let s3 = try query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-12 hours')", [])
-      let s3s = "s3(depts_q)=" + substring(to_string(s3), 0.0, 40.0)
-      let s4 = try json_encode(s3)
-      let s4s = "s4(json_enc)=" + substring(to_string(s4), 0.0, 40.0)
-      let s5 = try read_file("library/yana.md")
-      let s5s = "s5(read_file)=" + substring(to_string(s5), 0.0, 40.0)
-      let s6 = try call_llm("test", "test")
-      let s6s = "s6(call_llm)=" + substring(to_string(s6), 0.0, 40.0)
-      let s7 = try SendTelegramReplyMDV2(chat_id, "test")
-      let s7s = "s7(MDV2)=" + substring(to_string(s7), 0.0, 40.0)
-      let _ = SendTelegramReply(chat_id, s1s + "\n" + s2s + "\n" + s3s + "\n" + s4s + "\n" + s5s + "\n" + s6s + "\n" + s7s)
+      let result = try EveningSummary()
+      if to_string(result) == "()" then {
+        let _ = SendTelegramReply(chat_id, "Evening summary error — check logs.")
+      } else {
+        let _ = SendTelegramReply(chat_id, "Evening digest sent.")
+      }
       return respond("200 ok")
     }
 
     // /review
     if text == "/review" then {
-      // Granular debug for WeeklyDigest
-      let w1 = try env("OWNER_TELEGRAM_ID")
-      let w1s = "w1(env)=" + substring(to_string(w1), 0.0, 40.0)
-      let w2 = try query("SELECT COUNT(*) as cnt FROM channel_archive WHERE archived_at > datetime('now', '-7 days')", [])
-      let w2s = "w2(archive_q)=" + substring(to_string(w2), 0.0, 40.0)
-      let w3 = try query("SELECT dept, COUNT(*) as cnt FROM channel_archive WHERE archived_at > datetime('now', '-7 days') GROUP BY dept ORDER BY cnt DESC LIMIT 5", [])
-      let w3s = "w3(top_q)=" + substring(to_string(w3), 0.0, 40.0)
-      let w4 = try json_encode(w3)
-      let w4s = "w4(json_enc)=" + substring(to_string(w4), 0.0, 40.0)
-      let w5 = try read_file("library/yana.md")
-      let w5s = "w5(read_file)=" + substring(to_string(w5), 0.0, 40.0)
-      let w6 = try call_llm("test", "test")
-      let w6s = "w6(call_llm)=" + substring(to_string(w6), 0.0, 40.0)
-      let w7 = try SendTelegramReplyMDV2(chat_id, "test")
-      let w7s = "w7(MDV2)=" + substring(to_string(w7), 0.0, 40.0)
-      let _ = SendTelegramReply(chat_id, w1s + "\n" + w2s + "\n" + w3s + "\n" + w4s + "\n" + w5s + "\n" + w6s + "\n" + w7s)
+      let result = try WeeklyDigest()
+      if to_string(result) == "()" then {
+        let _ = SendTelegramReply(chat_id, "Weekly digest error — check logs.")
+      } else {
+        let _ = SendTelegramReply(chat_id, "Weekly review sent.")
+      }
       return respond("200 ok")
     }
 
