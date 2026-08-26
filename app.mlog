@@ -3271,14 +3271,31 @@ mlogserver {
         return respond("200 ok")
       }
       let _ = RecordUserMessage(chat_id, "osp", text)
-      // Clear stale model fails from debugging, then handle normally
       let _ = ClearModelFails("glm-4.6")
-      let reply = try HandleDeptQuery("osp", query, chat_id)
-      if to_string(reply) == "()" or reply == "" then {
-        let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
-      } else {
-        let _ = SendReport(reply, "osp", "OSP: " + substring(query, 0.0, 50.0), "3.0", chat_id)
+      send_message(chat_id, "ОСП: анализирую запрос...")
+      // Step-by-step debug with visible errors
+      let s1 = try BuildContext("osp", query, chat_id)
+      if to_string(s1) == "()" then {
+        let _ = SendTelegramReply(chat_id, "B3 FAIL: BuildContext crashed")
+        return respond("200 ok")
       }
+      let s2 = json_encode([{role: "system", content: s1}, {role: "user", content: query}])
+      let s3 = try CallLLMResilient("osp", s2)
+      if to_string(s3) == "()" then {
+        let _ = SendTelegramReply(chat_id, "B3 FAIL: CallLLMResilient crashed")
+        return respond("200 ok")
+      }
+      let s4 = try parse_json(s3)
+      if to_string(s4) == "()" then {
+        let _ = SendTelegramReply(chat_id, "B3 FAIL: parse_json crashed. raw=" + substring(to_string(s3), 0.0, 100.0))
+        return respond("200 ok")
+      }
+      let s5 = to_string(json_get(s4, "reply", ""))
+      if s5 == "" then {
+        let _ = SendTelegramReply(chat_id, "B3 FAIL: empty reply. raw=" + substring(to_string(s3), 0.0, 100.0))
+        return respond("200 ok")
+      }
+      let _ = SendReport(s5, "osp", "OSP: " + substring(query, 0.0, 50.0), "3.0", chat_id)
       return respond("200 ok")
     }
 
