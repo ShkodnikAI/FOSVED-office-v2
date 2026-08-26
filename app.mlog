@@ -373,15 +373,56 @@ pattern ClearModelFails(model: String) -> String {
 }
 
 pattern CallLLMResilient(dept: String, messages: String) -> String {
-  // DEBUG: return diagnostics instead of actual LLM call
   let chain = GetModelFallbackChain(dept)
-  let chain_debug = "chain=[" + chain + "]"
   let models = split(chain, ",")
-  let body = try json_encode({dept: dept, messages: parse_json(messages), model_override: trim(models[0])})
-  let body_debug = "body=" + substring(to_string(body), 0.0, 80.0)
-  let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 30.0)
-  let result_debug = "result=" + substring(to_string(result), 0.0, 80.0)
-  return json_encode({reply: "[DEBUG] " + chain_debug + " | " + body_debug + " | " + result_debug, model: "debug", tokens_in: "0", tokens_out: "0", error: ""})
+  let last_error = ""
+  let reply = ""
+  let used_model = ""
+  let tokens_in = "0"
+  let tokens_out = "0"
+  let found = ""
+
+  each raw_model in models {
+    let model = trim(raw_model)
+    if model != "" and found == "" then {
+      let status = IsModelCooled(model)
+      if status == "cooled" then {
+        let last_error = "model " + model + " cooled (3+ fails)"
+      } else {
+        let body = json_encode({dept: dept, messages: parse_json(messages), model_override: model})
+        let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
+        if to_string(result) == "()" then {
+          let last_error = "no response from " + model
+          let _ = MarkModelFail(model)
+          let _ = AuditLog("model_fail", dept, model + " no response")
+        } else {
+          let parsed = try parse_json(result)
+          if parsed == "()" then {
+            let last_error = "parse error from " + model
+            let _ = MarkModelFail(model)
+          } else {
+            let r = to_string(json_get(parsed, "reply", ""))
+            if r == "" then {
+              let last_error = "empty reply from " + model
+              let _ = MarkModelFail(model)
+            } else {
+              let reply = r
+              let used_model = to_string(json_get(parsed, "model", model))
+              let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
+              let tokens_out = to_string(json_get(parsed, "tokens_out", "0"))
+              let _ = ClearModelFails(model)
+              let found = "yes"
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if reply == "" then {
+    return json_encode({reply: "Error: all models failed (" + last_error + "). Try again later.", model: "", tokens_in: "0", tokens_out: "0", error: last_error})
+  }
+  return json_encode({reply: reply, model: used_model, tokens_in: tokens_in, tokens_out: tokens_out})
 }
 
 // ── FOIP-003.3: Token Metering ──
@@ -3221,12 +3262,14 @@ mlogserver {
         return respond("200 ok")
       }
       let _ = RecordUserMessage(chat_id, "osp", text)
-      send_message(chat_id, "ОСП: анализирую запрос...")
-      // Debug step 4: CallLLMResilient now returns internal diagnostics
-      let ctx = try BuildContext("osp", query, chat_id)
-      let msgs = json_encode([{role: "system", content: ctx}, {role: "user", content: query}])
-      let llm_result = try CallLLMResilient("osp", msgs)
-      let _ = SendTelegramReply(chat_id, to_string(llm_result))
+      // Clear stale model fails from debugging, then handle normally
+      let _ = ClearModelFails("glm-4.6")
+      let reply = try HandleDeptQuery("osp", query, chat_id)
+      if to_string(reply) == "()" or reply == "" then {
+        let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
+      } else {
+        let _ = SendReport(reply, "osp", "OSP: " + substring(query, 0.0, 50.0), "3.0", chat_id)
+      }
       return respond("200 ok")
     }
 
