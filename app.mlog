@@ -373,8 +373,10 @@ pattern ClearModelFails(model: String) -> String {
 }
 
 pattern CallLLMResilient(dept: String, messages: String) -> String {
-  let chain = GetModelFallbackChain(dept)
-  let models = split(chain, ",")
+  let chain = try GetModelFallbackChain(dept)
+  if to_string(chain) == "()" then { return json_encode({reply: "Error: GetModelFallbackChain crashed", model: "", tokens_in: "0", tokens_out: "0", error: "GetModelFallbackChain"}) }
+  let models = try split(chain, ",")
+  if to_string(models) == "()" then { return json_encode({reply: "Error: split chain crashed", model: "", tokens_in: "0", tokens_out: "0", error: "split"}) }
   let last_error = ""
   let reply = ""
   let used_model = ""
@@ -385,33 +387,42 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
   each raw_model in models {
     let model = trim(raw_model)
     if model != "" and found == "" then {
-      let status = IsModelCooled(model)
+      let status = try IsModelCooled(model)
+      if to_string(status) == "()" then { let status = "available" }
       if status == "cooled" then {
         let last_error = "model " + model + " cooled (3+ fails)"
       } else {
-        let body = json_encode({dept: dept, messages: parse_json(messages), model_override: model})
-        let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
-        if to_string(result) == "()" then {
-          let last_error = "no response from " + model
-          let _ = MarkModelFail(model)
-          let _ = AuditLog("model_fail", dept, model + " no response")
+        let msgs_parsed = try parse_json(messages)
+        if to_string(msgs_parsed) == "()" then {
+          let last_error = "parse_json(messages) crashed"
         } else {
-          let parsed = try parse_json(result)
-          if parsed == "()" then {
-            let last_error = "parse error from " + model
-            let _ = MarkModelFail(model)
+          let body = try json_encode({dept: dept, messages: msgs_parsed, model_override: model})
+          if to_string(body) == "()" then {
+            let last_error = "json_encode body crashed"
           } else {
-            let r = to_string(json_get(parsed, "reply", ""))
-            if r == "" then {
-              let last_error = "empty reply from " + model
-              let _ = MarkModelFail(model)
+            let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
+            if to_string(result) == "()" then {
+              let last_error = "no response from " + model
+              let _ = try MarkModelFail(model)
             } else {
-              let reply = r
-              let used_model = to_string(json_get(parsed, "model", model))
-              let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
-              let tokens_out = to_string(json_get(parsed, "tokens_out", "0"))
-              let _ = ClearModelFails(model)
-              let found = "yes"
+              let parsed = try parse_json(result)
+              if to_string(parsed) == "()" then {
+                let last_error = "parse error from " + model
+                let _ = try MarkModelFail(model)
+              } else {
+                let r = to_string(try json_get(parsed, "reply", ""))
+                if r == "" or r == "()" then {
+                  let last_error = "empty reply from " + model
+                  let _ = try MarkModelFail(model)
+                } else {
+                  let reply = r
+                  let used_model = to_string(try json_get(parsed, "model", model))
+                  let tokens_in = to_string(try json_get(parsed, "tokens_in", "0"))
+                  let tokens_out = to_string(try json_get(parsed, "tokens_out", "0"))
+                  let _ = try ClearModelFails(model)
+                  let found = "yes"
+                }
+              }
             }
           }
         }
