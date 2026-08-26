@@ -2241,10 +2241,15 @@ mlogserver {
       let naryad_id = "N" + substring(to_string(time_unix()), 5.0, len(to_string(time_unix())))
       // Get context: last assistant reply for reference
       let recent_rows = query("SELECT dept, content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1", [chat_id])
-      let recent_dept = json_get(parse_json(to_string(recent_rows)), "[0].dept", "")
       let context_line = ""
-      if recent_dept != "" then {
-        let context_line = "Контекст: ответ отдела " + recent_dept
+      if len(recent_rows) > 0.0 then {
+        let first_row = try get(recent_rows, 0.0)
+        if to_string(first_row) != "()" then {
+          let recent_dept = to_string(try json_get(first_row, "dept", ""))
+          if recent_dept != "" then {
+            let context_line = "Контекст: ответ отдела " + recent_dept
+          }
+        }
       }
       // Save to narads table
       db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES (?1, ?2, ?3, ?4, ?5, 'pending')", [naryad_id, substring(naryad_text, 0.0, 100.0), naryad_text, chat_id, "low"])
@@ -2776,9 +2781,9 @@ mlogserver {
       let output = "Last 20 audit events:\n"
       let count = 0.0
       each row in audit_rows {
-        let action = json_get(parse_json(to_string(row)), "action", "")
-        let dept = json_get(parse_json(to_string(row)), "dept", "")
-        let ts = json_get(parse_json(to_string(row)), "timestamp", "")
+        let action = to_string(json_get(row, "action", ""))
+        let dept = to_string(json_get(row, "dept", ""))
+        let ts = to_string(json_get(row, "timestamp", ""))
         let output = output + "[" + ts + "] " + action + " (" + dept + ")\n"
         let count = count + 1.0
         if count >= 20.0 then { }
@@ -2793,9 +2798,9 @@ mlogserver {
       let narad_rows = query("SELECT id, title, status, risk_level, created_at FROM narads ORDER BY id DESC LIMIT 10", [])
       let output = "Open narads:\n"
       each row in narad_rows {
-        let nid = json_get(parse_json(to_string(row)), "id", "")
-        let title = json_get(parse_json(to_string(row)), "title", "")
-        let status = json_get(parse_json(to_string(row)), "status", "")
+        let nid = to_string(json_get(row, "id", ""))
+        let title = to_string(json_get(row, "title", ""))
+        let status = to_string(json_get(row, "status", ""))
         let output = output + nid + " [" + status + "] " + title + "\n"
       }
       let _ = SendTelegramReply(chat_id, output)
@@ -2847,9 +2852,15 @@ mlogserver {
           // Legacy: publish specific MiniApp doc by doc_id
           let doc_id = arg1
           let doc_rows = query("SELECT dept, title, raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
-          let doc_dept = json_get(parse_json(to_string(doc_rows)), "[0].dept", "")
-          let doc_title = json_get(parse_json(to_string(doc_rows)), "[0].title", "")
-          let doc_content = json_get(parse_json(to_string(doc_rows)), "[0].raw_text", "")
+          let doc_dept = ""
+          let doc_title = ""
+          let doc_content = ""
+          if len(doc_rows) > 0.0 then {
+            let first = get(doc_rows, 0.0)
+            let doc_dept = to_string(json_get(first, "dept", ""))
+            let doc_title = to_string(json_get(first, "title", ""))
+            let doc_content = to_string(json_get(first, "raw_text", ""))
+          }
           if doc_dept != "" then {
             let msg_id = PublishToArchive(doc_id, doc_dept, doc_title, doc_content)
             let _ = SendTelegramReply(chat_id, "Archived: " + doc_title + " (msg_id: " + msg_id + ")")
@@ -2860,11 +2871,18 @@ mlogserver {
       } else {
         // Legacy: archive last MiniApp report
         let last_rows = query("SELECT id, dept, title, raw_text FROM miniapp_responses ORDER BY created_at DESC LIMIT 1", [])
-        let last_id = json_get(parse_json(to_string(last_rows)), "[0].id", "")
+        let last_id = ""
+        let last_dept = ""
+        let last_title = ""
+        let last_content = ""
+        if len(last_rows) > 0.0 then {
+          let first = get(last_rows, 0.0)
+          let last_id = to_string(json_get(first, "id", ""))
+          let last_dept = to_string(json_get(first, "dept", ""))
+          let last_title = to_string(json_get(first, "title", ""))
+          let last_content = to_string(json_get(first, "raw_text", ""))
+        }
         if last_id != "" then {
-          let last_dept = json_get(parse_json(to_string(last_rows)), "[0].dept", "")
-          let last_title = json_get(parse_json(to_string(last_rows)), "[0].title", "")
-          let last_content = json_get(parse_json(to_string(last_rows)), "[0].raw_text", "")
           let msg_id = PublishToArchive(last_id, last_dept, last_title, last_content)
           let _ = SendTelegramReply(chat_id, "Archived: " + last_title + " (msg_id: " + msg_id + ")")
         } else {
