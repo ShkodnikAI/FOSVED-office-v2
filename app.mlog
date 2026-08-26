@@ -2878,26 +2878,35 @@ mlogserver {
         }
       } else {
         // Legacy: archive last MiniApp report
-        let last_rows = query("SELECT id, dept, title, raw_text FROM miniapp_responses ORDER BY created_at DESC LIMIT 1", [])
-        let last_id = ""
-        let last_dept = ""
-        let last_title = ""
-        let last_content = ""
-        if len(last_rows) > 0.0 then {
-          let first = get(last_rows, 0.0)
-          let last_id = to_string(json_get(first, "id", ""))
-          let last_dept = to_string(json_get(first, "dept", ""))
-          let last_title = to_string(json_get(first, "title", ""))
-          let last_content = to_string(json_get(first, "raw_text", ""))
-        }
-        if last_id != "" then {
-          let msg_id = PublishToArchive(last_id, last_dept, last_title, last_content)
-          let _ = SendTelegramReply(chat_id, "Archived: " + last_title + " (msg_id: " + msg_id + ")")
-        } else {
+        let result = try ArchiveLastReport()
+        if to_string(result) == "()" then {
           let _ = SendTelegramReply(chat_id, "No reports to archive.")
+        } else {
+          let _ = SendTelegramReply(chat_id, result)
         }
       }
       return respond("200 ok")
+    }
+
+    // Helper: archive last MiniApp report
+    pattern ArchiveLastReport() -> String {
+      let last_rows = query("SELECT id, dept, title, raw_text FROM miniapp_responses ORDER BY created_at DESC LIMIT 1", [])
+      let last_id = ""
+      let last_dept = ""
+      let last_title = ""
+      let last_content = ""
+      if len(last_rows) > 0.0 then {
+        let first = get(last_rows, 0.0)
+        let last_id = to_string(json_get(first, "id", ""))
+        let last_dept = to_string(json_get(first, "dept", ""))
+        let last_title = to_string(json_get(first, "title", ""))
+        let last_content = to_string(json_get(first, "raw_text", ""))
+      }
+      if last_id != "" then {
+        let msg_id = try PublishToArchive(last_id, last_dept, last_title, last_content)
+        return "Archived: " + last_title + " (msg_id: " + to_string(msg_id) + ")"
+      }
+      return "No reports to archive."
     }
 
     // /verify <dept> <id> <outcome> — verify an archived entry (narad 3/6, extended narad 8)
@@ -2927,8 +2936,12 @@ mlogserver {
     if starts_with(text, "/score ") then {
       let dept = trim(substring(text, 7.0, len(text)))
       if dept == "marketing" or dept == "finance" or dept == "legal" then {
-        let result = ScoreDept(dept)
-        let _ = SendTelegramReply(chat_id, result)
+        let result = try ScoreDept(dept)
+        if to_string(result) == "()" then {
+          let _ = SendTelegramReply(chat_id, "ScoreDept error для " + dept)
+        } else {
+          let _ = SendTelegramReply(chat_id, result)
+        }
       } else {
         let _ = SendTelegramReply(chat_id, "Usage: /score <dept>\nGeneric depts: marketing, finance, legal\nFinance: базовая активность + MAPE (при >=10 verified pairs)\nLegal: базовая активность + % без rewrites (при >=10 verified)")
       }
