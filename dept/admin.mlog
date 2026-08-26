@@ -560,14 +560,14 @@ pattern AdminStatus() -> String {
   let graph_edges = query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
   let findings_high = query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open' AND severity = 'high'", [])
 
-  let f_open = json_get(to_string(findings_open), "[0].cnt", "0")
-  let p_pending = json_get(to_string(proposals_pending), "[0].cnt", "0")
-  let n_pending = json_get(to_string(narads_pending), "[0].cnt", "0")
-  let a_today = json_get(to_string(autofixes_today), "[0].cnt", "0")
-  let last_n = json_get(to_string(last_night), "[0].created_at", "never")
-  let g_nodes = json_get(to_string(graph_nodes), "[0].cnt", "0")
-  let g_edges = json_get(to_string(graph_edges), "[0].cnt", "0")
-  let f_high = json_get(to_string(findings_high), "[0].cnt", "0")
+  let f_open = to_string(try json_get(findings_open[0], "cnt", "0"))
+  let p_pending = to_string(try json_get(proposals_pending[0], "cnt", "0"))
+  let n_pending = to_string(try json_get(narads_pending[0], "cnt", "0"))
+  let a_today = to_string(try json_get(autofixes_today[0], "cnt", "0"))
+  let last_n = to_string(try json_get(last_night[0], "created_at", "never"))
+  let g_nodes = to_string(try json_get(graph_nodes[0], "cnt", "0"))
+  let g_edges = to_string(try json_get(graph_edges[0], "cnt", "0"))
+  let f_high = to_string(try json_get(findings_high[0], "cnt", "0"))
 
   let msg = "Admin v2.0 — status\n\n"
   let msg = msg + "Graph: " + g_nodes + " nodes, " + g_edges + " edges\n"
@@ -825,14 +825,23 @@ pattern AdminReport() -> String {
 // /admin health — real health score from UA
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminHealth() -> String {
-  let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
-  let health = json_get(parse_json(review_result), "health_score", "?")
-  let review_summary = json_get(parse_json(review_result), "summary", "")
+  let review_result = try http_get("http://127.0.0.1:4000/admin-ua/review")
+  if to_string(review_result) == "()" then {
+    let _ = AuditLog("admin_health", "admin", "http_get to admin-ua/review failed")
+    return "Admin health: внутренний эндпоент admin-ua/review недоступен."
+  }
+  let parsed = try parse_json(review_result)
+  if to_string(parsed) == "()" then {
+    let _ = AuditLog("admin_health", "admin", "parse_json failed on review result")
+    return "Admin health: ошибка парсинга ответа эндпоента."
+  }
+  let health = to_string(json_get(parsed, "health_score", "?"))
+  let review_summary = to_string(json_get(parsed, "summary", ""))
 
   let disclaimer = AdminDisclaimer()
-  let health_msg = "Code health: " + to_string(health) + "/10\n"
+  let health_msg = "Code health: " + health + "/10\n"
   let health_msg = health_msg + review_summary + "\n\n" + disclaimer
-  let _ = AuditLog("admin_health", "admin", "health=" + to_string(health))
+  let _ = AuditLog("admin_health", "admin", "health=" + health)
   return health_msg
 }
 
