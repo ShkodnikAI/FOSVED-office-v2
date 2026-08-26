@@ -1713,11 +1713,14 @@ pattern YanaRecordForgetting(chat_id: String, query_text: String, yana_answer: S
 
 pattern YanaGetMetrics() -> String {
   let deleg_total = query("SELECT COUNT(*) AS c FROM yana_delegation_log", [])
-  let deleg_total_n = to_float(json_get(deleg_total[0], "c", "0"))
+  let deleg_total_n = 0.0
+  each r in deleg_total { let deleg_total_n = to_float(json_get(r, "c", "0")) }
   let deleg_correct = query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 1", [])
-  let deleg_correct_n = to_float(json_get(deleg_correct[0], "c", "0"))
+  let deleg_correct_n = 0.0
+  each r in deleg_correct { let deleg_correct_n = to_float(json_get(r, "c", "0")) }
   let deleg_wrong = query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 0", [])
-  let deleg_wrong_n = to_float(json_get(deleg_wrong[0], "c", "0"))
+  let deleg_wrong_n = 0.0
+  each r in deleg_wrong { let deleg_wrong_n = to_float(json_get(r, "c", "0")) }
   let deleg_pending = deleg_total_n - deleg_correct_n - deleg_wrong_n
   let deleg_accuracy = 0.0
   if deleg_correct_n + deleg_wrong_n > 0.0 then {
@@ -1731,16 +1734,21 @@ pattern YanaGetMetrics() -> String {
     let dept_breakdown = dept_breakdown + d + ": " + dc + "  "
   }
   let forget_total = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents", [])
-  let forget_total_n = to_float(json_get(forget_total[0], "c", "0"))
+  let forget_total_n = 0.0
+  each r in forget_total { let forget_total_n = to_float(json_get(r, "c", "0")) }
   let forget_with_mem = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE memory_existed = 1", [])
-  let forget_with_mem_n = to_float(json_get(forget_with_mem[0], "c", "0"))
+  let forget_with_mem_n = 0.0
+  each r in forget_with_mem { let forget_with_mem_n = to_float(json_get(r, "c", "0")) }
   let forget_without_mem = forget_total_n - forget_with_mem_n
   let forget_7d = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE reported_at >= datetime('now', '-7 days')", [])
-  let forget_7d_n = to_float(json_get(forget_7d[0], "c", "0"))
+  let forget_7d_n = 0.0
+  each r in forget_7d { let forget_7d_n = to_float(json_get(r, "c", "0")) }
   let gate_violations = query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation'", [])
-  let gate_violations_n = to_float(json_get(gate_violations[0], "c", "0"))
+  let gate_violations_n = 0.0
+  each r in gate_violations { let gate_violations_n = to_float(json_get(r, "c", "0")) }
   let gate_7d = query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation' AND timestamp >= datetime('now', '-7 days')", [])
-  let gate_7d_n = to_float(json_get(gate_7d[0], "c", "0"))
+  let gate_7d_n = 0.0
+  each r in gate_7d { let gate_7d_n = to_float(json_get(r, "c", "0")) }
   let result = "Метрики Яны:\n\n"
   let result = result + "ДЕЛЕГИРОВАНИЕ:\n"
   let result = result + "  Всего: " + to_string(deleg_total_n) + "\n"
@@ -2113,36 +2121,31 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // /fix — LLM-classified correction (MEGA-3)
+    // /fix — record correction (MEGA-3, native Metalogos)
     if starts_with(text, "/fix") then {
-      let correction_text = substring(text, 5.0, len(correction_text))
-      // Extract text after /fix, also get the last query and dept from context
-      let recent_rows = query("SELECT dept, content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1", [chat_id])
-      let recent_dept = json_get(parse_json(to_string(recent_rows)), "[0].dept", "global")
+      let correction_text = substring(text, 5.0, len(text))
       if len(correction_text) > 1.0 then {
-        let fix_body = json_encode({text: correction_text, dept: recent_dept})
-        let fix_result = try http_post("http://127.0.0.1:4000/learning/fix", fix_body, "application/json")
-        if to_string(fix_result) == "()" then {
-          let _ = SendTelegramReply(chat_id, "Сервис обучения временно недоступен. Коррекция не сохранена.")
-          return respond("200 ok")
-        } else {
-          let error_type = json_get(parse_json(fix_result), "error_type", "classified")
-          let suggestion = json_get(parse_json(fix_result), "suggestion", "")
-          let _ = AuditLog("correction_fix", recent_dept, "type=" + error_type + " text=" + substring(correction_text, 0.0, 80.0))
-          // If correction targets Yana, record forgetting incident
-          if recent_dept == "yana" then {
-            let recent_user_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [chat_id])
-            let recent_query = json_get(parse_json(to_string(recent_user_rows)), "[0].content", "")
-            let recent_yana_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' AND dept = 'yana' ORDER BY id DESC LIMIT 1", [chat_id])
-            let yana_answer = json_get(parse_json(to_string(recent_yana_rows)), "[0].content", "")
-            let _ = YanaRecordForgetting(chat_id, recent_query, yana_answer, correction_text)
-          }
-          let msg = "Correction saved.\nType: " + error_type
-          if suggestion != "" then {
-            let msg = msg + "\nSuggestion: " + substring(suggestion, 0.0, 200.0)
-          }
-          let _ = SendTelegramReply(chat_id, msg)
+        let recent_rows = query("SELECT dept, content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1", [chat_id])
+        let recent_dept = "global"
+        each r in recent_rows {
+          let recent_dept = to_string(json_get(r, "dept", "global"))
         }
+        let user_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [chat_id])
+        let recent_query = ""
+        each r in user_rows {
+          let recent_query = to_string(json_get(r, "content", ""))
+        }
+        let _ = db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, corr_type) VALUES (?1, ?2, ?3, 'manual')", [recent_dept, substring(recent_query, 0.0, 2000.0), substring(correction_text, 0.0, 2000.0)])
+        let _ = AuditLog("correction_fix", recent_dept, "type=manual text=" + substring(correction_text, 0.0, 80.0))
+        if recent_dept == "yana" then {
+          let yana_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' AND dept = 'yana' ORDER BY id DESC LIMIT 1", [chat_id])
+          let yana_answer = ""
+          each r in yana_rows {
+            let yana_answer = to_string(json_get(r, "content", ""))
+          }
+          let _ = YanaRecordForgetting(chat_id, recent_query, yana_answer, correction_text)
+        }
+        let _ = SendTelegramReply(chat_id, "Correction saved for " + recent_dept + ".")
       } else {
         let _ = SendTelegramReply(chat_id, "Usage: /fix <your correction>")
       }
@@ -2152,10 +2155,17 @@ mlogserver {
     // /good — positive example (MEGA-3)
     if text == "/good" then {
       let recent_rows = query("SELECT dept, content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1", [chat_id])
-      let recent_dept = json_get(parse_json(to_string(recent_rows)), "[0].dept", "global")
-      let recent_reply = json_get(parse_json(to_string(recent_rows)), "[0].content", "")
+      let recent_dept = "global"
+      let recent_reply = ""
+      each r in recent_rows {
+        let recent_dept = to_string(json_get(r, "dept", "global"))
+        let recent_reply = to_string(json_get(r, "content", ""))
+      }
       let user_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [chat_id])
-      let user_query = json_get(parse_json(to_string(user_rows)), "[0].content", "")
+      let user_query = ""
+      each r in user_rows {
+        let user_query = to_string(json_get(r, "content", ""))
+      }
       let _ = RecordPositiveExample(recent_dept, user_query, recent_reply)
       let _ = SendTelegramReply(chat_id, "Positive feedback recorded for " + recent_dept + ".")
       return respond("200 ok")
@@ -2252,8 +2262,7 @@ mlogserver {
       if len(parts) > 1.0 then {
         let dept = trim(get(parts, 1.0))
         let debrief_result = DebriefDepartment(dept)
-        let analysis = json_get(parse_json(debrief_result), "analysis", debrief_result)
-        let _ = SendTelegramReply(chat_id, "Debrief " + dept + ":\n\n" + substring(analysis, 0.0, 2000.0))
+        let _ = SendTelegramReply(chat_id, "Debrief " + dept + ":\n\n" + substring(debrief_result, 0.0, 2000.0))
       } else {
         let _ = SendTelegramReply(chat_id, "Usage: /debrief <dept>\nExample: /debrief osp")
       }
@@ -2892,17 +2901,26 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // /search — search archive (MEGA-3)
+    // /search — search archive + memories (MEGA-3)
     if starts_with(text, "/search") then {
       let query_text = substring(text, 8.0, len(text))
       if query_text != "" then {
         let search_result = SearchArchive(query_text)
         let results_json = parse_json(search_result)
         let results_raw = json_get(results_json, "results", "[]")
+        let mem_raw = json_get(results_json, "memories", "[]")
         let results = to_string(results_raw)
+        let mems = to_string(mem_raw)
         let _ = AuditLog("archive_search", "archive", "query=" + query_text)
+        let out = ""
         if results != "[]" and results != "" then {
-          let _ = SendTelegramReply(chat_id, "Found in archive:\n" + substring(results, 0.0, 2000.0))
+          let out = "Архив:\n" + substring(results, 0.0, 1500.0)
+        }
+        if mems != "[]" and mems != "" then {
+          let out = out + "\nПамять:\n" + substring(mems, 0.0, 1500.0)
+        }
+        if out != "" then {
+          let _ = SendTelegramReply(chat_id, out)
         } else {
           let _ = SendTelegramReply(chat_id, "Nothing found for: " + query_text)
         }
