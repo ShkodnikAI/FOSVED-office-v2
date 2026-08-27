@@ -1959,7 +1959,38 @@ mlogserver {
     return respond("200 webhook-route-registered")
   }
 
-  // Debug: echo back request info to diagnose SEC-3 / proxy issues
+  // Debug: step-by-step webhook flow test
+  route "/debug/test-flow" method=GET {
+    let test_json = "{\"update_id\":-1,\"message\":{\"message_id\":-1,\"chat\":{\"id\":\"2044005421\"},\"text\":\"/status\",\"from\":{\"id\":\"2044005421\"}}}"
+    let data = try parse_json(test_json)
+    if to_string(data) == "()" then { return respond("500 1_parse_json_failed") }
+
+    let chat_id = to_string(json_get(data, "message.chat.id", "0"))
+    let user_id = to_string(json_get(data, "message.from.id", "0"))
+    let owner_id = env("OWNER_TELEGRAM_ID")
+    let r1 = "chat=" + chat_id + " user=" + user_id + " owner=" + owner_id
+
+    let text = to_string(json_get(data, "message.text", ""))
+    let dept = try DetectDepartment(text)
+    let r2 = r1 + " dept=" + to_string(dept)
+
+    let tier = try ClassifyQueryTier(text, to_string(dept))
+    let r3 = r2 + " tier=" + to_string(tier)
+
+    let _ = kv_set("query_tier", to_string(tier))
+    let chain = try GetModelFallbackChain(to_string(dept))
+    let _ = kv_set("query_tier", "")
+    let r4 = r3 + " chain=" + to_string(chain)
+
+    let proxy_result = try http_post("http://127.0.0.1:4000/health", "{}", "application/json", 5.0)
+    let r5 = r4 + " llm_proxy=" + to_string(try json_get(parse_json(to_string(proxy_result)), "status", "DEAD"))
+
+    let rows = try query("SELECT 1 as ok", [])
+    let r6 = r5 + " db=" + to_string(rows)
+
+    return respond("200 | " + r6)
+  }
+
   route "/debug/echo" method=POST {
     let data = json_body()
     let headers = "method=POST"
