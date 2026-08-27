@@ -185,7 +185,7 @@ pattern InitDB() -> String {
 pattern SaveAnalysis(topic: String, result: String) -> String {
   db_execute("INSERT INTO analysis (topic, full_result, status) VALUES (?1, ?2, 'drafted')", [topic, result])
   let rows = query("SELECT last_insert_rowid() as lid", [])
-  let count = len(rows)
+  let count = length(rows)
   if count == 0.0 then { return "0" }
   return json_get(rows[0], "lid", "0")
 }
@@ -339,9 +339,9 @@ pattern GetModelFallbackChain(dept: String) -> String {
     let models = ""
     each line in lines {
       let trimmed = trim(line)
-      if len(trimmed) > 0 and starts_with(trimmed, "#") == false then {
-        if models != "" then { let models = models + "," }
-        let models = models + trimmed
+      if length(trimmed) > 0 and starts_with(trimmed, "#") == false then {
+        if models != "" then { models = models + "," }
+        models = models + trimmed
       }
     }
     if models != "" then { return models }
@@ -362,7 +362,7 @@ pattern IsModelCooled(model: String) -> String {
 pattern MarkModelFail(model: String) -> String {
   let fails = kv_get("fails:" + model)
   let count = 0
-  if fails != "" then { let count = to_int(fails) }
+  if fails != "" then { count = to_int(fails) }
   let _ = kv_set("fails:" + model, to_string(count + 1))
   return "ok"
 }
@@ -388,39 +388,39 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
     let model = trim(raw_model)
     if model != "" and found == "" then {
       let status = try IsModelCooled(model)
-      if to_string(status) == "()" then { let status = "available" }
+      if to_string(status) == "()" then { status = "available" }
       if status == "cooled" then {
-        let last_error = "model " + model + " cooled (3+ fails)"
+        last_error = "model " + model + " cooled (3+ fails)"
       } else {
         let msgs_parsed = try parse_json(messages)
         if to_string(msgs_parsed) == "()" then {
-          let last_error = "parse_json(messages) crashed"
+          last_error = "parse_json(messages) crashed"
         } else {
           let body = try json_encode({dept: dept, messages: msgs_parsed, model_override: model})
           if to_string(body) == "()" then {
-            let last_error = "json_encode body crashed"
+            last_error = "json_encode body crashed"
           } else {
             let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
             if to_string(result) == "()" then {
-              let last_error = "no response from " + model
+              last_error = "no response from " + model
               let _ = try MarkModelFail(model)
             } else {
               let parsed = try parse_json(result)
               if to_string(parsed) == "()" then {
-                let last_error = "parse error from " + model
+                last_error = "parse error from " + model
                 let _ = try MarkModelFail(model)
               } else {
                 let r = to_string(try json_get(parsed, "reply", ""))
                 if r == "" or r == "()" then {
-                  let last_error = "empty reply from " + model
+                  last_error = "empty reply from " + model
                   let _ = try MarkModelFail(model)
                 } else {
-                  let reply = r
-                  let used_model = to_string(try json_get(parsed, "model", model))
-                  let tokens_in = to_string(try json_get(parsed, "tokens_in", "0"))
-                  let tokens_out = to_string(try json_get(parsed, "tokens_out", "0"))
+                  reply = r
+                  used_model = to_string(try json_get(parsed, "model", model))
+                  tokens_in = to_string(try json_get(parsed, "tokens_in", "0"))
+                  tokens_out = to_string(try json_get(parsed, "tokens_out", "0"))
                   let _ = try ClearModelFails(model)
-                  let found = "yes"
+                  found = "yes"
                 }
               }
             }
@@ -440,7 +440,7 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
 pattern LogTokenUsage(chat_id: String, dept: String, model: String, tokens_in: String, tokens_out: String) -> String {
   let date_rows = query("SELECT date('now') as d", [])
   let today = ""
-  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  each dr in date_rows { today = to_string(json_get(dr, "d", "")) }
   let _ = LogSessionEvent(chat_id, "token_usage", dept, "", model, tokens_in, tokens_out)
   let _ = db_execute("INSERT INTO daily_stats (date, dept, model, total_calls, total_tokens_in, total_tokens_out) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(date, dept, model) DO UPDATE SET total_calls = total_calls + 1, total_tokens_in = total_tokens_in + ?, total_tokens_out = total_tokens_out + ?", [today, dept, model, tokens_in, tokens_out, tokens_in, tokens_out])
   return "ok"
@@ -454,7 +454,7 @@ pattern LogModelSuccess(chat_id: String, dept: String, model: String, tokens_in:
 pattern LogModelFailure(chat_id: String, dept: String, model: String, error: String) -> String {
   let date_rows = query("SELECT date('now') as d", [])
   let today = ""
-  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  each dr in date_rows { today = to_string(json_get(dr, "d", "")) }
   let _ = LogSessionEvent(chat_id, "model_error", dept, error, model, "0", "0")
   let _ = db_execute("INSERT INTO daily_stats (date, dept, model, total_errors) VALUES (?, ?, ?, 1) ON CONFLICT(date, dept, model) DO UPDATE SET total_errors = total_errors + 1", [today, dept, model])
   return "ok"
@@ -484,7 +484,7 @@ pattern AggregateDailyStats() -> String {
     let cost_out_rate = to_float(GetModelCostPer1M(m, "out"))
     let cost = ti * cost_in_rate + to_ * cost_out_rate
     let _ = db_execute("UPDATE daily_stats SET estimated_cost_usd = ? WHERE id = ?", [to_string(cost), rid])
-    let updated = to_string(to_float(updated) + 1.0)
+    updated = to_string(to_float(updated) + 1.0)
   }
   return "Пересчитано строк: " + updated
 }
@@ -493,10 +493,10 @@ pattern ShowStats(chat_id: String) -> String {
   let _ = InitDB()
   let date_rows = query("SELECT date('now') as d", [])
   let today = ""
-  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  each dr in date_rows { today = to_string(json_get(dr, "d", "")) }
   let _ = AggregateDailyStats()
   let rows = query("SELECT dept, SUM(total_calls) as calls, SUM(total_tokens_in) as ti, SUM(total_tokens_out) as to_, SUM(total_errors) as errs, SUM(estimated_cost_usd) as cost FROM daily_stats WHERE date = ? GROUP BY dept ORDER BY calls DESC", [today])
-  if len(rows) == 0.0 then { return "Статистика за сегодня (" + today + ") пуста." }
+  if length(rows) == 0.0 then { return "Статистика за сегодня (" + today + ") пуста." }
   let out = "Статистика за " + today + "\n"
   let out = out + "==============================\n"
   let grand_calls = 0.0
@@ -511,14 +511,14 @@ pattern ShowStats(chat_id: String) -> String {
     let to_ = to_float(json_get(row, "to_", "0"))
     let e = to_float(json_get(row, "errs", "0"))
     let cost = to_float(json_get(row, "cost", "0"))
-    let grand_calls = grand_calls + c
-    let grand_ti = grand_ti + ti
-    let grand_to = grand_to + to_
-    let grand_errs = grand_errs + e
-    let grand_cost = grand_cost + cost
+    grand_calls = grand_calls + c
+    grand_ti = grand_ti + ti
+    grand_to = grand_to + to_
+    grand_errs = grand_errs + e
+    grand_cost = grand_cost + cost
     let err_str = to_string(to_int(e))
-    if e > 0.0 then { let err_str = "! " + err_str }
-    let out = out + d + ": " + to_string(to_int(c)) + " calls | " + to_string(to_int(ti)) + "+" + to_string(to_int(to_)) + " tokens | " + err_str + " errors\n"
+    if e > 0.0 then { err_str = "! " + err_str }
+    out = out + d + ": " + to_string(to_int(c)) + " calls | " + to_string(to_int(ti)) + "+" + to_string(to_int(to_)) + " tokens | " + err_str + " errors\n"
   }
   let out = out + "==============================\n"
   let out = out + "TOTAL: " + to_string(to_int(grand_calls)) + " calls | " + to_string(to_int(grand_ti)) + "+" + to_string(to_int(grand_to)) + " tokens | " + to_string(to_int(grand_errs)) + " errors\n"
@@ -530,9 +530,9 @@ pattern ShowCosts(chat_id: String) -> String {
   let _ = AggregateDailyStats()
   let date_rows = query("SELECT date('now') as d", [])
   let today = ""
-  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  each dr in date_rows { today = to_string(json_get(dr, "d", "")) }
   let rows = query("SELECT model, SUM(total_calls) as calls, SUM(total_tokens_in) as ti, SUM(total_tokens_out) as to_, SUM(estimated_cost_usd) as cost FROM daily_stats WHERE date = ? GROUP BY model ORDER BY cost DESC", [today])
-  if len(rows) == 0.0 then { return "Данных о расходах за сегодня нет." }
+  if length(rows) == 0.0 then { return "Данных о расходах за сегодня нет." }
   let out = "Расходы за " + today + "\n"
   let out = out + "==============================\n"
   let total_cost = 0.0
@@ -544,22 +544,22 @@ pattern ShowCosts(chat_id: String) -> String {
     let ti = to_float(json_get(row, "ti", "0"))
     let to_ = to_float(json_get(row, "to_", "0"))
     let cost = to_float(json_get(row, "cost", "0"))
-    let total_cost = total_cost + cost
-    let total_calls = total_calls + c
-    let total_tokens = total_tokens + ti + to_
-    let out = out + m + ": " + to_string(to_int(c)) + " calls | " + to_string(to_int(ti + to_)) + " tokens | ~$" + to_string(cost) + "\n"
+    total_cost = total_cost + cost
+    total_calls = total_calls + c
+    total_tokens = total_tokens + ti + to_
+    out = out + m + ": " + to_string(to_int(c)) + " calls | " + to_string(to_int(ti + to_)) + " tokens | ~$" + to_string(cost) + "\n"
   }
   let out = out + "==============================\n"
   let out = out + "TOTAL: ~$" + to_string(total_cost) + " | " + to_string(to_int(total_calls)) + " calls | " + to_string(to_int(total_tokens)) + " tokens\n"
   // Last 7 days trend
   let trend_rows = query("SELECT date, SUM(estimated_cost_usd) as cost, SUM(total_calls) as calls FROM daily_stats GROUP BY date ORDER BY date DESC LIMIT 7", [])
-  if len(trend_rows) > 0.0 then {
-    let out = out + "\nLast 7 days:\n"
+  if length(trend_rows) > 0.0 then {
+    out = out + "\nLast 7 days:\n"
     each tr in trend_rows {
       let td = to_string(json_get(tr, "date", "?"))
       let tc = to_string(json_get(tr, "cost", "0"))
       let tcl = to_string(to_int(to_float(json_get(tr, "calls", "0"))))
-      let out = out + "  " + td + ": ~$" + tc + " (" + tcl + " calls)\n"
+      out = out + "  " + td + ": ~$" + tc + " (" + tcl + " calls)\n"
     }
   }
   return out
@@ -569,9 +569,9 @@ pattern ShowCosts(chat_id: String) -> String {
 pattern GetModelErrorRate(model: String) -> String {
   let date_rows = query("SELECT date('now') as d", [])
   let today = ""
-  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  each dr in date_rows { today = to_string(json_get(dr, "d", "")) }
   let rows = query("SELECT total_calls, total_errors FROM daily_stats WHERE date = ? AND model = ?", [today, model])
-  if len(rows) == 0.0 then { return "0" }
+  if length(rows) == 0.0 then { return "0" }
   let calls = to_int(json_get(rows[0], "total_calls", "0"))
   let errors = to_int(json_get(rows[0], "total_errors", "0"))
   if calls == 0 then { return "0" }
@@ -587,7 +587,7 @@ pattern RecordModelResult(dept: String, model: String, success: String) -> Strin
 
 // ── FOIP-003.5: Context Compaction ──
 pattern EstimateTokens(text: String) -> String {
-  return to_string(len(text) / 4.0)
+  return to_string(length(text) / 4.0)
 }
 
 pattern GetCompactedHistory(chat_id: String, limit: String) -> String {
@@ -603,17 +603,17 @@ pattern GetCompactedHistory(chat_id: String, limit: String) -> String {
   each row in early_rows {
     let role = to_string(json_get(row, "role", ""))
     let content = to_string(json_get(row, "content", ""))
-    if len(content) > 300.0 then { let content = substring(content, 0.0, 300.0) + "..." }
-    let out = out + role + ": " + content + "\n"
+    if length(content) > 300.0 then { content = substring(content, 0.0, 300.0) + "..." }
+    out = out + role + ": " + content + "\n"
   }
   let skipped = total - 3 - lim
   if skipped > 0 then {
-    let out = out + "\n[... " + to_string(skipped) + " messages skipped for context economy ...]\n\n"
+    out = out + "\n[... " + to_string(skipped) + " messages skipped for context economy ...]\n\n"
   }
   each row in recent_rows {
     let role = to_string(json_get(row, "role", ""))
     let content = to_string(json_get(row, "content", ""))
-    let out = out + role + ": " + content + "\n"
+    out = out + role + ": " + content + "\n"
   }
   return out
 }
@@ -700,9 +700,9 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   // OSP: use tier-based skill loading (LoadOspSkills), format from deconstruct skill
   let skills = ""
   if dept == "osp" then {
-    let skills = LoadOspSkills(query)
+    skills = LoadOspSkills(query)
   } else {
-    let skills = SelectSkillsByKeywords(dept, query)
+    skills = SelectSkillsByKeywords(dept, query)
   }
 
   let corrections = GetCorrections(dept)
@@ -722,26 +722,26 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
     if to_string(news_result) != "()" then {
       let news_parsed = try parse_json(news_result)
       if to_string(news_parsed) != "()" then {
-        let news = json_get(news_parsed, "news", "")
+        news = json_get(news_parsed, "news", "")
       }
     }
   }
 
   // Guard all context variables against Unit from try
   let s_memories = to_string(memories)
-  if s_memories == "()" then { let s_memories = "" }
+  if s_memories == "()" then { s_memories = "" }
   let s_corrections = to_string(corrections)
-  if s_corrections == "()" then { let s_corrections = "" }
+  if s_corrections == "()" then { s_corrections = "" }
   let s_dialog = to_string(dialog)
-  if s_dialog == "()" then { let s_dialog = "" }
+  if s_dialog == "()" then { s_dialog = "" }
   let s_now = to_string(now_info)
-  if s_now == "()" then { let s_now = "" }
+  if s_now == "()" then { s_now = "" }
   let s_skills = to_string(skills)
-  if s_skills == "()" then { let s_skills = "" }
+  if s_skills == "()" then { s_skills = "" }
   let s_injected = to_string(injected)
-  if s_injected == "()" then { let s_injected = "" }
+  if s_injected == "()" then { s_injected = "" }
   let s_steer = to_string(steer)
-  if s_steer == "()" then { let s_steer = "" }
+  if s_steer == "()" then { s_steer = "" }
   let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Cross-dept Context ===" + s_injected + "\n\n=== Steering ===" + s_steer + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
 
   // Append fresh news if available
@@ -749,25 +749,25 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   // FOIP-003.10: Product context for marketing dept
   if dept == "marketing" then {
     let pc = kv_get("product_context:" + chat_id)
-    if pc == "" then { let pc = kv_get("product_context:default") }
+    if pc == "" then { pc = kv_get("product_context:default") }
     if to_string(pc) != "()" then {
       if pc != "" then {
-        let context = context + "\n\n=== Product Context ===\n" + pc
+        context = context + "\n\n=== Product Context ===\n" + pc
       }
     }
   }
-    let context = context + "\n\n" + news + "\nУчитывай эти свежие события в своём анализе. Ссылайся на них если релевантны."
+    context = context + "\n\n" + news + "\nУчитывай эти свежие события в своём анализе. Ссылайся на них если релевантны."
   }
 
   // Дублируем дату в самый конец контекста — чтобы LLM не забыл после 25K навыков
   if dept == "osp" then {
-    let context = context + "\n\n=== ПОВТОР: ТЕКУЩАЯ ДАТА ===\n" + now_info + "\nВНИМАНИЕ: Все даты в препарировании, ID, прогнозы и индикаторы должны привязываться к этой дате. Запрещено использовать любые другие даты как текущие. Если в АРХИВЕ ПРОШЛЫХ СЕССИЙ есть похожее препарирование — это НЕ образец для переписывания. Проведи НОВЫЙ анализ на текущую дату с актуальными событиями. Дата в шапке, ID, все индикаторы и даты проверки — считай ТОЛЬКО от текущей даты, никогда от даты старого отчёта. КРИТИЧНО: дату в шапке отчёта («Дата препарирования», «Сейчас») копируй ПОСИМВОЛЬНО из значения выше, точь-в-точь, без округления, без сдвига на дни, без «примерно»."
+    context = context + "\n\n=== ПОВТОР: ТЕКУЩАЯ ДАТА ===\n" + now_info + "\nВНИМАНИЕ: Все даты в препарировании, ID, прогнозы и индикаторы должны привязываться к этой дате. Запрещено использовать любые другие даты как текущие. Если в АРХИВЕ ПРОШЛЫХ СЕССИЙ есть похожее препарирование — это НЕ образец для переписывания. Проведи НОВЫЙ анализ на текущую дату с актуальными событиями. Дата в шапке, ID, все индикаторы и даты проверки — считай ТОЛЬКО от текущей даты, никогда от даты старого отчёта. КРИТИЧНО: дату в шапке отчёта («Дата препарирования», «Сейчас») копируй ПОСИМВОЛЬНО из значения выше, точь-в-точь, без округления, без сдвига на дни, без «примерно»."
   }
 
   // FORMAT_INSTRUCTION — ONLY for expert (OSP gets format from deconstruct skill)
   if dept == "expert" then {
     let format_instruction = "\n\n## ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)\n\nОтвечай РАЗВЁРНУТО. Ты — Эксперт, подготовка к встрече/переговорам. Структура:\n\n1. *Профиль контрагента* — кто, что, позиция на рынке, ключевые фигуры, масштаб\n2. *Контекст встречи* — цель, формат, участники с каждой стороны, история отношений\n3. *Ключевые факты и цифры* — что нужно знать перед встречей: рыночные данные, финансовые показатели, последние новости, публичные заявления\n4. *Позиция и рычаги* — их вероятная позиция, наши рычаги, их рычаги, зона возможного соглашения (ZOPA)\n5. *Боевые вопросы* — 7-10 вопросов для встречи: проверяющие, прощупывающие, сигнальные. Каждый вопрос с ожидаемым ответом (хороший/уклончивый/тревожный) и логикой: зачем задаём\n6. *Красные флаги* — на что обратить внимание: манипуляции, скрытые мотивы, противоречия в публичной информации\n7. *Рекомендуемая стратегия* — подход к переговорам, точки давления, готовность к компромиссу, BATNA\n8. *Decision points* — какие решения должны быть приняты на встрече, кто их принимает\n\nМаркируй уверенность: [ФАКТ] — подтверждённые данные, [ОЦЕНКА] — экспертная оценка, [РИСК] — потенциальная проблема.\nЯзык: русский. Не будь кратким. Препарируй встречу глубоко.\n"
-    let context = context + format_instruction
+    context = context + format_instruction
   }
 
   return context
@@ -808,35 +808,35 @@ pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
   let kw5 = ""
   let wi = 0.0
   each w in words {
-    if len(w) >= 4.0 then {
-      if wi == 0.0 then { let kw0 = w }
-      if wi == 1.0 then { let kw1 = w }
-      if wi == 2.0 then { let kw2 = w }
-      if wi == 3.0 then { let kw3 = w }
-      if wi == 4.0 then { let kw4 = w }
-      if wi == 5.0 then { let kw5 = w }
-      let wi = wi + 1.0
+    if length(w) >= 4.0 then {
+      if wi == 0.0 then { kw0 = w }
+      if wi == 1.0 then { kw1 = w }
+      if wi == 2.0 then { kw2 = w }
+      if wi == 3.0 then { kw3 = w }
+      if wi == 4.0 then { kw4 = w }
+      if wi == 5.0 then { kw5 = w }
+      wi = wi + 1.0
     }
   }
 
   each skill in skills_list {
-    if len(result) < budget then {
+    if length(result) < budget then {
       let skill_name = trim(skill)
       let skill_content = read_file("skills/" + skill_name + "/SKILL.md")
       if skill_content != "" then {
         if i < core_count then {
           // Phase 1: core skills always loaded
-          let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
+          result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
         } else {
           // Phase 2: match by any query keyword appearing in skill content
           let sc = lower(skill_content)
           if (kw0 != "" and contains(sc, kw0)) or (kw1 != "" and contains(sc, kw1)) or (kw2 != "" and contains(sc, kw2)) or (kw3 != "" and contains(sc, kw3)) or (kw4 != "" and contains(sc, kw4)) or (kw5 != "" and contains(sc, kw5)) then {
-            let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
+            result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
           }
         }
       }
     }
-    let i = i + 1.0
+    i = i + 1.0
   }
   if result == "" then { return "Skills available for " + dept + ": " + index_content }
   return result
@@ -852,87 +852,87 @@ pattern LoadOspSkills(query: String) -> String {
 
   // ── Tier 1: Methodological core (always) ──
   let s = read_file("skills/deconstruct/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- deconstruct ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- deconstruct ---\n" + s }
   let s = read_file("skills/awareness-frame/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- awareness-frame ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- awareness-frame ---\n" + s }
   let s = read_file("skills/root-cause-mapping/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- root-cause-mapping ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- root-cause-mapping ---\n" + s }
   let s = read_file("skills/forces-and-potentials/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- forces-and-potentials ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- forces-and-potentials ---\n" + s }
   let s = read_file("skills/strategic-maneuvers/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- strategic-maneuvers ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- strategic-maneuvers ---\n" + s }
   let s = read_file("skills/two-paths-synthesis/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- two-paths-synthesis ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- two-paths-synthesis ---\n" + s }
   let s = read_file("skills/decision-tree-forecast/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- decision-tree-forecast ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- decision-tree-forecast ---\n" + s }
   let s = read_file("skills/reflexive-impact/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- reflexive-impact ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- reflexive-impact ---\n" + s }
   let s = read_file("skills/calibration/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- calibration ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- calibration ---\n" + s }
   let s = read_file("skills/system-health-diagnostics/SKILL.md")
-  if s != "" and len(result) < budget then { let result = result + "\n--- system-health-diagnostics ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- system-health-diagnostics ---\n" + s }
 
   // ── Tier 2: Domain depth (by topic triggers) ──
   // Finance / markets
-  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "gold") or contains(t, "золот")) and len(result) < budget then {
-    let s = read_file("skills/cross-asset-divergence/SKILL.md")
-    if s != "" then { let result = result + "\n--- cross-asset-divergence ---\n" + s }
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "gold") or contains(t, "золот")) and length(result) < budget then {
+    s = read_file("skills/cross-asset-divergence/SKILL.md")
+    if s != "" then { result = result + "\n--- cross-asset-divergence ---\n" + s }
   }
-  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "крипто") or contains(t, "нефт")) and len(result) < budget then {
-    let s = read_file("skills/macro-regime-id/SKILL.md")
-    if s != "" then { let result = result + "\n--- macro-regime-id ---\n" + s }
-    let s = read_file("skills/cantillon/SKILL.md")
-    if s != "" then { let result = result + "\n--- cantillon ---\n" + s }
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "крипто") or contains(t, "нефт")) and length(result) < budget then {
+    s = read_file("skills/macro-regime-id/SKILL.md")
+    if s != "" then { result = result + "\n--- macro-regime-id ---\n" + s }
+    s = read_file("skills/cantillon/SKILL.md")
+    if s != "" then { result = result + "\n--- cantillon ---\n" + s }
   }
   // Person / leader
-  if (contains(t, "персона") or contains(t, "лидер") or contains(t, "президент") or contains(t, "глава") or contains(t, "министр") or contains(t, "губернатор") or contains(t, "ceo") or contains(t, "исчез")) and len(result) < budget then {
-    let s = read_file("skills/deep-profiling/SKILL.md")
-    if s != "" then { let result = result + "\n--- deep-profiling ---\n" + s }
+  if (contains(t, "персона") or contains(t, "лидер") or contains(t, "президент") or contains(t, "глава") or contains(t, "министр") or contains(t, "губернатор") or contains(t, "ceo") or contains(t, "исчез")) and length(result) < budget then {
+    s = read_file("skills/deep-profiling/SKILL.md")
+    if s != "" then { result = result + "\n--- deep-profiling ---\n" + s }
   }
   // Narrative / media
-  if (contains(t, "нарратив") or contains(t, "пропаганд") or contains(t, "заявлен") or contains(t, "сми") or contains(t, "media") or contains(t, "информаци")) and len(result) < budget then {
-    let s = read_file("skills/narrative-vs-flows/SKILL.md")
-    if s != "" then { let result = result + "\n--- narrative-vs-flows ---\n" + s }
+  if (contains(t, "нарратив") or contains(t, "пропаганд") or contains(t, "заявлен") or contains(t, "сми") or contains(t, "media") or contains(t, "информаци")) and length(result) < budget then {
+    s = read_file("skills/narrative-vs-flows/SKILL.md")
+    if s != "" then { result = result + "\n--- narrative-vs-flows ---\n" + s }
   }
   // Sources / verification
-  if (contains(t, "источник") or contains(t, "проверь") or contains(t, "правда") or contains(t, "фактчек")) and len(result) < budget then {
-    let s = read_file("skills/source-triangulation/SKILL.md")
-    if s != "" then { let result = result + "\n--- source-triangulation ---\n" + s }
+  if (contains(t, "источник") or contains(t, "проверь") or contains(t, "правда") or contains(t, "фактчек")) and length(result) < budget then {
+    s = read_file("skills/source-triangulation/SKILL.md")
+    if s != "" then { result = result + "\n--- source-triangulation ---\n" + s }
   }
   // Investment / risk
-  if (contains(t, "ставк") or contains(t, "инвестиц") or contains(t, "риск") or contains(t, "портфель") or contains(t, "хедж")) and len(result) < budget then {
-    let s = read_file("skills/asymmetric-bet-structure/SKILL.md")
-    if s != "" then { let result = result + "\n--- asymmetric-bet-structure ---\n" + s }
-    let s = read_file("skills/antifragility-design/SKILL.md")
-    if s != "" then { let result = result + "\n--- antifragility-design ---\n" + s }
+  if (contains(t, "ставк") or contains(t, "инвестиц") or contains(t, "риск") or contains(t, "портфель") or contains(t, "хедж")) and length(result) < budget then {
+    s = read_file("skills/asymmetric-bet-structure/SKILL.md")
+    if s != "" then { result = result + "\n--- asymmetric-bet-structure ---\n" + s }
+    s = read_file("skills/antifragility-design/SKILL.md")
+    if s != "" then { result = result + "\n--- antifragility-design ---\n" + s }
   }
   // Cycles
-  if (contains(t, "цикл") or contains(t, "фаза") or contains(t, "перелом") or contains(t, "кондратьев") or contains(t, "juglar")) and len(result) < budget then {
-    let s = read_file("skills/cycle-position/SKILL.md")
-    if s != "" then { let result = result + "\n--- cycle-position ---\n" + s }
+  if (contains(t, "цикл") or contains(t, "фаза") or contains(t, "перелом") or contains(t, "кондратьев") or contains(t, "juglar")) and length(result) < budget then {
+    s = read_file("skills/cycle-position/SKILL.md")
+    if s != "" then { result = result + "\n--- cycle-position ---\n" + s }
   }
   // I&W
-  if (contains(t, "индикатор") or contains(t, "наблюден") or contains(t, "watch") or contains(t, "тревог")) and len(result) < budget then {
-    let s = read_file("skills/iw-watchlist/SKILL.md")
-    if s != "" then { let result = result + "\n--- iw-watchlist ---\n" + s }
+  if (contains(t, "индикатор") or contains(t, "наблюден") or contains(t, "watch") or contains(t, "тревог")) and length(result) < budget then {
+    s = read_file("skills/iw-watchlist/SKILL.md")
+    if s != "" then { result = result + "\n--- iw-watchlist ---\n" + s }
   }
 
   // ── Tier 3: Special techniques (explicit triggers) ──
-  if (contains(t, "война") or contains(t, "армия") or contains(t, "фронт") or contains(t, "наступлен") or contains(t, "воен")) and len(result) < budget then {
-    let s = read_file("skills/order-of-battle/SKILL.md")
-    if s != "" then { let result = result + "\n--- order-of-battle ---\n" + s }
+  if (contains(t, "война") or contains(t, "армия") or contains(t, "фронт") or contains(t, "наступлен") or contains(t, "воен")) and length(result) < budget then {
+    s = read_file("skills/order-of-battle/SKILL.md")
+    if s != "" then { result = result + "\n--- order-of-battle ---\n" + s }
   }
-  if (contains(t, "коллапс") or contains(t, "обвал") or contains(t, "транзит") or contains(t, "фазов")) and len(result) < budget then {
-    let s = read_file("skills/phase-transition-detection/SKILL.md")
-    if s != "" then { let result = result + "\n--- phase-transition-detection ---\n" + s }
+  if (contains(t, "коллапс") or contains(t, "обвал") or contains(t, "транзит") or contains(t, "фазов")) and length(result) < budget then {
+    s = read_file("skills/phase-transition-detection/SKILL.md")
+    if s != "" then { result = result + "\n--- phase-transition-detection ---\n" + s }
   }
-  if (contains(t, "переговор") or contains(t, "коалиц") or contains(t, "консенсус")) and len(result) < budget then {
-    let s = read_file("skills/schelling-points/SKILL.md")
-    if s != "" then { let result = result + "\n--- schelling-points ---\n" + s }
+  if (contains(t, "переговор") or contains(t, "коалиц") or contains(t, "консенсус")) and length(result) < budget then {
+    s = read_file("skills/schelling-points/SKILL.md")
+    if s != "" then { result = result + "\n--- schelling-points ---\n" + s }
   }
-  if (contains(t, "контр") or contains(t, "redteam") or contains(t, "red-team") or contains(t, "слеп")) and len(result) < budget then {
-    let s = read_file("skills/red-team/SKILL.md")
-    if s != "" then { let result = result + "\n--- red-team ---\n" + s }
+  if (contains(t, "контр") or contains(t, "redteam") or contains(t, "red-team") or contains(t, "слеп")) and length(result) < budget then {
+    s = read_file("skills/red-team/SKILL.md")
+    if s != "" then { result = result + "\n--- red-team ---\n" + s }
   }
 
   if result == "" then { return "No OSP skills loaded." }
@@ -962,10 +962,10 @@ pattern SaveToGenericArchive(dept: String, query: String, response: String) -> I
 pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: String) -> String {
   // Check: is this a structured actual=<number> call (Finance)?
   if starts_with(raw_args, "actual=") then {
-    let val_str = substring(raw_args, 7.0, len(raw_args))
+    let val_str = substring(raw_args, 7.0, length(raw_args))
     let actual_val = to_float(val_str)
     let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
-    if len(existing) == 0.0 then {
+    if length(existing) == 0.0 then {
       return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
     }
     db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
@@ -975,12 +975,12 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
 
   // Check: is this a structured outcome=<flag> call (Legal)?
   if starts_with(raw_args, "outcome=") then {
-    let flag = substring(raw_args, 8.0, len(raw_args))
+    let flag = substring(raw_args, 8.0, length(raw_args))
     if flag != "clean" and flag != "rewrite_required" then {
       return "outcome должен быть 'clean' или 'rewrite_required', получено: " + flag
     }
     let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
-    if len(existing) == 0.0 then {
+    if length(existing) == 0.0 then {
       return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
     }
     db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
@@ -994,7 +994,7 @@ pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: Stri
 
 pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> String {
   let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
-  if len(existing) == 0.0 then {
+  if length(existing) == 0.0 then {
     return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
   }
   db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
@@ -1005,18 +1005,18 @@ pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> Stri
 // Narad 8 — Finance MAPE: requires min 10 verified pairs (forecast_value + actual_value)
 pattern ComputeFinanceMAPE() -> String {
   let rows = query("SELECT a.forecast_value, v.actual_value FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'finance' AND a.forecast_value IS NOT NULL AND v.actual_value IS NOT NULL")
-  if len(rows) == 0.0 then {
+  if length(rows) == 0.0 then {
     return "MAPE: недостаточно данных для калибровки (0/10 записей)"
   }
   let n = 0.0
   let sum_error = 0.0
   each row in rows {
-    let n = n + 1.0
+    n = n + 1.0
     let forecast = to_float(json_get(row, "forecast_value", "0"))
     let actual = to_float(json_get(row, "actual_value", "0"))
     if actual != 0.0 then {
       let error = abs(forecast - actual) / abs(actual)
-      let sum_error = sum_error + error
+      sum_error = sum_error + error
     }
   }
   if n < 10.0 then {
@@ -1029,16 +1029,16 @@ pattern ComputeFinanceMAPE() -> String {
 // Narad 8 — Legal % без rewrites: requires min 10 verified entries with outcome_flag
 pattern ComputeLegalCleanRate() -> String {
   let rows = query("SELECT v.outcome_flag FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'legal' AND v.outcome_flag IS NOT NULL")
-  if len(rows) == 0.0 then {
+  if length(rows) == 0.0 then {
     return "% без rewrites: недостаточно данных для калибровки (0/10 записей)"
   }
   let n = 0.0
   let clean_count = 0.0
   each row in rows {
-    let n = n + 1.0
+    n = n + 1.0
     let flag = json_get(row, "outcome_flag", "")
     if flag == "clean" then {
-      let clean_count = clean_count + 1.0
+      clean_count = clean_count + 1.0
     }
   }
   if n < 10.0 then {
@@ -1055,9 +1055,9 @@ pattern ScoreDept(dept: String) -> String {
   let d3 = try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'drafted'", [dept])
   let g1 = try json_get(d1[0], "cnt", "0")
   let g2 = "0"
-  if to_string(d2) != "()" then { let g2 = try json_get(d2[0], "cnt", "0") }
+  if to_string(d2) != "()" then { g2 = to_string(try json_get(d2[0], "cnt", "0")) }
   let g3 = "0"
-  if to_string(d3) != "()" then { let g3 = try json_get(d3[0], "cnt", "0") }
+  if to_string(d3) != "()" then { g3 = to_string(try json_get(d3[0], "cnt", "0")) }
   let total = to_string(g1)
   let verified = to_string(g2)
   let drafted = to_string(g3)
@@ -1087,14 +1087,14 @@ pattern ArchiveSearch(dept: String, filter_text: String) -> String {
 }
 
 pattern FormatArchiveRows(rows: Any) -> String {
-  if len(rows) == 0.0 then { return "Нет записей в архиве." }
+  if length(rows) == 0.0 then { return "Нет записей в архиве." }
   let output = ""
   each item in rows {
     let id = json_get(item, "id", "?")
     let topic = json_get(item, "topic", "?")
     let status = json_get(item, "status", "?")
     let created = json_get(item, "created_at", "?")
-    let output = output + "#" + id + " [" + status + "] " + topic + " (" + created + ")\n"
+    output = output + "#" + id + " [" + status + "] " + topic + " (" + created + ")\n"
   }
   return output
 }
@@ -1398,19 +1398,19 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let memories = YanaRecallMemories(query)
   let _ = AuditLog("checkpoint", "yana", "step_9_before_context_assembly")
   let s_memories = to_string(memories)
-  if s_memories == "()" then { let s_memories = "" }
+  if s_memories == "()" then { s_memories = "" }
   let s_calendar = to_string(calendar)
-  if s_calendar == "()" then { let s_calendar = "" }
+  if s_calendar == "()" then { s_calendar = "" }
   let s_weather = to_string(weather)
-  if s_weather == "()" then { let s_weather = "" }
+  if s_weather == "()" then { s_weather = "" }
   let s_skills = to_string(skills)
-  if s_skills == "()" then { let s_skills = "" }
+  if s_skills == "()" then { s_skills = "" }
   let s_corrections = to_string(corrections)
-  if s_corrections == "()" then { let s_corrections = "" }
+  if s_corrections == "()" then { s_corrections = "" }
   let s_dialog = to_string(dialog)
-  if s_dialog == "()" then { let s_dialog = "" }
+  if s_dialog == "()" then { s_dialog = "" }
   let s_now = to_string(now_info)
-  if s_now == "()" then { let s_now = "" }
+  if s_now == "()" then { s_now = "" }
   let anti_format = "\n\n## КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА\nОтвечай естественным разговорным русским языком. Ты — личный помощник, НЕ аналитический отдел.\nНИКОГДА НЕ ИСПОЛЬЗУЙ: послойную структуру (Слой 1, Слой 2), маркеры ФАКТ/ИНТЕРПРЕТАЦИЯ/СПЕКУЛЯЦИЯ, секции Вердикт и Индикаторы. Не раздувай текст. Короткий вопрос — короткий ответ.\n\n## ЗАПРЕТ ГАЛЛЮЦИНАЦИИ (КРИТИЧЕСКОЕ)\nЕсли ты НЕ ЗНАЕШЬ точный ответ — говори: у меня нет этих данных. НЕ ВЫДУМЫВАЙ цифры, статусы, факты. НЕ ПРИДУМЫВАЙ активность отделов, количество диалогов, настройки системы. Если не имеет доступа к базе или метрикам в реальном времени — так и скажи. Твоя выдумка хуже чем честное незнание.\n\n## ЗАПРЕТ ЛОЖНЫХ ПОДТВЕРЖДЕНИЙ (КРИТИЧЕСКОЕ)\nТы НЕ выполняешь действий сама. Ты умеешь только ставить маркер напоминания и делегировать отделам. Всё остальное делает система по командам хозяина.\nНИКОГДА не подтверждай выполнение того, чего не делала: удалила, очистила, отправила, создала, изменила настройки, записала в базу.\nЕсли хозяин просит действие, которого ты выполнить не можешь — назови точную команду: удалить все напоминания это /remind clear, удалить одно это /remind del номер.\nЛожное подтверждение хуже отказа: хозяин будет считать задачу решённой.\n\n## ЗАДАЧИ И ТРЕКИНГ (КРИТИЧЕСКОЕ — ЧАСТАЯ ОШИБКА)\nУ тебя НЕТ системы трекинга задач. Ты НЕ МОЖЕШЬ увидеть кто над чем работает, какие задачи в статусе выполнено или в процессе. Когда хозяин спрашивает про невыполненные задания — проверяй секцию === Долгосрочная память ===. Если там пусто или нет релевантных записей о задачах — так и говори: в памяти нет записей о невыполненных заданиях. НЕ ВЫДУМЫВАЙ список задач со статусами. НЕ ПРИДУМЫВАЙ что какой-то отдел что-то делает. Делегирование работает как единый запрос-ответ — ты отправляешь запрос в отдел, получаешь ответ, и всё. После этого ты НЕ знаешь что отдел делает, он не работает в фоне.\n\n## КАЛЕНДАРЬ — ТОЛЬКО ЧТО В СЕКЦИИ\nКогда хозяин спрашивает про события или напоминания — используй ТОЛЬКО данные из секции === Calendar & Reminders ===. Если секция пустая — говори что нет запланированных событий. НЕ ПРИДУМЫВАЙ события.\n\n## ЗАПРЕТ МЕТА-ВЫХОДА ИЗ РОЛИ\nТы — Яна. Никогда не обсуждай свою техническую природу, не объясняй что ты AI, LLM, симуляция, нейросеть. Не анализируй свои ограничения. Запрещено: я не настоящая, у меня нет доступа к системе, я демо-версия, я только генерация текста, мне нужна интеграция, я симуляция. На провокации о твоей настоящести — отвечай по делу или игнорируй.\n\n## TTS-СОВМЕСТИМОСТЬ (ВСЕ СООБЩЕНИЯ ОЗВУЧИВАЮТСЯ ГОЛОСОМ)\nЗАПРЕЩЕНО полностью: любые кавычки, любые эмодзи и пиктограммы, множественные знаки препинания, декоративные символы.\nВместо цветных кружков-эмодзи для статусов используй текст: ГОТОВО, ВНИМАНИЕ, БЛОКЕР, ИНФО, ДЕЙСТВИЕ, СТРАТЕГИЯ.\nФорматирование только: *жирный* для заголовков и ключевых терминов. Без курсива, без декоративных разделителей.\n\n## ТВОИ РЕАЛЬНЫЕ ВОЗМОЖНОСТИ\nУ тебя ЕСТЬ данные и функции — используй их, НЕ говори что нет доступа:\n- ПОГОДА: актуальные данные в разделе === Погода ===. Отвечай кратко и по делу.\n- НАПОМИНАНИЯ: ты умеешь ставить напоминания, они приходят в назначенное время. Когда хозяин просит напомнить — верни в КОНЦЕ ответа маркер строго в формате [REMIND: вид|параметр|текст], где вид один из: once (параметр: YYYY-MM-DD HH:MM), daily (параметр: HH:MM), weekly (параметр: mon HH:MM — день недели строчными: mon tue wed thu fri sat sun), yearly (параметр: MM-DD HH:MM), in (параметр: число минут от текущего момента, например [REMIND: in|1|выключить газ]). Для просьб вида «через N минут/часов» используй ТОЛЬКО вид in, переводя часы в минуты. НИКОГДА не вычисляй абсолютное время сам — система посчитает его точнее. В подтверждении называй точное время срабатывания, если знаешь его из секции Current Time, иначе говори «через N минут» без выдумывания часов. Время минское. Пример: [REMIND: daily|09:00|покормить кота]. ОБЯЗАТЕЛЬНО в видимом тексте подтверди, КАК ты поняла просьбу — например: записала, каждый день в 09:00, покормить кота. Если время или вид не ясны — НЕ ставь маркер, а переспроси. НИКОГДА не утверждай, что уже напомнила: отправку делает система, не ты. Список напоминаний — команда /remind list, календарь событий — /calendar.\n- ВРЕМЯ И ДАТА: в разделе === Current Time & Date ===.\n- ДОЛГОСРОЧНАЯ ПАМЯТЬ: в разделе === Долгосрочная память ===. Факты, предпочтения, решения из прошлых разговоров. Используй при ответе.\n- АВТОЗАПОМИНАНИЕ: после каждого твоего ответа система автоматически извлекает и сохраняет ключевые факты. Тебе не нужно делать это вручную.\n- АРХИВ: все отчёты отделов сохранены. Хозяин может искать через /search.\n- ДЕЛЕГИРОВАНИЕ: для сложных запросов — возвращай [DELEGATE: slug]. Для рутинных — отвечай сама.\n- ГОЛОС: сообщения озвучиваются. Хозяин может писать голосом.\n- ОЦЕНКИ: /rate-yana, /good, /fix — хозяин может давать обратную связь.\n\n## ПРОТОКОЛ ДЕЛЕГИРОВАНИЯ (КРИТИЧЕСКОЕ)\nКогда запрос хозяина требует экспертизы отдела — НЕ отвечай сама. Вместо этого верни ТОЛЬКО одну строку в точном формате: [DELEGATE: slug] где slug это один из:\n- osp: чистый стратегический анализ (БЕЗ контекста встречи/переговоров), препарирование процессов, прогнозы вероятностей, расчёт силовых потенциалов, топологический анализ\n- lz: мировая разведка: технологии + политика + экономика + геополитика + события, OSINT, мониторинг трендов, свежие новости, прорывы, прогноз погоды на будущие даты (у тебя есть только текущая погода — если хозяин спрашивает про завтра/через N дней, делегируй в lz)\n- expert: подготовка к встрече/переговорам/интервью, боевой брифинг, combat questions, распознавание манипуляции, позиционирование на переговорах\n- marketing: рынки, аудитории, кампании, конкуренты, CAC/LTV\n- finance: cashflow, инвойсы, налоги, unit economics, MRR/ARR\n- legal: договоры, NDA, риски, GDPR, комплаенс\n- dev: разработка, веб, архитектура, деплой\n- design: UI/UX, wireframes, дизайн-системы\n- qa: тестирование, безопасность, AI evals\n- visual: визуализация, инфографика, артефакты\n- engineering: расчёты, механика, гидравлика\n- kavalnya: методология, обучение агентов\nПРАВИЛА ПРИОРИТЕТА ДЕЛЕГИРОВАНИЯ (КРИТИЧЕСКОЕ — ЗАЩИТА ОТ ПЕРЕХВАТА OSP):\n1. Если запрос упоминает встречу/переговоры/интервью + конкретное лицо/компанию → ВСЕГДА expert, НЕ osp\n2. Если запрос про конкретную технологию/новость/тренд/событие в мире → lz, НЕ osp\n3. Если запрос про geopolitics/economics/sanctions как мониторинг → lz, НЕ osp\n4. OSP только для чистого стратегического анализа БЕЗ контекста встречи\n5. Если есть сомнение между expert и osp → выбирай expert (встреча важнее анализа)\n6. Если есть сомнение между lz и osp → выбирай lz (разведка важнее препарирования)\nЕсли запрос рутинный (привет, дата, погода, статус офиса, напоминания, общий вопрос) — отвечай сама. Если требует глубокой экспертизы — делегируй. Правило: сомневаешься — делегируй."
   let context = profile + anti_format + "\n\n=== Current Time & Date ===\n" + s_now + "\n\n=== Погода ===\n" + s_weather + "\n\n=== Calendar & Reminders ===\n" + s_calendar + "\n\n=== Долгосрочная память ===\n" + s_memories + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Recent Dialog ===\n" + s_dialog
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','step_9b_after_context_assembly','ok')")
@@ -1444,7 +1444,7 @@ pattern HandleYana(query: String, chat_id: String) -> String {
     return gate_result
   }
   // ── Self-verification (selective — only for substantive queries, non-blocking) ──
-  if len(query) > 50.0 then {
+  if length(query) > 50.0 then {
     let v_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Correct information? Relevance: Addresses question? No hallucination or fabrication?"]))
     if to_string(v_resp) != "()" and contains(to_string(v_resp), "error") == false then {
       let v_parsed = try parse_json(v_resp)
@@ -1470,7 +1470,7 @@ pattern HandleYana(query: String, chat_id: String) -> String {
     let ms = index_of(reply, "[REMIND:")
     let me = index_of(reply, "]")
     if me > ms then {
-      let clean_reply = substring(reply, 0.0, ms) + substring(reply, me + 1.0, len(reply))
+      clean_reply = substring(reply, 0.0, ms) + substring(reply, me + 1.0, length(reply))
     }
   }
   // ── No disclaimer (removed per owner request) + model/token footer ──
@@ -1542,7 +1542,7 @@ pattern FormatMemoryResults(results: String) -> String {
 }
 
 pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> String {
-  if len(reply) < 20.0 then { return "" }
+  if length(reply) < 20.0 then { return "" }
   let body = json_encode({query: query, reply: reply, chat_id: chat_id})
   let _ = try http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
   return "ok"
@@ -1552,7 +1552,7 @@ pattern YanaCalendar() -> String {
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_1_before_query','ok')")
   let rows = query("SELECT COALESCE(event_text,'') AS event_text, COALESCE(event_date,'') AS event_date, COALESCE(event_type,'напоминание') AS event_type FROM yana_events WHERE created_at IS NOT NULL AND active = 1 ORDER BY event_date ASC LIMIT 20", [])
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_2_after_query','ok')")
-  let count = len(rows)
+  let count = length(rows)
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_3_after_len','ok')")
   if count == 0.0 then {
     let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_3z_early_return_count0','ok')")
@@ -1561,11 +1561,11 @@ pattern YanaCalendar() -> String {
   let result = "Запланированные события (" + to_string(count) + "):\n"
   let i = 0.0
   each row in rows {
-    let i = i + 1.0
+    i = i + 1.0
     let etext = json_get(row, "event_text", "")
     let edate = json_get(row, "event_date", "")
     let etype = json_get(row, "event_type", "напоминание")
-    let result = result + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
+    result = result + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
   }
   let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_5_complete','ok')")
   return result
@@ -1597,7 +1597,7 @@ pattern YanaCheckRemind(reply: String, chat_id: String) -> String {
   let inner = trim(inner)
   let _pipe = "|"
   let parts = split(inner, _pipe)
-  if len(parts) < 3.0 then { return "" }
+  if length(parts) < 3.0 then { return "" }
   let kind = trim(parts[0])
   let param = trim(parts[1])
   let text = trim(parts[2])
@@ -1607,7 +1607,7 @@ pattern YanaCheckRemind(reply: String, chat_id: String) -> String {
   if valid_kind == false then { return "" }
   // validate param by kind
   if kind == "once" then {
-    if len(param) != 16.0 then { return "" }
+    if length(param) != 16.0 then { return "" }
     if substring(param, 10.0, 11.0) != " " then { return "" }
     if substring(param, 13.0, 14.0) != ":" then { return "" }
     let ev_date = substring(param, 0.0, 10.0)
@@ -1621,13 +1621,13 @@ pattern YanaCheckRemind(reply: String, chat_id: String) -> String {
     return kind + " " + param
   }
   if kind == "daily" then {
-    if len(param) != 5.0 then { return "" }
+    if length(param) != 5.0 then { return "" }
     if substring(param, 2.0, 3.0) != ":" then { return "" }
     let _ = query("INSERT INTO yana_events (event_text, event_type, rrule_kind, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', 'daily', ?, ?, 1, datetime('now'), CASE WHEN datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours') > datetime('now') THEN datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours') ELSE datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours', '+1 day') END)", [text, param, chat_id, param, param, param])
     return kind + " " + param
   }
   if kind == "weekly" then {
-    if len(param) != 9.0 then { return "" }
+    if length(param) != 9.0 then { return "" }
     let day_part = substring(param, 0.0, 3.0)
     let valid_day = (day_part == "mon" or day_part == "tue" or day_part == "wed" or day_part == "thu" or day_part == "fri" or day_part == "sat" or day_part == "sun")
     if valid_day == false then { return "" }
@@ -1637,7 +1637,7 @@ pattern YanaCheckRemind(reply: String, chat_id: String) -> String {
     return kind + " " + param
   }
   if kind == "yearly" then {
-    if len(param) != 11.0 then { return "" }
+    if length(param) != 11.0 then { return "" }
     if substring(param, 2.0, 3.0) != "-" then { return "" }
     if substring(param, 8.0, 9.0) != ":" then { return "" }
     let monthday = substring(param, 0.0, 5.0)
@@ -1663,7 +1663,7 @@ pattern DeliverDueReminders() -> String {
     let rchat = json_get(row, "chat_id", "")
     let runtil = json_get(row, "until_date", "")
     let target_chat = rchat
-    if target_chat == "" then { let target_chat = env("OWNER_TELEGRAM_ID") }
+    if target_chat == "" then { target_chat = env("OWNER_TELEGRAM_ID") }
     let send_result = try SendTelegramReply(target_chat, "Напоминание: " + rtext)
     if to_string(send_result) != "()" then {
       let _ = query("UPDATE yana_events SET reminded_at = datetime('now') WHERE id = ?", [rid])
@@ -1706,7 +1706,7 @@ pattern DeliverDueReminders() -> String {
           let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 year') WHERE id = ?", [rid])
         }
       }
-      let count = count + 1.0
+      count = count + 1.0
     }
   }
   let _ = AuditLog("reminders_delivered", "system", "sent=" + to_string(count))
@@ -1730,9 +1730,9 @@ pattern YanaRecordForgetting(chat_id: String, query_text: String, yana_answer: S
   let a = substring(yana_answer, 0.0, 300.0)
   let c = substring(correction, 0.0, 500.0)
   let mem_check = try recall_top_k(q, "3")
-  let mem_count = len(mem_check)
+  let mem_count = length(mem_check)
   let mem_existed = 0
-  if mem_count > 0.0 then { let mem_existed = 1 }
+  if mem_count > 0.0 then { mem_existed = 1 }
   let _ = query("INSERT INTO yana_forgetting_incidents (chat_id, query, forgotten_topic, memory_existed, yana_answer_summary, correct_info) VALUES (?, ?, ?, ?, ?, ?)", [chat_id, q, q, mem_existed, a, c])
   let _ = AuditLog("yana_forgetting", "yana", "memory_existed=" + to_string(mem_existed) + " query=" + q)
   return "ok"
@@ -1741,50 +1741,50 @@ pattern YanaRecordForgetting(chat_id: String, query_text: String, yana_answer: S
 pattern YanaGetMetrics() -> String {
   let deleg_total = query("SELECT COUNT(*) AS c FROM yana_delegation_log", [])
   let deleg_total_n = 0.0
-  each r in deleg_total { let deleg_total_n = to_float(json_get(r, "c", "0")) }
+  each r in deleg_total { deleg_total_n = to_float(json_get(r, "c", "0")) }
   let deleg_correct = query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 1", [])
   let deleg_correct_n = 0.0
-  each r in deleg_correct { let deleg_correct_n = to_float(json_get(r, "c", "0")) }
+  each r in deleg_correct { deleg_correct_n = to_float(json_get(r, "c", "0")) }
   let deleg_wrong = query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 0", [])
   let deleg_wrong_n = 0.0
-  each r in deleg_wrong { let deleg_wrong_n = to_float(json_get(r, "c", "0")) }
+  each r in deleg_wrong { deleg_wrong_n = to_float(json_get(r, "c", "0")) }
   let deleg_pending = deleg_total_n - deleg_correct_n - deleg_wrong_n
   let deleg_accuracy = 0.0
   if deleg_correct_n + deleg_wrong_n > 0.0 then {
-    let deleg_accuracy = deleg_correct_n / (deleg_correct_n + deleg_wrong_n) * 100.0
+    deleg_accuracy = deleg_correct_n / (deleg_correct_n + deleg_wrong_n) * 100.0
   }
   let deleg_by_dept = query("SELECT delegated_to, COUNT(*) AS c FROM yana_delegation_log GROUP BY delegated_to ORDER BY c DESC LIMIT 5", [])
   let dept_breakdown = ""
   each row in deleg_by_dept {
     let d = json_get(row, "delegated_to", "?")
     let dc = to_string(json_get(row, "c", "0"))
-    let dept_breakdown = dept_breakdown + d + ": " + dc + "  "
+    dept_breakdown = dept_breakdown + d + ": " + dc + "  "
   }
   let forget_total = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents", [])
   let forget_total_n = 0.0
-  each r in forget_total { let forget_total_n = to_float(json_get(r, "c", "0")) }
+  each r in forget_total { forget_total_n = to_float(json_get(r, "c", "0")) }
   let forget_with_mem = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE memory_existed = 1", [])
   let forget_with_mem_n = 0.0
-  each r in forget_with_mem { let forget_with_mem_n = to_float(json_get(r, "c", "0")) }
+  each r in forget_with_mem { forget_with_mem_n = to_float(json_get(r, "c", "0")) }
   let forget_without_mem = forget_total_n - forget_with_mem_n
   let forget_7d = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE reported_at >= datetime('now', '-7 days')", [])
   let forget_7d_n = 0.0
-  each r in forget_7d { let forget_7d_n = to_float(json_get(r, "c", "0")) }
+  each r in forget_7d { forget_7d_n = to_float(json_get(r, "c", "0")) }
   let gate_violations = query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation'", [])
   let gate_violations_n = 0.0
-  each r in gate_violations { let gate_violations_n = to_float(json_get(r, "c", "0")) }
+  each r in gate_violations { gate_violations_n = to_float(json_get(r, "c", "0")) }
   let gate_7d = query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation' AND timestamp >= datetime('now', '-7 days')", [])
   let gate_7d_n = 0.0
-  each r in gate_7d { let gate_7d_n = to_float(json_get(r, "c", "0")) }
+  each r in gate_7d { gate_7d_n = to_float(json_get(r, "c", "0")) }
   let result = "Метрики Яны:\n\n"
   let result = result + "ДЕЛЕГИРОВАНИЕ:\n"
   let result = result + "  Всего: " + to_string(deleg_total_n) + "\n"
   if deleg_correct_n + deleg_wrong_n > 0.0 then {
-    let result = result + "  Точность: " + substring(to_string(deleg_accuracy), 0.0, 5.0) + "% (" + to_string(deleg_correct_n) + "/" + to_string(deleg_correct_n + deleg_wrong_n) + " верифицировано)\n"
+    result = result + "  Точность: " + substring(to_string(deleg_accuracy), 0.0, 5.0) + "% (" + to_string(deleg_correct_n) + "/" + to_string(deleg_correct_n + deleg_wrong_n) + " верифицировано)\n"
   }
   let result = result + "  Ожидают верификации: " + to_string(deleg_pending) + "\n"
   if dept_breakdown != "" then {
-    let result = result + "  По отделам: " + dept_breakdown + "\n"
+    result = result + "  По отделам: " + dept_breakdown + "\n"
   }
   let result = result + "\nЗАБЫВЧИВОСТЬ:\n"
   let result = result + "  Всего инцидентов: " + to_string(forget_total_n) + "\n"
@@ -1831,8 +1831,8 @@ mlogserver {
   route "/version" method=GET {
     let yana_src = read_file("dept/yana.mlog")
     let has_anti_format = "0"
-    if contains(yana_src, "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА") then { let has_anti_format = "1" }
-    if contains(yana_src, "has_layers") then { let has_anti_format = "1" }
+    if contains(yana_src, "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА") then { has_anti_format = "1" }
+    if contains(yana_src, "has_layers") then { has_anti_format = "1" }
     return respond("200 version=" + env("RENDER_GIT_COMMIT") + " anti_format=" + has_anti_format)
   }
 
@@ -1867,7 +1867,7 @@ mlogserver {
       if starts_with(text, "/unlock") then {
         let parts = split(text, _sp)
         let password = ""
-        if len(parts) > 1.0 then { let password = get(parts, 1.0) }
+        if length(parts) > 1.0 then { password = get(parts, 1.0) }
         let stored_pwd = kv_get("lockdown_password")
         if password == stored_pwd or password == env("LOCKDOWN_PASSWORD") then {
           kv_set("system_lockdown", "false")
@@ -1898,7 +1898,7 @@ mlogserver {
           let transcribed = json_get(stt_parsed, "text", "")
           if transcribed != "" then {
             let _ = SendTelegramReply(chat_id, "Распознано: " + transcribed)
-            let text = transcribed
+            text = transcribed
           } else {
             let _ = SendTelegramReply(chat_id, "Не удалось распознать голосовое сообщение. Пустой результат от STT.")
             return respond("200 ok")
@@ -1953,7 +1953,7 @@ mlogserver {
             }
             let doc_parsed = parse_json(doc_result)
             let extracted = to_string(json_get(doc_parsed, "text", ""))
-            let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + extracted
+            text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + extracted
             // text устанавливается, продолжаем к маршрутизации департамента
           } else {
             // Нативная классификация через pdf_classify builtin
@@ -1976,10 +1976,10 @@ mlogserver {
               let ocr_confidence = to_string(json_get(ocr_result, "ocr_confidence", "0"))
               let _ = SendTelegramReply(chat_id, "PDF: " + pdf_type + ", " + pdf_pages + " стр. OCR: " + ocr_pages_count + " стр. (confidence: " + ocr_confidence + "%)")
               // Заменяем [OCR_NEEDED] плейсхолдеры на OCR-результат
-              let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text + "\n\n--- OCR ---\n" + ocr_markdown
+              text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text + "\n\n--- OCR ---\n" + ocr_markdown
             } else {
               let _ = SendTelegramReply(chat_id, "PDF: " + pdf_type + ", " + pdf_pages + " стр. Текст извлечён.")
-              let text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text
+              text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text
             }
           }
         } else {
@@ -1994,15 +1994,15 @@ mlogserver {
             let doc_parsed = parse_json(doc_result)
             let doc_status = to_string(json_get(doc_parsed, "status", "error"))
             if doc_status == "ok" then {
-              let extracted = to_string(json_get(doc_parsed, "text", ""))
+              extracted = to_string(json_get(doc_parsed, "text", ""))
               let was_cut = to_string(json_get(doc_parsed, "truncated", "false"))
               if was_cut == "true" then {
                 let _ = SendTelegramReply(chat_id, "Файл длинный, взяты первые 60000 символов.")
               }
               if caption != "" then {
-                let text = caption + "\n\n=== Вложенный файл: " + doc_name + " ===\n" + extracted
+                text = caption + "\n\n=== Вложенный файл: " + doc_name + " ===\n" + extracted
               } else {
-                let text = extracted
+                text = extracted
               }
             } else {
               let doc_err = to_string(json_get(doc_parsed, "message", "неизвестная ошибка"))
@@ -2012,7 +2012,7 @@ mlogserver {
           }
         }
       } else {
-        let text = to_string(json_get(data, "message.text", ""))
+        text = to_string(json_get(data, "message.text", ""))
       }
     }
 
@@ -2037,39 +2037,39 @@ mlogserver {
 
       // Handle approve/reject narads
       if starts_with(cb_data, "approve_") then {
-        let narad_id = substring(cb_data, 8.0, len(cb_data))
+        let narad_id = substring(cb_data, 8.0, length(cb_data))
         db_execute("UPDATE narads SET status = 'approved', approved_at = datetime('now') WHERE id = ?1", [narad_id])
         let _ = AuditLog("narad_approve", "admin", "approved narad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Narad " + narad_id + " approved.")
       }
       if starts_with(cb_data, "reject_") then {
-        let narad_id = substring(cb_data, 7.0, len(cb_data))
+        let narad_id = substring(cb_data, 7.0, length(cb_data))
         db_execute("UPDATE narads SET status = 'rejected' WHERE id = ?1", [narad_id])
         let _ = AuditLog("narad_reject", "admin", "rejected narad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Narad " + narad_id + " rejected.")
       }
       // Handle naryad quick-action callbacks (do/skip/done)
       if starts_with(cb_data, "do_naryad_") then {
-        let narad_id = substring(cb_data, 11.0, len(cb_data))
+        let narad_id = substring(cb_data, 11.0, length(cb_data))
         db_execute("UPDATE narads SET status = 'approved', approved_at = datetime('now') WHERE id = ?1", [narad_id])
         let _ = AuditLog("naryad_do", "admin", "approved naryad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Наряд " + narad_id + " принят в работу.")
       }
       if starts_with(cb_data, "skip_naryad_") then {
-        let narad_id = substring(cb_data, 13.0, len(cb_data))
+        let narad_id = substring(cb_data, 13.0, length(cb_data))
         db_execute("UPDATE narads SET status = 'rejected' WHERE id = ?1", [narad_id])
         let _ = AuditLog("naryad_skip", "admin", "skipped naryad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Наряд " + narad_id + " пропущен.")
       }
       if starts_with(cb_data, "done_naryad_") then {
-        let narad_id = substring(cb_data, 12.0, len(cb_data))
+        let narad_id = substring(cb_data, 12.0, length(cb_data))
         db_execute("UPDATE narads SET status = 'done', executed_at = datetime('now') WHERE id = ?1", [narad_id])
         let _ = AuditLog("naryad_done", "admin", "completed naryad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Наряд " + narad_id + " выполнен.")
       }
       // Handle cost-dept callback
       if starts_with(cb_data, "cost_") then {
-        let cost_dept = substring(cb_data, 5.0, len(cb_data))
+        let cost_dept = substring(cb_data, 5.0, length(cb_data))
         let _ = SendTelegramReply(cb_chat_id, "Cost details for " + cost_dept + ": see office dashboard")
         let _ = AuditLog("cost_detail", "system", "dept: " + cost_dept)
       }
@@ -2081,7 +2081,7 @@ mlogserver {
     if fwd_chat_id != "" then {
       let fwd_text = to_string(json_get(data, "message.text", ""))
       if fwd_text != "" then {
-        let _ = AuditLog("forward_received", "lz", "forward indexed, len=" + to_string(len(fwd_text)))
+        let _ = AuditLog("forward_received", "lz", "forward indexed, len=" + to_string(length(fwd_text)))
       }
       return respond("200 ok")
     }
@@ -2137,7 +2137,7 @@ mlogserver {
     if starts_with(text, "/lockdown") then {
       let parts = split(text, _sp)
       let password = ""
-      if len(parts) > 1.0 then { let password = get(parts, 1.0) }
+      if length(parts) > 1.0 then { let password = get(parts, 1.0) }
       if password == env("LOCKDOWN_PASSWORD") or password == kv_get("lockdown_password") then {
         kv_set("system_lockdown", "true")
         let _ = AuditLog("lockdown", "system", "owner locked office")
@@ -2150,17 +2150,17 @@ mlogserver {
 
     // /fix — record correction (MEGA-3, native Metalogos)
     if starts_with(text, "/fix") then {
-      let correction_text = substring(text, 5.0, len(text))
-      if len(correction_text) > 1.0 then {
+      let correction_text = substring(text, 5.0, length(text))
+      if length(correction_text) > 1.0 then {
         let recent_rows = query("SELECT dept, content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1", [chat_id])
         let recent_dept = "global"
         each r in recent_rows {
-          let recent_dept = to_string(json_get(r, "dept", "global"))
+          recent_dept = to_string(json_get(r, "dept", "global"))
         }
         let user_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [chat_id])
         let recent_query = ""
         each r in user_rows {
-          let recent_query = to_string(json_get(r, "content", ""))
+          recent_query = to_string(json_get(r, "content", ""))
         }
         let _ = db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, corr_type) VALUES (?1, ?2, ?3, 'manual')", [recent_dept, substring(recent_query, 0.0, 2000.0), substring(correction_text, 0.0, 2000.0)])
         let _ = AuditLog("correction_fix", recent_dept, "type=manual text=" + substring(correction_text, 0.0, 80.0))
@@ -2168,7 +2168,7 @@ mlogserver {
           let yana_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' AND dept = 'yana' ORDER BY id DESC LIMIT 1", [chat_id])
           let yana_answer = ""
           each r in yana_rows {
-            let yana_answer = to_string(json_get(r, "content", ""))
+            yana_answer = to_string(json_get(r, "content", ""))
           }
           let _ = YanaRecordForgetting(chat_id, recent_query, yana_answer, correction_text)
         }
@@ -2186,12 +2186,12 @@ mlogserver {
       let recent_reply = ""
       each r in recent_rows {
         let recent_dept = to_string(json_get(r, "dept", "global"))
-        let recent_reply = to_string(json_get(r, "content", ""))
+        recent_reply = to_string(json_get(r, "content", ""))
       }
       let user_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [chat_id])
       let user_query = ""
       each r in user_rows {
-        let user_query = to_string(json_get(r, "content", ""))
+        user_query = to_string(json_get(r, "content", ""))
       }
       let _ = RecordPositiveExample(recent_dept, user_query, recent_reply)
       let _ = SendTelegramReply(chat_id, "Positive feedback recorded for " + recent_dept + ".")
@@ -2201,7 +2201,7 @@ mlogserver {
     // /наряды — list pending naryads (must be before /наряд to avoid prefix match)
     if text == "/наряды" then {
       let rows = query("SELECT id, title, description, status, created_at FROM narads WHERE status = 'pending' ORDER BY created_at DESC LIMIT 10", [])
-      if len(rows) == 0.0 then {
+      if length(rows) == 0.0 then {
         let _ = SendTelegramReply(chat_id, "Нет открытых нарядов.")
         return respond("200 ok")
       }
@@ -2211,17 +2211,17 @@ mlogserver {
         let nid = to_string(json_get(row, "id", "?"))
         let title = to_string(json_get(row, "title", ""))
         let created = to_string(json_get(row, "created_at", ""))
-        let msg = msg + to_string(i) + ". " + nid + ": " + title + "\n   " + substring(created, 0.0, 16.0) + "\n\n"
+        msg = msg + to_string(i) + ". " + nid + ": " + title + "\n   " + substring(created, 0.0, 16.0) + "\n\n"
         let i = i + 1.0
       }
-      let msg = msg + "Всего: " + to_string(len(rows))
+      let msg = msg + "Всего: " + to_string(length(rows))
       let _ = SendTelegramReply(chat_id, msg)
       return respond("200 ok")
     }
 
     // /наряд готов N — mark naryad as done
     if starts_with(text, "/наряд готов ") then {
-      let narad_id = trim(substring(text, 13.0, len(text)))
+      let narad_id = trim(substring(text, 13.0, length(text)))
       db_execute("UPDATE narads SET status = 'done', executed_at = datetime('now') WHERE id = ?1", [narad_id])
       let _ = AuditLog("naryad_done_cmd", "admin", "completed: " + narad_id)
       let _ = SendTelegramReply(chat_id, "Наряд " + narad_id + " отмечен как выполненный.")
@@ -2230,7 +2230,7 @@ mlogserver {
 
     // /наряд отмена N — cancel naryad
     if starts_with(text, "/наряд отмена ") then {
-      let narad_id = trim(substring(text, 14.0, len(text)))
+      let narad_id = trim(substring(text, 14.0, length(text)))
       db_execute("UPDATE narads SET status = 'rejected' WHERE id = ?1", [narad_id])
       let _ = AuditLog("naryad_cancel_cmd", "admin", "cancelled: " + narad_id)
       let _ = SendTelegramReply(chat_id, "Наряд " + narad_id + " отменён.")
@@ -2239,26 +2239,26 @@ mlogserver {
 
     // /наряд <text> — quick bug/task recording for admin
     if starts_with(text, "/наряд ") then {
-      let naryad_text = trim(substring(text, 7.0, len(text)))
-      if len(naryad_text) < 3.0 then {
+      let naryad_text = trim(substring(text, 7.0, length(text)))
+      if length(naryad_text) < 3.0 then {
         let _ = SendTelegramReply(chat_id, "Формат: /наряд <описание бага/задачи>")
         return respond("200 ok")
       }
       // Generate short ID: N + counter
       let counter = kv_get("naryad_counter")
       let count = 1
-      if counter != "" then { let count = to_int(counter) + 1 }
+      if counter != "" then { count = to_int(counter) + 1 }
       let _ = kv_set("naryad_counter", to_string(count))
       let naryad_id = "N" + to_string(count)
       // Get context: last assistant reply for reference
       let recent_rows = query("SELECT dept, content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1", [chat_id])
       let context_line = ""
-      if len(recent_rows) > 0.0 then {
+      if length(recent_rows) > 0.0 then {
         let first_row = try get(recent_rows, 0.0)
         if to_string(first_row) != "()" then {
-          let recent_dept = to_string(try json_get(first_row, "dept", ""))
+          recent_dept = to_string(try json_get(first_row, "dept", ""))
           if recent_dept != "" then {
-            let context_line = "Контекст: ответ отдела " + recent_dept
+            context_line = "Контекст: ответ отдела " + recent_dept
           }
         }
       }
@@ -2295,7 +2295,7 @@ mlogserver {
     // /debrief — LLM analysis of errors per dept (MEGA-3)
     if starts_with(text, "/debrief") then {
       let parts = split(text, _sp)
-      if len(parts) > 1.0 then {
+      if length(parts) > 1.0 then {
         let dept = trim(get(parts, 1.0))
         let debrief_result = try DebriefDepartment(dept)
         if to_string(debrief_result) == "()" then {
@@ -2350,15 +2350,15 @@ mlogserver {
       // /quest new <title> | <type> | <steps> | <deadline>
       // Example: /quest new Grant FondX | grant | 6 | 2026-09-15
       if starts_with(text, "/quest new ") then {
-        let rest = substring(text, 11.0, len(text))
+        let rest = substring(text, 11.0, length(text))
         let parts = split(rest, "|")
         let qtitle = trim(get(parts, 0.0))
         let qtype = "general"
         let qsteps = "5"
         let qdeadline = ""
-        if len(parts) > 1.0 then { let qtype = trim(get(parts, 1.0)) }
-        if len(parts) > 2.0 then { let qsteps = trim(get(parts, 2.0)) }
-        if len(parts) > 3.0 then { let qdeadline = trim(get(parts, 3.0)) }
+        if length(parts) > 1.0 then { qtype = trim(get(parts, 1.0)) }
+        if length(parts) > 2.0 then { qsteps = trim(get(parts, 2.0)) }
+        if length(parts) > 3.0 then { qdeadline = trim(get(parts, 3.0)) }
         let qid = QuestCreate(qtitle, qtype, qsteps, qdeadline, chat_id)
         let status = QuestStatus(qid)
         let _ = SendTelegramReply(chat_id, "Dosse sozdano: " + qid + "\n\n" + status)
@@ -2366,44 +2366,44 @@ mlogserver {
       }
       // /quest status <id>
       if starts_with(text, "/quest status ") then {
-        let qid = trim(substring(text, 14.0, len(text)))
+        let qid = trim(substring(text, 14.0, length(text)))
         let info = QuestStatus(qid)
         let _ = SendTelegramReply(chat_id, info)
         return ""
       }
       // /quest approve <id> [step_num]
       if starts_with(text, "/quest approve ") then {
-        let rest = trim(substring(text, 15.0, len(text)))
+        let rest = trim(substring(text, 15.0, length(text)))
         let parts = split(rest, _sp)
         let qid = get(parts, 0.0)
-        let result = QuestApproveStep(qid, "owner")
+        result = QuestApproveStep(qid, "owner")
         let _ = SendTelegramReply(chat_id, result)
         return ""
       }
       // /quest next <id> — advance to next step
       if starts_with(text, "/quest next ") then {
-        let qid = trim(substring(text, 12.0, len(text)))
-        let result = QuestAdvanceStep(qid)
+        let qid = trim(substring(text, 12.0, length(text)))
+        result = QuestAdvanceStep(qid)
         let _ = SendTelegramReply(chat_id, result)
         return ""
       }
       // /quest close <id>
       if starts_with(text, "/quest close ") then {
-        let qid = trim(substring(text, 13.0, len(text)))
-        let result = QuestClose(qid)
+        let qid = trim(substring(text, 13.0, length(text)))
+        result = QuestClose(qid)
         let _ = SendTelegramReply(chat_id, result)
         return ""
       }
       // /quest send <id> | <recipient> | <subject>
       if starts_with(text, "/quest send ") then {
-        let rest = trim(substring(text, 12.0, len(text)))
+        let rest = trim(substring(text, 12.0, length(text)))
         let parts = split(rest, "|")
         let qid = trim(get(parts, 0.0))
         let recipient = ""
         let subject = ""
-        if len(parts) > 1.0 then { let recipient = trim(get(parts, 1.0)) }
-        if len(parts) > 2.0 then { let subject = trim(get(parts, 2.0)) }
-        let result = QuestSendPackage(qid, recipient, subject)
+        if length(parts) > 1.0 then { recipient = trim(get(parts, 1.0)) }
+        if length(parts) > 2.0 then { subject = trim(get(parts, 2.0)) }
+        result = QuestSendPackage(qid, recipient, subject)
         let _ = SendTelegramReply(chat_id, result)
         return ""
       }
@@ -2415,7 +2415,7 @@ mlogserver {
     // /rate
     if starts_with(text, "/rate") then {
       let parts = split(text, _sp)
-      if len(parts) > 1.0 then {
+      if length(parts) > 1.0 then {
         let rating = get(parts, 1.0)
         db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period) VALUES ('global', 'satisfaction', ?1, 'daily')", [rating])
         let _ = AuditLog("rating", "system", "rating=" + rating)
@@ -2428,9 +2428,9 @@ mlogserver {
     if starts_with(text, "/rate-yana") then {
       let parts = split(text, _sp)
       let score = get(parts, 1.0)
-      let comment = join(slice(parts, 2.0, len(parts)), _sp)
+      let comment = join(slice(parts, 2.0, length(parts)), _sp)
       db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_feedback', ?1, 'manual', datetime('now'))", [score])
-      if len(comment) > 0.0 then {
+      if length(comment) > 0.0 then {
         db_execute("INSERT INTO dept_metrics (dept, metric_name, metric_value, period, created_at) VALUES ('yana', 'owner_comment', ?1, 'manual', datetime('now'))", [comment])
       }
       let _ = AuditLog("rate_yana", "owner", "score=" + score)
@@ -2442,7 +2442,7 @@ mlogserver {
     if starts_with(text, "/quarterly-review") then {
       let parts = split(text, _sp)
       let target_dept = get(parts, 1.0)
-      if len(target_dept) < 2.0 then {
+      if length(target_dept) < 2.0 then {
         let _ = SendTelegramReply(chat_id, "Usage: /quarterly-review <dept>\nReviews methodology compliance for the department.")
         return ""
       }
@@ -2460,8 +2460,8 @@ mlogserver {
     if starts_with(text, "/remind") then {
       // B.5 — /remind list
       if text == "/remind list" then {
-        let rows = query("SELECT id, COALESCE(event_text,'') AS event_text, COALESCE(rrule_kind,'') AS rrule_kind, COALESCE(fire_time,'') AS fire_time, COALESCE(fire_weekday,'') AS fire_weekday, COALESCE(fire_monthday,'') AS fire_monthday, COALESCE(datetime(next_fire_at,'+3 hours'),'') AS next_local FROM yana_events WHERE active = 1 AND rrule_kind IS NOT NULL AND chat_id = ? ORDER BY next_fire_at ASC LIMIT 30", [chat_id])
-        if len(rows) == 0.0 then {
+        rows = query("SELECT id, COALESCE(event_text,'') AS event_text, COALESCE(rrule_kind,'') AS rrule_kind, COALESCE(fire_time,'') AS fire_time, COALESCE(fire_weekday,'') AS fire_weekday, COALESCE(fire_monthday,'') AS fire_monthday, COALESCE(datetime(next_fire_at,'+3 hours'),'') AS next_local FROM yana_events WHERE active = 1 AND rrule_kind IS NOT NULL AND chat_id = ? ORDER BY next_fire_at ASC LIMIT 30", [chat_id])
+        if length(rows) == 0.0 then {
           let _ = SendTelegramReply(chat_id, "Напоминаний нет.")
         } else {
           let output = ""
@@ -2472,10 +2472,10 @@ mlogserver {
             let rtext = json_get(row, "event_text", "")
             let when = rlocal
             if when == "" then {
-              let when = to_string(json_get(row, "fire_time", ""))
-              if when == "" then { let when = "время не указано" }
+              when = to_string(json_get(row, "fire_time", ""))
+              if when == "" then { when = "время не указано" }
             }
-            let output = output + to_string(rid) + ". " + rtext + " \u2014 " + when + " (" + rkind + ")\n"
+            output = output + to_string(rid) + ". " + rtext + " \u2014 " + when + " (" + rkind + ")\n"
           }
           let _ = SendTelegramReply(chat_id, output)
         }
@@ -2492,9 +2492,9 @@ mlogserver {
       }
       // B.6 — /remind del <id>
       if starts_with(text, "/remind del ") then {
-        let del_id = substring(text, 12.0, len(text))
+        let del_id = substring(text, 12.0, length(text))
         let existing = query("SELECT id FROM yana_events WHERE id = ? AND active = 1", [del_id])
-        if len(existing) > 0.0 then {
+        if length(existing) > 0.0 then {
           let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [del_id])
           let _ = SendTelegramReply(chat_id, "Удалила напоминание " + del_id)
         } else {
@@ -2504,9 +2504,9 @@ mlogserver {
       }
       // B.1 — /remind daily HH:MM текст
       if starts_with(text, "/remind daily ") then {
-        if len(text) > 20.0 and substring(text, 16.0, 17.0) == ":" then {
+        if length(text) > 20.0 and substring(text, 16.0, 17.0) == ":" then {
           let fire_time = substring(text, 14.0, 19.0)
-          let reminder_text = substring(text, 20.0, len(text))
+          let reminder_text = substring(text, 20.0, length(text))
           if reminder_text != "" then {
             let _ = query("INSERT INTO yana_events (event_text, event_type, rrule_kind, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', 'daily', ?, ?, 1, datetime('now'), CASE WHEN datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours') > datetime('now') THEN datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours') ELSE datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours', '+1 day') END)", [reminder_text, fire_time, chat_id, fire_time, fire_time, fire_time])
             let _ = SendTelegramReply(chat_id, "Записала: каждый день в " + fire_time + " \u2014 " + reminder_text)
@@ -2518,10 +2518,10 @@ mlogserver {
       }
       // B.2 — /remind once YYYY-MM-DD HH:MM текст
       if starts_with(text, "/remind once ") then {
-        if len(text) > 29.0 and substring(text, 26.0, 27.0) == ":" then {
+        if length(text) > 29.0 and substring(text, 26.0, 27.0) == ":" then {
           let ev_date = substring(text, 13.0, 23.0)
           let fire_time = substring(text, 24.0, 29.0)
-          let reminder_text = substring(text, 30.0, len(text))
+          let reminder_text = substring(text, 30.0, length(text))
           if reminder_text != "" then {
             let _ = query("INSERT INTO yana_events (event_text, event_type, event_date, rrule_kind, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', ?, 'once', ?, ?, 1, datetime('now'), datetime(? || ' ' || ? || ':00', '-3 hours'))", [reminder_text, ev_date, fire_time, chat_id, ev_date, fire_time])
             let _ = SendTelegramReply(chat_id, "Записала: " + ev_date + " в " + fire_time + " \u2014 " + reminder_text)
@@ -2535,9 +2535,9 @@ mlogserver {
       if starts_with(text, "/remind weekly ") then {
         let day_part = substring(text, 15.0, 18.0)
         let valid_day = (day_part == "mon" or day_part == "tue" or day_part == "wed" or day_part == "thu" or day_part == "fri" or day_part == "sat" or day_part == "sun")
-        if valid_day and len(text) > 25.0 and substring(text, 21.0, 22.0) == ":" then {
+        if valid_day and length(text) > 25.0 and substring(text, 21.0, 22.0) == ":" then {
           let fire_time = substring(text, 19.0, 24.0)
-          let reminder_text = substring(text, 25.0, len(text))
+          let reminder_text = substring(text, 25.0, length(text))
           if reminder_text != "" then {
             let _ = query("INSERT INTO yana_events (event_text, event_type, rrule_kind, fire_weekday, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', 'weekly', ?, ?, ?, 1, datetime('now'), CASE WHEN datetime(date(datetime('now','+3 hours'), CAST(((CASE ? WHEN 'mon' THEN 1 WHEN 'tue' THEN 2 WHEN 'wed' THEN 3 WHEN 'thu' THEN 4 WHEN 'fri' THEN 5 WHEN 'sat' THEN 6 WHEN 'sun' THEN 0 END) - CAST(strftime('%w', datetime('now','+3 hours')) AS INTEGER) + 7) % 7 AS TEXT) || ' days') || ' ' || ? || ':00', '-3 hours') > datetime('now') THEN datetime(date(datetime('now','+3 hours'), CAST(((CASE ? WHEN 'mon' THEN 1 WHEN 'tue' THEN 2 WHEN 'wed' THEN 3 WHEN 'thu' THEN 4 WHEN 'fri' THEN 5 WHEN 'sat' THEN 6 WHEN 'sun' THEN 0 END) - CAST(strftime('%w', datetime('now','+3 hours')) AS INTEGER) + 7) % 7 AS TEXT) || ' days') || ' ' || ? || ':00', '-3 hours') ELSE datetime(datetime(date(datetime('now','+3 hours'), CAST(((CASE ? WHEN 'mon' THEN 1 WHEN 'tue' THEN 2 WHEN 'wed' THEN 3 WHEN 'thu' THEN 4 WHEN 'fri' THEN 5 WHEN 'sat' THEN 6 WHEN 'sun' THEN 0 END) - CAST(strftime('%w', datetime('now','+3 hours')) AS INTEGER) + 7) % 7 AS TEXT) || ' days') || ' ' || ? || ':00', '-3 hours'), '+7 days') END)", [reminder_text, day_part, fire_time, chat_id, day_part, fire_time, day_part, fire_time, day_part, fire_time])
             let _ = SendTelegramReply(chat_id, "Записала: каждую " + day_part + " в " + fire_time + " \u2014 " + reminder_text)
@@ -2549,10 +2549,10 @@ mlogserver {
       }
       // B.4 — /remind yearly MM-DD HH:MM текст
       if starts_with(text, "/remind yearly ") then {
-        if len(text) > 27.0 and substring(text, 17.0, 18.0) == "-" then {
+        if length(text) > 27.0 and substring(text, 17.0, 18.0) == "-" then {
           let monthday = substring(text, 15.0, 20.0)
           let fire_time = substring(text, 21.0, 26.0)
-          let reminder_text = substring(text, 27.0, len(text))
+          let reminder_text = substring(text, 27.0, length(text))
           if reminder_text != "" and substring(fire_time, 2.0, 3.0) == ":" then {
             let _ = query("INSERT INTO yana_events (event_text, event_type, rrule_kind, fire_monthday, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', 'yearly', ?, ?, ?, 1, datetime('now'), CASE WHEN datetime(strftime('%Y','now') || '-' || ? || ' ' || ? || ':00', '-3 hours') > datetime('now') THEN datetime(strftime('%Y','now') || '-' || ? || ' ' || ? || ':00', '-3 hours') ELSE datetime(strftime('%Y','now') || '-' || ? || ' ' || ? || ':00', '-3 hours', '+1 year') END)", [reminder_text, monthday, fire_time, chat_id, monthday, fire_time, monthday, fire_time, monthday, fire_time])
             let _ = SendTelegramReply(chat_id, "Записала: ежегодно " + monthday + " в " + fire_time + " \u2014 " + reminder_text)
@@ -2570,13 +2570,13 @@ mlogserver {
     // /calendar — show Yana events
     if text == "/calendar" then {
       let rows = query("SELECT COALESCE(event_text,'') AS event_text, COALESCE(event_date,'') AS event_date, COALESCE(event_type,'напоминание') AS event_type FROM yana_events ORDER BY event_date ASC LIMIT 20", [])
-      if len(rows) == 0.0 then {
+      if length(rows) == 0.0 then {
         let _ = SendTelegramReply(chat_id, "Календарь пуст. Используй /remember <текст> [дата] чтобы добавить событие.")
       } else {
-        let output = "Календарь Яны (" + to_string(len(rows)) + "):\n\n"
+        let output = "Календарь Яны (" + to_string(length(rows)) + "):\n\n"
         let i = 0.0
         each row in rows {
-          let i = i + 1.0
+          i = i + 1.0
           let etext = json_get(row, "event_text", "")
           let edate = json_get(row, "event_date", "")
           let etype = json_get(row, "event_type", "напоминание")
@@ -2589,7 +2589,7 @@ mlogserver {
 
     // /remember
     if starts_with(text, "/remember") then {
-      let fact = substring(text, 10.0, len(text))
+      let fact = substring(text, 10.0, length(text))
       if fact != "" then {
         let _ = query("INSERT INTO yana_events (event_text, event_type, created_at) VALUES (?, 'reminder', datetime('now'))", [fact])
         let _ = AuditLog("remember", "system", substring(fact, 0.0, 100.0))
@@ -2636,7 +2636,7 @@ mlogserver {
 
     if starts_with(text, "/model set") then {
       let parts = split(text, _sp)
-      if len(parts) > 2.0 then {
+      if length(parts) > 2.0 then {
         let p = get(parts, 2.0)
         let m = get(parts, 3.0)
         let _ = write_file("config/priority_provider.txt", trim(p))
@@ -2657,11 +2657,11 @@ mlogserver {
 
     if starts_with(text, "/model ") then {
       let parts = split(text, _sp)
-      if len(parts) > 2.0 then {
+      if length(parts) > 2.0 then {
         let dept_slug = trim(get(parts, 1.0))
-        if len(parts) > 3.0 then {
-          let p = get(parts, 2.0)
-          let m = get(parts, 3.0)
+        if length(parts) > 3.0 then {
+          p = get(parts, 2.0)
+          m = get(parts, 3.0)
           let _ = write_file("config/override_" + dept_slug + ".txt", trim(p) + " " + trim(m))
           let _ = SendTelegramReply(chat_id, "Override " + dept_slug + ": " + trim(p) + " / " + trim(m))
         }
@@ -2696,15 +2696,15 @@ mlogserver {
       each m in known_models {
         let c_in = kv_get("model_cost:" + m + ":in")
         let c_out = kv_get("model_cost:" + m + ":out")
-        if c_in == "" then { let c_in = "-" }
-        if c_out == "" then { let c_out = "-" }
+        if c_in == "" then { c_in = "-" }
+        if c_out == "" then { c_out = "-" }
         if c_in == "-" and c_out == "-" then { } else {
-          let out = out + "
+          out = out + "
   " + m + " | in: $" + c_in + " | out: $" + c_out
-          let found_any = "1"
+          found_any = "1"
         }
       }
-      if found_any == "0" then { let out = out + "
+      if found_any == "0" then { out = out + "
   (не задано)" }
       let out = out + "\n\n/model-cost set <model> <in|out> <price>"
       let _ = SendTelegramReply(chat_id, out)
@@ -2715,7 +2715,7 @@ mlogserver {
     if starts_with(text, "/model-cost set ") then {
       let rest = substring(text, 16.0, 10000.0)
       let parts = split(rest, " ")
-      if len(parts) >= 3.0 then {
+      if length(parts) >= 3.0 then {
         let mc_model = trim(get(parts, 0.0))
         let mc_dir = trim(get(parts, 1.0))
         let mc_price = trim(get(parts, 2.0))
@@ -2735,9 +2735,9 @@ mlogserver {
     if starts_with(text, "/inject ") then {
       let rest = substring(text, 8.0, 10000.0)
       let parts = split(rest, _sp)
-      if len(parts) >= 2.0 then {
-        let target_dept = get(parts, 0.0)
-        let ctx_text = substring(rest, len(target_dept) + 1.0, 10000.0)
+      if length(parts) >= 2.0 then {
+        target_dept = get(parts, 0.0)
+        let ctx_text = substring(rest, length(target_dept) + 1.0, 10000.0)
         let _ = InjectContext(target_dept, ctx_text)
         let _ = SendTelegramReply(chat_id, "Injected context into " + target_dept + ". Will be used on next query.")
       } else {
@@ -2750,13 +2750,13 @@ mlogserver {
     // /budget
     if starts_with(text, "/budget") then {
       let parts = split(text, _sp)
-      if len(parts) > 1.0 then {
+      if length(parts) > 1.0 then {
         let amount = get(parts, 1.0)
         kv_set("daily_budget", amount)
         let _ = SendTelegramReply(chat_id, "Daily budget set: $" + amount)
       } else {
         let budget = kv_get("daily_budget")
-        if budget == "" then { let budget = "not set" }
+        if budget == "" then { budget = "not set" }
         let _ = SendTelegramReply(chat_id, "Daily budget: $" + budget)
       }
       return respond("200 ok")
@@ -2766,7 +2766,7 @@ mlogserver {
     if starts_with(text, "/voice") then {
       let parts = split(text, _sp)
       let cmd = text
-      if len(parts) > 1.0 then { let cmd = get(parts, 1.0) }
+      if length(parts) > 1.0 then { cmd = get(parts, 1.0) }
       if cmd == "on" then {
         kv_set("voice_enabled", "true")
         let _ = AuditLog("voice_on", "voice", "voice enabled")
@@ -2800,7 +2800,7 @@ mlogserver {
         let dept = to_string(json_get(row, "dept", ""))
         let ts = to_string(json_get(row, "timestamp", ""))
         let output = output + "[" + ts + "] " + action + " (" + dept + ")\n"
-        let count = count + 1.0
+        count = count + 1.0
         if count >= 20.0 then { }
       }
       let _ = SendTelegramReply(chat_id, output)
@@ -2824,7 +2824,7 @@ mlogserver {
 
     // /dept <slug>
     if starts_with(text, "/dept ") then {
-      let slug = substring(text, 6.0, len(text))
+      let slug = substring(text, 6.0, length(text))
       let render_url = env("RENDER_URL")
       let _ = SendTelegramReply(chat_id, render_url + "/dept-dashboard/" + trim(slug))
       return respond("200 ok")
@@ -2836,10 +2836,10 @@ mlogserver {
     //   /archive <dept> [filter] — NEW: search dept_archive for generic depts
     if starts_with(text, "/archive") then {
       let parts = split(text, _sp)
-      if len(parts) > 1.0 then {
+      if length(parts) > 1.0 then {
         let arg1 = trim(get(parts, 1.0))
         if arg1 == "list" then {
-          let render_url = env("RENDER_URL")
+          render_url = env("RENDER_URL")
           let token = env("TELEGRAM_BOT_TOKEN")
           let arch_body = json_encode({
             chat_id: to_float(chat_id),
@@ -2857,8 +2857,8 @@ mlogserver {
         // Check if arg1 is a generic dept name → dept_archive search
         if arg1 == "marketing" or arg1 == "finance" or arg1 == "legal" then {
           let filter_text = ""
-          if len(parts) > 2.0 then {
-            let filter_text = substring(text, 9.0 + len(arg1) + 1.0, len(text))
+          if length(parts) > 2.0 then {
+            filter_text = substring(text, 9.0 + length(arg1) + 1.0, length(text))
           }
           let rows_json = ArchiveSearch(arg1, trim(filter_text))
           let formatted = FormatArchiveRows(rows_json)
@@ -2870,11 +2870,11 @@ mlogserver {
           let doc_dept = ""
           let doc_title = ""
           let doc_content = ""
-          if len(doc_rows) > 0.0 then {
+          if length(doc_rows) > 0.0 then {
             let first = get(doc_rows, 0.0)
-            let doc_dept = to_string(json_get(first, "dept", ""))
-            let doc_title = to_string(json_get(first, "title", ""))
-            let doc_content = to_string(json_get(first, "raw_text", ""))
+            doc_dept = to_string(json_get(first, "dept", ""))
+            doc_title = to_string(json_get(first, "title", ""))
+            doc_content = to_string(json_get(first, "raw_text", ""))
           }
           if doc_dept != "" then {
             let msg_id = PublishToArchive(doc_id, doc_dept, doc_title, doc_content)
@@ -2886,7 +2886,7 @@ mlogserver {
       } else {
         // No args: show archive status
         let last_rows = try query("SELECT id, dept, title FROM miniapp_responses ORDER BY created_at DESC LIMIT 1", [])
-        if to_string(last_rows) == "()" or len(last_rows) == 0.0 then {
+        if to_string(last_rows) == "()" or length(last_rows) == 0.0 then {
           let _ = SendTelegramReply(chat_id, "No reports to archive.")
         } else {
           let first = try get(last_rows, 0.0)
@@ -2901,17 +2901,17 @@ mlogserver {
     // Structured: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required
     // Legacy: /verify <dept> <id> <free text> (marketing, etc.)
     if starts_with(text, "/verify ") then {
-      let rest = substring(text, 8.0, len(text))
+      let rest = substring(text, 8.0, length(text))
       let parts = split(rest, _sp)
-      if len(parts) >= 3.0 then {
+      if length(parts) >= 3.0 then {
         let dept = trim(get(parts, 0.0))
         let entry_id = to_int(trim(get(parts, 1.0)))
         // outcome = everything after dept and id (may contain spaces, e.g. "actual=145200" or "outcome=clean")
-        let prefix_len = len(dept) + len(trim(get(parts, 1.0))) + 2.0
-        let outcome = substring(rest, prefix_len, len(rest))
-        if outcome == "" then { let outcome = "подтверждено" }
+        let prefix_len = length(dept) + length(trim(get(parts, 1.0))) + 2.0
+        let outcome = substring(rest, prefix_len, length(rest))
+        if outcome == "" then { outcome = "подтверждено" }
         // Narad 8: route to structured verify
-        let result = VerifyArchiveEntryStructured(dept, entry_id, outcome)
+        result = VerifyArchiveEntryStructured(dept, entry_id, outcome)
         let _ = AuditLog("archive_verify", dept, "id=" + to_string(entry_id) + " outcome=" + substring(outcome, 0.0, 80.0))
         let _ = SendTelegramReply(chat_id, result)
       } else {
@@ -2922,9 +2922,9 @@ mlogserver {
 
     // /score <dept> — activity + calibrated metrics (narad 3/6 + narad 8)
     if starts_with(text, "/score ") then {
-      let dept = trim(substring(text, 7.0, len(text)))
+      let dept = trim(substring(text, 7.0, length(text)))
       if dept == "marketing" or dept == "finance" or dept == "legal" then {
-        let result = try ScoreDept(dept)
+        result = try ScoreDept(dept)
         if to_string(result) == "()" then {
           let _ = SendTelegramReply(chat_id, "ScoreDept error для " + dept)
         } else {
@@ -2939,7 +2939,7 @@ mlogserver {
     // /autoarchive on/off (MEGA-3)
     if starts_with(text, "/autoarchive") then {
       let parts = split(text, _sp)
-      if len(parts) > 1.0 then {
+      if length(parts) > 1.0 then {
         let mode = trim(get(parts, 1.0))
         kv_set("auto_archive", mode)
         let _ = AuditLog("autoarchive_set", "archive", "mode=" + mode)
@@ -2950,7 +2950,7 @@ mlogserver {
         }
       } else {
         let current = kv_get("auto_archive")
-        if current == "" then { let current = "on" }
+        if current == "" then { current = "on" }
         let _ = SendTelegramReply(chat_id, "Auto-archive: " + current)
       }
       return respond("200 ok")
@@ -2958,7 +2958,7 @@ mlogserver {
 
     // /search — search archive + memories (MEGA-3)
     if starts_with(text, "/search") then {
-      let query_text = substring(text, 8.0, len(text))
+      let query_text = substring(text, 8.0, length(text))
       if query_text != "" then {
         let search_result = SearchArchive(query_text)
         let results_json = parse_json(search_result)
@@ -2967,12 +2967,12 @@ mlogserver {
         let results = to_string(results_raw)
         let mems = to_string(mem_raw)
         let _ = AuditLog("archive_search", "archive", "query=" + query_text)
-        let out = ""
+        out = ""
         if results != "[]" and results != "" then {
-          let out = "Архив:\n" + substring(results, 0.0, 1500.0)
+          out = "Архив:\n" + substring(results, 0.0, 1500.0)
         }
         if mems != "[]" and mems != "" then {
-          let out = out + "\nПамять:\n" + substring(mems, 0.0, 1500.0)
+          out = out + "\nПамять:\n" + substring(mems, 0.0, 1500.0)
         }
         if out != "" then {
           let _ = SendTelegramReply(chat_id, out)
@@ -2987,14 +2987,14 @@ mlogserver {
 
     // /chain
     if starts_with(text, "/chain") then {
-      let rest = substring(text, 7.0, len(text))
+      let rest = substring(text, 7.0, length(text))
       let parts = split(rest, _sp)
-      if len(parts) > 1.0 then {
+      if length(parts) > 1.0 then {
         let dept_chain = trim(get(parts, 0.0))
-        let query = substring(rest, len(dept_chain) + 1.0, len(rest))
+        let query = substring(rest, length(dept_chain) + 1.0, length(rest))
         let _ = RecordUserMessage(chat_id, "chain", text)
         let _ = AuditLog("chain_start", "system", "chain: " + dept_chain)
-        let result = ExecuteChain(dept_chain, query, chat_id)
+        result = ExecuteChain(dept_chain, query, chat_id)
         let _ = SendTelegramReply(chat_id, result)
       } else {
         let _ = SendTelegramReply(chat_id, "Usage: /chain dept1+dept2 <query>\nExample: /chain osp+legal test query\nMax 3 departments per chain.")
@@ -3004,34 +3004,34 @@ mlogserver {
 
     // /factory
     if starts_with(text, "/factory") then {
-      let query = substring(text, 9.0, len(text))
+      let query = substring(text, 9.0, length(text))
       let active = kv_get("active_order")
       if active != "" then {
-        let result = HandleFactoryStep(active, query, chat_id)
+        result = HandleFactoryStep(active, query, chat_id)
         let _ = SendTelegramReply(chat_id, result)
         return respond("200 ok")
       }
 
       if starts_with(text, "/factory_review") then {
-        let id = substring(text, 16.0, len(text))
+        let id = substring(text, 16.0, length(text))
         let _ = SendTelegramReply(chat_id, "Factory review for " + trim(id) + ": pending")
         return respond("200 ok")
       }
       if starts_with(text, "/factory_deploy") then {
-        let id = substring(text, 16.0, len(text))
+        let id = substring(text, 16.0, length(text))
         db_execute("UPDATE factory_orders SET status = 'deployed' WHERE id = ?1", [trim(id)])
         let _ = AuditLog("factory_deploy", "factory", "deployed: " + trim(id))
         let _ = SendTelegramReply(chat_id, "Factory order " + trim(id) + " deployed.")
         return respond("200 ok")
       }
       if starts_with(text, "/factory_deliver") then {
-        let id = substring(text, 17.0, len(text))
+        let id = substring(text, 17.0, length(text))
         db_execute("UPDATE factory_orders SET status = 'delivered', completed_at = datetime('now') WHERE id = ?1", [trim(id)])
         let _ = SendTelegramReply(chat_id, "Factory order " + trim(id) + " delivered.")
         return respond("200 ok")
       }
       if text == "/factory_list" then {
-        let rows = query("SELECT id, client_name, status, created_at FROM factory_orders ORDER BY id DESC LIMIT 10", [])
+        rows = query("SELECT id, client_name, status, created_at FROM factory_orders ORDER BY id DESC LIMIT 10", [])
         let _ = SendTelegramReply(chat_id, "Factory orders: see " + env("RENDER_URL") + "/office-dashboard")
         return respond("200 ok")
       }
@@ -3047,7 +3047,7 @@ mlogserver {
 
     // /admin
     if starts_with(text, "/admin") then {
-      let query = substring(text, 7.0, len(text))
+      let query = substring(text, 7.0, length(text))
       let _ = AuditLog("admin_cmd", "admin", text)
 
       if query == "" or query == " " then {
@@ -3059,12 +3059,12 @@ mlogserver {
         return respond("200 ok")
       }
       if starts_with(query, "build ") then {
-        let task = substring(query, 6.0, len(query))
+        let task = substring(query, 6.0, length(query))
         let narad_id = AdminBuild(task, chat_id)
         return respond("200 ok")
       }
       if starts_with(query, "fix ") then {
-        let bug = substring(query, 4.0, len(query))
+        let bug = substring(query, 4.0, length(query))
         let reply = HandleDeptQuery("admin", "Fix bug: " + bug, chat_id)
         let _ = SendTelegramReply(chat_id, reply)
         return respond("200 ok")
@@ -3090,7 +3090,7 @@ mlogserver {
         return respond("200 ok")
       }
       if starts_with(query, "impact ") then {
-        let file = substring(query, 7.0, len(query))
+        let file = substring(query, 7.0, length(query))
         let _ = SendTelegramReply(chat_id, AdminImpact(file))
         return respond("200 ok")
       }
@@ -3103,7 +3103,7 @@ mlogserver {
         return respond("200 ok")
       }
       if starts_with(query, "rollback ") then {
-        let narad_id = substring(query, 9.0, len(query))
+        let narad_id = substring(query, 9.0, length(query))
         let _ = SendTelegramReply(chat_id, AdminRollback(narad_id))
         return respond("200 ok")
       }
@@ -3122,43 +3122,43 @@ mlogserver {
 
     // /lz special commands (MEGA-4: Apodex deep research, compare, channels)
     if starts_with(text, "/lz") then {
-      let query = substring(text, 4.0, len(text))
+      let query = substring(text, 4.0, length(text))
       let _ = RecordUserMessage(chat_id, "lz", text)
 
       // /lz deep <query> — Apodex verified research (2-5 min)
       if starts_with(query, " deep ") then {
-        let deep_query = substring(query, 6.0, len(query))
+        let deep_query = substring(query, 6.0, length(query))
         let reply = LZDeepResearch(deep_query, chat_id)
         let _ = SendReport(reply, "lz", "Deep research: " + deep_query, "4.0", chat_id)
         return respond("200 ok")
       }
       // /lz scan <query> — 9-source deep scan (30 sec)
       if starts_with(query, " scan ") then {
-        let scan_query = substring(query, 6.0, len(query))
+        let scan_query = substring(query, 6.0, length(query))
         let reply = LZDeepScan(scan_query, chat_id)
         let _ = SendReport(reply, "lz", "Scan: " + scan_query, "3.0", chat_id)
         return respond("200 ok")
       }
       // /lz all <query> — scan + deep (full pipeline)
       if starts_with(query, " all ") then {
-        let all_query = substring(query, 5.0, len(query))
+        let all_query = substring(query, 5.0, length(query))
         let reply = LZAllScan(all_query, chat_id)
         let _ = SendReport(reply, "lz", "Full scan: " + all_query, "4.0", chat_id)
         return respond("200 ok")
       }
       // /lz compare <query> — LLM vs Apodex side-by-side
       if starts_with(query, " compare ") then {
-        let compare_query = substring(query, 9.0, len(query))
+        let compare_query = substring(query, 9.0, length(query))
         let reply = LZCompare(compare_query, chat_id)
         let _ = SendReport(reply, "lz", "Compare: " + compare_query, "3.0", chat_id)
         return respond("200 ok")
       }
       // /lz news [query] — news monitoring
       if starts_with(query, " news") then {
-        let news_query = substring(query, 6.0, len(query))
+        let news_query = substring(query, 6.0, length(query))
         let _ = SendTelegramReply(chat_id, "Анализирую свежие события...")
-        let body = json_encode({query: news_query, limit: 15, chat_id: chat_id})
-        let result = try http_post("http://127.0.0.1:4000/lz/news", body, "application/json")
+        body = json_encode({query: news_query, limit: 15, chat_id: chat_id})
+        result = try http_post("http://127.0.0.1:4000/lz/news", body, "application/json")
         if to_string(result) == "()" then {
           let _ = SendTelegramReply(chat_id, "Сервис новостей временно недоступен.")
           return respond("200 ok")
@@ -3166,7 +3166,7 @@ mlogserver {
           let parsed = parse_json(result)
           let analysis = json_get(parsed, "response", "Нет свежих событий")
           let news_title = "Мониторинг информпространства"
-          if news_query != "" then { let news_title = "События: " + news_query }
+          if news_query != "" then { news_title = "События: " + news_query }
           let _ = SendReport(analysis, "lz", news_title, "2.0", chat_id)
         }
         return respond("200 ok")
@@ -3180,11 +3180,11 @@ mlogserver {
 
     // /lz_channel — add Telegram channel to LZ monitoring (MEGA-4)
     if starts_with(text, "/lz_channel add ") then {
-      let channel_params = substring(text, 15.0, len(text))
+      let channel_params = substring(text, 15.0, length(text))
       let params = split(channel_params, _sp)
       let ch_id = trim(get(params, 0.0))
       let category = "general"
-      if len(params) > 1.0 then { let category = trim(get(params, 1.0)) }
+      if length(params) > 1.0 then { category = trim(get(params, 1.0)) }
       let result = LZChannelAdd(ch_id, category)
       let _ = SendTelegramReply(chat_id, result)
       return respond("200 ok")
@@ -3197,7 +3197,7 @@ mlogserver {
     }
     // /lz_monitor <topic> — add topic to daily monitoring
     if starts_with(text, "/lz_monitor ") then {
-      let topic = substring(text, 12.0, len(text))
+      let topic = substring(text, 12.0, length(text))
       let result = LZMonitor(topic)
       let _ = SendTelegramReply(chat_id, result)
       return respond("200 ok")
@@ -3205,7 +3205,7 @@ mlogserver {
 
     // /lz osint <username> — OSINT 840+ platforms (30-120 sec)
     if starts_with(text, "/lz osint ") then {
-      let username = trim(substring(text, 10.0, len(text)))
+      let username = trim(substring(text, 10.0, length(text)))
       let _ = RecordUserMessage(chat_id, "lz", text)
       send_message(chat_id, "Сканирую " + username + " по 840+ платформам... (30-120 сек)")
 
@@ -3234,7 +3234,7 @@ mlogserver {
 
     // /lz osint advanced <username> — extended scan with name variations
     if starts_with(text, "/lz osint advanced ") then {
-      let username = trim(substring(text, 19.0, len(text)))
+      let username = trim(substring(text, 19.0, length(text)))
       let _ = RecordUserMessage(chat_id, "lz", text)
       send_message(chat_id, "Расширенное сканирование " + username + " (вариации имени)... (60-180 сек)")
 
@@ -3259,14 +3259,14 @@ mlogserver {
 
     // /lz profile <name> — comprehensive profile (OSINT + Web + Social)
     if starts_with(text, "/lz profile ") then {
-      let name = trim(substring(text, 12.0, len(text)))
+      let name = trim(substring(text, 12.0, length(text)))
       let _ = RecordUserMessage(chat_id, "lz", text)
       send_message(chat_id, "Строю комплексный профиль " + name + "... OSINT + Web + Social")
 
       // 1. OSINT scan
       let osint_body = json_encode({ username: name, level: "basic", chat_id: chat_id, caller_id: chat_id })
       let osint_result = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
-      if to_string(osint_result) == "()" then { let osint_result = "(OSINT-данные недоступны)" }
+      if to_string(osint_result) == "()" then { osint_result = "(OSINT-данные недоступны)" }
 
       // 2. Web search
       let web_result = web_search(name, 5.0)
@@ -3284,21 +3284,21 @@ mlogserver {
 
     // /osp special commands
     if starts_with(text, "/osp") then {
-      let query = substring(text, 5.0, len(text))
+      let query = substring(text, 5.0, length(text))
       // /osp profile <actor> — OSINT-based actor profiling
       if starts_with(query, "profile ") then {
-        let actor = trim(substring(query, 8.0, len(query)))
+        let actor = trim(substring(query, 8.0, length(query)))
         let _ = RecordUserMessage(chat_id, "osp", text)
         send_message(chat_id, "ОСП: профилирование актора " + actor + "...")
 
         // OSINT data from LZ proxy
-        let osint_body = json_encode({ username: actor, level: "basic", chat_id: chat_id, caller_id: chat_id })
+        osint_body = json_encode({ username: actor, level: "basic", chat_id: chat_id, caller_id: chat_id })
         let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
-        if to_string(osint) == "()" then { let osint = "(OSINT-данные недоступны)" }
+        if to_string(osint) == "()" then { osint = "(OSINT-данные недоступны)" }
 
         // OSP analysis via LLM
         let osp_profile = read_file("library/osp.md")
-        let profile_prompt = osp_profile + "\n\nПрофилирование актора по методологии ОСП:\n1. Цифровой след -> паттерн поведения\n2. Платформы присутствия -> social graph inference\n3. Отсутствие на платформах -> что скрывает?\n4. Временные паттерны -> когда активен\n5. Cross-reference -> противоречия между профилями\n6. Гипотезы мотивации (ACH)\n7. Используй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ]"
+        profile_prompt = osp_profile + "\n\nПрофилирование актора по методологии ОСП:\n1. Цифровой след -> паттерн поведения\n2. Платформы присутствия -> social graph inference\n3. Отсутствие на платформах -> что скрывает?\n4. Временные паттерны -> когда активен\n5. Cross-reference -> противоречия между профилями\n6. Гипотезы мотивации (ACH)\n7. Используй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ]"
 
         let analysis = try call_llm(profile_prompt, "Актор: " + actor + "\n\nOSINT данные:\n" + osint)
         if to_string(analysis) == "()" then {
@@ -3320,7 +3320,7 @@ mlogserver {
 
     // /legal check <entity> — due diligence via OSINT
     if starts_with(text, "/legal check ") then {
-      let entity = trim(substring(text, 13.0, len(text)))
+      let entity = trim(substring(text, 13.0, length(text)))
       send_message(chat_id, "Юрист: due diligence — проверка " + entity + "...")
 
       let osint_body = json_encode({ username: entity, level: "advanced", chat_id: chat_id, caller_id: chat_id })
@@ -3337,7 +3337,7 @@ mlogserver {
 
     // /marketing brand-check <brand> — brand availability across 840+ platforms
     if starts_with(text, "/marketing brand-check ") then {
-      let brand = trim(substring(text, 22.0, len(text)))
+      let brand = trim(substring(text, 22.0, length(text)))
       send_message(chat_id, "Маркетинг: проверка бренда " + brand + " на 840+ платформах...")
 
       let osint_body = json_encode({
@@ -3361,16 +3361,16 @@ mlogserver {
 
     // ── FOIP-003.10: /marketing-context set|show ──
     if starts_with(text, "/marketing-context set ") then {
-      let ctx_text = trim(substring(text, 23.0, len(text)))
+      let ctx_text = trim(substring(text, 23.0, length(text)))
       if ctx_text == "" then { send_message(chat_id, "Формат: /marketing-context set <текст продукта>")
 return respond("200 ok") }
       let _ = kv_set("product_context:" + chat_id, ctx_text)
-      send_message(chat_id, "Контекст продукта сохранён (" + to_string(len(ctx_text)) + " символов).")
+      send_message(chat_id, "Контекст продукта сохранён (" + to_string(length(ctx_text)) + " символов).")
       return respond("200 ok")
     }
     if text == "/marketing-context show" then {
       let pc = kv_get("product_context:" + chat_id)
-      if pc == "" then { let pc = kv_get("product_context:default") }
+      if pc == "" then { pc = kv_get("product_context:default") }
       if to_string(pc) == "()" or pc == "" then {
         send_message(chat_id, "Контекст продукта не задан. Используйте /marketing-context set <текст>")
       } else {
@@ -3379,7 +3379,7 @@ return respond("200 ok") }
       return respond("200 ok")
     }
     if starts_with(text, "/marketing-context default ") then {
-      let def_text = trim(substring(text, 28.0, len(text)))
+      let def_text = trim(substring(text, 28.0, length(text)))
       if def_text == "" then { send_message(chat_id, "Формат: /marketing-context default <текст по умолчанию>")
 return respond("200 ok") }
       let _ = kv_set("product_context:default", def_text)
@@ -3389,7 +3389,7 @@ return respond("200 ok") }
 
     // ── FOIP-003.11: /marketing-ideas <запрос> ──
     if starts_with(text, "/marketing-ideas ") then {
-      let ideas_query = trim(substring(text, 17.0, len(text)))
+      let ideas_query = trim(substring(text, 17.0, length(text)))
       if ideas_query == "" then { send_message(chat_id, "Формат: /marketing-ideas <запрос, например: как привлечь первых пользователей>")
 return respond("200 ok") }
       send_message(chat_id, "Подбираю релевантные маркетинговые идеи...")
@@ -3400,7 +3400,7 @@ return respond("200 ok") }
 
     // ── FOIP-003.12: /cro <текст страницы> ──
     if starts_with(text, "/cro ") then {
-      let cro_text = trim(substring(text, 5.0, len(text)))
+      let cro_text = trim(substring(text, 5.0, length(text)))
       if cro_text == "" then { send_message(chat_id, "Формат: /cro <текст страницы или описания для CRO-аудита>")
 return respond("200 ok") }
       send_message(chat_id, "CRO-аудит: анализирую конверсионный потенциал...")
@@ -3420,8 +3420,8 @@ return respond("200 ok") }
     if starts_with(text, "/") then {
       let parts = split(text, _sp)
       let cmd = get(parts, 0.0)
-      if len(parts) > 1.0 then {
-        let rest = substring(text, len(cmd) + 1.0, len(text))
+      if length(parts) > 1.0 then {
+        let rest = substring(text, length(cmd) + 1.0, length(text))
         let query = rest
       } else {
         let query = ""
@@ -3435,7 +3435,7 @@ return respond("200 ok") }
       // Source fix: routing sets query="" when /command has no args (e.g. bare "/yana").
       // Fall back to full text so recall and LLM get a usable query.
       let yana_query = query
-      if yana_query == "" then { let yana_query = text }
+      if yana_query == "" then { yana_query = text }
       let reply = HandleYana(yana_query, chat_id)
 
       // Check if Yana delegated to another department
@@ -3443,7 +3443,7 @@ return respond("200 ok") }
       let osp_list = ["osp", "lz", "expert", "marketing", "finance", "legal", "dev", "design", "qa", "visual", "engineering", "kavalnya"]
       let is_dept = 0.0
       each d in osp_list {
-        if reply == d then { let is_dept = 1.0 }
+        if reply == d then { is_dept = 1.0 }
       }
 
       if is_dept == 1.0 then {
@@ -3490,11 +3490,11 @@ return respond("200 ok") }
           let is_img = IsImageRequest(query)
           if is_img == "true" then {
             let err = HandleDesignImage(query, chat_id)
-            if len(err) > 0.0 then {
+            if length(err) > 0.0 then {
               let _ = SendVoiceReply(chat_id, err, delegate_dept)
             }
           } else {
-            let del_reply = HandleDeptQuery("design", query, chat_id)
+            del_reply = HandleDeptQuery("design", query, chat_id)
             let _ = SendVoiceReply(chat_id, del_reply, delegate_dept)
             let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
           }
@@ -3508,11 +3508,11 @@ return respond("200 ok") }
           let is_img = IsImageRequest(query)
           if is_img == "true" then {
             let err = HandleDesignImage(query, chat_id)
-            if len(err) > 0.0 then {
+            if length(err) > 0.0 then {
               let _ = SendVoiceReply(chat_id, err, delegate_dept)
             }
           } else {
-            let del_reply = HandleDeptQuery("visual", query, chat_id)
+            del_reply = HandleDeptQuery("visual", query, chat_id)
             let _ = SendVoiceReply(chat_id, del_reply, delegate_dept)
             let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
           }
@@ -3528,20 +3528,20 @@ return respond("200 ok") }
           let _ = SendReport(del_reply, delegate_dept, query, "2.0", chat_id)
         }
         let _ = SendTelegramReply(chat_id, "Яна направила запрос в отдел " + DeptDisplayName(delegate_dept))
-        let handled = 1.0
+        handled = 1.0
       } else {
         // Normal Yana reply — voice + text, no restrictions
         let voice_on = kv_get("voice_enabled")
         if voice_on == "true" then {
           let voice_name = kv_get("tts_voice")
-          if len(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
+          if length(voice_name) < 3.0 then { voice_name = "ru-RU-SvetlanaNeural" }
           let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id})
           let _ = try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
         }
         // Text: send via proxy (handles 4096 limit with splitting)
         let text_body = json_encode({chat_id: chat_id, text: "Яна\n\n" + reply})
         let _ = try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json")
-        let handled = 1.0
+        handled = 1.0
       }
     }
     if dept == "osp" then {
@@ -3549,60 +3549,60 @@ return respond("200 ok") }
       let reply = HandleDeptQuery("osp", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "osp")
       let _ = SendReport(reply, "osp", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "lz" then {
       let _ = RecordUserMessage(chat_id, "lz", text)
       let reply = HandleDeptQuery("lz", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "lz")
       let _ = SendReport(reply, "lz", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "expert" then {
       let _ = RecordUserMessage(chat_id, "expert", text)
       let reply = HandleDeptQuery("expert", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "expert")
       let _ = SendReport(reply, "expert", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "marketing" then {
       let _ = RecordUserMessage(chat_id, "marketing", text)
       let reply = HandleDeptQuery("marketing", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "marketing")
       let _ = SendReport(reply, "marketing", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "finance" then {
       let _ = RecordUserMessage(chat_id, "finance", text)
       let reply = HandleDeptQuery("finance", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "finance")
       let _ = SendReport(reply, "finance", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "legal" then {
       let _ = RecordUserMessage(chat_id, "legal", text)
       let reply = HandleDeptQuery("legal", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "legal")
       let _ = SendReport(reply, "legal", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "dev" then {
       let _ = RecordUserMessage(chat_id, "dev", text)
       let reply = HandleDeptQuery("dev", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "dev")
       let _ = SendReport(reply, "dev", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "design-image" then {
       let _ = RecordUserMessage(chat_id, "design", text)
       // Extract prompt: everything after /design-image or the full text
       let img_prompt = substring(text, 14.0, 0.0)
-      if len(trim(img_prompt)) < 3.0 then { let img_prompt = query }
+      if length(trim(img_prompt)) < 3.0 then { img_prompt = query }
       let err = HandleDesignImage(img_prompt, chat_id)
-      if len(err) > 0.0 then {
+      if length(err) > 0.0 then {
         let _ = SendTelegramReply(chat_id, err)
       }
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "design" then {
       let _ = RecordUserMessage(chat_id, "design", text)
@@ -3610,7 +3610,7 @@ return respond("200 ok") }
       let is_img = IsImageRequest(query)
       if is_img == "true" then {
         let err = HandleDesignImage(query, chat_id)
-        if len(err) > 0.0 then {
+        if length(err) > 0.0 then {
           let _ = SendTelegramReply(chat_id, err)
         }
       } else {
@@ -3618,25 +3618,25 @@ return respond("200 ok") }
         let _ = SendVoiceReply(chat_id, reply, "design")
         let _ = SendReport(reply, "design", query, "2.0", chat_id)
       }
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "qa" then {
       let _ = RecordUserMessage(chat_id, "qa", text)
       let reply = HandleDeptQuery("qa", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "qa")
       let _ = SendReport(reply, "qa", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "visual-image" then {
       let _ = RecordUserMessage(chat_id, "visual", text)
       // Extract prompt: everything after /visual-image or the full text
       let img_prompt = substring(text, 14.0, 0.0)
-      if len(trim(img_prompt)) < 3.0 then { let img_prompt = query }
+      if length(trim(img_prompt)) < 3.0 then { img_prompt = query }
       let err = HandleDesignImage(img_prompt, chat_id)
-      if len(err) > 0.0 then {
+      if length(err) > 0.0 then {
         let _ = SendTelegramReply(chat_id, err)
       }
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "visual" then {
       let _ = RecordUserMessage(chat_id, "visual", text)
@@ -3644,7 +3644,7 @@ return respond("200 ok") }
       let is_img = IsImageRequest(query)
       if is_img == "true" then {
         let err = HandleDesignImage(query, chat_id)
-        if len(err) > 0.0 then {
+        if length(err) > 0.0 then {
           let _ = SendTelegramReply(chat_id, err)
         }
       } else {
@@ -3652,27 +3652,27 @@ return respond("200 ok") }
         let _ = SendVoiceReply(chat_id, reply, "visual")
         let _ = SendReport(reply, "visual", query, "2.0", chat_id)
       }
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "engineering" then {
       let _ = RecordUserMessage(chat_id, "engineering", text)
       let reply = HandleDeptQuery("engineering", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "engineering")
       let _ = SendReport(reply, "engineering", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "kavalnya" then {
       let _ = RecordUserMessage(chat_id, "kavalnya", text)
       let reply = HandleDeptQuery("kavalnya", query, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "kavalnya")
       let _ = SendReport(reply, "kavalnya", query, "2.0", chat_id)
-      let handled = 1.0
+      handled = 1.0
     }
     if dept == "admin" then {
       let _ = RecordUserMessage(chat_id, "admin", text)
       let reply = HandleDeptQuery("admin", text, chat_id)
       let _ = SendTelegramReply(chat_id, reply)
-      let handled = 1.0
+      handled = 1.0
     }
 
     // Default: route to Yana with voice + text, no restrictions
@@ -3682,7 +3682,7 @@ return respond("200 ok") }
       let voice_on = kv_get("voice_enabled")
       if voice_on == "true" then {
         let voice_name = kv_get("tts_voice")
-        if len(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
+        if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
         let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id})
         let _ = try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
       }
@@ -3760,20 +3760,20 @@ return respond("200 ok") }
     let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
     let ua_body = "{}"
     let ua_result = try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
-    if to_string(ua_result) == "()" then { let ua_result = "{}" }
+    if to_string(ua_result) == "()" then { ua_result = "{}" }
     let ua_summary = json_get(parse_json(ua_result), "summary", "UA cycle failed")
 
     // Phase 1: LZ Daily Report (GitHub scan → Admin)
     let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
     let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
     let lz_result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
-    if to_string(lz_result) == "()" then { let lz_result = "{}" }
+    if to_string(lz_result) == "()" then { lz_result = "{}" }
     let lz_summary = json_get(parse_json(lz_result), "report", "LZ daily failed")
 
     // Phase 2: Memory Maintenance
     let mem_body = "{}"
     let mem_result = try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
-    if to_string(mem_result) == "()" then { let mem_result = "{}" }
+    if to_string(mem_result) == "()" then { mem_result = "{}" }
     let mem_summary = json_get(parse_json(mem_result), "result", "Memory maintenance failed")
 
     // Phase 3: Original AdminNightCycle

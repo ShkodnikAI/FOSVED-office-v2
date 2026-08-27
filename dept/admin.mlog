@@ -197,10 +197,10 @@ pattern SaveFindings(issues: String) -> String {
       let file_idx = index_of(trimmed, file_marker)
       let file_path = ""
       if file_idx > 0.0 then {
-        let rest = substring(trimmed, file_idx + 5.0, len(trimmed))
+        let rest = substring(trimmed, file_idx + 5.0, length(trimmed))
         let space_idx = index_of(rest, " ")
         if space_idx > 0.0 then {
-          let file_path = substring(rest, 0.0, space_idx)
+          file_path = substring(rest, 0.0, space_idx)
         }
       }
 
@@ -208,14 +208,14 @@ pattern SaveFindings(issues: String) -> String {
       let issue_idx = index_of(trimmed, issue_marker)
       let issue_text = ""
       if issue_idx > 0.0 then {
-        let issue_text = substring(trimmed, issue_idx + 6.0, len(trimmed))
+        issue_text = substring(trimmed, issue_idx + 6.0, length(trimmed))
       }
 
       // HARD GATE: never save findings about immutable zones
       if severity != "" then {
         if AdminGateImmutable(file_path) == "PASS" then {
           db_execute("INSERT INTO admin_findings (severity, file_path, issue, fix_suggestion, status, created_at) VALUES (?1, ?2, ?3, '', 'open', datetime('now'))", [severity, file_path, issue_text])
-          let saved = saved + 1.0
+          saved = saved + 1.0
         }
       }
     }
@@ -244,11 +244,11 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
       let p_end = index_of(trimmed, "(", p_start)
       if p_end > p_start then {
         let pattern_name = substring(trimmed, p_start, p_end)
-        if len(pattern_name) > 2.0 then {
+        if length(pattern_name) > 2.0 then {
           db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES ('pattern', ?1, ?2, 'Function', datetime('now'))", [pattern_name, file_path])
           db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?1, ?2, 'calls', ?1, datetime('now'))", [file_path, pattern_name])
-          let nodes_saved = nodes_saved + 1.0
-          let edges_saved = edges_saved + 1.0
+          nodes_saved = nodes_saved + 1.0
+          edges_saved = edges_saved + 1.0
         }
       }
     }
@@ -259,10 +259,10 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
     let trimmed = trim(to_string(line))
     if starts_with(trimmed, "import") then {
       let imp_start = index_of(trimmed, "import") + 7.0
-      let imp_name = substring(trimmed, imp_start, len(trimmed))
-      if len(imp_name) > 2.0 then {
+      let imp_name = substring(trimmed, imp_start, length(trimmed))
+      if length(imp_name) > 2.0 then {
         db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?1, ?2, 'imports', ?1, datetime('now'))", [file_path, imp_name])
-        let edges_saved = edges_saved + 1.0
+        edges_saved = edges_saved + 1.0
       }
     }
   }
@@ -305,8 +305,8 @@ pattern BuildKnowledgeGraph() -> String {
   // Count results
   let node_rows = query("SELECT COUNT(*) as cnt FROM knowledge_graph", [])
   let edge_rows = query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
-  let node_count = json_get(to_string(node_rows), "[0].cnt", "0")
-  let edge_count = json_get(to_string(edge_rows), "[0].cnt", "0")
+  let node_count = to_string(try json_get(node_rows[0], "cnt", "0"))
+  let edge_count = to_string(try json_get(edge_rows[0], "cnt", "0"))
 
   let _ = AuditLog("graph_build_done", "admin", "nodes=" + node_count + " edges=" + edge_count)
 
@@ -320,14 +320,14 @@ pattern ImpactAnalysis(file_path: String) -> String {
   let dependents = query("SELECT DISTINCT source_name FROM knowledge_edges WHERE target_name = ?", [file_path])
   let dependencies = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE source_name = ?", [file_path])
 
-  let dep_count = json_get(to_string(dependents), "[0].cnt", "0")
+  let dep_count = length(dependents)
 
   let risk = "low"
-  if dep_count > 5.0 then { let risk = "high" }
-  if dep_count > 2.0 and dep_count <= 5.0 then { let risk = "medium" }
+  if dep_count > 5.0 then { risk = "high" }
+  if dep_count > 2.0 and dep_count <= 5.0 then { risk = "medium" }
 
   // HARD GATE: immutable files are always high risk
-  if AdminGateImmutable(file_path) == "BLOCK" then { let risk = "CRITICAL_IMMUTABLE" }
+  if AdminGateImmutable(file_path) == "BLOCK" then { risk = "CRITICAL_IMMUTABLE" }
 
   let result = "Impact Analysis: " + file_path + "\n\n"
   let result = result + "Risk: " + risk + "\n"
@@ -368,14 +368,14 @@ pattern AdminCodeAudit() -> String {
 
   // Read key files for context
   let app_content = read_file("app.mlog")
-  let files_summary = "app.mlog: " + to_string(len(app_content)) + " chars\n"
+  let files_summary = "app.mlog: " + to_string(length(app_content)) + " chars\n"
 
   let dept_files = list_dir("dept/")
   each f in dept_files {
     let fname = trim(to_string(f))
     if ends_with(fname, ".mlog") then {
       let content = read_file("dept/" + fname)
-      let files_summary = files_summary + "dept/" + fname + ": " + to_string(len(content)) + " chars\n"
+      files_summary = files_summary + "dept/" + fname + ": " + to_string(length(content)) + " chars\n"
     }
   }
 
@@ -431,13 +431,13 @@ pattern AdminAutoFix(issues: String) -> String {
   let fixes_applied = ""
 
   if contains(plan, "NONE") then {
-    let fixes_applied = "No autofixes needed"
+    fixes_applied = "No autofixes needed"
   } else {
     // Parse autofix plan and apply only low-risk fixes in dept/ files
     let _file = "FILE:"
     let parts = split(plan, _file)
     each part in parts {
-      if len(part) > 5.0 then {
+      if length(part) > 5.0 then {
         let file_path = trim(substring(to_string(part), 0.0, index_of(to_string(part), "\n")))
 
         // HARD GATE: check both immutable and autofix gates
@@ -766,7 +766,7 @@ pattern AdminImpact(file_path: String) -> String {
 pattern AdminProposalsView() -> String {
   let rows = query("SELECT content, status, created_at FROM admin_proposals WHERE status = 'pending' ORDER BY id DESC LIMIT 5", [])
   let result = to_string(rows)
-  if len(result) > 10 then {
+  if length(result) > 10 then {
     let _ = AuditLog("admin_proposals_view", "admin", "proposals viewed")
     return "Pending proposals:\n\n" + result
   }
@@ -780,11 +780,11 @@ pattern AdminNarads() -> String {
   let rows = query("SELECT id, title, status, risk_level, created_at FROM narads ORDER BY id DESC LIMIT 10", [])
   let output = "Narads:\n"
   each row in rows {
-    let nid = json_get(to_string(row), "id", "")
-    let title = json_get(to_string(row), "title", "")
-    let status = json_get(to_string(row), "status", "")
-    let risk = json_get(to_string(row), "risk_level", "")
-    let output = output + nid + " [" + status + "|" + risk + "] " + substring(title, 0, 60) + "\n"
+    let nid = to_string(try json_get(row, "id", ""))
+    let title = to_string(try json_get(row, "title", ""))
+    let status = to_string(try json_get(row, "status", ""))
+    let risk = to_string(try json_get(row, "risk_level", ""))
+    output = output + nid + " [" + status + "|" + risk + "] " + substring(title, 0, 60) + "\n"
   }
   let _ = AuditLog("admin_narads_view", "admin", "narads viewed")
   return output
@@ -796,7 +796,7 @@ pattern AdminNarads() -> String {
 pattern AdminRollback(narad_id: String) -> String {
   // Get current status
   let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
-  let current_status = json_get(to_string(current), "[0].status", "unknown")
+  let current_status = to_string(try json_get(current[0], "status", "unknown"))
 
   // Lifecycle gate
   let new_status = AdminGateNaradTransition(current_status, "rollback")
@@ -850,7 +850,7 @@ pattern AdminHealth() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminApproveNarad(narad_id: String) -> String {
   let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
-  let current_status = json_get(to_string(current), "[0].status", "unknown")
+  let current_status = to_string(try json_get(current[0], "status", "unknown"))
 
   let new_status = AdminGateNaradTransition(current_status, "approve")
   if new_status == "DENY" then {
@@ -867,7 +867,7 @@ pattern AdminApproveNarad(narad_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminRejectNarad(narad_id: String) -> String {
   let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
-  let current_status = json_get(to_string(current), "[0].status", "unknown")
+  let current_status = to_string(try json_get(current[0], "status", "unknown"))
 
   let new_status = AdminGateNaradTransition(current_status, "reject")
   if new_status == "DENY" then {
