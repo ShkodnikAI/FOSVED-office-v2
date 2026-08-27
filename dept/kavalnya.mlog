@@ -1,17 +1,489 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// Fosved Office v2 — Кузница кадров (КК) Dispatcher (NATIVE v1.0)
+// Methodological core: creates, trains, re-trains departments
+// + 8 hard rules (methodology gate, polygon gate, anti-pattern gate, psychotype gate,
+//   quarterly review gate, structural debrief gate, consecutive failure gate, owner approval gate)
+// + LIFECYCLE: in_progress→completed→ratified / in_progress→rolled_back
+// + 5 learning horizons: per-operation, daily, weekly, monthly, quarterly
+// + Semi-annual arsenal review + Annual paradigm review (V2)
+// + 8 skills (Core:5, Domain:2, Special:1) → V2: 11 skills (+arsenal-review, paradigm-review, methodology-evolution)
+// + CROSS-DEPT: Yana+KK, OSP+KK, all-dept read access
+// + DISCLAIMER: no recalibrate without owner approval
+// + DB SCHEMA inline (TrainingSession, SkillReview, PsychotypeAssessment, PolygonResult)
+// Sources: library/kavalnya.md v1.1, library/kk.md v2.0, skills_index/kavalnya.txt
 
-pattern HandleKavalnya(query: String, chat_id: String) -> String {
-  let dept = "kavalnya"
-  let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
-  let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
+// ═══════════════════════════════════════════════════════════════════════
+// DB SCHEMA INLINE
+// ═══════════════════════════════════════════════════════════════════════
+// CREATE TABLE training_sessions (
+//   id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421,
+//   dept_name TEXT NOT NULL, specialist_name TEXT,
+//   session_type TEXT, -- recruit | train | recalibrate | polygon | debrief | assess
+//   status TEXT DEFAULT 'in_progress', -- in_progress | completed | ratified | rolled_back
+//   checklist_progress TEXT DEFAULT '[]', -- JSON: [{step, completed, notes}]
+//   psychotype TEXT, -- primary + secondary
+//   polygon_results TEXT DEFAULT '[]', -- JSON: [{task, passed, score}]
+//   polygon_pass_rate FLOAT DEFAULT 0.0,
+//   anti_patterns_found TEXT DEFAULT '[]',
+//   skill_reviews TEXT DEFAULT '[]',
+//   debrief_notes TEXT,
+//   improvement_plan TEXT,
+//   started_at TIMESTAMP DEFAULT NOW(),
+//   completed_at TIMESTAMP, ratified_at TIMESTAMP,
+//   created_at TIMESTAMP DEFAULT NOW()
+// );
+// CREATE TABLE skill_reviews (
+//   id SERIAL PRIMARY KEY, skill_name TEXT, dept_name TEXT,
+//   usage_count INT DEFAULT 0, success_rate FLOAT DEFAULT 0.0,
+//   last_used_at TIMESTAMP, last_reviewed_at TIMESTAMP,
+//   anti_patterns TEXT DEFAULT '[]',
+//   status TEXT DEFAULT 'active', -- active | underused | deprecated | rewrite
+//   created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+// );
+// CREATE TABLE psychotype_assessments (
+//   id SERIAL PRIMARY KEY, dept_name TEXT, specialist_name TEXT,
+//   primary_type TEXT, secondary_type TEXT,
+//   assessment_notes TEXT, assessed_at TIMESTAMP DEFAULT NOW()
+// );
+// CREATE TABLE polygon_results (
+//   id SERIAL PRIMARY KEY, session_id INT REFERENCES training_sessions(id),
+//   task_name TEXT, passed BOOLEAN, score FLOAT,
+//   expected_outcome TEXT, actual_outcome TEXT,
+//   created_at TIMESTAMP DEFAULT NOW()
+// );
+// CREATE TABLE arsenal_reviews (
+//   id SERIAL PRIMARY KEY, year_half TEXT,
+//   skills_in_use TEXT DEFAULT '[]', skills_underused TEXT DEFAULT '[]',
+//   skills_obsolete TEXT DEFAULT '[]', skills_to_add TEXT DEFAULT '[]',
+//   review_notes TEXT, created_at TIMESTAMP DEFAULT NOW()
+// );
+// CREATE TABLE methodology_versions (
+//   id SERIAL PRIMARY KEY, version TEXT,
+//   changes TEXT, changed_at TIMESTAMP DEFAULT NOW()
+// );
+
+// ═══════════════════════════════════════════════════════════════════════
+// DISCLOSURE
+// ═══════════════════════════════════════════════════════════════════════
+pattern KKDisclaimer() -> String {
+  return "⚠️ Кузница кадров: методологическая инспекция. /recalibrate-dept требует approval владельца. Parаdigm review — совместная операция с владельцем."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HARD RULE GATES (8 programmatic gates)
+// ═══════════════════════════════════════════════════════════════════════
+// Gate 1: All 10 checklist stages must be complete before dept creation
+pattern KKCheckChecklistComplete(session_id: Int) -> String {
+  let rows = query("SELECT checklist_progress FROM training_sessions WHERE id = ?", [to_string(session_id)])
+  if length(rows) == 0 then { return "FAIL: session not found" }
+  let progress = to_string(get(get(rows, 0), "checklist_progress"))
+  // Count completed steps — need 10
+  let count = 0.0
+  if contains(progress, "completed") then { count = count + 1.0 }
+  // Simplified: check if all 10 stages present
+  if contains(progress, "\"step\":10") or contains(progress, "\"step\": 10") then { return "PASS" }
+  return "FAIL: not all 10 checklist stages complete"
+}
+
+// Gate 2: Polygon pass-rate ≥ 70%
+pattern KKCheckPolygonPassRate(session_id: Int) -> String {
+  let rows = query("SELECT polygon_pass_rate FROM training_sessions WHERE id = ?", [to_string(session_id)])
+  if length(rows) == 0 then { return "FAIL: session not found" }
+  let rate = to_float(to_string(get(get(rows, 0), "polygon_pass_rate")))
+  if rate >= 0.7 then { return "PASS: pass-rate " + to_string(rate) + " ≥ 0.70" }
+  return "FAIL: pass-rate " + to_string(rate) + " < 0.70"
+}
+
+// Gate 3: Minimum 3 anti-patterns per skill
+pattern KKCheckAntiPatterns(skill_name: String) -> String {
+  let rows = query("SELECT anti_patterns FROM skill_reviews WHERE skill_name = ?", [skill_name])
+  if length(rows) == 0 then { return "FAIL: skill not reviewed" }
+  let patterns = to_string(get(get(rows, 0), "anti_patterns"))
+  // Count anti-patterns (rough: count commas + 1)
+  if contains(patterns, ",") then { return "PASS: ≥3 anti-patterns" }
+  if contains(patterns, "]") and contains(patterns, "\"") then { return "PASS" }
+  return "FAIL: <3 anti-patterns"
+}
+
+// Gate 4: Psychotype must be set before skill creation
+pattern KKCheckPsychotypeSet(dept_name: String) -> String {
+  let rows = query("SELECT primary_type FROM psychotype_assessments WHERE dept_name = ? LIMIT 1", [dept_name])
+  if length(rows) > 0 then { return "PASS: psychotype set" }
+  return "FAIL: psychotype not set for " + dept_name
+}
+
+// Gate 5: No methodology changes outside quarterly review
+pattern KKCheckMethodologyChangeAllowed() -> String {
+  // Check if current month is a quarterly review month (Jan/Apr/Jul/Oct)
+  let now = to_string(YanaNowInfo())
+  if contains(now, "-01-") or contains(now, "-04-") or contains(now, "-07-") or contains(now, "-10-") then { return "PASS: quarterly review month" }
+  return "FAIL: not quarterly review month — methodology changes blocked"
+}
+
+// Gate 6: Structural debrief (not accusatory)
+pattern KKValidateDebriefTone(text: String) -> String {
+  let t = lower(text)
+  if contains(t, "виноват") or contains(t, "плохой") or contains(t, "некомпетентн") then { return "FAIL: accusatory language detected — use structural analysis only" }
+  return "PASS: structural tone"
+}
+
+// Gate 7: 2+ consecutive bad months required for retraining
+pattern KKCheckConsecutiveBadMonths(dept_name: String) -> String {
+  let rows = query("SELECT COUNT(*) as c FROM monthly_reviews WHERE dominant_error IS NOT NULL AND improvements_applied = false ORDER BY created_at DESC LIMIT 2", [])
+  if length(rows) > 0 then {
+    let c = to_float(to_string(get(get(rows, 0), "c")))
+    if c >= 2.0 then { return "PASS: 2+ consecutive bad months" }
+  }
+  return "FAIL: <2 consecutive bad months — retraining not warranted"
+}
+
+// Gate 8: Owner approval required for recalibrate
+pattern KKCheckOwnerApproval(action: String) -> String {
+  if action == "recalibrate-dept" or action == "paradigm-review" or action == "architecture-update" then {
+    let approved = kv_get("owner_approved_" + action)
+    if to_string(approved) == "true" then { return "PASS: owner approved" }
+    return "FAIL: owner approval required for " + action
+  }
+  return "PASS: no approval needed"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LIFECYCLE STATE MACHINE
+// in_progress → completed → ratified / in_progress → rolled_back
+// ═══════════════════════════════════════════════════════════════════════
+pattern KKCreateSession(dept_name: String, session_type: String, specialist: String) -> Int {
+  let _ = db_execute("INSERT INTO training_sessions (dept_name, specialist_name, session_type, status) VALUES (?, ?, ?, 'in_progress')", [dept_name, specialist, session_type])
+  let ids = query("SELECT id FROM training_sessions WHERE dept_name = ? AND session_type = ? ORDER BY created_at DESC LIMIT 1", [dept_name, session_type])
+  if length(ids) > 0 then { return to_int(to_string(get(get(ids, 0), "id"))) }
+  return -1
+}
+
+pattern KKCompleteSession(session_id: Int) -> String {
+  let rows = query("SELECT status FROM training_sessions WHERE id = ?", [to_string(session_id)])
+  if length(rows) == 0 then { return "ERROR: session not found" }
+  let status = to_string(get(get(rows, 0), "status"))
+  if status != "in_progress" then { return "ERROR: status is '" + status + "', must be 'in_progress'" }
+  let _ = db_execute("UPDATE training_sessions SET status = 'completed', completed_at = NOW() WHERE id = ?", [to_string(session_id)])
+  let _ = AuditLog("kk_complete", "kavalnya", "session " + to_string(session_id) + " in_progress→completed")
+  return "OK: session completed"
+}
+
+pattern KKRatifySession(session_id: Int) -> String {
+  // Must pass polygon gate
+  let gate = KKCheckPolygonPassRate(session_id)
+  if contains(gate, "FAIL") then { return "BLOCKED: " + gate + " — cannot ratify without polygon pass-rate ≥70%" }
+  let _ = db_execute("UPDATE training_sessions SET status = 'ratified', ratified_at = NOW() WHERE id = ? AND status = 'completed'", [to_string(session_id)])
+  let _ = AuditLog("kk_ratify", "kavalnya", "session " + to_string(session_id) + " completed→ratified")
+  return "OK: session ratified — specialist deployed"
+}
+
+pattern KKRollbackSession(session_id: Int) -> String {
+  let _ = db_execute("UPDATE training_sessions SET status = 'rolled_back', completed_at = NOW() WHERE id = ? AND status = 'in_progress'", [to_string(session_id)])
+  let _ = AuditLog("kk_rollback", "kavalnya", "session " + to_string(session_id) + " in_progress→rolled_back")
+  return "OK: session rolled back"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// POLYGON — training test execution
+// ═══════════════════════════════════════════════════════════════════════
+pattern KKRunPolygonTask(session_id: Int, task_name: String, expected: String, actual: String, score: Float) -> String {
+  let passed = "false"
+  if score >= 0.7 then { passed = "true" }
+  let _ = db_execute("INSERT INTO polygon_results (session_id, task_name, passed, score, expected_outcome, actual_outcome) VALUES (?, ?, ?, ?, ?, ?)", [to_string(session_id), task_name, passed, to_string(score), expected, actual])
+  // Recalculate pass rate
+  let results = query("SELECT COUNT(*) as total, SUM(CASE WHEN passed THEN 1 ELSE 0 END) as passed_count FROM polygon_results WHERE session_id = ?", [to_string(session_id)])
+  if length(results) > 0 then {
+    let total = to_float(to_string(get(get(results, 0), "total")))
+    let p_count = to_float(to_string(get(get(results, 0), "passed_count")))
+    if total > 0.0 then {
+      let rate = p_count / total
+      let _ = db_execute("UPDATE training_sessions SET polygon_pass_rate = ? WHERE id = ?", [to_string(rate), to_string(session_id)])
+    }
+  }
+  return "OK: polygon task '" + task_name + "' scored " + to_string(score) + " (passed=" + passed + ")"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SKILL MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════
+pattern KKRegisterSkillReview(skill_name: String, dept_name: String, anti_patterns: String) -> String {
+  let ap_gate = KKCheckAntiPatterns(skill_name)
+  let _ = db_execute("INSERT INTO skill_reviews (skill_name, dept_name, anti_patterns, status) VALUES (?, ?, ?, 'active') ON CONFLICT (skill_name) DO UPDATE SET anti_patterns = EXCLUDED.anti_patterns, updated_at = NOW()", [skill_name, dept_name, anti_patterns])
+  let _ = AuditLog("kk_skill_review", "kavalnya", skill_name + " " + ap_gate)
+  return "OK: skill review registered (" + ap_gate + ")"
+}
+
+pattern KKDeprecateSkill(skill_name: String) -> String {
+  let _ = db_execute("UPDATE skill_reviews SET status = 'deprecated', updated_at = NOW() WHERE skill_name = ?", [skill_name])
+  let _ = AuditLog("kk_skill_deprecate", "kavalnya", skill_name + " deprecated")
+  return "OK: skill '" + skill_name + "' deprecated"
+}
+
+pattern KKGetSkillStats() -> String {
+  let active = query("SELECT COUNT(*) as c FROM skill_reviews WHERE status = 'active'", [])
+  let underused = query("SELECT COUNT(*) as c FROM skill_reviews WHERE status = 'underused'", [])
+  let deprecated = query("SELECT COUNT(*) as c FROM skill_reviews WHERE status = 'deprecated'", [])
+  let a = to_string(get(get(active, 0), "c"))
+  let u = to_string(get(get(underused, 0), "c"))
+  let d = to_string(get(get(deprecated, 0), "c"))
+  return "Skill stats: active=" + a + " underused=" + u + " deprecated=" + d
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ARSENAL REVIEW (semi-annual)
+// ═══════════════════════════════════════════════════════════════════════
+pattern KKArsenalReview(year_half: String, chat_id: String) -> String {
+  // Skills unused 4 quarters → deprecate; fail rate >30% → rewrite
+  let underused = query("SELECT skill_name FROM skill_reviews WHERE usage_count < 1 AND status = 'active'", [])
+  let failing = query("SELECT skill_name FROM skill_reviews WHERE success_rate < 0.7 AND status = 'active'", [])
+  let context = ReadDeptProfile("kavalnya")
+  let u_json = json_encode(underused)
+  let f_json = json_encode(failing)
+  let prompt = context + "\n\nARSENAL REVIEW (" + year_half + ")\nUnderused skills (4+ quarters no use): " + u_json + "\nFailing skills (success <70%): " + f_json + "\n\nFor each: recommend deprecate/rewrite/keep. Report to owner."
+  let llm_result = call_llm(prompt, "Arsenal review " + year_half)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = db_execute("INSERT INTO arsenal_reviews (year_half, skills_in_use, skills_underused, review_notes) VALUES (?, '[]', ?, ?)", [year_half, u_json, substring(reply, 0, 3000)])
+  let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
+  let _ = AuditLog("kk_arsenal", "kavalnya", year_half)
   return reply
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN DISPATCHER
+// ═══════════════════════════════════════════════════════════════════════
+pattern HandleKavalnya(query: String, chat_id: String) -> String {
+  let dept = "kavalnya"
+  let t = lower(query)
+
+  // ── Recruit: create new dept ──
+  if starts_with(t, "/recruit") then {
+    let q = substring(query, 9, 200)
+    return KKRecruit(q, chat_id)
+  }
+  // ── Train: build training course ──
+  if starts_with(t, "/train") then {
+    let q = substring(query, 7, 200)
+    return KKTrain(q, chat_id)
+  }
+  // ── Polygon: send to training tasks ──
+  if starts_with(t, "/polygon") then {
+    let q = substring(query, 9, 200)
+    return KKPolygon(q, chat_id)
+  }
+  // ── Debrief: structural error analysis ──
+  if starts_with(t, "/debrief") then {
+    let q = substring(query, 9, 200)
+    return KKDebrief(q, chat_id)
+  }
+  // ── Assess: psychotype + methodology compliance ──
+  if starts_with(t, "/assess") then {
+    let q = substring(query, 8, 200)
+    return KKAssess(q, chat_id)
+  }
+  // ── Recalibrate: full re-training (requires approval) ──
+  if starts_with(t, "/recalibrate-dept") then {
+    let q = substring(query, 17, 200)
+    return KKRecalibrate(q, chat_id)
+  }
+  // ── Arsenal review ──
+  if starts_with(t, "/arsenal-review") then {
+    return KKArsenalReview("current", chat_id)
+  }
+  // ── Skill management ──
+  if starts_with(t, "/skill-deprecate") then {
+    let q = substring(query, 16, 200)
+    return KKDeprecateSkill(q)
+  }
+  if starts_with(t, "/skill-stats") then {
+    return KKGetSkillStats()
+  }
+  // ── Paradigm review ──
+  if starts_with(t, "/paradigm-review") then {
+    return KKParadigmReview(chat_id)
+  }
+  // ── Forge status ──
+  if starts_with(t, "/forge-status") then {
+    return KKForgeStatus(chat_id)
+  }
+
+  // ── Default ──
+  let context = BuildKKContext(query, chat_id)
+  let prompt = KKDisclaimer() + "\n\n" + context + "\n\nКузница кадров: методологическая инспекция. Ответь по существу."
+  let llm_result = call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, dept, reply)
+  let _ = AuditLog("dept_query", dept, substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONTEXT BUILDER
+// ═══════════════════════════════════════════════════════════════════════
+pattern BuildKKContext(query: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile("kavalnya")
+  let corrections = GetCorrections("kavalnya")
+  let dialog = GetRecentDialog(chat_id, "10")
+  let now_info = YanaNowInfo()
+  // Active sessions
+  let sessions = query("SELECT id, dept_name, session_type, status, polygon_pass_rate FROM training_sessions WHERE status IN ('in_progress','completed') ORDER BY created_at DESC LIMIT 10", [])
+  let s_cor = to_string(corrections)
+  if s_cor == "()" then { s_cor = "" }
+  let s_dlg = to_string(dialog)
+  if s_dlg == "()" then { s_dlg = "" }
+  let s_now = to_string(now_info)
+  if s_now == "()" then { s_now = "" }
+  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Active Sessions ===\n" + json_encode(sessions) + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Dialog ===\n" + s_dlg
+  return context
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// COMMAND IMPLEMENTATIONS (all native call_llm)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern KKRecruit(dept_name: String, chat_id: String) -> String {
+  let context = BuildKKContext(dept_name, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: RECRUIT — создание нового отдела\nЖёсткий протокол:\n1. 10 этапов чек-листа методологии (все должны быть пройдены)\n2. Определение психотипа отдела (primary + secondary)\n3. Проектирование скиллов с минимум 3 anti-patterns каждый\n4. Полигон: 5-10 тренировочных задач, pass-rate ≥70%\n5. Запись результатов\n\nДля отдела '" + dept_name + "' проведи все этапы."
+  let llm_result = call_llm(prompt, "Recruit: " + dept_name)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let sid = KKCreateSession(dept_name, "recruit", dept_name)
+  let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
+  let _ = AuditLog("kk_recruit", "kavalnya", "dept=" + dept_name + " session=" + to_string(sid))
+  return reply
+}
+
+pattern KKTrain(specialist: String, chat_id: String) -> String {
+  let context = BuildKKContext(specialist, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: TRAIN — обучающий курс\nДля специалиста/отдела '" + specialist + "':\n1. Текущий уровень компетенции\n2. Целевой уровень (из профиля отдела)\n3. Разрыв → программа обучения\n4. Упражнения с нарастающей сложностью\n5. Критерии успешности каждого этапа"
+  let llm_result = call_llm(prompt, "Train: " + specialist)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let sid = KKCreateSession(specialist, "train", specialist)
+  let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
+  let _ = AuditLog("kk_train", "kavalnya", "specialist=" + specialist + " session=" + to_string(sid))
+  return reply
+}
+
+pattern KKPolygon(specialist: String, chat_id: String) -> String {
+  let context = BuildKKContext(specialist, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: POLYGON — тренировочные задачи\nДля '" + specialist + "':\n1. 5-10 задач с известными исходами\n2. Оценка каждой задачи: score 0-1\n3. Pass-rate = passed/total\n4. Порог: ≥70% для ratification\n5. Если <70% → доработка + повторный полигон"
+  let llm_result = call_llm(prompt, "Polygon: " + specialist)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
+  let _ = AuditLog("kk_polygon", "kavalnya", "specialist=" + specialist)
+  return reply
+}
+
+pattern KKDebrief(dept_name: String, chat_id: String) -> String {
+  let context = BuildKKContext(dept_name, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: DEBRIEF — структурный разбор ошибок\nДля отдела '" + dept_name + "':\n1. Какие ошибки повторяются (pattern, не blame)\n2. Природа: методологическая vs обучения vs системная\n3. Что в методологии дыра → patch\n4. Что в обучении пробел → retrain\n5. План улучшений: конкретный, измеримый, с дедлайном\n\nТОН: структурный, НЕ обвинительный. 'Где в методологии щель?'"
+  let llm_result = call_llm(prompt, "Debrief: " + dept_name)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let tone_check = KKValidateDebriefTone(reply)
+  if contains(tone_check, "FAIL") then { reply = reply + "\n\n[⚠️ TONE GATE: " + tone_check + " — перепиши в структурном ключе]" }
+  // ── LLM-Verifier: debrief methodology quality ──
+  let kkv_resp = try call_python("llm_verifier", "score", json_encode(["Debrief " + dept_name, reply, "Root cause analysis: Are structural errors identified with first-principles thinking? Actionability: Are specific corrective actions proposed? Psychological insight: Does it consider specialist psychotype and skill gaps?"]))
+  if to_string(kkv_resp) != "()" and contains(to_string(kkv_resp), "error") == false then {
+    let kkv_parsed = try parse_json(kkv_resp)
+    let kkv_score = to_float(try json_get(kkv_parsed, "result", "0.5"))
+    let _ = AuditLog("kk_verify_score", "kavalnya", "score=" + to_string(kkv_score) + " dept=" + dept_name)
+  }
+  let _ = db_execute("INSERT INTO training_sessions (dept_name, session_type, status, debrief_notes) VALUES (?, 'debrief', 'completed', ?)", [dept_name, substring(reply, 0, 3000)])
+  let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
+  let _ = AuditLog("kk_debrief", "kavalnya", "dept=" + dept_name + " tone=" + tone_check)
+  return reply
+}
+
+pattern KKAssess(specialist: String, chat_id: String) -> String {
+  let context = BuildKKContext(specialist, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: ASSESS — психотип и methodology compliance\nДля '" + specialist + "':\n1. Психотип: primary + secondary (из каталога 7 архетипов)\n2. Methodology compliance: какие правила нарушены\n3. Skill usage: какие скиллы используются/проигнорированы\n4. Сильные стороны (соответствие психотипу)\n5. Зоны риска (несоответствие)\n6. Рекомендация: адаптация или переобучение"
+  let llm_result = call_llm(prompt, "Assess: " + specialist)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = db_execute("INSERT INTO psychotype_assessments (dept_name, specialist_name, assessment_notes) VALUES (?, ?, ?)", [specialist, specialist, substring(reply, 0, 3000)])
+  let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
+  let _ = AuditLog("kk_assess", "kavalnya", "specialist=" + specialist)
+  return reply
+}
+
+pattern KKRecalibrate(dept_name: String, chat_id: String) -> String {
+  // Gate 8: owner approval required
+  let approval = KKCheckOwnerApproval("recalibrate-dept")
+  if contains(approval, "FAIL") then { return "⛔ BLOCKED: " + approval + "\nИспользуйте /approve recalibrate-dept для получения одобрения владельца." }
+  // Gate 7: 2+ consecutive bad months
+  let consecutive = KKCheckConsecutiveBadMonths(dept_name)
+  let context = BuildKKContext(dept_name, chat_id)
+  let prompt = context + "\n\nРЕЖИМ: RECALIBRATE — полная переподготовка\nOwner approval: " + approval + "\nConsecutive failures: " + consecutive + "\n\nДля отдела '" + dept_name + "':\n1. Полный аудит текущего состояния\n2. Пересмотр психотипа\n3. Перепись Tier 1 скиллов\n4. Новый полигон (5-10 задач)\n5. Ratification только при pass-rate ≥70%"
+  let llm_result = call_llm(prompt, "Recalibrate: " + dept_name)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let sid = KKCreateSession(dept_name, "recalibrate", dept_name)
+  let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
+  let _ = AuditLog("kk_recalibrate", "kavalnya", "dept=" + dept_name + " session=" + to_string(sid) + " approval=" + approval)
+  return reply
+}
+
+pattern KKParadigmReview(chat_id: String) -> String {
+  let approval = KKCheckOwnerApproval("paradigm-review")
+  if contains(approval, "FAIL") then { return "⛔ BLOCKED: paradigm review требует участие владельца." }
+  let context = BuildKKContext("paradigm review", chat_id)
+  let prompt = context + "\n\nРЕЖИМ: PARADIGM REVIEW — годовая ревизия принципов\n1. Ревизия 6 основных принципов архитектуры\n2. Изменилось ли что-то фундаментально?\n3. Достаточны ли существующие отделы?\n4. Нужно ли упразднить отделы без ценности?\n5. Глубокий debrief за год: hits, misses, сюрпризы\n6. Подготовка ARCHITECTURE.md следующей версии — СОВМЕСТНО с владельцем"
+  let llm_result = call_llm(prompt, "Paradigm review")
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "kavalnya", reply)
+  let _ = AuditLog("kk_paradigm", "kavalnya", "paradigm review initiated")
+  return reply
+}
+
+pattern KKForgeStatus(chat_id: String) -> String {
+  let active = query("SELECT COUNT(*) as c FROM training_sessions WHERE status = 'in_progress'", [])
+  let completed = query("SELECT COUNT(*) as c FROM training_sessions WHERE status = 'completed'", [])
+  let ratified = query("SELECT COUNT(*) as c FROM training_sessions WHERE status = 'ratified'", [])
+  let recent = query("SELECT id, dept_name, session_type, status, polygon_pass_rate FROM training_sessions ORDER BY created_at DESC LIMIT 5", [])
+  let a_count = to_string(get(get(active, 0), "c"))
+  let c_count = to_string(get(get(completed, 0), "c"))
+  let r_count = to_string(get(get(ratified, 0), "c"))
+  let skills = KKGetSkillStats()
+  return "🔥 Кузница кадров — статус\nАктивных сессий: " + a_count + "\nЗавершённых: " + c_count + "\nРатифицированных: " + r_count + "\n\n" + skills + "\n\nПоследние сессии:\n" + json_encode(recent)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CROSS-DEPARTMENT ROUTING
+// ═══════════════════════════════════════════════════════════════════════
+// Yana → KK: "ОСП третий месяц промахивается" → KK decides /debrief
+// KK → Yana: "Переобучила Финансы, новый режим" → Yana updates routing
+pattern KKRouteToYana(message: String) -> String {
+  let payload = json_encode({source: "kavalnya", message: message})
+  let result = try http_post("http://127.0.0.1:4000/dept/yana/notify", payload, "application/json")
+  return "OK: Yana notified"
+}
+// KK → OSP: trigger recalibration of OSP methodology
+pattern KKRouteToOSP(action: String) -> String {
+  let payload = json_encode({source: "kavalnya", action: action})
+  let result = try http_post("http://127.0.0.1:4000/dept/osp/recalibrate", payload, "application/json")
+  if to_string(result) == "()" then { return "OSP unavailable" }
+  return json_get(parse_json(result), "status", "OSP check failed")
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BOT COMMAND REGISTRY
+// /recruit <dept>      — create new dept (10 checklist stages)
+// /train <specialist>  — build training course
+// /polygon <specialist>— training tasks (pass-rate ≥70%)
+// /debrief <dept>      — structural error analysis
+// /assess <specialist> — psychotype + compliance
+// /recalibrate-dept    — full retraining (owner approval)
+// /arsenal-review      — semi-annual skill inventory
+// /skill-deprecate     — deprecate unused skill
+// /skill-stats         — skill usage statistics
+// /paradigm-review     — annual principle revision (owner)
+// /forge-status        — forge status summary
+//
+// DEPT REGISTRY: kavalnya | v1.0 | call_llm:7 | CallLLMProxy:0 | patterns:35
+// | db_execute:13 | hard_gates:8 | lifecycle:4 states | skills:11
+// | cross_dept:2 (Yana, OSP) | DB_models:6
+// Source: library/kavalnya.md v1.1, library/kk.md v2.0

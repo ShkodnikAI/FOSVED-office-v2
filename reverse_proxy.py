@@ -15,10 +15,14 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
 # Routes that go to LLM Proxy (Mini App + dashboards + archive + scheduler + learning)
 LLM_ROUTES_PREFIXES = [
-    # "/webhook/telegram",  # WH-1: returned to Metalogos after fixing app.mlog:2251
+    # "/webhook/",   # Telegram webhook — Python handler
     "/webhook/miniapp-action",  # Mini App action bar → LLM Proxy (must precede generic mlog routing)
     "/cron/collect-news",  # registered in LLM Proxy, not in Metalogos; guarded by CRON_SECRET
     "/news/stats",         # read-only counters, used by the smoke script,
+    "/scheduler/morning-brief",   # cron-accessible
+    "/scheduler/lz-daily",        # cron-accessible
+    "/scheduler/watch-sweep",     # cron-accessible (OSP watch sweep)
+    "/scheduler/indicator-pre-reminders",  # cron-accessible (OSP pre-reminders)
     "/miniapp/",
     "/miniapp",
     "/miniapp-spa/",
@@ -36,7 +40,15 @@ LLM_ROUTES_PREFIXES = [
 INTERNAL_ONLY_PREFIXES = [
     "/ask",
     "/detect-dept",
-    "/scheduler/",
+    # /scheduler/ endpoints: crons need public access, but internal sub-routes stay blocked
+    "/scheduler/admin-morning-reply",
+    "/scheduler/admin-daily",
+    "/scheduler/evening-summary",
+    "/scheduler/weekly-digest",
+    "/scheduler/monthly-review",
+    "/scheduler/control-check",
+    "/scheduler/self-learn",
+    "/scheduler/reminder-check",
     "/learning/",
     "/memory/",
     "/lz/",
@@ -55,8 +67,9 @@ INTERNAL_ONLY_PREFIXES = [
     "/archive/publish",
     "/archive/digest",
     "/archive/daily-digest",
+    "/archive/save",
     "/extract-document",
-    "/download-telegram-file",
+    "/expert/chart",  # Expert chart gen — called by mlog internally
 ]
 
 
@@ -65,10 +78,15 @@ def is_internal_only(path):
 
 
 # Routes that go to Metalogos
+# NOTE: mlog routes checked BEFORE LLM routes (specific > catch-all)
+# "/" is exact-only — see is_mlog_route (must not swallow /miniapp, /api, …)
 MLOG_ROUTES_PREFIXES = [
-    # "/webhook/" removed — Telegram webhook now handled by Python (llm_proxy:4000)
+    "/api/expert/",  # Expert automotive API — served by mlog (dept/expert.mlog)
+    "/api/lz/",      # LZ multi-domain API — served by mlog (dept/lz.mlog)
+    "/webhook/",    # Telegram webhook — mlog handler
     "/cron/",
     "/health",
+    "/version",
     "/",
 ]
 
@@ -82,8 +100,17 @@ def is_llm_route(path):
 
 
 def is_mlog_route(path):
-    """Check if path should go to Metalogos."""
+    """Check if path should go to Metalogos.
+
+    Prefix "/" matches only the exact root path. Without this guard,
+    path.startswith("/") is true for every URL and Mini App / LLM routes
+    never reach port 4000 (net::ERR_HTTP_RESPONSE_CODE_FAILURE / 404).
+    """
     for prefix in MLOG_ROUTES_PREFIXES:
+        if prefix == "/":
+            if path == "/":
+                return True
+            continue
         if path == prefix or path.startswith(prefix):
             return True
     return False
@@ -113,9 +140,14 @@ def proxy(path):
     if full_path == "/webhook/":
         full_path = "/webhook/telegram"
 
-    # Determine target
+    # Determine target:
+    # 1) LLM-specific prefixes first (miniapp, dashboards, …)
+    # 2) then mlog-specific prefixes
+    # 3) default → mlog
     if is_llm_route(full_path):
         target_url = LLM_URL + full_path
+    elif is_mlog_route(full_path):
+        target_url = MLOG_URL + full_path
     else:
         target_url = MLOG_URL + full_path
 

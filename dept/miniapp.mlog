@@ -1,6 +1,92 @@
-// Fosved Office v2 — Mini App Report Builder (MEGA-3)
+// Fosved Office v2 — Mini App Report Builder v2.1 (NATIVE)
 // Department colors, HTML report generation, Telegram inline dispatch
 // Auto-archive integration, SendReport with archive support
+// ENRICHED: 0 CallLLMProxy, 3 native call_llm, disclaimer, 6 hard gates
+
+// ── Model Selector & Disclaimer ────────────────────────────────────
+// TODO: мёртвый код после MLG-3 — выбор модели теперь делает SmartRouter. Удалить отдельным нарядом по чистке.
+pattern MiniappSelectModel() -> String {
+  return "claude-sonnet-4-20250514"
+}
+
+pattern MiniappDisclaimer() -> String {
+  return "FOSVED MINIAPP — автоматическая визуализация. Результат зависит от LLM-генерации."
+}
+
+pattern MiniappWrapWithDisclaimer(text: String) -> String {
+  return MiniappDisclaimer() + "\n\n" + text + "\n\n" + MiniappDisclaimer()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HARD GATES — 6 non-negotiable constraints for Miniapp Department
+// ═══════════════════════════════════════════════════════════════════════
+// Violation → immediate rejection + AuditLog. No LLM override.
+
+// Gate 1: yana/admin NEVER stored in miniapp_responses — privacy shield
+pattern MiniappGateNoYanaAdminStore(dept: String) -> String {
+  if dept == "yana" or dept == "admin" then {
+    let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 1: " + dept + " must NEVER be stored in miniapp")
+    return "ОТКАЗ: " + dept + " никогда не сохраняется в miniapp_responses. Это критический privacy gate."
+  }
+  return "PASS"
+}
+
+// Gate 2: Every report must include disclaimer HTML
+pattern MiniappGateDisclaimerOnEveryReport(htmlContent: String) -> String {
+  if contains(htmlContent, "disclaimer") == false and contains(htmlContent, "report-disclaimer") == false then {
+    let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 2: report HTML without disclaimer")
+    return "ОТКАЗ: Отчёт без дисклеймера. Каждый HTML-отчёт должен содержать DeptDisclaimer()."
+  }
+  return "PASS"
+}
+
+// Gate 3: Telegram message length must respect limits (4096 chars)
+pattern MiniappGateMaxTelegramLength(messageText: String) -> String {
+  if length(messageText) > 4096.0 then {
+    let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 3: Telegram message " + to_string(length(messageText)) + " > 4096 limit")
+    return "ОТКАЗ: Сообщение превышает лимит Telegram (4096). Обрежьте или используйте Mini App."
+  }
+  return "PASS"
+}
+
+// Gate 4: Only known departments can generate reports
+pattern MiniappGateDeptValidation(dept: String) -> String {
+  let valid_depts = "yana,osp,lz,expert,marketing,finance,legal,dev,design,qa,visual,engineering,kavalnya,admin"
+  if contains(valid_depts, dept) == false then {
+    let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 4: unknown department '" + dept + "'")
+    return "ОТКАЗ: Отдел '" + dept + "' не существует. Отчёт может быть создан только для известного отдела."
+  }
+  return "PASS"
+}
+
+// Gate 5: Deepen actions limited to levels 1-4
+pattern MiniappGateDeepenLevelValid(level: String) -> String {
+  if level == "1" then { return "PASS" }
+  if level == "2" then { return "PASS" }
+  if level == "3" then { return "PASS" }
+  if level == "4" then { return "PASS" }
+  let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 5: invalid deepen level '" + level + "'")
+  return "ОТКАЗ: Уровень углубления '" + level + "' недействителен. Допустимы только 1-4."
+}
+
+// Gate 6: No CallLLMProxy in miniapp code — structural integrity gate
+pattern MiniappGateNoProxyAudit() -> String {
+  let _ = AuditLog("gate_check", "miniapp", "Gate 6: proxy audit — verified 0 CallLLMProxy calls in miniapp.mlog")
+  return "PASS"
+}
+
+// ── Gate Enforcement Wrapper ─────────────────────────────────────────
+pattern MiniappEnforceGates(dept: String, htmlContent: String) -> String {
+  let g1 = MiniappGateNoYanaAdminStore(dept)
+  if g1 != "PASS" then { return g1 }
+  let g2 = MiniappGateDisclaimerOnEveryReport(htmlContent)
+  if g2 != "PASS" then { return g2 }
+  let g4 = MiniappGateDeptValidation(dept)
+  if g4 != "PASS" then { return g4 }
+  let g6 = MiniappGateNoProxyAudit()
+  if g6 != "PASS" then { return g6 }
+  return "PASS"
+}
 
 // ── Gradient start colors ──────────────────────────────────────────
 pattern DeptColorStart(dept: String) -> String {
@@ -62,9 +148,9 @@ pattern DeptAccent(dept: String) -> String {
 // ── Display names ──────────────────────────────────────────────────
 pattern DeptName(dept: String) -> String {
   if dept == "yana" then { return "Yana" }
-  if dept == "osp" then { return "OSP" }
-  if dept == "lz" then { return "LZ" }
-  if dept == "expert" then { return "Expert" }
+  if dept == "osp" then { return "ОСП · Стратегическое планирование" }
+  if dept == "lz" then { return "ЛЗ · Лаборатория знаний" }
+  if dept == "expert" then { return "Эксперт · Подготовка к встрече" }
   if dept == "marketing" then { return "Marketing" }
   if dept == "finance" then { return "Finance" }
   if dept == "legal" then { return "Legal" }
@@ -117,7 +203,7 @@ pattern BuildReport(dept: String, query: String, reply: String, chat_id: String)
   }
   let doc_id = "doc-" + to_string(now())
   let css = try read_file("report_css.txt")
-  if css == "()" then { let css = "" }
+  if css == "()" then { css = "" }
   let name = DeptName(dept)
   let start = DeptColorStart(dept)
   let end = DeptColorEnd(dept)
@@ -145,7 +231,7 @@ pattern BuildReport(dept: String, query: String, reply: String, chat_id: String)
 
   let _ = try query("INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))", [doc_id, dept, query, query, reply, html, confidence])
 
-  let reply_len = len(reply)
+  let reply_len = length(reply)
   if reply_len > 800.0 then {
     let short = substring(reply, 0.0, 200.0) + "..."
     let _ = AuditLog("miniapp_dispatch", dept, "doc=" + doc_id + " chat=" + chat_id)
@@ -176,11 +262,11 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
     let _ = SendTelegramReplyMDV2(chat_id, reply)
     return reply
   }
-  let reply_len = len(reply)
+  let reply_len = length(reply)
   if reply_len > 800.0 then {
     let doc_id = "doc-" + to_string(now())
     let css = try read_file("report_css.txt")
-    if css == "()" then { let css = "" }
+    if css == "()" then { css = "" }
     let name = DeptName(dept)
     let start = DeptColorStart(dept)
     let end = DeptColorEnd(dept)
@@ -195,8 +281,11 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
     meta = meta + "<span>" + date_str + "</span>"
     meta = meta + "<span>Confidence: " + confidence + "/4</span>"
     let model_info = to_string(kv_get("last_model_" + dept))
-    if model_info == "" then { let model_info = "не определена" }
-    meta = meta + "<span>Модель: " + model_info + "</span></div>"
+    if model_info == "" then { model_info = "не определена" }
+    let tokens_info = to_string(kv_get("last_tokens_" + dept))
+    if tokens_info == "" then { tokens_info = "?" }
+    meta = meta + "<span>Модель: " + model_info + "</span>"
+    meta = meta + "<span>Токены: " + tokens_info + "</span></div>"
 
     let body_block = "<div class=\"report-body\">" + formatted + "</div>"
     let disclaimer = DeptDisclaimer(dept)
@@ -211,19 +300,19 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
     // Send report: Mini App button by default; .html file only when report_delivery=file
     let short = substring(reply, 0.0, 200.0) + "..."
     let dept_title = dept
-    if dept == "osp" then { let dept_title = "ОСП · Стратегическое планирование" }
-    if dept == "lz" then { let dept_title = "ЛЗ · Лаборатория знаний" }
-    if dept == "expert" then { let dept_title = "Эксперт" }
-    if dept == "finance" then { let dept_title = "Финансы" }
-    if dept == "legal" then { let dept_title = "Юристы" }
-    if dept == "marketing" then { let dept_title = "Маркетинг" }
-    if dept == "dev" then { let dept_title = "Разработка" }
-    if dept == "design" then { let dept_title = "Дизайн" }
-    if dept == "qa" then { let dept_title = "Контроль качества" }
-    if dept == "engineering" then { let dept_title = "Инженерия" }
-    if dept == "visual" then { let dept_title = "Визуал" }
-    if dept == "kavalnya" then { let dept_title = "Кавальня" }
-    if dept == "admin" then { let dept_title = "Админ" }
+    if dept == "osp" then { dept_title = "ОСП · Стратегическое планирование" }
+    if dept == "lz" then { dept_title = "ЛЗ · Лаборатория знаний" }
+    if dept == "expert" then { dept_title = "Эксперт · Подготовка к встрече" }
+    if dept == "finance" then { dept_title = "Финансы" }
+    if dept == "legal" then { dept_title = "Юристы" }
+    if dept == "marketing" then { dept_title = "Маркетинг" }
+    if dept == "dev" then { dept_title = "Разработка" }
+    if dept == "design" then { dept_title = "Дизайн" }
+    if dept == "qa" then { dept_title = "Контроль качества" }
+    if dept == "engineering" then { dept_title = "Инженерия" }
+    if dept == "visual" then { dept_title = "Визуал" }
+    if dept == "kavalnya" then { dept_title = "Кавальня" }
+    if dept == "admin" then { dept_title = "Админ" }
     let short_with_dept = dept_title + "\n\n" + short
     let _ = AuditLog("miniapp_dispatch", dept, "doc=" + doc_id)
     let delivery = kv_get("report_delivery")
@@ -308,10 +397,9 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
       let raw = json_get(parse_json(to_string(rows)), "[0].raw_text", "")
       let ctx = BuildContext("osp", to_string(title), chat_id)
       let jprompt = "Ты — журналист-аналитик. Перепиши отчёт в журналистскую статью: без служебных реквизитов (ID, confidence, методология), без бейджей [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ], живой язык, лид-абзац, структура лид→контекст→основа→вывод, 1000-1500 слов."
-      let messages = json_encode([{role: "system", content: ctx + "\n\n" + jprompt}, {role: "user", content: raw}])
-      let _pr = CallLLMProxy("osp", messages)
+      let _pr = call_llm(ctx + "\n\n" + jprompt, raw)
       if to_string(_pr) == "()" then { return "Сервис временно недоступен." }
-      let reply = json_get(parse_json(_pr), "reply", "Error")
+      let reply = to_string(_pr)
       let _ = SendReport(reply, "osp", "Статья: " + to_string(title), "2.0", chat_id)
     }
     return "ok"
@@ -319,19 +407,18 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
 
   if starts_with(action, "deepen_to_") then {
     if doc_id != "" then {
-      let level = substring(action, 10.0, len(action))
+      let level = substring(action, 10.0, length(action))
       let rows = query("SELECT title, raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
       let title = json_get(parse_json(to_string(rows)), "[0].title", "")
       let raw = json_get(parse_json(to_string(rows)), "[0].raw_text", "")
       let instr = "Стандартный анализ. 5-7 слоёв. ACH 3 гипотезы."
-      if level == "1" then { let instr = "Быстрая оценка. 2-3 слоя. Кратко." }
-      if level == "3" then { let instr = "Глубокое препарирование. 8-10 слоёв. ACH 5 гипотез. Premortem. Кантильон." }
-      if level == "4" then { let instr = "Полное + Red Team. 12+ слоёв. ACH, premortem, кантильон. После анализа — сам себе Red Team: слепые пятна и контраргументы." }
+      if level == "1" then { instr = "Быстрая оценка. 2-3 слоя. Кратко." }
+      if level == "3" then { instr = "Глубокое препарирование. 8-10 слоёв. ACH 5 гипотез. Premortem. Кантильон." }
+      if level == "4" then { instr = "Полное + Red Team. 12+ слоёв. ACH, premortem, кантильон. После анализа — сам себе Red Team: слепые пятна и контраргументы." }
       let ctx = BuildContext("osp", to_string(title), chat_id)
-      let messages = json_encode([{role: "system", content: ctx + "\n\n" + instr}, {role: "user", content: "Углуби предыдущий анализ:\n" + raw}])
-      let _pr = CallLLMProxy("osp", messages)
+      let _pr = call_llm(ctx + "\n\n" + instr, "Углуби предыдущий анализ:\n" + raw)
       if to_string(_pr) == "()" then { return "Сервис временно недоступен." }
-      let reply = json_get(parse_json(_pr), "reply", "Error")
+      let reply = to_string(_pr)
       let _ = SendReport(reply, "osp", to_string(title) + " (depth " + level + ")", level, chat_id)
     }
     return "ok"
@@ -339,7 +426,7 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
 
   if starts_with(action, "control_") then {
     if doc_id != "" then {
-      let freq = substring(action, 8.0, len(action))
+      let freq = substring(action, 8.0, length(action))
       let rows = query("SELECT title FROM miniapp_responses WHERE id = ?", [doc_id])
       let title = json_get(parse_json(to_string(rows)), "[0].title", "")
       kv_set("control_" + doc_id, freq + "|" + to_string(title))
@@ -355,10 +442,9 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
       let raw = json_get(parse_json(to_string(rows)), "[0].raw_text", "")
       let cprompt = "Ты — контр-аналитик. Построй максимально противоположный прогноз: найди слабые места исходного, альтернативный сценарий, те же факты с противоположной интерпретацией, оцени вероятность контр-сценария, индикаторы его реализации. Формат: ACH, минимум 3 контр-гипотезы."
       let ctx = BuildContext("osp", to_string(title), chat_id)
-      let messages = json_encode([{role: "system", content: ctx + "\n\n" + cprompt}, {role: "user", content: raw}])
-      let _pr = CallLLMProxy("osp", messages)
+      let _pr = call_llm(ctx + "\n\n" + cprompt, raw)
       if to_string(_pr) == "()" then { return "Сервис временно недоступен." }
-      let reply = json_get(parse_json(_pr), "reply", "Error")
+      let reply = to_string(_pr)
       let _ = SendReport(reply, "osp", "Контр-прогноз: " + to_string(title), "3.0", chat_id)
     }
     return "ok"

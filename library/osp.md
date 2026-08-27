@@ -253,3 +253,67 @@ _(пополняется через `/debrief осп | <текст опыта>` 
 
 ---
 **Статус:** Отдел-оркестратор (I.2.2 v1.2). Master-скилл: `deconstruct`. 24 скилла в 3 tier'ах, загрузка управляется master-скиллом.
+
+---
+
+## Проектные параметры (V3.1 Enrichment)
+
+### Токен-бюджеты
+
+| Глубина | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Output | Итого (анализ) | Skills | Total |
+|---------|---------|---------|---------|---------|--------|-----------------|--------|-------|
+| 0 (Quick) | 500 | 1000 | 800 | 600 | 600 | ~3500 | 8K | ~11.5K |
+| 1 (Standard) | 800 | 4000 | 3000 | 2000 | 1200 | ~11000 | 12K | ~23K |
+| 2 (Wargame) | 1000 | 6000 | 5000 | 3500 | 1500 | ~17000 | 18K | ~35K |
+| 3 (Deep) | 1200 | 8000 | 7000 | 5000 | 2000 | ~23200 | 20K | ~43K |
+| 4 (Full) | 1500 | 10000 | 9000 | 7000 | 2500 | ~30000 | 23K | ~53K |
+
+### Модельный конфиг
+
+| Глубина | Модель | Reasoning | Обоснование |
+|---------|--------|-----------|-------------|
+| 0 | claude-3-5-haiku | low | Быстрый ответ |
+| 1 | claude-sonnet-4 | medium | Баланс |
+| 2 | claude-sonnet-4 | high | Расширенное reasoning |
+| 3 | claude-opus-4 | high | Глубокий анализ |
+| 4 | claude-opus-4 | high | Multi-turn, max reasoning |
+
+### Quality gates (программные)
+
+- **BLOCKER** (failed → DRAFTED): awareness frame, no empty layers, topology has fruits, forces complete, both paths run, falsifiable indicators, chat summary ≤25 lines
+- **WARNING** (failed → DRAFTED, override possible): Layer 8 comparison, Layer 11 null hypothesis, ≥2 maneuvers, ≥3 fruits projected, divergence in tree
+- Gates проверяются через `OSPCheckQualityGates()` в osp.mlog после каждого анализа
+
+### Auto-escalation triggers
+
+- Тема в I&W watchlist → depth +1
+- Тема в top-3 приоритетов owner → depth +1
+- ≥2 historical misses на похожую тему → depth +1
+- High-stakes флаг → depth +2
+- Hard ceiling: depth ≤4
+
+### API endpoints (новые)
+
+- `GET /osp/archive` — поиск по архиву (status, domain, limit)
+- `GET /osp/indicators/due` — индикаторы к проверке
+- `POST /osp/verify/:id` — верифицировать индикатор
+- Full spec: `docs/OSP-PROJECT-PARAMS.md`
+
+### Error categories (при MISS)
+
+| Категория | Fallback |
+|-----------|----------|
+| MISSED_FORCE | Auto-trigger red-team |
+| MISSED_SPILLOVER | Flag for mandatory cross-country check |
+| PREMATURE_CONVERGENCE | Add Path C (contrarian) |
+| WRONG_MODEL | Bi-annual paradigm review |
+| WRONG_SCORING | Recalculate + calibration bias log |
+
+### Prisma модели
+
+- `Analysis` — полный архив (30+ полей, 4 фазы, quality gates, verification)
+- `Indicator` — индикаторы с scheduled verification
+- `WatchlistItem` — I&W наблюдение с delta tracking
+- `BrierScoreLog` — покаскадный Brier score
+- `CalibrationCurvePoint` — точки калибровочной кривой
+- Full schema: `docs/OSP-PROJECT-PARAMS.md` секция 1

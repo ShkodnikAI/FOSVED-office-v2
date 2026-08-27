@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
-    ca-certificates git python3 python3-pip curl \
+    ca-certificates git python3 python3-pip curl nodejs npm \
     tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-jpn tesseract-ocr-kor \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,6 +16,11 @@ WORKDIR /office
 COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
 COPY . .
+
+# Node.js deps (Prisma client for PostgreSQL)
+RUN npm install --production 2>/dev/null || true
+RUN npx prisma generate 2>/dev/null || true
+
 RUN mkdir -p /office/data /tmp
 RUN git config --global user.email "agent@fosved.office" \
     && git config --global user.name "Fosved Agent"

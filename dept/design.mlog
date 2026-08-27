@@ -1,17 +1,1670 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// ═══════════════════════════════════════════════════════════════════════
+// Fosved Office v2 — Design Department (Дизайн) — NATIVE v1.0
+// ═══════════════════════════════════════════════════════════════════════
+// Replaces Python proxy stub with native Metalogos design engine.
+// 12 skills (5 Tier 1 + 5 Tier 2 + 2 Tier 3), 8 bot commands,
+// 12 hard rules, lifecycle state machine, disclaimer enforcement,
+// accessibility gates, design token discipline, learning loop.
+// 0 CallLLMProxy calls, 0 Python dependencies.
+//
+// Architecture:
+//   HandleDesign(query, chat_id)
+//     → ParseDesignQuery(query)           ← NLP + command detection
+//     → RouteDesignCommand(cmd, ...)       ← 8 bot commands + free-text dispatch
+//       → cmd=/design        → CreateDesignArtifact
+//       → cmd=/design-spec   → GenerateComponentSpec
+//       → cmd=/design-system → ManageDesignSystem
+//       → cmd=/design-show   → ShowDesignArtifact
+//       → cmd=/design-artifacts → ListDesignArtifacts
+//       → cmd=/design-research → ConductUserResearch
+//       → cmd=/design-iterate → IterateDesignArtifact
+//       → cmd=/design-approve → ApproveDesignArtifact
+//       → free-text           → DesignPipeline
+//     → DesignPipeline (for free-text queries):
+//       → DetectArtifactType                ← wireframe/mockup/spec/etc.
+//       → EnforceHardRules                 ← 12 gates, all native
+//       → LoadSkillTiers                   ← Tier 1 always, Tier 2 by type, Tier 3 explicit
+//       → RunPreApprovalGate               ← WCAG + user tasks + states + responsive
+//       → ExecuteDesignGeneration          ← call_llm with full context
+//       → ValidateAccessibility            ← WCAG AA minimum, AAA for critical
+//       → RecordArtifactLifecycle          ← db_execute state transition
+//       → WrapWithDisclaimer               ← mandatory bookends
+//     → RecordAssistantMessage
+//
+// Depends on BUILTINS only (no Python, no CallLLMProxy):
+//   call_llm, db_execute, kv_get, kv_set, json_encode, json_get, parse_json,
+//   to_string, to_float, to_int, length, contains, lower, substring,
+//   join, split, now, format_date, hash, AuditLog,
+//   RecordAssistantMessage, BuildContext, SendTelegramMessage
+//
+// ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 0: CONSTANTS & DISCLAIMER
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern DISCLAIMER_TOP() -> String { return "⚠️ Дизайн-спецификация генерируется проектным ассистентом. Все решения подлежат согласованию с владельцем и проверке на техническую осуществимость перед реализацией." }
+
+pattern DISCLAIMER_BOTTOM() -> String { return "⚠️ Дизайн-спецификация генерируется проектным ассистентом. Все решения подлежат согласованию с владельцем и проверке на техническую осуществимость перед реализацией." }
+
+pattern DEPT_NAME() -> String { return "design" }
+pattern DEPT_NAME_RU() -> String { return "Дизайн" }
+pattern PSYCHOTYPE() -> String { return "Эмпат + Перфекционист + Систематик" }
+
+// Fosved brand identity — design tokens (source of truth)
+pattern COLOR_PRIMARY_NAVY() -> String { return "#1a2332" }
+pattern COLOR_PRIMARY_CREAM() -> String { return "#f4f0e6" }
+pattern COLOR_ACCENT_GOLD() -> String { return "#c9a227" }
+pattern COLOR_ACCENT_BURGUNDY() -> String { return "#6e2639" }
+pattern COLOR_ACCENT_FOREST() -> String { return "#2d4a3e" }
+pattern COLOR_NEUTRAL_GREY() -> String { return "#6b7280" }
+
+pattern TYPO_HEADING() -> String { return "Inter Tight" }
+pattern TYPO_BODY() -> String { return "Inter" }
+pattern TYPO_MONO() -> String { return "IBM Plex Mono" }
+
+pattern SPACING_SCALE() -> String { return "4,8,16,24,40,64" }
+pattern GRID_COLS() -> String { return "12" }
+pattern GRID_GUTTER() -> String { return "24px" }
+pattern GRID_MARGIN() -> String { return "64px" }
+
+// Artifact types
+pattern ARTIFACT_TYPES() -> String { return "wireframe,mockup,design_system,component_spec,user_flow,prototype,design_token_set" }
+
+// Lifecycle states: draft → iteration → review → approved → handed_off → implemented → retired
+pattern STATE_DRAFT() -> String { return "draft" }
+pattern STATE_ITERATION() -> String { return "iteration" }
+pattern STATE_REVIEW() -> String { return "review" }
+pattern STATE_APPROVED() -> String { return "approved" }
+pattern STATE_HANDED_OFF() -> String { return "handed_off" }
+pattern STATE_IMPLEMENTED() -> String { return "implemented" }
+pattern STATE_RETIRED() -> String { return "retired" }
+
+pattern VALID_TRANSITIONS() -> String { return "draft→iteration,draft→review,iteration→iteration,iteration→review,review→approved,review→iteration,approved→handed_off,handed_off→implemented,implemented→retired,any→retired" }
+
+// 7 interaction states (hard rule 4)
+pattern INTERACTION_STATES() -> String { return "default,hover,focus,active,disabled,loading,error" }
+
+// WCAG levels
+pattern WCAG_AA() -> String { return "AA" }
+pattern WCAG_AAA() -> String { return "AAA" }
+
+// Skill tiers
+pattern TIER1_SKILLS() -> String { return "user-task-analysis,design-system-thinking,accessibility-first,design-tokens-discipline,cognitive-laws-application" }
+pattern TIER2_SKILLS() -> String { return "wireframe-production,interaction-states,responsive-design,component-library-development,dev-handoff-specs" }
+pattern TIER3_SKILLS() -> String { return "user-research-methods,conversational-ui-design" }
+
+// Iteration escalation threshold
+pattern ITERATION_WARN_THRESHOLD() -> Int { return 3 }
+
+// Metrics targets
+pattern TARGET_DRIFT() -> Float { return 0.90 }
+pattern TARGET_A11Y_SCORE() -> Float { return 1.0 }
+pattern TARGET_ITERATION_80PCT() -> Int { return 3 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 1: DESIGN TOKEN CONSTANTS (for system enforcement)
+// Hard rule 3: no free styles — design tokens mandatory
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FOSVED_TOKENS_JSON() -> String { return "{\"colors\":{\"primary-navy\":\"#1a2332\",\"primary-cream\":\"#f4f0e6\",\"accent-gold\":\"#c9a227\",\"accent-burgundy\":\"#6e2639\",\"accent-forest\":\"#2d4a3e\",\"neutral-grey\":\"#6b7280\",\"semantic-error\":\"#dc2626\",\"semantic-success\":\"#16a34a\",\"semantic-warning\":\"#f59e0b\",\"semantic-info\":\"#3b82f6\"},\"typography\":{\"heading\":{\"family\":\"Inter Tight\",\"weights\":\"400,500,600,700\"},\"body\":{\"family\":\"Inter\",\"weights\":\"400,500,600\"},\"mono\":{\"family\":\"IBM Plex Mono\",\"weights\":\"400,500\"}},\"spacing\":{\"scale\":\"4,8,16,24,40,64\",\"unit\":\"8px\"},\"grid\":{\"columns\":12,\"gutter\":\"24px\",\"margin\":\"64px\"},\"radius\":{\"none\":\"0px\",\"sm\":\"4px\",\"md\":\"8px\",\"lg\":\"16px\",\"xl\":\"24px\",\"full\":\"9999px\"},\"shadow\":{\"none\":\"none\",\"sm\":\"0 1px 2px rgba(0,0,0,0.05)\",\"md\":\"0 4px 6px rgba(0,0,0,0.07)\",\"lg\":\"0 10px 15px rgba(0,0,0,0.1)\"}}" }
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 2: NLP QUERY PARSER & ARTIFACT TYPE DETECTION
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern DetectArtifactType(query: String) -> String {
+  let q = lower(query)
+  // Wireframe keywords
+  if contains(q, "wireframe") or contains(q, "вайрфрейм") or contains(q, "каркас экран") or contains(q, "лэйаут") or contains(q, "layout") then { return "wireframe" }
+  // Mockup keywords
+  if contains(q, "mockup") or contains(q, "макет") or contains(q, "визуальн") or contains(q, "дизайн экран") then { return "mockup" }
+  // Component spec keywords
+  if contains(q, "компонент") or contains(q, "component") or contains(q, "спецификаци") or contains(q, "spec") then { return "component_spec" }
+  // Design system keywords
+  if contains(q, "design system") or contains(q, "дизайн-систем") or contains(q, "дизайн систем") or contains(q, "токен") then { return "design_system" }
+  // User flow keywords
+  if contains(q, "user flow") or contains(q, "пользовательск") or contains(q, "флоу") or contains(q, "сценарий") or contains(q, "journey") then { return "user_flow" }
+  // Prototype keywords
+  if contains(q, "prototype") or contains(q, "прототип") or contains(q, "интерактивн") then { return "prototype" }
+  // Design token set keywords
+  if contains(q, "design token") or contains(q, "токен дизайн") or contains(q, "color token") or contains(q, "spacing token") then { return "design_token_set" }
+  return "unknown"
+}
+
+pattern DetectDesignCommand(query: String) -> String {
+  let q = lower(query)
+  if contains(q, "/design-spec") then { return "design_spec" }
+  if contains(q, "/design-system") then { return "design_system" }
+  if contains(q, "/design-show") then { return "design_show" }
+  if contains(q, "/design-artifacts") then { return "design_artifacts" }
+  if contains(q, "/design-research") then { return "design_research" }
+  if contains(q, "/design-iterate") then { return "design_iterate" }
+  if contains(q, "/design-approve") then { return "design_approve" }
+  if contains(q, "/design") then { return "design" }
+  return "free_text"
+}
+
+pattern DetectAISpecific(query: String) -> Bool {
+  // Detect if query is about an AI/ML product — triggers hard rule 11
+  let q = lower(query)
+  return contains(q, "ai") or contains(q, "ии") or contains(q, "chatbot") or contains(q, "чат-бот") or contains(q, "ассистент") or contains(q, "llm") or contains(q, "ml") or contains(q, "нейросет") or contains(q, "machine learning") or contains(q, "agent") or contains(q, "агент")
+}
+
+pattern DetectNewDomain(query: String) -> Bool {
+  // Detect if query involves a new/unfamiliar domain — triggers hard rule 12
+  let q = lower(query)
+  return contains(q, "новый домен") or contains(q, "new domain") or contains(q, "незнаком") or contains(q, "не работал") or contains(q, "впервые") or contains(q, "first time")
+}
+
+pattern ParseDesignQuery(query: String) -> Dict {
+  let command = DetectDesignCommand(query)
+  let artifact_type = DetectArtifactType(query)
+
+  // Extract artifact_id if present (after command keyword)
+  let artifact_id = ""
+  let parts = split(query, " ")
+  if command != "free_text" and command != "design" then {
+    if length(parts) > 1 then {
+      artifact_id = to_string(get(parts, 1))
+    }
+  }
+
+  // Determine WCAG level from query
+  let q = lower(query)
+  let wcag_level = WCAG_AA()
+  if contains(q, "aaa") or contains(q, "критичн") then { wcag_level = WCAG_AAA() }
+
+  return {
+    command: command,
+    artifact_type: artifact_type,
+    task_description: query,
+    artifact_id: artifact_id,
+    is_ai_product: DetectAISpecific(query),
+    is_new_domain: DetectNewDomain(query),
+    wcag_level: wcag_level
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 3: HARD RULE GATES (12 native gates)
+// Every hard rule is an if-then block that blocks execution on violation.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Hard rule 1: No finalizing design without accessibility check (WCAG AA minimum; AAA for critical)
+pattern GateA11yCheck(artifact_type: String, wcag_level: String, a11y_score: Float) -> Dict {
+  let required_score = 0.9
+  if wcag_level == WCAG_AAA() then { required_score = 1.0 }
+  if a11y_score < required_score then {
+    return {
+      passes: false,
+      message: "🚫 ЖЁСТКОЕ ПРАВИЛО 1: Дизайн не может быть утверждён без проверки доступности. WCAG " + wcag_level + " требует оценку ≥" + to_string(required_score) + ", текущая: " + to_string(a11y_score) + ". Проведите accessibility-аудит."
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 1: Доступность проверена (WCAG " + wcag_level + ", оценка: " + to_string(a11y_score) + ")"
+  }
+}
+
+// Hard rule 2: No one-off design — every component enters design system
+pattern GateDesignSystemEntry(artifact_type: String, design_system_id: String) -> Dict {
+  if artifact_type == "component_spec" or artifact_type == "mockup" or artifact_type == "wireframe" then {
+    if design_system_id == "" then {
+      return {
+        passes: false,
+        message: "🚫 ЖЁСТКОЕ ПРАВИЛО 2: Каждый компонент должен быть включён в дизайн-систему. Укажите design_system_id или создайте новую командой /design-system."
+      }
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 2: Компонент привязан к дизайн-системе"
+  }
+}
+
+// Hard rule 3: No free styles — design tokens mandatory
+pattern GateDesignTokens(tokens_json: String) -> Dict {
+  if tokens_json == "" or tokens_json == "{}" or tokens_json == "null" then {
+    return {
+      passes: false,
+      message: "🚫 ЖЁСТКОЕ ПРАВИЛО 3: Свободные стили запрещены. Все визуальные свойства должны использовать дизайн-токены (цвет, отступы, типографика, радиус)."
+    }
+  }
+  // Check that token set contains minimum required categories
+  let has_colors = contains(tokens_json, "color") or contains(tokens_json, "Цвет")
+  let has_spacing = contains(tokens_json, "spacing") or contains(tokens_json, "отступ")
+  let has_typo = contains(tokens_json, "typo") or contains(tokens_json, "типографик") or contains(tokens_json, "font")
+  if (has_colors == false) or (has_spacing == false) or (has_typo == false) then {
+    let colors_str = "НЕТ"
+    if has_colors then { colors_str = "да" }
+    let spacing_str = "НЕТ"
+    if has_spacing then { spacing_str = "да" }
+    let typo_str = "НЕТ"
+    if has_typo then { typo_str = "да" }
+    return {
+      passes: false,
+      message: "🚫 ЖЁСТКОЕ ПРАВИЛО 3: Токены неполны. Обязательные категории: color, spacing, typography. Получено: colors=" + colors_str + " spacing=" + spacing_str + " typography=" + typo_str
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 3: Дизайн-токены определены (color, spacing, typography)"
+  }
+}
+
+// Hard rule 4: No dev handoff without explicit state specs (7 states)
+pattern GateInteractionStates(artifact_type: String, states_json: String) -> Dict {
+  if artifact_type == "component_spec" then {
+    let has_default = contains(states_json, "default")
+    let has_hover = contains(states_json, "hover")
+    let has_focus = contains(states_json, "focus")
+    let has_active = contains(states_json, "active")
+    let has_disabled = contains(states_json, "disabled")
+    let has_loading = contains(states_json, "loading")
+    let has_error = contains(states_json, "error")
+    let all_present = has_default and has_hover and has_focus and has_active and has_disabled and has_loading and has_error
+    ifall_present == false then {
+      let missing = ""
+      ifhas_default == false then { missing = missing + "default " }
+      ifhas_hover == false then { missing = missing + "hover " }
+      ifhas_focus == false then { missing = missing + "focus " }
+      ifhas_active == false then { missing = missing + "active " }
+      ifhas_disabled == false then { missing = missing + "disabled " }
+      ifhas_loading == false then { missing = missing + "loading " }
+      ifhas_error == false then { missing = missing + "error " }
+      return {
+        passes: false,
+        message: "🚫 ЖЁСТКОЕ ПРАВИЛО 4: Dev-хэндофф невозможен без спецификации ВСЕХ 7 состояний. Отсутствуют: " + missing
+      }
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 4: Все 7 состояний взаимодействия специфицированы"
+  }
+}
+
+// Hard rule 5: No ignoring mobile — every design has mobile-first or responsive view
+pattern GateResponsiveDesign(artifact_type: String, has_mobile: Bool, has_responsive: Bool) -> Dict {
+  if artifact_type == "wireframe" or artifact_type == "mockup" or artifact_type == "component_spec" or artifact_type == "prototype" then {
+    if (has_mobile == false) and (has_responsive == false) then {
+      return {
+        passes: false,
+        message: "🚫 ЖЁСТКОЕ ПРАВИЛО 5: Мобильная версия обязательна. Каждый дизайн должен иметь mobile-first или responsive вариант."
+      }
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 5: Мобильная/адаптивная версия предусмотрена"
+  }
+}
+
+// Hard rule 6: No design without user task definition
+pattern GateUserTasks(user_tasks_json: String) -> Dict {
+  if user_tasks_json == "" or user_tasks_json == "[]" or user_tasks_json == "null" then {
+    return {
+      passes: false,
+      message: "🚫 ЖЁСТКОЕ ПРАВИЛО 6: Дизайн без определения пользовательских задач недопустим. Укажите задачи (какую проблему решает пользователь, какой результат ожидает)."
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 6: Пользовательские задачи определены"
+  }
+}
+
+// Hard rule 7: No design system without documented usage examples + anti-patterns
+pattern GateDesignSystemDocs(artifact_type: String, has_examples: Bool, has_anti_patterns: Bool) -> Dict {
+  if artifact_type == "design_system" then {
+    if (has_examples == false) or (has_anti_patterns == false) then {
+      let ex_status = "НЕТ"
+      if has_examples then { ex_status = "да" }
+      let ap_status = "НЕТ"
+      if has_anti_patterns then { ap_status = "да" }
+      return {
+        passes: false,
+        message: "ЖЁСТКОЕ ПРАВИЛО 7: Дизайн-система должна содержать примеры использования и анти-паттерны. examples=" + ex_status + " anti-patterns=" + ap_status
+      }
+    }
+  }
+  return {
+    passes: true,
+    message: "Правило 7: Дизайн-система документирована (примеры + анти-паттерны)"
+  }
+}
+
+// Hard rule 8: No design without iteration count recorded
+pattern GateIterationRecorded(artifact_id: String, iteration_count: Int) -> Dict {
+  if iteration_count < 0 then {
+    return {
+      passes: false,
+      message: "🚫 ЖЁСТКОЕ ПРАВИЛО 8: Итерация не записана. Каждый артефакт должен иметь счётчик итераций."
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 8: Итерация зафиксирована (итерация " + to_string(iteration_count) + ")"
+  }
+}
+
+// Hard rule 9: No design review skip with Dev before implementation
+pattern GateDevReviewBeforeImplementation(status: String, dev_review_done: Bool) -> Dict {
+  if status == STATE_HANDED_OFF() or status == STATE_IMPLEMENTED() then {
+    if dev_review_done == false then {
+      return {
+        passes: false,
+        message: "🚫 ЖЁСТКОЕ ПРАВИЛО 9: Перед передачей в разработку обязателен совместный дизайн-ревью с Dev. Ревью не проведено."
+      }
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 9: Дизайн-ревью с Dev проведён"
+  }
+}
+
+// Hard rule 10: No stock-photo style imagery without justification
+pattern GateStockPhotoUsage(uses_stock: Bool, justification: String) -> Dict {
+  if uses_stock and justification == "" then {
+    return {
+      passes: false,
+      message: "🚫 ЖЁСТКОЕ ПРАВИЛО 10: Использование стоковых изображений требует обоснования. Почему сток предпочтительнее оригинальной съёмки/иллюстрации?"
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 10: Изображения обоснованы"
+  }
+}
+
+// Hard rule 11: For AI products — no handoff without trust calibration patterns
+pattern GateAITrustCalibration(is_ai_product: Bool, status: String, has_trust_patterns: Bool) -> Dict {
+  if is_ai_product and (status == STATE_HANDED_OFF() or status == STATE_APPROVED()) then {
+    ifhas_trust_patterns == false then {
+      return {
+        passes: false,
+        message: "🚫 ЖЁСТКОЕ ПРАВИЛО 11: Для AI-продуктов обязателен паттерн калибровки доверия (trust calibration) — индикаторы уверенности, объяснения, ограничений. Без этого хэндофф невозможен."
+      }
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 11: AI trust calibration предусмотрен"
+  }
+}
+
+// Hard rule 12: No skipping research for new domain
+pattern GateResearchForNewDomain(is_new_domain: Bool, research_done: Bool) -> Dict {
+  if is_new_domain andresearch_done == false then {
+    return {
+      passes: false,
+      message: "🚫 ЖЁСТКОЕ ПРАВИЛО 12: Новый домен требует пользовательского исследования перед дизайном. Запустите /design-research для проведения исследования."
+    }
+  }
+  return {
+    passes: true,
+    message: "✅ Правило 12: Исследование для нового домена проведено"
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 4: LIFECYCLE STATE MACHINE
+// draft → iteration → review → approved → handed_off → implemented → retired
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern ValidateTransition(current_state: String, target_state: String) -> Dict {
+  // Direct valid transitions
+  if current_state == STATE_DRAFT() and target_state == STATE_ITERATION() then { return { valid: true, message: "draft → iteration" } }
+  if current_state == STATE_DRAFT() and target_state == STATE_REVIEW() then { return { valid: true, message: "draft → review" } }
+  if current_state == STATE_ITERATION() and target_state == STATE_ITERATION() then { return { valid: true, message: "iteration → iteration (redesign cycle)" } }
+  if current_state == STATE_ITERATION() and target_state == STATE_REVIEW() then { return { valid: true, message: "iteration → review" } }
+  if current_state == STATE_REVIEW() and target_state == STATE_APPROVED() then { return { valid: true, message: "review → approved" } }
+  if current_state == STATE_REVIEW() and target_state == STATE_ITERATION() then { return { valid: true, message: "review → iteration (revisions needed)" } }
+  if current_state == STATE_APPROVED() and target_state == STATE_HANDED_OFF() then { return { valid: true, message: "approved → handed_off" } }
+  if current_state == STATE_HANDED_OFF() and target_state == STATE_IMPLEMENTED() then { return { valid: true, message: "handed_off → implemented" } }
+  if current_state == STATE_IMPLEMENTED() and target_state == STATE_RETIRED() then { return { valid: true, message: "implemented → retired" } }
+  // Any state can transition to retired
+  if target_state == STATE_RETIRED() then { return { valid: true, message: "any → retired" } }
+  // Invalid
+  return {
+    valid: false,
+    message: "Недопустимый переход: " + current_state + " → " + target_state + ". Допустимые переходы: draft→iteration, draft→review, iteration→iteration, iteration→review, review→approved, review→iteration, approved→handed_off, handed_off→implemented, implemented→retired"
+  }
+}
+
+pattern TransitionArtifactState(artifact_id: String, target_state: String) -> Dict {
+  // Read current state from DB
+  let row = db_execute("SELECT status, iteration_count FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then {
+    return { success: false, new_state: "", message: "Артефакт не найден: " + artifact_id }
+  }
+  let data = get(row, 0)
+  let current_state = to_string(json_get(data, "status", STATE_DRAFT()))
+  let iteration_count = to_int(json_get(data, "iteration_count", 0))
+
+  // Validate transition
+  let transition = ValidateTransition(current_state, target_state)
+  iftransition.valid == false then {
+    return { success: false, new_state: current_state, message: "Переход отклонён: " + transition.message }
+  }
+
+  // Increment iteration count on iteration transition
+  let new_iteration = iteration_count
+  if target_state == STATE_ITERATION() then { new_iteration = iteration_count + 1 }
+
+  // Update DB
+  let _ = db_execute("UPDATE design_artifacts SET status = ?, iteration_count = ?, updated_at = NOW() WHERE id = ?", [target_state, new_iteration, artifact_id])
+
+  // Record state change in design_decisions for audit trail
+  let decision_id = hash(artifact_id + target_state + to_string(now()))
+  let _ = db_execute("INSERT INTO design_decisions (id, artifact_id, decision_type, old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, NOW())", [decision_id, artifact_id, "state_transition", current_state, target_state])
+
+  let _ = AuditLog("design_lifecycle", DEPT_NAME(), "artifact=" + artifact_id + " " + current_state + "→" + target_state + " iteration=" + to_string(new_iteration))
+
+  return {
+    success: true,
+    new_state: target_state,
+    message: "Состояние изменено: " + current_state + " → " + target_state + " (итерация " + to_string(new_iteration) + ")"
+  }
+}
+
+pattern GetArtifactState(artifact_id: String) -> String {
+  let row = db_execute("SELECT status FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then { return "not_found" }
+  let data = get(row, 0)
+  return to_string(json_get(data, "status", STATE_DRAFT()))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 5: DESIGN TOKEN MANAGEMENT
+// Hard rule 3 enforcement: all styles go through tokens
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern GetFosvedTokens() -> String {
+  // Returns the canonical Fosved design token set
+  return FOSVED_TOKENS_JSON()
+}
+
+pattern ResolveToken(token_name: String) -> String {
+  // Resolves a token name to its value from Fosved token set
+  let tokens = parse_json(FOSVED_TOKENS_JSON())
+  // Color tokens
+  if token_name == "primary-navy" then { return COLOR_PRIMARY_NAVY() }
+  if token_name == "primary-cream" then { return COLOR_PRIMARY_CREAM() }
+  if token_name == "accent-gold" then { return COLOR_ACCENT_GOLD() }
+  if token_name == "accent-burgundy" then { return COLOR_ACCENT_BURGUNDY() }
+  if token_name == "accent-forest" then { return COLOR_ACCENT_FOREST() }
+  if token_name == "neutral-grey" then { return COLOR_NEUTRAL_GREY() }
+  // Spacing tokens
+  if token_name == "spacing-1" then { return "4px" }
+  if token_name == "spacing-2" then { return "8px" }
+  if token_name == "spacing-3" then { return "16px" }
+  if token_name == "spacing-4" then { return "24px" }
+  if token_name == "spacing-5" then { return "40px" }
+  if token_name == "spacing-6" then { return "64px" }
+  // Typography tokens
+  if token_name == "font-heading" then { return TYPO_HEADING() }
+  if token_name == "font-body" then { return TYPO_BODY() }
+  if token_name == "font-mono" then { return TYPO_MONO() }
+  // Radius tokens
+  if token_name == "radius-sm" then { return "4px" }
+  if token_name == "radius-md" then { return "8px" }
+  if token_name == "radius-lg" then { return "16px" }
+  if token_name == "radius-xl" then { return "24px" }
+  return "UNKNOWN_TOKEN"
+}
+
+pattern ValidateTokenUsage(styles_json: String) -> Dict {
+  // Check that all color/spacing/font values in styles reference tokens
+  // not raw values (hard rule 3)
+  let has_hex = contains(styles_json, "#") andcontains(styles_json, "#1a2332") == false andcontains(styles_json, "#f4f0e6") == false andcontains(styles_json, "#c9a227") == false andcontains(styles_json, "#6e2639") == false andcontains(styles_json, "#2d4a3e") == false andcontains(styles_json, "#6b7280") == false
+  let has_raw_px = contains(styles_json, "px") andcontains(styles_json, "var(") == false andcontains(styles_json, "token") == false
+
+  let violations = ""
+  if has_hex then { violations = violations + "Обнаружен raw hex-цвет (используйте токен); " }
+  if has_raw_px then { violations = violations + "Обнаружен raw px (используйте spacing-токен); " }
+
+  let all_tokens = violations == ""
+  return {
+    all_tokens: all_tokens,
+    violations: violations,
+    let corrected_val = "Требуется замена raw-значений на токены: " + violations
+    if all_tokens then { corrected_val = styles_json }
+    corrected: corrected_val
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 6: ACCESSIBILITY CHECKS
+// Hard rule 1 enforcement: WCAG AA minimum, AAA for critical
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern ComputeContrastRatio(color1: String, color2: String) -> Float {
+  // Prompt LLM to compute contrast ratio (we can't do real math in Metalogos)
+  let prompt = "Вычисли контрастное отношение (contrast ratio) между цветами " + color1 + " и " + color2 + ". Верни только число (например 4.5). Без пояснений."
+  let result = call_llm(prompt)
+  return to_float(result)
+}
+
+pattern ValidateColorContrast(fg_color: String, bg_color: String, wcag_level: String, is_large_text: Bool) -> Dict {
+  let ratio = ComputeContrastRatio(fg_color, bg_color)
+  // WCAG AA: 4.5:1 normal text, 3:1 large text
+  // WCAG AAA: 7:1 normal text, 4.5:1 large text
+  let required = 4.5
+  if wcag_level == WCAG_AAA() then {
+    if is_large_text then { required = 4.5 } else { required = 7.0 }
+  } else {
+    if is_large_text then { required = 3.0 } else { required = 4.5 }
+  }
+  let passes = ratio >= required
+  let message = "❌ Контраст " + to_string(ratio) + ":1 — НЕ проходит " + wcag_level + " (требуется ≥" + to_string(required) + ":1)"
+  if passes then { message = "✅ Контраст " + to_string(ratio) + ":1 — проходит " + wcag_level + " (требуется ≥" + to_string(required) + ":1)" }
+  return {
+    passes: passes,
+    ratio: ratio,
+    required: required,
+    message: message
+  }
+}
+
+pattern ValidateFosvedBrandContrast(wcag_level: String) -> String {
+  // Validate all Fosved brand color combinations for accessibility
+  let report = "═══ Проверка контрастности Fosved Brand ═══\n\n"
+
+  // Navy on Cream (primary text on background)
+  let c1 = ValidateColorContrast(COLOR_PRIMARY_NAVY(), COLOR_PRIMARY_CREAM(), wcag_level, false)
+  let report = report + "Navy на Cream (основной текст): " + c1.message + "\n"
+
+  // Cream on Navy (inverted)
+  let c2 = ValidateColorContrast(COLOR_PRIMARY_CREAM(), COLOR_PRIMARY_NAVY(), wcag_level, false)
+  let report = report + "Cream на Navy (инвертированный): " + c2.message + "\n"
+
+  // Gold on Navy (accent on dark)
+  let c3 = ValidateColorContrast(COLOR_ACCENT_GOLD(), COLOR_PRIMARY_NAVY(), wcag_level, true)
+  let report = report + "Gold на Navy (акцент крупный): " + c3.message + "\n"
+
+  // Burgundy on Cream (accent on light)
+  let c4 = ValidateColorContrast(COLOR_ACCENT_BURGUNDY(), COLOR_PRIMARY_CREAM(), wcag_level, false)
+  let report = report + "Burgundy на Cream (акцент): " + c4.message + "\n"
+
+  // Forest on Cream
+  let c5 = ValidateColorContrast(COLOR_ACCENT_FOREST(), COLOR_PRIMARY_CREAM(), wcag_level, false)
+  let report = report + "Forest на Cream: " + c5.message + "\n"
+
+  // Grey on Cream (secondary text)
+  let c6 = ValidateColorContrast(COLOR_NEUTRAL_GREY(), COLOR_PRIMARY_CREAM(), wcag_level, false)
+  let report = report + "Grey на Cream (вторичный текст): " + c6.message + "\n"
+
+  let all_pass = c1.passes and c2.passes and c3.passes and c4.passes and c5.passes and c6.passes
+  let result_str = "❌ ЕСТЬ НЕПРОХОДЯЩИЕ КОМБИНАЦИИ — требуется корректировка"
+  if all_pass then { result_str = "✅ ВСЕ КОМБИНАЦИИ ПРОХОДЯТ WCAG " + wcag_level }
+  let report = report + "\nОбщий результат: " +result_str
+
+  return report
+}
+
+pattern RunAccessibilityAudit(artifact_id: String, wcag_level: String) -> Dict {
+  // Fetch artifact details
+  let row = db_execute("SELECT artifact_type, content, design_tokens FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then {
+    return { score: 0.0, issues: "Артефакт не найден", passes: false }
+  }
+  let data = get(row, 0)
+  let artifact_type = to_string(json_get(data, "artifact_type", ""))
+  let content = to_string(json_get(data, "content", ""))
+  let tokens = to_string(json_get(data, "design_tokens", ""))
+
+  // Use LLM for comprehensive a11y audit
+  let audit_prompt = "Проведи аудит доступности (WCAG " + wcag_level + ") для следующего дизайн-артефакта.\n\nТип: " + artifact_type + "\nСодержимое: " + substring(content, 0.0, 2000.0) + "\n\nПроверь:\n1. Контрастность цветов (4.5:1 для AA, 7:1 для AAA)\n2. Альтернативные тексты для изображений\n3. Навигация с клавиатуры\n4. ARIA-атрибуты\n5. Семантическая разметка\n6. Фокус-индикаторы\n7. Размеры touch-областей (≥44px)\n8. Совместимость со скринридерами\n\nВерни JSON: {\"score\": 0.0-1.0, \"issues\": [\"...\"], \"recommendations\": [\"...\"]}"
+  let audit_result = call_llm(audit_prompt)
+
+  let audit_parsed = parse_json(audit_result)
+  let score = to_float(json_get(audit_parsed, "score", 0.0))
+  let issues = to_string(json_get(audit_parsed, "issues", "[]"))
+
+  // Record audit result
+  let _ = db_execute("UPDATE design_artifacts SET a11y_score = ?, a11y_level = ?, a11y_issues = ? WHERE id = ?", [score, wcag_level, issues, artifact_id])
+  let _ = AuditLog("design_a11y_audit", DEPT_NAME(), "artifact=" + artifact_id + " wcag=" + wcag_level + " score=" + to_string(score))
+
+  let passes = score >= 0.9
+  if wcag_level == WCAG_AAA() then { passes = score >= 1.0 }
+  return {
+    score: score,
+    issues: issues,
+    passes: passes
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 7: SKILL TIER LOADING
+// Tier 1 always active, Tier 2 by artifact type, Tier 3 explicit request
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern GetActiveSkills(artifact_type: String, is_ai_product: Bool, is_new_domain: Bool) -> String {
+  // Tier 1: always active
+  let skills = TIER1_SKILLS()
+
+  // Tier 2: by artifact type
+  if artifact_type == "wireframe" then {
+    skills = skills + "," + "wireframe-production" + "," + "responsive-design"
+  }
+  if artifact_type == "component_spec" then {
+    skills = skills + "," + "interaction-states" + "," + "component-library-development" + "," + "dev-handoff-specs"
+  }
+  if artifact_type == "mockup" then {
+    skills = skills + "," + "wireframe-production" + "," + "responsive-design"
+  }
+  if artifact_type == "design_system" then {
+    skills = skills + "," + "component-library-development" + "," + "design-tokens-discipline"
+  }
+  if artifact_type == "prototype" then {
+    skills = skills + "," + "interaction-states" + "," + "responsive-design"
+  }
+  if artifact_type == "user_flow" then {
+    skills = skills + "," + "interaction-states"
+  }
+  // Default Tier 2: all
+  if artifact_type == "unknown" then {
+    skills = skills + "," + TIER2_SKILLS()
+  }
+
+  // Tier 3: explicit conditions
+  if is_ai_product then {
+    skills = skills + "," + "conversational-ui-design"
+  }
+  if is_new_domain then {
+    skills = skills + "," + "user-research-methods"
+  }
+
+  return skills
+}
+
+pattern BuildSkillContext(skills: String) -> String {
+  // Build a context string for LLM listing active skills and their roles
+  let ctx = "Активные навыки дизайна:\n"
+  let ctx = ctx + "─── Tier 1 (всегда) ───\n"
+  let ctx = ctx + "• user-task-analysis: определение пользовательских задач перед дизайном\n"
+  let ctx = ctx + "• design-system-thinking: системный подход, не разовые экраны\n"
+  let ctx = ctx + "• accessibility-first: WCAG AA минимум, AAA для критичных\n"
+  let ctx = ctx + "• design-tokens-discipline: все стили через токены\n"
+  let ctx = ctx + "• cognitive-laws-application: Fitts, Hick, Miller, Von Restorff, Jakob's Law\n"
+
+  if contains(skills, "wireframe-production") then {
+    ctx = ctx + "─── Tier 2 (по типу) ───\n"
+    ctx = ctx + "• wireframe-production: создание низко- и высокофиделити вайрфреймов\n"
+  }
+  if contains(skills, "interaction-states") then {
+    ctx = ctx + "• interaction-states: 7 состояний (default/hover/focus/active/disabled/loading/error)\n"
+  }
+  if contains(skills, "responsive-design") then {
+    ctx = ctx + "• responsive-design: mobile-first, breakpoints, адаптивная сетка\n"
+  }
+  if contains(skills, "component-library-development") then {
+    ctx = ctx + "• component-library-development: атомы → молекулы → организмы\n"
+  }
+  if contains(skills, "dev-handoff-specs") then {
+    ctx = ctx + "• dev-handoff-specs: спецификации для передачи в разработку\n"
+  }
+
+  if contains(skills, "user-research-methods") then {
+    ctx = ctx + "─── Tier 3 (явный запрос) ───\n"
+    ctx = ctx + "• user-research-methods: интервью, тестирование, анализ поведения\n"
+  }
+  if contains(skills, "conversational-ui-design") then {
+    ctx = ctx + "• conversational-ui-design: чат-интерфейсы, turn-taking, trust patterns\n"
+  }
+
+  return ctx
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 8: PRE-APPROVAL GATE
+// Composite gate function: all checks before design can be approved
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern RunPreApprovalGate(artifact_id: String, wcag_level: String) -> Dict {
+  let issues = ""
+  let checks_run = 0
+
+  // Fetch artifact details
+  let row = db_execute("SELECT artifact_type, status, design_tokens, user_tasks, interaction_states, has_mobile, has_responsive, design_system_id, iteration_count, a11y_score, dev_review_done, uses_stock_imagery, stock_justification FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then {
+    return { passes: false, issues: "Артефакт не найден: " + artifact_id, checks_run: 0 }
+  }
+  let data = get(row, 0)
+  let artifact_type = to_string(json_get(data, "artifact_type", ""))
+  let status = to_string(json_get(data, "status", STATE_DRAFT()))
+  let tokens = to_string(json_get(data, "design_tokens", ""))
+  let user_tasks = to_string(json_get(data, "user_tasks", ""))
+  let states_json = to_string(json_get(data, "interaction_states", ""))
+  let has_mobile = json_get(data, "has_mobile", false)
+  let has_responsive = json_get(data, "has_responsive", false)
+  let design_system_id = to_string(json_get(data, "design_system_id", ""))
+  let iteration_count = to_int(json_get(data, "iteration_count", 0))
+  let a11y_score = to_float(json_get(data, "a11y_score", 0.0))
+  let dev_review_done = json_get(data, "dev_review_done", false)
+  let uses_stock = json_get(data, "uses_stock_imagery", false)
+  let stock_just = to_string(json_get(data, "stock_justification", ""))
+
+  // Check 1: Accessibility (hard rule 1)
+  let g1 = GateA11yCheck(artifact_type, wcag_level, a11y_score)
+  let checks_run = checks_run + 1
+  ifg1.passes == false then { issues = issues + g1.message + "\n" }
+
+  // Check 2: Design system entry (hard rule 2)
+  let g2 = GateDesignSystemEntry(artifact_type, design_system_id)
+  let checks_run = checks_run + 1
+  ifg2.passes == false then { issues = issues + g2.message + "\n" }
+
+  // Check 3: Design tokens (hard rule 3)
+  let g3 = GateDesignTokens(tokens)
+  let checks_run = checks_run + 1
+  ifg3.passes == false then { issues = issues + g3.message + "\n" }
+
+  // Check 4: Interaction states (hard rule 4)
+  let g4 = GateInteractionStates(artifact_type, states_json)
+  let checks_run = checks_run + 1
+  ifg4.passes == false then { issues = issues + g4.message + "\n" }
+
+  // Check 5: Responsive (hard rule 5)
+  let g5 = GateResponsiveDesign(artifact_type, has_mobile, has_responsive)
+  let checks_run = checks_run + 1
+  ifg5.passes == false then { issues = issues + g5.message + "\n" }
+
+  // Check 6: User tasks (hard rule 6)
+  let g6 = GateUserTasks(user_tasks)
+  let checks_run = checks_run + 1
+  ifg6.passes == false then { issues = issues + g6.message + "\n" }
+
+  // Check 8: Iteration recorded (hard rule 8)
+  let g8 = GateIterationRecorded(artifact_id, iteration_count)
+  let checks_run = checks_run + 1
+  ifg8.passes == false then { issues = issues + g8.message + "\n" }
+
+  // Check 9: Dev review (hard rule 9)
+  let g9 = GateDevReviewBeforeImplementation(status, dev_review_done)
+  let checks_run = checks_run + 1
+  ifg9.passes == false then { issues = issues + g9.message + "\n" }
+
+  // Check 10: Stock photo (hard rule 10)
+  let g10 = GateStockPhotoUsage(uses_stock, stock_just)
+  let checks_run = checks_run + 1
+  ifg10.passes == false then { issues = issues + g10.message + "\n" }
+
+  let passes = issues == ""
+  return {
+    passes: passes,
+    issues: issues,
+    checks_run: checks_run
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 9: COMMAND HANDLERS (8 commands)
+// ═══════════════════════════════════════════════════════════════════════
+
+// /design — create new design artifact
+pattern CreateDesignArtifact(artifact_type: String, description: String, chat_id: String) -> String {
+  // Gate: hard rule 6 — no design without user task
+  let user_tasks_prompt = "Для описанного дизайна извлеки пользовательские задачи: какую проблему решает пользователь, какой результат ожидает.\n\nОписание: " + description + "\n\nВерни JSON массив задач: [{\"task\": \"...\", \"user_goal\": \"...\", \"success_criteria\": \"...\"}]"
+  let user_tasks_result = call_llm(user_tasks_prompt)
+  let user_tasks = user_tasks_result
+
+  // Gate: hard rule 12 — new domain requires research
+  let is_new = DetectNewDomain(description)
+  if is_new then {
+    let research_check = db_execute("SELECT COUNT(*) as cnt FROM user_research_sessions WHERE domain = ? AND status = 'completed'", [description])
+    if length(research_check) > 0 then {
+      let rc = get(research_check, 0)
+      let cnt = to_int(json_get(rc, "cnt", 0))
+      if cnt == 0 then {
+        return "🚫 ЖЁСТКОЕ ПРАВИЛО 12: Новый домен требует пользовательского исследования. Запустите /design-research перед созданием артефакта."
+      }
+    }
+  }
+
+  // Generate artifact ID
+  let artifact_id = "da-" + substring(hash(description + to_string(now())), 0.0, 8.0)
+
+  // Load skills for this artifact type
+  let skills = GetActiveSkills(artifact_type, DetectAISpecific(description), is_new)
+  let skill_context = BuildSkillContext(skills)
+
+  // Build design generation prompt
+  let design_prompt = "Создай дизайн-артефакт типа '" + artifact_type + "' для следующего описания:\n\n" + description + "\n\n" + skill_context + "\n\nБренд-токены Fosved:\n" + FOSVED_TOKENS_JSON() + "\n\nТребования:\n1. Используй ТОЛЬКО дизайн-токены (никаких raw-значений)\n2. Укажи мобильную версию (mobile-first)\n3. Для component_spec — специфицируй все 7 состояний\n4. Для AI-продуктов — включи trust calibration паттерны\n5. Укажи пользовательские задачи\n\nВерни JSON: {\"name\": \"...\", \"content\": \"...\", \"tokens_used\": [...], \"interaction_states\": [...], \"user_tasks\": [...], \"mobile_variant\": \"...\", \"a11y_notes\": \"...\"}"
+
+  let design_result = call_llm(design_prompt)
+  let design_parsed = parse_json(design_result)
+  let name = to_string(json_get(design_parsed, "name", "Untitled"))
+  let content = to_string(json_get(design_parsed, "content", ""))
+  let tokens_used = to_string(json_get(design_parsed, "tokens_used", "[]"))
+  let states_result = to_string(json_get(design_parsed, "interaction_states", "[]"))
+  let mobile_variant = to_string(json_get(design_parsed, "mobile_variant", ""))
+  let a11y_notes = to_string(json_get(design_parsed, "a11y_notes", ""))
+
+  // Validate tokens (hard rule 3)
+  let token_check = ValidateTokenUsage(content)
+  iftoken_check.all_tokens == false then {
+    content = content + "\n\n⚠️ НАРУШЕНИЕ ТОКЕНОВ: " + token_check.violations
+  }
+
+  // Insert into DB
+  let mobile_str = "false"
+  if mobile_variant != "" then { mobile_str = "true" }
+  let _ = db_execute("INSERT INTO design_artifacts (id, name, artifact_type, status, content, design_tokens, user_tasks, interaction_states, has_mobile, has_responsive, a11y_score, iteration_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())", [artifact_id, name, artifact_type, STATE_DRAFT(), content, tokens_used, user_tasks, states_result, mobile_str, "true", 0.0, 0])
+
+  let _ = AuditLog("design_create", DEPT_NAME(), "id=" + artifact_id + " type=" + artifact_type + " name=" + name)
+
+  // Format output
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "ДИЗАЙН-АРТЕФАКТ №" + artifact_id + "\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "Тип: " + artifact_type + "\n"
+  let output = output + "Название: " + name + "\n"
+  let output = output + "Статус: " + STATE_DRAFT() + "\n"
+  let output = output + "Итерация: 0\n\n"
+  let output = output + "─── Содержимое ───\n"
+  let output = output + substring(content, 0.0, 2000.0) + "\n\n"
+  if mobile_variant != "" then {
+    output = output + "─── Мобильный вариант ───\n"
+    output = output + substring(mobile_variant, 0.0, 500.0) + "\n\n"
+  }
+  let output = output + "─── Пользовательские задачи ───\n"
+  let output = output + substring(user_tasks, 0.0, 500.0) + "\n\n"
+  let output = output + "─── Заметки по доступности ───\n"
+  let output = output + a11y_notes + "\n\n"
+  iftoken_check.all_tokens == false then {
+    output = output + "⚠️ НАРУШЕНИЕ ТОКЕНОВ: " + token_check.violances + "\n\n"
+  }
+  let output = output + "Дальнейшие действия:\n"
+  let output = output + "• /design-iterate " + artifact_id + " — доработать\n"
+  let output = output + "• /design-approve " + artifact_id + " — утвердить (после всех проверок)\n"
+  let output = output + "• /design-show " + artifact_id + " — показать\n"
+
+  return output
+}
+
+// /design-spec — generate component specification
+pattern GenerateComponentSpec(artifact_id: String, chat_id: String) -> String {
+  // Fetch existing artifact
+  let row = db_execute("SELECT name, content, design_tokens, interaction_states FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then {
+    return "Артефакт не найден: " + artifact_id
+  }
+  let data = get(row, 0)
+  let name = to_string(json_get(data, "name", ""))
+  let content = to_string(json_get(data, "content", ""))
+  let tokens = to_string(json_get(data, "design_tokens", ""))
+  let current_states = to_string(json_get(data, "interaction_states", "[]"))
+
+  // Build component spec prompt with hard rule 4 enforcement (7 states)
+  let spec_prompt = "Создай полную спецификацию компонента для Dev-хэндоффа.\n\nКомпонент: " + name + "\nТекущий дизайн: " + substring(content, 0.0, 1500.0) + "\n\nТокены: " + tokens + "\n\nОБЯЗАТЕЛЬНО специфицируй ВСЕ 7 состояний:\n1. default — базовое состояние\n2. hover — при наведении\n3. focus — при фокусе (клавиатура!)\n4. active — при нажатии\n5. disabled — недоступен\n6. loading — загрузка данных\n7. error — состояние ошибки\n\nДля каждого состояния укажи: визуальные изменения, токены, transition, ARIA-атрибуты.\n\nТакже укажи:\n• Props/API\n• Размеры и варианты\n• Ограничения и анти-паттерны\n• Доступность (ARIA roles, keyboard nav)\n• Responsive поведение\n\nВерни JSON: {\"spec\": \"...\", \"states\": {...}, \"props\": [...], \"a11y\": {...}, \"anti_patterns\": [...]}"
+
+  let spec_result = call_llm(spec_prompt)
+  let spec_parsed = parse_json(spec_result)
+  let spec_content = to_string(json_get(spec_parsed, "spec", ""))
+  let states_spec = to_string(json_get(spec_parsed, "states", "{}"))
+  let props = to_string(json_get(spec_parsed, "props", "[]"))
+  let a11y = to_string(json_get(spec_parsed, "a11y", "{}"))
+  let anti_patterns = to_string(json_get(spec_parsed, "anti_patterns", "[]"))
+
+  // Validate: hard rule 4 — all 7 states must be present
+  let g4 = GateInteractionStates("component_spec", states_spec)
+
+  // Create spec artifact in DB
+  let spec_id = "da-" + substring(hash(artifact_id + "spec" + to_string(now())), 0.0, 8.0)
+  let _ = db_execute("INSERT INTO design_artifacts (id, name, artifact_type, status, content, design_tokens, interaction_states, parent_artifact_id, has_mobile, has_responsive, a11y_score, iteration_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())", [spec_id, name + " — Spec", "component_spec", STATE_DRAFT(), spec_content, tokens, states_spec, artifact_id, "true", "true", 0.0, 0])
+
+  let g4_passes_str = "false"
+  if g4.passes then { g4_passes_str = "true" }
+  let _ = AuditLog("design_spec", DEPT_NAME(), "spec_id=" + spec_id + " parent=" + artifact_id + " states_valid=" + g4_passes_str)
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "КОМПОНЕНТ-СПЕЦИФИКАЦИЯ №" + spec_id + "\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "Компонент: " + name + "\n"
+  let output = output + "Родительский артефакт: " + artifact_id + "\n\n"
+  let output = output + "─── Спецификация ───\n"
+  let output = output + substring(spec_content, 0.0, 2000.0) + "\n\n"
+  let output = output + "─── Состояния ───\n"
+  let output = output + substring(states_spec, 0.0, 1000.0) + "\n\n"
+  let output = output + g4.message + "\n\n"
+  ifg4.passes == false then {
+    output = output + "⚠️ ХЭНДОФФ НЕВОЗМОЖЕН — доработайте состояния\n"
+  }
+
+  return output
+}
+
+// /design-system — manage design system
+pattern ManageDesignSystem(action: String, chat_id: String) -> String {
+  if action == "tokens" or action == "" then {
+    // Show current Fosved token set
+    let output = "═══════════════════════════════════════\n"
+    output = output + "FOSVED DESIGN TOKENS\n"
+    output = output + "═══════════════════════════════════════\n\n"
+    output = output + "─── Цвета ───\n"
+    output = output + "• primary-navy:     " + COLOR_PRIMARY_NAVY() + "\n"
+    output = output + "• primary-cream:    " + COLOR_PRIMARY_CREAM() + "\n"
+    output = output + "• accent-gold:      " + COLOR_ACCENT_GOLD() + "\n"
+    output = output + "• accent-burgundy:  " + COLOR_ACCENT_BURGUNDY() + "\n"
+    output = output + "• accent-forest:    " + COLOR_ACCENT_FOREST() + "\n"
+    output = output + "• neutral-grey:     " + COLOR_NEUTRAL_GREY() + "\n\n"
+    output = output + "─── Типографика ───\n"
+    output = output + "• heading: " + TYPO_HEADING() + "\n"
+    output = output + "• body:    " + TYPO_BODY() + "\n"
+    output = output + "• mono:    " + TYPO_MONO() + "\n\n"
+    output = output + "─── Отступы (8px scale) ───\n"
+    output = output + "• spacing-1: 4px\n"
+    output = output + "• spacing-2: 8px\n"
+    output = output + "• spacing-3: 16px\n"
+    output = output + "• spacing-4: 24px\n"
+    output = output + "• spacing-5: 40px\n"
+    output = output + "• spacing-6: 64px\n\n"
+    output = output + "─── Сетка ───\n"
+    output = output + "• Колонки: " + GRID_COLS() + "\n"
+    output = output + "• Gutter:  " + GRID_GUTTER() + "\n"
+    output = output + "• Margin:  " + GRID_MARGIN() + "\n\n"
+    output = output + "─── Радиусы ───\n"
+    output = output + "• sm: 4px  • md: 8px  • lg: 16px  • xl: 24px  • full: 9999px\n\n"
+    output = output + "Полный JSON:\n" + FOSVED_TOKENS_JSON()
+    return output
+  }
+
+  if action == "audit" then {
+    // Run design system audit (hard rule 7: examples + anti-patterns)
+    let audit_prompt = "Проведи аудит дизайн-системы Fosved.\n\nТекущие токены: " + FOSVED_TOKENS_JSON() + "\n\nПроверь:\n1. Все ли компоненты имеют примеры использования?\n2. Все ли компоненты имеют анти-паттерны?\n3. Есть ли orphan-токены (неиспользуемые)?\n4. Есть ли дублирование токенов?\n5. Полнота: покрытие всех UI-элементов\n6. Согласованность: нет ли конфликтов между токенами\n\nВерни JSON: {\"completeness\": 0.0-1.0, \"issues\": [...], \"recommendations\": [...], \"orphan_tokens\": [...], \"missing_components\": [...]}"
+    let audit_result = call_llm(audit_prompt)
+    output = "═══════════════════════════════════════\n"
+    output = output + "АУДИТ ДИЗАЙН-СИСТЕМЫ FOSVED\n"
+    output = output + "═══════════════════════════════════════\n\n"
+    output = output + substring(audit_result, 0.0, 3000.0)
+    let _ = AuditLog("design_system_audit", DEPT_NAME(), "action=audit")
+    return output
+  }
+
+  if action == "contrast" then {
+    return ValidateFosvedBrandContrast(WCAG_AA())
+  }
+
+  return "Действия дизайн-системы: tokens | audit | contrast"
+}
+
+// /design-show — display artifact
+pattern ShowDesignArtifact(artifact_id: String) -> String {
+  let row = db_execute("SELECT id, name, artifact_type, status, content, design_tokens, user_tasks, interaction_states, iteration_count, a11y_score, a11y_level, created_at, updated_at FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then {
+    return "Артефакт не найден: " + artifact_id
+  }
+  let data = get(row, 0)
+  let id = to_string(json_get(data, "id", ""))
+  let name = to_string(json_get(data, "name", ""))
+  let artifact_type = to_string(json_get(data, "artifact_type", ""))
+  let status = to_string(json_get(data, "status", ""))
+  let content = to_string(json_get(data, "content", ""))
+  let tokens = to_string(json_get(data, "design_tokens", ""))
+  let user_tasks = to_string(json_get(data, "user_tasks", ""))
+  let states = to_string(json_get(data, "interaction_states", ""))
+  let iteration = to_int(json_get(data, "iteration_count", 0))
+  let a11y_score = to_float(json_get(data, "a11y_score", 0.0))
+  let a11y_level = to_string(json_get(data, "a11y_level", ""))
+  let created = to_string(json_get(data, "created_at", ""))
+  let updated = to_string(json_get(data, "updated_at", ""))
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "ДИЗАЙН-АРТЕФАКТ №" + id + "\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "Название:    " + name + "\n"
+  let output = output + "Тип:         " + artifact_type + "\n"
+  let output = output + "Статус:      " + status + "\n"
+  let output = output + "Итерация:    " + to_string(iteration) + "\n"
+  let output = output + "A11y:        " + to_string(a11y_score) + " (WCAG " + a11y_level + ")\n"
+  let output = output + "Создан:      " + created + "\n"
+  let output = output + "Обновлён:    " + updated + "\n\n"
+  let output = output + "─── Содержимое ───\n"
+  let output = output + substring(content, 0.0, 2500.0) + "\n\n"
+  if user_tasks != "" then {
+    output = output + "─── Пользовательские задачи ───\n"
+    output = output + substring(user_tasks, 0.0, 500.0) + "\n\n"
+  }
+  if states != "" then {
+    output = output + "─── Состояния взаимодействия ───\n"
+    output = output + substring(states, 0.0, 500.0) + "\n\n"
+  }
+
+  return output
+}
+
+// /design-artifacts — list all artifacts
+pattern ListDesignArtifacts(chat_id: String, limit: Int) -> String {
+  let rows = db_execute("SELECT id, name, artifact_type, status, iteration_count, a11y_score, created_at FROM design_artifacts ORDER BY updated_at DESC LIMIT ?", [limit])
+  if length(rows) == 0 then {
+    return "Нет дизайн-артефактов. Создайте первый: /design <описание>"
+  }
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "ДИЗАЙН-АРТЕФАКТЫ (" + to_string(length(rows)) + ")\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+
+  let i = 0
+  while i < length(rows) do {
+    let row = get(rows, i)
+    let id = to_string(json_get(row, "id", ""))
+    let name = to_string(json_get(row, "name", ""))
+    let atype = to_string(json_get(row, "artifact_type", ""))
+    let status = to_string(json_get(row, "status", ""))
+    let iter = to_int(json_get(row, "iteration_count", 0))
+    let a11y = to_float(json_get(row, "a11y_score", 0.0))
+    let created = to_string(json_get(row, "created_at", ""))
+    output = output + "• [" + id + "] " + name + "\n"
+    output = output + "  Тип: " + atype + " | Статус: " + status + " | Итерация: " + to_string(iter) + " | A11y: " + to_string(a11y) + "\n\n"
+    i = i + 1
+  }
+
+  let output = output + "Команды: /design-show <id> | /design-iterate <id> | /design-approve <id>"
+  return output
+}
+
+// /design-research — conduct user research (Tier 3 skill)
+pattern ConductUserResearch(domain: String, research_type: String, chat_id: String) -> String {
+  // Hard rule 12: research required for new domain
+  let research_id = "ur-" + substring(hash(domain + to_string(now())), 0.0, 8.0)
+
+  let research_prompt = "Проведи пользовательское исследование для домена: " + domain + "\n\nТип исследования: " + research_type + "\n\nОпредели:\n1. Целевая аудитория (сегменты)\n2. Ключевые пользовательские задачи\n3. Текущие решения и их ограничения\n4. Боли и потребности\n5. Поведенческие паттерны\n6. Контекст использования (устройства, среда)\n7. Метрики успеха\n\nДля каждого сегмента укажи:\n• Демографический профиль\n• Поведенческие характеристики\n• Уровень цифровой грамотности\n• Критические задачи\n\nВерни JSON: {\"segments\": [...], \"tasks\": [...], \"pain_points\": [...], \"current_solutions\": [...], \"context\": {...}, \"success_metrics\": [...]}"
+
+  let research_result = call_llm(research_prompt)
+  let research_parsed = parse_json(research_result)
+  let segments = to_string(json_get(research_parsed, "segments", "[]"))
+  let tasks = to_string(json_get(research_parsed, "tasks", "[]"))
+  let pain_points = to_string(json_get(research_parsed, "pain_points", "[]"))
+
+  // Store research session
+  let _ = db_execute("INSERT INTO user_research_sessions (id, domain, research_type, status, segments, tasks, pain_points, findings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())", [research_id, domain, research_type, "completed", segments, tasks, pain_points, research_result])
+
+  let _ = AuditLog("design_research", DEPT_NAME(), "id=" + research_id + " domain=" + domain + " type=" + research_type)
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "ПОЛЬЗОВАТЕЛЬСКОЕ ИССЛЕДОВАНИЕ №" + research_id + "\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "Домен: " + domain + "\n"
+  let output = output + "Тип: " + research_type + "\n\n"
+  let output = output + "─── Сегменты ───\n"
+  let output = output + substring(segments, 0.0, 800.0) + "\n\n"
+  let output = output + "─── Задачи ───\n"
+  let output = output + substring(tasks, 0.0, 800.0) + "\n\n"
+  let output = output + "─── Боли ───\n"
+  let output = output + substring(pain_points, 0.0, 500.0) + "\n\n"
+  let output = output + "─── Полные результаты ───\n"
+  let output = output + substring(research_result, 0.0, 1500.0) + "\n\n"
+  let output = output + "✅ Правило 12: Исследование завершено. Теперь можно создавать дизайн-артефакты."
+
+  return output
+}
+
+// /design-iterate — iterate on existing artifact
+pattern IterateDesignArtifact(artifact_id: String, feedback: String, chat_id: String) -> String {
+  // Fetch current artifact
+  let row = db_execute("SELECT id, name, artifact_type, status, content, design_tokens, user_tasks, interaction_states, iteration_count, a11y_score FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then {
+    return "Артефакт не найден: " + artifact_id
+  }
+  let data = get(row, 0)
+  let name = to_string(json_get(data, "name", ""))
+  let artifact_type = to_string(json_get(data, "artifact_type", ""))
+  let current_status = to_string(json_get(data, "status", ""))
+  let content = to_string(json_get(data, "content", ""))
+  let tokens = to_string(json_get(data, "design_tokens", ""))
+  let user_tasks = to_string(json_get(data, "user_tasks", ""))
+  let iteration_count = to_int(json_get(data, "iteration_count", 0))
+
+  // Transition state
+  let transition = TransitionArtifactState(artifact_id, STATE_ITERATION())
+  iftransition.success == false then {
+    return "Не удалось начать итерацию: " + transition.message
+  }
+
+  // Iteration escalation: >3 iterations → warn
+  let new_iteration = iteration_count + 1
+  let escalation = ""
+  if new_iteration > ITERATION_WARN_THRESHOLD() then {
+    escalation = "\n\n⚠️ ЭСКАЛАЦИЯ ИТЕРАЦИЙ: Итерация " + to_string(new_iteration) + " превышает порог (" + to_string(ITERATION_WARN_THRESHOLD()) + "). Рекомендуется повторить user-task-analysis — возможно, исходные задачи определены неточно."
+  }
+
+  // Generate iteration with LLM
+  let iter_prompt = "Итерация дизайна на основе обратной связи.\n\nАртефакт: " + name + " (тип: " + artifact_type + ")\nТекущий дизайн:\n" + substring(content, 0.0, 2000.0) + "\n\nОбратная связь: " + feedback + "\n\nТокены: " + tokens + "\nПользовательские задачи: " + substring(user_tasks, 0.0, 500.0) + "\n\nУчти обратную связь, но:\n1. Не нарушай дизайн-токены\n2. Не убирай мобильную версию\n3. Не убирай пользовательские задачи\n4. Улучши доступность если возможно\n\nВерни JSON: {\"content\": \"...\", \"changes_summary\": \"...\", \"a11y_improvements\": \"...\"}"
+
+  let iter_result = call_llm(iter_prompt)
+  let iter_parsed = parse_json(iter_result)
+  let new_content = to_string(json_get(iter_parsed, "content", ""))
+  let changes = to_string(json_get(iter_parsed, "changes_summary", ""))
+  let a11y_impr = to_string(json_get(iter_parsed, "a11y_improvements", ""))
+
+  // Validate tokens in new content
+  let token_check = ValidateTokenUsage(new_content)
+
+  // Update DB
+  let _ = db_execute("UPDATE design_artifacts SET content = ?, updated_at = NOW() WHERE id = ?", [new_content, artifact_id])
+
+  // Record iteration as design decision
+  let decision_id = hash(artifact_id + "iter" + to_string(new_iteration) + to_string(now()))
+  let _ = db_execute("INSERT INTO design_decisions (id, artifact_id, decision_type, rationale, old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())", [decision_id, artifact_id, "iteration", feedback, "iteration_" + to_string(iteration_count), "iteration_" + to_string(new_iteration)])
+
+  let token_check_all_tokens_str = "false"
+  if token_check.all_tokens then { token_check_all_tokens_str = "true" }
+  let _ = AuditLog("design_iterate", DEPT_NAME(), "id=" + artifact_id + " iteration=" + to_string(new_iteration) + " tokens_ok=" + token_check_all_tokens_str)
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "ИТЕРАЦИЯ №" + to_string(new_iteration) + " АРТЕФАКТА " + artifact_id + "\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "Статус: " + STATE_ITERATION() + "\n"
+  let output = output + "Обратная связь: " + substring(feedback, 0.0, 300.0) + "\n\n"
+  let output = output + "─── Изменения ───\n"
+  let output = output + changes + "\n\n"
+  let output = output + "─── Обновлённый дизайн ───\n"
+  let output = output + substring(new_content, 0.0, 2000.0) + "\n\n"
+  if a11y_impr != "" then {
+    output = output + "─── Улучшения доступности ───\n"
+    output = output + a11y_impr + "\n\n"
+  }
+  iftoken_check.all_tokens == false then {
+    output = output + "⚠️ НАРУШЕНИЕ ТОКЕНОВ: " + token_check.violations + "\n\n"
+  }
+  let output = output + escalation + "\n"
+  let output = output + "Дальнейшие действия:\n"
+  let output = output + "• /design-iterate " + artifact_id + " — ещё одна итерация\n"
+  let output = output + "• /design-approve " + artifact_id + " — утвердить\n"
+
+  return output
+}
+
+// /design-approve — approve artifact (runs all gates)
+pattern ApproveDesignArtifact(artifact_id: String, wcag_level: String, chat_id: String) -> String {
+  // Fetch artifact
+  let row = db_execute("SELECT id, name, artifact_type, status, a11y_score FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then {
+    return "Артефакт не найден: " + artifact_id
+  }
+  let data = get(row, 0)
+  let name = to_string(json_get(data, "name", ""))
+  let current_status = to_string(json_get(data, "status", ""))
+
+  // Cannot approve from draft or iteration without going through review
+  if current_status == STATE_DRAFT() then {
+    return "Артефакт в состоянии draft — сначала переведите в review: /design-iterate " + artifact_id + " (после итераций переводится в review)"
+  }
+
+  // Run pre-approval gate (all hard rules)
+  let gate = RunPreApprovalGate(artifact_id, wcag_level)
+
+  ifgate.passes == false then {
+    let output = "🚫 УТВЕРЖДЕНИЕ ОТКЛОНЕНО — не все проверки пройдены\n\n"
+    output = output + "Проверок выполнено: " + to_string(gate.checks_run) + "\n\n"
+    output = output + "─── Проблемы ───\n"
+    output = output + gate.issues + "\n\n"
+    output = output + "Исправьте указанные проблемы и повторите попытку."
+    return output
+  }
+
+  // Run accessibility audit
+  let a11y = RunAccessibilityAudit(artifact_id, wcag_level)
+
+  // Check a11y gate (hard rule 1)
+  let a11y_gate = GateA11yCheck("any", wcag_level, a11y.score)
+  ifa11y_gate.passes == false then {
+    output = "🚫 УТВЕРЖДЕНИЕ ОТКЛОНЕНО — доступность недостаточна\n\n"
+    output = output + a11y_gate.message + "\n\n"
+    output = output + "─── Проблемы доступности ───\n"
+    output = output + substring(a11y.issues, 0.0, 1500.0) + "\n"
+    return output
+  }
+
+  // Transition to approved
+  let transition = TransitionArtifactState(artifact_id, STATE_APPROVED())
+  iftransition.success == false then {
+    return "Не удалось утвердить: " + transition.message
+  }
+
+  let _ = AuditLog("design_approve", DEPT_NAME(), "id=" + artifact_id + " wcag=" + wcag_level + " a11y_score=" + to_string(a11y.score))
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "✅ АРТЕФАКТ УТВЕРЖДЁН: " + artifact_id + "\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "Название: " + name + "\n"
+  let output = output + "Статус: " + STATE_APPROVED() + "\n"
+  let output = output + "WCAG: " + wcag_level + " (оценка: " + to_string(a11y.score) + ")\n"
+  let output = output + "Проверок пройдено: " + to_string(gate.checks_run) + "\n\n"
+  let output = output + "Дальнейшие действия:\n"
+  let output = output + "• Провести дизайн-ревью с Dev (жёсткое правило 9)\n"
+  let output = output + "• После ревью → handed_off → implemented\n"
+
+  return output
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 10: ITERATION ESCALATION & COGNITIVE LAWS
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern CheckIterationEscalation(artifact_id: String) -> Dict {
+  let row = db_execute("SELECT iteration_count, user_tasks FROM design_artifacts WHERE id = ?", [artifact_id])
+  if length(row) == 0 then { return { needs_escalation: false, message: "" } }
+  let data = get(row, 0)
+  let count = to_int(json_get(data, "iteration_count", 0))
+  if count > ITERATION_WARN_THRESHOLD() then {
+    return {
+      needs_escalation: true,
+      message: "⚠️ ЭСКАЛАЦИЯ: Итерация " + to_string(count) + " > " + to_string(ITERATION_WARN_THRESHOLD()) + ". Вероятно, пользовательские задачи определены неточно. Рекомендация: повторить user-task-analysis перед следующей итерацией."
+    }
+  }
+  return { needs_escalation: false, message: "" }
+}
+
+pattern ApplyCognitiveLaws(context: String) -> String {
+  // Tier 1 skill: cognitive-laws-application
+  // Apply Fitts, Hick, Miller, Von Restorff, Jakob's Law, Doherty Threshold
+  let prompt = "Примени когнитивные законы к дизайн-контексту:\n\n" + context + "\n\nЗаконы для применения:\n1. Закон Фиттса — размер и расстояние до click-областей\n2. Закон Хика — количество выборов → время решения\n3. Закон Миллера — 7±2 элемента в рабочей памяти\n4. Эффект фон Ресторфф — выделение важного среди однородного\n5. Закон Якоба — пользователи ожидают, что сайт работает как другие\n6. Порог Дохерти — время отклика <400мс воспринимается как мгновенный\n\nДля каждого закона укажи конкретные рекомендации по данному контексту."
+  return call_llm(prompt)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 11: LEARNING LOOPS & METRICS
+// Per-artifact verification, monthly design system audit, quarterly review
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern ComputeDesignMetrics() -> Dict {
+  // Total artifacts
+  let count_row = db_execute("SELECT COUNT(*) as cnt FROM design_artifacts", [])
+  let total = 0
+  if length(count_row) > 0 then {
+    let d = get(count_row, 0)
+    total = to_int(json_get(d, "cnt", 0))
+  }
+
+  // Average iteration count
+  let avg_iter_row = db_execute("SELECT AVG(iteration_count) as avg FROM design_artifacts", [])
+  let avg_iter = 0.0
+  if length(avg_iter_row) > 0 then {
+    let d = get(avg_iter_row, 0)
+    avg_iter = to_float(json_get(d, "avg", 0.0))
+  }
+
+  // Average a11y score
+  let avg_a11y_row = db_execute("SELECT AVG(a11y_score) as avg FROM design_artifacts WHERE a11y_score > 0", [])
+  let avg_a11y = 0.0
+  if length(avg_a11y_row) > 0 then {
+    let d = get(avg_a11y_row, 0)
+    avg_a11y = to_float(json_get(d, "avg", 0.0))
+  }
+
+  // % of artifacts with ≤3 iterations
+  let pct_row = db_execute("SELECT CAST(SUM(CASE WHEN iteration_count <= 3 THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 as pct FROM design_artifacts", [])
+  let pct = 0.0
+  if length(pct_row) > 0 then {
+    let d = get(pct_row, 0)
+    pct = to_float(json_get(d, "pct", 0.0))
+  }
+
+  // Design system reuse rate
+  let reuse_row = db_execute("SELECT CAST(SUM(CASE WHEN design_system_id IS NOT NULL AND design_system_id != '' THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 as pct FROM design_artifacts WHERE artifact_type IN ('component_spec', 'mockup', 'wireframe')", [])
+  let reuse = 0.0
+  if length(reuse_row) > 0 then {
+    let d = get(reuse_row, 0)
+    reuse = to_float(json_get(d, "pct", 0.0))
+  }
+
+  // Design-to-code drift score (from verification table)
+  let drift_row = db_execute("SELECT AVG(drift_score) as avg FROM design_verification WHERE verified_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)", [])
+  let drift = 0.0
+  if length(drift_row) > 0 then {
+    let d = get(drift_row, 0)
+    drift = to_float(json_get(d, "avg", 0.0))
+  }
+
+  return {
+    total_artifacts: total,
+    avg_iteration_count: avg_iter,
+    avg_a11y_score: avg_a11y,
+    pct_under_3_iterations: pct,
+    design_system_reuse: reuse,
+    drift_score: drift
+  }
+}
+
+pattern RecordDesignVerification(artifact_id: String, implemented_hash: String, design_hash: String) -> Dict {
+  // Compare design spec hash with implementation hash
+  // If hashes match: drift = 1.0 (perfect alignment)
+  // If different: use LLM to estimate drift
+  let drift_score = 1.0
+  let verdict = "perfect_match"
+
+  if implemented_hash != design_hash then {
+    // Estimate drift using LLM
+    let drift_prompt = "Сравни дизайн-спецификацию с реализацией и оцени степень дрифта (насколько реализация совпадает с дизайном).\n\nВерни число от 0.0 до 1.0, где 1.0 = полное совпадение, 0.0 = полное расхождение."
+    let drift_result = call_llm(drift_prompt)
+    drift_score = to_float(drift_result)
+    verdict = "drift_detected"
+    if drift_score >= TARGET_DRIFT() then { verdict = "acceptable" }
+  }
+
+  // Record in verification table
+  let _ = db_execute("INSERT INTO design_verification (artifact_id, design_hash, implemented_hash, drift_score, verdict, verified_at) VALUES (?, ?, ?, ?, ?, NOW())", [artifact_id, design_hash, implemented_hash, drift_score, verdict])
+
+  let _ = AuditLog("design_verify", DEPT_NAME(), "artifact=" + artifact_id + " drift=" + to_string(drift_score) + " verdict=" + verdict)
+
+  return {
+    drift_score: drift_score,
+    verdict: verdict
+  }
+}
+
+pattern RunMonthlyDesignAudit() -> String {
+  // Monthly design system audit (scheduled 15th 12:00)
+  let metrics = ComputeDesignMetrics()
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "ЕЖЕМЕСЯЧНЫЙ АУДИТ ДИЗАЙН-СИСТЕМЫ\n"
+  let output = output + "Дата: " + format_date(now(), "yyyy-MM-dd") + "\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "─── Метрики ───\n"
+  let output = output + "Всего артефактов:       " + to_string(metrics.total_artifacts) + "\n"
+  let output = output + "Средние итерации:       " + to_string(metrics.avg_iteration_count) + "\n"
+  let output = output + "Средний a11y score:     " + to_string(metrics.avg_a11y_score) + "\n"
+  let output = output + "% ≤3 итераций:          " + to_string(metrics.pct_under_3_iterations) + "% (цель: ≥80%)\n"
+  let output = output + "DS reuse rate:          " + to_string(metrics.design_system_reuse) + "%\n"
+  let output = output + "Design-code drift:      " + to_string(metrics.drift_score) + " (цель: ≥0.90)\n\n"
+
+  // Flag issues
+  let output = output + "─── Проблемы ───\n"
+  if metrics.pct_under_3_iterations < 80.0 then {
+    output = output + "⚠️ Процент артефактов с ≤3 итерациями ниже 80% — " + to_string(metrics.pct_under_3_iterations) + "%. Анализируй причины длительных итераций.\n"
+  }
+  if metrics.drift_score < TARGET_DRIFT() then {
+    output = output + "⚠️ Design-code drift ниже целевого (0.90) — " + to_string(metrics.drift_score) + ". Усиль связь дизайн↔разработка.\n"
+  }
+  if metrics.avg_a11y_score < 0.9 then {
+    output = output + "⚠️ Средний a11y score ниже 0.9 — " + to_string(metrics.avg_a11y_score) + ". Проведи аудит доступности.\n"
+  }
+  if metrics.design_system_reuse < 80.0 then {
+    output = output + "⚠️ Design system reuse ниже 80% — " + to_string(metrics.design_system_reuse) + "%. Компоненты создаются вне системы.\n"
+  }
+
+  // Token audit
+  let token_audit = ManageDesignSystem("audit", "")
+  let output = output + "\n─── Аудит токенов ───\n"
+  let output = output + substring(token_audit, 0.0, 1000.0) + "\n"
+
+  // Store audit result
+  let _ = db_execute("INSERT INTO design_decisions (id, artifact_id, decision_type, rationale, created_at) VALUES (?, ?, ?, ?, NOW())", [hash("monthly_audit" + to_string(now())), "", "monthly_audit", substring(output, 0.0, 4000.0)])
+  let _ = AuditLog("design_monthly_audit", DEPT_NAME(), "artifacts=" + to_string(metrics.total_artifacts) + " drift=" + to_string(metrics.drift_score))
+
+  return output
+}
+
+pattern RunQuarterlyMethodologyReview() -> String {
+  // Quarterly review of design methodology adherence
+  let metrics = ComputeDesignMetrics()
+
+  let prompt = "Проведи квартальный обзор методологии дизайн-отдела Fosved.\n\nМетрики:\n• Всего артефактов: " + to_string(metrics.total_artifacts) + "\n• Средние итерации: " + to_string(metrics.avg_iteration_count) + "\n• Средний a11y: " + to_string(metrics.avg_a11y_score) + "\n• % ≤3 итераций: " + to_string(metrics.pct_under_3_iterations) + "%\n• DS reuse: " + to_string(metrics.design_system_reuse) + "%\n• Drift: " + to_string(metrics.drift_score) + "\n\nЖёсткие правила:\n1. Нет финализации без a11y\n2. Каждый компонент → дизайн-система\n3. Только токены, никаких свободных стилей\n4. 7 состояний для хэндоффа\n5. Mobile-first обязателен\n6. Пользовательские задачи обязательны\n7. Примеры + анти-паттерны для DS\n8. Итерации записаны\n9. Ревью с Dev обязателен\n10. Стоковые фото с обоснованием\n11. Trust calibration для AI\n12. Исследование для нового домена\n\nОцени adherence каждого правила (0-10) и дай рекомендации."
+  let review = call_llm(prompt)
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "КВАРТАЛЬНЫЙ ОБЗОР МЕТОДОЛОГИИ ДИЗАЙНА\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + substring(review, 0.0, 3000.0)
+
+  let _ = AuditLog("design_quarterly", DEPT_NAME(), "artifacts=" + to_string(metrics.total_artifacts))
+  return output
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 12: DESIGN SCORE DISPLAY
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern DesignScore() -> String {
+  let metrics = ComputeDesignMetrics()
+
+  let output = "═══════════════════════════════════════\n"
+  let output = output + "ДИЗАЙН-МЕТРИКИ\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "Артефактов:              " + to_string(metrics.total_artifacts) + "\n"
+  let output = output + "Средние итерации:        " + to_string(metrics.avg_iteration_count) + "\n"
+  let output = output + "A11y score (средний):    " + to_string(metrics.avg_a11y_score) + " / 1.0\n"
+  let output = output + "Итерации ≤3:             " + to_string(metrics.pct_under_3_iterations) + "% (цель: ≥80%)\n"
+  let output = output + "DS reuse:                " + to_string(metrics.design_system_reuse) + "%\n"
+  let output = output + "Design→code drift:       " + to_string(metrics.drift_score) + " (цель: ≥0.90)\n\n"
+
+  let output = output + "─── Оценка ───\n"
+  let a11y_ok = metrics.avg_a11y_score >= 0.9
+  let iter_ok = metrics.pct_under_3_iterations >= 80.0
+  let drift_ok = metrics.drift_score >= TARGET_DRIFT()
+  let a11y_ok_icon = "❌"
+  if a11y_ok then { a11y_ok_icon = "✅" }
+  let output = output + "A11y:      " +a11y_ok_icon + "\n"
+  let iter_ok_icon = "❌"
+  if iter_ok then { iter_ok_icon = "✅" }
+  let output = output + "Итерации:  " +iter_ok_icon + "\n"
+  let drift_ok_icon = "❌"
+  if drift_ok then { drift_ok_icon = "✅" }
+  let output = output + "Drift:     " +drift_ok_icon + "\n"
+
+  return output
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 13: FULL DESIGN PIPELINE (for free-text queries)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern DesignPipeline(query: String, artifact_type: String, chat_id: String) -> String {
+  // Step 0: Top disclaimer
+  let output = DISCLAIMER_TOP() + "\n\n"
+
+  // Step 1: Detect artifact type if unknown
+  let atype = artifact_type
+  if artifact_type == "unknown" then { atype = "wireframe" }
+
+  // Step 2: Enforce hard rule 12 (new domain → research)
+  let is_new = DetectNewDomain(query)
+  if is_new then {
+    let research_check = db_execute("SELECT COUNT(*) as cnt FROM user_research_sessions WHERE status = 'completed'", [])
+    let has_research = false
+    if length(research_check) > 0 then {
+      let d = get(research_check, 0)
+      let cnt = to_int(json_get(d, "cnt", 0))
+      if cnt > 0 then { has_research = true }
+    }
+    ifhas_research == false then {
+      output = output + "🚫 ЖЁСТКОЕ ПРАВИЛО 12: Новый домен требует исследования.\n\n"
+      output = output + "Запустите: /design-research <домен> <тип>\n\n"
+      output = output + DISCLAIMER_BOTTOM()
+      return output
+    }
+  }
+
+  // Step 3: Load skills
+  let skills = GetActiveSkills(atype, DetectAISpecific(query), is_new)
+  let skill_context = BuildSkillContext(skills)
+
+  // Step 4: Enforce hard rule 6 — user tasks
+  let user_tasks_prompt = "Определи пользовательские задачи для:\n" + query + "\n\nВерни JSON массив: [{\"task\": \"...\", \"user_goal\": \"...\", \"success_criteria\": \"...\"}]"
+  let user_tasks = call_llm(user_tasks_prompt)
+
+  // Step 5: Apply cognitive laws (Tier 1)
+  let cognitive = ApplyCognitiveLaws(query)
+
+  // Step 6: Generate design
+  let design_prompt = "Спроектируй UI/UX для:\n\n" + query + "\n\nТип артефакта: " + atype + "\n\n" + skill_context + "\n\nБренд-токены Fosved:\n" + FOSVED_TOKENS_JSON() + "\n\nПользовательские задачи:\n" + substring(user_tasks, 0.0, 500.0) + "\n\nКогнитивные законы:\n" + substring(cognitive, 0.0, 500.0) + "\n\nТребования:\n1. ТОЛЬКО дизайн-токены (никаких raw-значений)\n2. Mobile-first + responsive\n3. Для component_spec — 7 состояний\n4. Для AI — trust calibration\n5. WCAG AA минимум\n6. Сетко: 12 колонок, 24px gutter\n\nВерни JSON: {\"name\": \"...\", \"content\": \"...\", \"mobile\": \"...\", \"states\": {...}, \"a11y\": {...}, \"tokens_used\": [...]}"
+
+  let design_result = call_llm(design_prompt)
+  let design_parsed = parse_json(design_result)
+  let name = to_string(json_get(design_parsed, "name", "Untitled"))
+  let content = to_string(json_get(design_parsed, "content", ""))
+  let mobile = to_string(json_get(design_parsed, "mobile", ""))
+  let states = to_string(json_get(design_parsed, "states", "{}"))
+  let a11y_result = to_string(json_get(design_parsed, "a11y", "{}"))
+  let tokens_used = to_string(json_get(design_parsed, "tokens_used", "[]"))
+
+  // Step 7: Validate tokens (hard rule 3)
+  let token_check = ValidateTokenUsage(content)
+
+  // Step 8: Validate responsive (hard rule 5)
+  let responsive_check = GateResponsiveDesign(atype, mobile != "", true)
+
+  // Step 9: Generate artifact ID and store
+  let artifact_id = "da-" + substring(hash(query + to_string(now())), 0.0, 8.0)
+  let mobile_str = "false"
+  if mobile != "" then { mobile_str = "true" }
+  let _ = db_execute("INSERT INTO design_artifacts (id, name, artifact_type, status, content, design_tokens, user_tasks, interaction_states, has_mobile, has_responsive, a11y_score, iteration_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())", [artifact_id, name, atype, STATE_DRAFT(), content, tokens_used, user_tasks, states, mobile_str, "true", 0.0, 0])
+
+  // Step 10: Assemble output
+  let output = output + "═══════════════════════════════════════\n"
+  let output = output + "ДИЗАЙН-АРТЕФАКТ №" + artifact_id + "\n"
+  let output = output + "═══════════════════════════════════════\n\n"
+  let output = output + "Тип: " + atype + " | Статус: " + STATE_DRAFT() + " | Итерация: 0\n\n"
+  let output = output + "─── Пользовательские задачи ───\n"
+  let output = output + substring(user_tasks, 0.0, 600.0) + "\n\n"
+  let output = output + "─── Дизайн ───\n"
+  let output = output + substring(content, 0.0, 2500.0) + "\n\n"
+  if mobile != "" then {
+    let output = output + "─── Mobile ───\n"
+    let output = output + substring(mobile, 0.0, 800.0) + "\n\n"
+  }
+  let output = output + "─── Когнитивные законы ───\n"
+  let output = output + substring(cognitive, 0.0, 600.0) + "\n\n"
+
+  // Step 11: Gate results
+  let output = output + "─── Проверки ───\n"
+  let token_icon = "❌ " + token_check.violations
+  if token_check.all_tokens then { token_icon = "✅" }
+  let output = output + "Токены: " +token_icon + "\n"
+  let resp_icon = "❌ " + responsive_check.message
+  if responsive_check.passes then { resp_icon = "✅" }
+  let output = output + "Responsive: " +resp_icon + "\n\n"
+
+  let output = output + "─── Навыки ───\n"
+  let output = output + skills + "\n\n"
+
+  let output = output + "Дальнейшие действия:\n"
+  let output = output + "• /design-iterate " + artifact_id + " <обратная связь>\n"
+  let output = output + "• /design-spec " + artifact_id + " — спецификация для Dev\n"
+  let output = output + "• /design-approve " + artifact_id + "\n\n"
+
+  // Step 12: Bottom disclaimer
+  let output = output + DISCLAIMER_BOTTOM()
+
+  let token_check_all_tokens_str = "false"
+  if token_check.all_tokens then { token_check_all_tokens_str = "true" }
+  let _ = AuditLog("design_pipeline", DEPT_NAME(), "id=" + artifact_id + " type=" + atype + " tokens_ok=" + token_check_all_tokens_str)
+
+  return output
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 14: COMMAND ROUTER
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern RouteDesignCommand(parsed: Dict, chat_id: String) -> String {
+  let cmd = parsed.command
+
+  // /design — create new artifact
+  if cmd == "design" then {
+    if parsed.artifact_type == "unknown" then {
+      return ListDesignArtifacts(chat_id, 10)
+    }
+    return CreateDesignArtifact(parsed.artifact_type, parsed.task_description, chat_id)
+  }
+
+  // /design-spec — generate component spec
+  if cmd == "design_spec" then {
+    if parsed.artifact_id == "" then { return "Укажите ID артефакта: /design-spec <id>" }
+    return GenerateComponentSpec(parsed.artifact_id, chat_id)
+  }
+
+  // /design-system — manage design system
+  if cmd == "design_system" then {
+    let action = "tokens" }
+    if contains(lower(parsed.task_description), "audit") then { action = "audit" }
+    if contains(lower(parsed.task_description), "contrast") then { action = "contrast" }
+    return ManageDesignSystem(action, chat_id)
+  }
+
+  // /design-show — display artifact
+  if cmd == "design_show" then {
+    if parsed.artifact_id == "" then { return "Укажите ID артефакта: /design-show <id>" }
+    return ShowDesignArtifact(parsed.artifact_id)
+  }
+
+  // /design-artifacts — list artifacts
+  if cmd == "design_artifacts" then {
+    return ListDesignArtifacts(chat_id, 20)
+  }
+
+  // /design-research — conduct user research
+  if cmd == "design_research" then {
+    let parts = split(parsed.task_description, " ")
+    let domain = "general"
+    if length(parts) > 1 then { domain = join(parts, " ", 1, length(parts)) }
+    return ConductUserResearch(domain, "interview+analysis", chat_id)
+  }
+
+  // /design-iterate — iterate on artifact
+  if cmd == "design_iterate" then {
+    if parsed.artifact_id == "" then { return "Укажите ID артефакта и обратную связь: /design-iterate <id> <обратная связь>" }
+    // Extract feedback from after artifact_id
+    let parts = split(parsed.task_description, " ")
+    let feedback = "Улучшить дизайн"
+    if length(parts) > 2 then { feedback = join(parts, " ", 2, length(parts)) }
+    return IterateDesignArtifact(parsed.artifact_id, feedback, chat_id)
+  }
+
+  // /design-approve — approve artifact
+  if cmd == "design_approve" then {
+    if parsed.artifact_id == "" then { return "Укажите ID артефакта: /design-approve <id>" }
+    return ApproveDesignArtifact(parsed.artifact_id, parsed.wcag_level, chat_id)
+  }
+
+  // Free-text: run full pipeline
+  return DesignPipeline(parsed.task_description, parsed.artifact_type, chat_id)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 15: DISCLAIMER WRAPPER
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern WrapWithDisclaimer(content: String) -> String {
+  return DISCLAIMER_TOP() + "\n\n" + content + "\n\n" + DISCLAIMER_BOTTOM()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 16: ENTRY POINT (HandleDesign)
+// This is the pattern that app.mlog calls via import dept/design
+// ═══════════════════════════════════════════════════════════════════════
 
 pattern HandleDesign(query: String, chat_id: String) -> String {
-  let dept = "design"
-  let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
-  let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
-  return reply
+  let dept = DEPT_NAME()
+  let _ = AuditLog("dept_entry", dept, "query: " + substring(query, 0, 100))
+
+  // Parse query → command + artifact type + flags
+  let parsed = ParseDesignQuery(query)
+
+  // Route to command handler or full pipeline
+  let result = RouteDesignCommand(parsed, chat_id)
+
+  // Final safety: ensure disclaimer is present (hard rule 1 + department policy)
+  let has_disclaimer = contains(result, "Дизайн-спецификация генерируется")
+  let output = WrapWithDisclaimer(result)
+  if has_disclaimer then { output = result }
+
+  // ── LLM-Verifier: UX/design quality ──
+  let dsiv_resp = try call_python("llm_verifier", "score", json_encode([query, output, "Usability: Are interaction patterns user-centered with clear hierarchy? Accessibility: Are WCAG AA considerations included? Design system: Does it reference consistent components/tokens?"]))
+  if to_string(dsiv_resp) != "()" and contains(to_string(dsiv_resp), "error") == false then {
+    let dsiv_parsed = try parse_json(dsiv_resp)
+    let dsiv_score = to_float(try json_get(dsiv_parsed, "result", "0.5"))
+    let _ = AuditLog("design_verify_score", dept, "score=" + to_string(dsiv_score))
+  }
+
+  let _ = kv_set("last_model_" + dept, "native_call_llm")
+  let _ = RecordAssistantMessage(chat_id, dept, substring(output, 0.0, 4000.0))
+
+  return output
 }

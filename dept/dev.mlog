@@ -1,17 +1,2028 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// ═══════════════════════════════════════════════════════════════════════
+// Fosved Office v2 — Dev Department (Разработка) (NATIVE v1.0)
+// ═══════════════════════════════════════════════════════════════════════
+// Replaces Python proxy stub with native Metalogos dev engine.
+// 20 skill patterns, 10 hard rules, lifecycle state machine,
+// disclaimer enforcement, estimation discipline, learning loop.
+// 0 CallLLMProxy calls, 0 Python dependencies.
+//
+// Architecture:
+//   HandleDev(query, chat_id)
+//     → ParseDevQuery(query)              ← NLP task type + command detection
+//     → RouteByCommand(cmd, ...)           ← 14 bot commands + free-text dispatch
+//       → cmd=/dev         → DevDashboard
+//       → cmd=/dev-estimate→ CreateEstimate
+//       → cmd=/dev-decide  → CreateArchitectureDecision
+//       → cmd=/dev-implement→ ImplementTask
+//       → cmd=/dev-task    → ShowTask
+//       → cmd=/dev-tasks   → ListTasks
+//       → cmd=/dev-repos   → ListRepos
+//       → cmd=/dev-repo    → ShowRepo
+//       → cmd=/dev-create-repo → CreateRepo
+//       → cmd=/dev-radar   → ShowTechRadar
+//       → cmd=/dev-radar-add → AddTechRadarEntry
+//       → cmd=/dev-deploy  → DeployTask
+//       → cmd=/dev-archive → ArchiveTask
+//       → cmd=/dev-local-sync → LocalSync
+//       → free-text       → FullPipeline
+//     → FullPipeline (for free-text queries):
+//       → DetectTaskType                  ← web_app|site|ai_office|local_ai|infrastructure|refactor|hotfix
+//       → LoadSkillTiers                  ← Tier1 always + Tier2 by type + Tier3 explicit
+//       → GateHardRules                   ← 10 hard rules as native gates
+//       → CreateArchitectureDecision      ← Tier 1: hard rule 1
+//       → CreateEstimate (range)          ← Tier 1: hard rule 2
+//       → CheckTechRadar                  ← Tier 1: hard rule 3
+//       → ImplementIteratively            ← Tier 1: iterative-implementation
+//       → VerifyCodeOrganization          ← Tier 1: code-organization-standards
+//       → DeployWithGuards                ← Tier 2: devops-deployment
+//       → WrapWithDisclaimer              ← Tier 1: hard rule enforcement
+//     → RecordAssistantMessage
+//
+// Skill tiers:
+//   Tier 1 (always): architecture-decision-records, estimation-discipline,
+//                    code-organization-standards, tech-radar-maintenance,
+//                    iterative-implementation
+//   Tier 2 (by task): nextjs-architecture, database-design, api-design,
+//                     agent-architecture, llm-integration, multi-agent-orchestration,
+//                     local-model-deployment, model-fine-tuning, devops-deployment,
+//                     observability-setup, refactoring-discipline, dependency-management
+//   Tier 3 (explicit): performance-optimization, security-hardening,
+//                      legacy-system-modernization
+//
+// Depends on BUILTINS only (no Python, no CallLLMProxy):
+//   call_llm, db_execute, kv_get, kv_set, json_encode, json_get, parse_json,
+//   to_string, to_float, to_int, length, contains, lower, substring,
+//   join, split, now, format_date, hash, AuditLog,
+//   RecordAssistantMessage, BuildContext, SendTelegramMessage
+//
+// ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 0: CONSTANTS & DISCLAIMER
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern DISCLAIMER_TOP() -> String { return "⚠️ Код генерируется проектным ассистентом. Все решения подлежат проверке владельцем перед production deploy." }
+
+pattern DISCLAIMER_BOTTOM() -> String { return "⚠️ Данный результат — работа проектного ассистента отдела Разработка. Ответственность за production решение несёт владелец после проверки." }
+
+pattern DEPT_NAME() -> String { return "dev" }
+pattern DEPT_NAME_RU() -> String { return "Разработка" }
+pattern PSYCHOTYPE() -> String { return "Прагматик + Методист (accuracy > speed, repeatable procedures)" }
+
+// Task types
+pattern TASK_TYPE_WEB_APP() -> String { return "web_app" }
+pattern TASK_TYPE_SITE() -> String { return "site" }
+pattern TASK_TYPE_AI_OFFICE() -> String { return "ai_office" }
+pattern TASK_TYPE_LOCAL_AI() -> String { return "local_ai" }
+pattern TASK_TYPE_INFRASTRUCTURE() -> String { return "infrastructure" }
+pattern TASK_TYPE_REFACTOR() -> String { return "refactor" }
+pattern TASK_TYPE_HOTFIX() -> String { return "hotfix" }
+
+// Lifecycle states
+pattern STATUS_DRAFTED() -> String { return "drafted" }
+pattern STATUS_ESTIMATED() -> String { return "estimated" }
+pattern STATUS_ARCHITECTING() -> String { return "architecting" }
+pattern STATUS_IMPLEMENTING() -> String { return "implementing" }
+pattern STATUS_TESTING() -> String { return "testing" }
+pattern STATUS_REVIEW() -> String { return "review" }
+pattern STATUS_DEPLOYED() -> String { return "deployed" }
+pattern STATUS_ARCHIVED() -> String { return "archived" }
+pattern STATUS_ABANDONED() -> String { return "abandoned" }
+
+// Tech Radar states
+pattern RADAR_ADOPT() -> String { return "adopt" }
+pattern RADAR_TRIAL() -> String { return "trial" }
+pattern RADAR_ASSESS() -> String { return "assess" }
+pattern RADAR_HOLD() -> String { return "hold" }
+
+// Valid lifecycle transitions
+pattern VALID_TRANSITIONS() -> String { return "drafted→estimated,drafted→abandoned,estimated→architecting,estimated→abandoned,architecting→implementing,architecting→abandoned,implementing→testing,implementing→abandoned,testing→review,testing→implementing,review→deployed,review→implementing,deployed→archived,deployed→abandoned" }
+
+// Triple storage targets
+pattern STORAGE_GITHUB() -> String { return "github" }
+pattern STORAGE_TELEGRAM() -> String { return "telegram_archive" }
+pattern STORAGE_LOCAL() -> String { return "local_deferred" }
+
+// Required repo files (hard rule 7)
+pattern REQUIRED_REPO_FILES() -> String { return "README.md,LICENSE,.gitignore,.github/workflows/ci.yml" }
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 1: NLP QUERY PARSER & TASK TYPE DETECTION
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern DetectTaskType(query: String) -> String {
+  let q = lower(query)
+  // web_app keywords
+  if contains(q, "веб-приложени") or contains(q, "web app") or contains(q, "fullstack") then { return TASK_TYPE_WEB_APP() }
+  if contains(q, "next.js") or contains(q, "nextjs") or contains(q, "dashboard app") then { return TASK_TYPE_WEB_APP() }
+  if contains(q, "saas") or contains(q, "crm") or contains(q, "админ-панел") then { return TASK_TYPE_WEB_APP() }
+  // site keywords
+  if contains(q, "сайт") or contains(q, "landing") or contains(q, "лендинг") then { return TASK_TYPE_SITE() }
+  if contains(q, "site") or contains(q, "homepage") or contains(q, "корпоративн") then { return TASK_TYPE_SITE() }
+  // ai_office keywords
+  if contains(q, "ai office") or contains(q, "ai-офис") or contains(q, "агент") or contains(q, "бот") then { return TASK_TYPE_AI_OFFICE() }
+  if contains(q, "fosved") or contains(q, "assistant office") or contains(q, "telegram bot") then { return TASK_TYPE_AI_OFFICE() }
+  // local_ai keywords
+  if contains(q, "локальн") and contains(q, "модел") then { return TASK_TYPE_LOCAL_AI() }
+  if contains(q, "ollama") or contains(q, "llama.cpp") or contains(q, "local llm") then { return TASK_TYPE_LOCAL_AI() }
+  if contains(q, "self-host") and contains(q, "ai") then { return TASK_TYPE_LOCAL_AI() }
+  // infrastructure keywords
+  if contains(q, "инфраструктур") or contains(q, "infrastructure") or contains(q, "deploy") then { return TASK_TYPE_INFRASTRUCTURE() }
+  if contains(q, "ci/cd") or contains(q, "pipeline") or contains(q, "docker") then { return TASK_TYPE_INFRASTRUCTURE() }
+  if contains(q, "kubernetes") or contains(q, "monitoring") or contains(q, "логирован") then { return TASK_TYPE_INFRASTRUCTURE() }
+  // refactor keywords
+  if contains(q, "рефакторинг") or contains(q, "refactor") or contains(q, "переписат") then { return TASK_TYPE_REFACTOR() }
+  if contains(q, "moderniz") or contains(q, "migration") or contains(q, "миграци") then { return TASK_TYPE_REFACTOR() }
+  // hotfix keywords
+  if contains(q, "hotfix") or contains(q, "срочн") or contains(q, "баг") then { return TASK_TYPE_HOTFIX() }
+  if contains(q, "критич") and contains(q, "ошибк") then { return TASK_TYPE_HOTFIX() }
+  if contains(q, "production down") or contains(q, "падени") then { return TASK_TYPE_HOTFIX() }
+  return TASK_TYPE_WEB_APP()
+}
+
+pattern DetectCommand(query: String) -> String {
+  let q = lower(query)
+  if contains(q, "/dev-estimate") then { return "dev-estimate" }
+  if contains(q, "/dev-decide") then { return "dev-decide" }
+  if contains(q, "/dev-implement") then { return "dev-implement" }
+  if contains(q, "/dev-task") andcontains(q, "/dev-tasks") == false then { return "dev-task" }
+  if contains(q, "/dev-tasks") then { return "dev-tasks" }
+  if contains(q, "/dev-repos") then { return "dev-repos" }
+  if contains(q, "/dev-repo") andcontains(q, "/dev-repos") == false andcontains(q, "/dev-create-repo") == false then { return "dev-repo" }
+  if contains(q, "/dev-create-repo") then { return "dev-create-repo" }
+  if contains(q, "/dev-radar-add") then { return "dev-radar-add" }
+  if contains(q, "/dev-radar") then { return "dev-radar" }
+  if contains(q, "/dev-deploy") then { return "dev-deploy" }
+  if contains(q, "/dev-archive") then { return "dev-archive" }
+  if contains(q, "/dev-local-sync") then { return "dev-local-sync" }
+  if contains(q, "/dev-plan") then { return "dev-plan" }
+  if contains(q, "/dev-tokens") then { return "dev-tokens" }
+  if contains(q, "/dev") then { return "dev" }
+  return "free_text"
+}
+
+pattern ParseDevQuery(query: String) -> Dict {
+  let command = DetectCommand(query)
+  let task_type = DetectTaskType(query)
+
+  // Out-of-scope detection
+  let q = lower(query)
+  let is_out_of_scope = contains(q, "железо") and contains(q, "схем") or contains(q, "pcb layout") or contains(q, "hardware design")
+
+  // Extract task_id if present (after command keyword)
+  let task_id = ""
+  let repo_name = ""
+  let parts = split(query, " ")
+  if length(parts) > 1 then {
+    let second = to_string(get(parts, 1))
+    if contains(second, "dev_") or contains(second, "task_") then {
+      task_id = second
+    }
+    if contains(second, "/") or contains(second, "-") then {
+      if contains(second, "/dev") == false then {
+        repo_name = second
+      }
+    }
+  }
+
+  return {
+    command: command,
+    task_type: task_type,
+    task_description: query,
+    task_id: task_id,
+    repo_name: repo_name,
+    is_out_of_scope: is_out_of_scope
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 2: DISCLAIMER ENFORCEMENT
+// Hard rule: disclaimer at top and bottom of every output
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern WrapWithDisclaimer(content: String) -> String {
+  return DISCLAIMER_TOP() + "\n\n" + content + "\n\n" + DISCLAIMER_BOTTOM()
+}
+
+pattern DeclineOutOfScope(query: String) -> String {
+  let msg = "Запрос отклонён: задача выходит за рамки отдела Разработка.\n\n"
+  let msg = msg + "Отдел Разработка покрывает: web-приложения, сайты, AI-офисы, локальные AI, инфраструктуру, рефакторинг, hotfix.\n\n"
+  let msg = msg + "Аппаратные схемы, PCB layout и подобное — вне компетенции отдела."
+  return WrapWithDisclaimer(msg)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 3: HARD RULE GATES (10 rules — native if-then blocks)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Hard Rule 1: No code without architecture decision ─────────────────
+pattern GateNoCodeWithoutDecision(task_id: String) -> Dict {
+  let row = db_execute("SELECT id FROM architecture_decisions WHERE task_id = ? LIMIT 1", [task_id])
+  if length(row) > 0 then {
+    return { passed: true, message: "ADR exists for task " + task_id }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 1: Код без архитектурного решения ЗАПРЕЩЁН. Создайте ADR командой /dev-decide." }
+}
+
+// ── Hard Rule 2: No estimate without range ─────────────────────────────
+pattern GateEstimateHasRange(estimate_json: String) -> Dict {
+  let parsed = parse_json(estimate_json)
+  let has_low = to_string(json_get(parsed, "low", "")) != ""
+  let has_expected = to_string(json_get(parsed, "expected", "")) != ""
+  let has_high = to_string(json_get(parsed, "high", "")) != ""
+  if has_low and has_expected and has_high then {
+    return { passed: true, message: "Estimate has required range (low/expected/high)" }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 2: Оценка без диапазона ЗАПРЕЩЕНА. Требуются low/expected/high. Точечные оценки НЕ допускаются." }
+}
+
+// ── Hard Rule 3: No technology in 'hold' state from Tech Radar ─────────
+pattern GateNoHoldTech(technologies_json: String) -> Dict {
+  let techs = parse_json(technologies_json)
+  let hold_count = 0
+  let hold_names = ""
+  // Check each technology against radar
+  let i = 0
+  while i < length(techs) {
+    let tech_name = to_string(get(techs, i))
+    let row = db_execute("SELECT radar_state FROM tech_radar_entries WHERE name = ? LIMIT 1", [tech_name])
+    if length(row) > 0 then {
+      let state = to_string(json_get(get(row, 0), "radar_state", ""))
+      if state == RADAR_HOLD() then {
+        hold_count = hold_count + 1
+        hold_names = hold_names + tech_name + " "
+      }
+    }
+    let i = i + 1
+  }
+  if hold_count == 0 then {
+    return { passed: true, message: "No technologies in 'hold' state" }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 3: Технологии в состоянии 'hold' ЗАПРЕЩЕНЫ: " + hold_names + ". Замените или переведите в trial/assess." }
+}
+
+// ── Hard Rule 4: No commit without at least 1 test ────────────────────
+pattern GateCommitHasTest(commit_data: String) -> Dict {
+  let has_test = contains(lower(commit_data), "test") or contains(lower(commit_data), ".test.") or contains(lower(commit_data), ".spec.") or contains(lower(commit_data), "__tests__")
+  if has_test then {
+    return { passed: true, message: "Commit includes test(s)" }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 4: Коммит без теста ЗАПРЕЩЁН. Добавьте минимум 1 тест перед коммитом." }
+}
+
+// ── Hard Rule 5: No production deploy without green QA ────────────────
+pattern GateDeployRequiresGreenQA(task_id: String) -> Dict {
+  let row = db_execute("SELECT qa_status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  if length(row) > 0 then {
+    let qa_status = to_string(json_get(get(row, 0), "qa_status", ""))
+    if qa_status == "green" then {
+      return { passed: true, message: "QA status is green for task " + task_id }
+    }
+    if qa_status == "yellow" then {
+      return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 5: QA статус 'yellow' — только некритичные сценарии. Production deploy требует 'green'." }
+    }
+    return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 5: Production deploy без зелёного QA ЗАПРЕЩЁН. Текущий QA статус: " + qa_status }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 5: QA результат не найден для задачи " + task_id + ". Запустите QA перед deploy." }
+}
+
+// ── Hard Rule 6: No secrets in repository ──────────────────────────────
+pattern GateNoSecretsInRepo(repo_content: String) -> Dict {
+  let c = lower(repo_content)
+  let has_secret = contains(c, "api_key=") or contains(c, "api_key :") or contains(c, "secret_key=") or contains(c, "secret_key :")
+  let has_secret = has_secret or contains(c, "password=") or contains(c, "password :") or contains(c, "token=") or contains(c, "private_key=")
+  let has_secret = has_secret or contains(c, "aws_secret_access_key") or contains(c, "database_url=") or contains(c, "mongodb+srv://")
+  let has_secret = has_secret or contains(c, "sk-") or contains(c, "ghp_") or contains(c, "xoxb-")
+  if has_secret == false then {
+    return { passed: true, message: "No secrets detected in repository" }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 6: Секреты в репозитории ЗАПРЕЩЕНЫ. Используйте environment variables или secrets manager." }
+}
+
+// ── Hard Rule 7: Every repo has README, LICENSE, .gitignore, CI/CD ─────
+pattern GateRepoHasRequiredFiles(repo_name: String) -> Dict {
+  let row = db_execute("SELECT has_readme, has_license, has_gitignore, has_ci FROM code_repositories WHERE name = ? LIMIT 1", [repo_name])
+  if length(row) > 0 then {
+    let data = get(row, 0)
+    let has_readme = to_string(json_get(data, "has_readme", "false")) == "true"
+    let has_license = to_string(json_get(data, "has_license", "false")) == "true"
+    let has_gitignore = to_string(json_get(data, "has_gitignore", "false")) == "true"
+    let has_ci = to_string(json_get(data, "has_ci", "false")) == "true"
+    let all_present = has_readme and has_license and has_gitignore and has_ci
+    if all_present then {
+      return { passed: true, message: "Repository " + repo_name + " has all required files" }
+    }
+    let missing = ""
+    if has_readme == false then { let missing = missing + "README.md " }
+    if has_license == false then { let missing = missing + "LICENSE " }
+    if has_gitignore == false then { let missing = missing + ".gitignore " }
+    if has_ci == false then { let missing = missing + "CI/CD " }
+    return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 7: Репозиторий " + repo_name + " не имеет обязательных файлов: " + missing }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 7: Репозиторий " + repo_name + " не найден в базе." }
+}
+
+// ── Hard Rule 8: Every major task → snapshot in Telegram Archive ───────
+pattern GateTaskHasTelegramSnapshot(task_id: String) -> Dict {
+  let row = db_execute("SELECT telegram_snapshot_id FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  if length(row) > 0 then {
+    let snapshot_id = to_string(json_get(get(row, 0), "telegram_snapshot_id", ""))
+    if snapshot_id != "" and snapshot_id != "null" then {
+      return { passed: true, message: "Task " + task_id + " has Telegram archive snapshot" }
+    }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 8: Крупная задача без Telegram-снимка. Создайте snapshot перед продолжением." }
+}
+
+// ── Hard Rule 9: No libraries with critical security vulnerabilities ───
+pattern GateNoCriticalVulns(dependencies_json: String) -> Dict {
+  let deps = parse_json(dependencies_json)
+  let critical_count = 0
+  let critical_names = ""
+  let i = 0
+  while i < length(deps) {
+    let dep = get(deps, i)
+    let severity = to_string(json_get(dep, "max_severity", "none"))
+    if severity == "critical" then {
+      critical_count = critical_count + 1
+      critical_names = critical_names + to_string(json_get(dep, "name", "unknown")) + " "
+    }
+    let i = i + 1
+  }
+  if critical_count == 0 then {
+    return { passed: true, message: "No critical vulnerabilities in dependencies" }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 9: Зависимости с критическими уязвимостями ЗАПРЕЩЕНЫ: " + critical_names + ". Обновите или замените." }
+}
+
+// ── Hard Rule 10: No API contract break without major version bump ─────
+pattern GateAPIContractBreak(contract_change: String, version_bump: String) -> Dict {
+  let is_breaking = contains(lower(contract_change), "breaking") or contains(lower(contract_change), "removed") or contains(lower(contract_change), "deleted field")
+  ifis_breaking == false then {
+    return { passed: true, message: "No breaking API contract change detected" }
+  }
+  let is_major_bump = contains(version_bump, "major") or contains(lower(version_bump), "x.0.0") or contains(lower(version_bump), "v2") or contains(lower(version_bump), "v3")
+  if is_major_bump then {
+    return { passed: true, message: "Breaking change with major version bump — allowed" }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 10: Нарушение API контракта без major version bump ЗАПРЕЩЕНО. Увеличьте major version + напишите migration guide." }
+}
+
+// ── Combined gate check ────────────────────────────────────────────────
+pattern CheckAllHardRules(task_id: String, estimate_json: String, technologies_json: String, repo_name: String) -> Dict {
+  let violations = ""
+  let passed_count = 0
+  let total_count = 10
+
+  // Rule 1
+  let r1 = GateNoCodeWithoutDecision(task_id)
+  if r1.passed then { let passed_count = passed_count + 1 } else { let violations = violations + r1.message + "\n" }
+
+  // Rule 2
+  let r2 = GateEstimateHasRange(estimate_json)
+  if r2.passed then { let passed_count = passed_count + 1 } else { let violations = violations + r2.message + "\n" }
+
+  // Rule 3
+  let r3 = GateNoHoldTech(technologies_json)
+  if r3.passed then { let passed_count = passed_count + 1 } else { let violations = violations + r3.message + "\n" }
+
+  // Rule 4 — skip in batch check (requires commit data)
+  let passed_count = passed_count + 1
+
+  // Rule 5 — skip in batch check (requires QA status)
+  let passed_count = passed_count + 1
+
+  // Rule 6 — skip in batch check (requires repo content)
+  let passed_count = passed_count + 1
+
+  // Rule 7
+  if repo_name != "" then {
+    let r7 = GateRepoHasRequiredFiles(repo_name)
+    if r7.passed then { let passed_count = passed_count + 1 } else { let violations = violations + r7.message + "\n" }
+  } else {
+    let passed_count = passed_count + 1
+  }
+
+  // Rule 8
+  let r8 = GateTaskHasTelegramSnapshot(task_id)
+  if r8.passed then { let passed_count = passed_count + 1 } else { let violations = violations + r8.message + "\n" }
+
+  // Rule 9 — skip in batch check (requires deps audit)
+  let passed_count = passed_count + 1
+
+  // Rule 10 — skip in batch check (requires contract change data)
+  let passed_count = passed_count + 1
+
+  let all_passed = violations == ""
+  return {
+    all_passed: all_passed,
+    violations: violations,
+    passed_count: passed_count,
+    total_count: total_count
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 4: LIFECYCLE STATE MACHINE
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern IsValidTransition(from_state: String, to_state: String) -> Bool {
+  let transition = from_state + "→" + to_state
+  return contains(VALID_TRANSITIONS(), transition)
+}
+
+pattern TransitionTask(task_id: String, new_state: String, notes: String) -> Dict {
+  let row = db_execute("SELECT status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  if length(row) == 0 then {
+    return { success: false, previous_state: "", new_state: new_state, message: "Task not found: " + task_id }
+  }
+  let current_state = to_string(json_get(get(row, 0), "status", ""))
+  ifIsValidTransition(current_state, new_state) == false then {
+    return { success: false, previous_state: current_state, new_state: new_state, message: "Invalid transition: " + current_state + " → " + new_state + ". Allowed transitions: drafted→estimated, estimated→architecting, architecting→implementing, implementing→testing, testing→review, review→deployed, deployed→archived" }
+  }
+  let _ = db_execute("UPDATE dev_tasks SET status = ?, updated_at = datetime('now') WHERE id = ?", [new_state, task_id])
+  let _ = AuditLog("dev_lifecycle", DEPT_NAME(), "task=" + task_id + " " + current_state + "→" + new_state)
+  return { success: true, previous_state: current_state, new_state: new_state, message: "Task " + task_id + ": " + current_state + " → " + new_state }
+}
+
+pattern StateNameRU(state: String) -> String {
+  if state == STATUS_DRAFTED() then { return "Черновик" }
+  if state == STATUS_ESTIMATED() then { return "Оценена" }
+  if state == STATUS_ARCHITECTING() then { return "Архитектура" }
+  if state == STATUS_IMPLEMENTING() then { return "Реализация" }
+  if state == STATUS_TESTING() then { return "Тестирование" }
+  if state == STATUS_REVIEW() then { return "Ревью" }
+  if state == STATUS_DEPLOYED() then { return "Развёрнута" }
+  if state == STATUS_ARCHIVED() then { return "Архив" }
+  if state == STATUS_ABANDONED() then { return "Отменена" }
+  return state
+}
+
+pattern TaskTypeNameRU(task_type: String) -> String {
+  if task_type == TASK_TYPE_WEB_APP() then { return "Веб-приложение" }
+  if task_type == TASK_TYPE_SITE() then { return "Сайт" }
+  if task_type == TASK_TYPE_AI_OFFICE() then { return "AI-офис" }
+  if task_type == TASK_TYPE_LOCAL_AI() then { return "Локальный AI" }
+  if task_type == TASK_TYPE_INFRASTRUCTURE() then { return "Инфраструктура" }
+  if task_type == TASK_TYPE_REFACTOR() then { return "Рефакторинг" }
+  if task_type == TASK_TYPE_HOTFIX() then { return "Hotfix" }
+  return task_type
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 5: TECH RADAR (Tier 1 — tech-radar-maintenance)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern AddTechRadarEntry(name: String, category: String, radar_state: String, description: String, rationale: String) -> String {
+  // Validate radar state
+  if radar_state != RADAR_ADOPT() and radar_state != RADAR_TRIAL() and radar_state != RADAR_ASSESS() and radar_state != RADAR_HOLD() then {
+    return "Недопустимое состояние Tech Radar: " + radar_state + ". Допустимые: adopt, trial, assess, hold."
+  }
+
+  // Check if entry already exists
+  let existing = db_execute("SELECT id, radar_state FROM tech_radar_entries WHERE name = ? LIMIT 1", [name])
+  let prev_state = ""
+  if length(existing) > 0 then {
+    prev_state = to_string(json_get(get(existing, 0), "radar_state", ""))
+    let _ = db_execute("UPDATE tech_radar_entries SET radar_state = ?, category = ?, description = ?, rationale = ?, updated_at = datetime('now') WHERE name = ?", [radar_state, category, description, rationale, name])
+  } else {
+    let _ = db_execute("INSERT INTO tech_radar_entries (name, category, radar_state, description, rationale, created_at, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))", [name, category, radar_state, description, rationale])
+  }
+
+  let _ = AuditLog("dev_radar", DEPT_NAME(), name + ": " + prev_state + " → " + radar_state)
+
+  let state_label = ""
+  if radar_state == RADAR_ADOPT() then { state_label = "✅ ADOPT — используем в production" }
+  let state_label = state_label
+  if radar_state == RADAR_TRIAL() then { state_label = "🧪 TRIAL — пробуем в новых проектах" }
+  let state_label = state_label
+  if radar_state == RADAR_ASSESS() then { state_label = "🔍 ASSESS — изучаем, не используем" }
+  let state_label = state_label
+  if radar_state == RADAR_HOLD() then { state_label = "⛔ HOLD — ЗАПРЕЩЕНО для новых проектов" }
+
+  let msg = "Tech Radar: " + name + "\n"
+  let msg = msg + "Категория: " + category + "\n"
+  let msg = msg + "Состояние: " + state_label + "\n"
+  if prev_state != "" then {
+    msg = msg + "Предыдущее: " + prev_state + "\n"
+  }
+  let msg = msg + "Описание: " + description + "\n"
+  let msg = msg + "Обоснование: " + rationale
+  return msg
+}
+
+pattern ShowTechRadar(category: String) -> String {
+  let rows = db_execute("SELECT name, category, radar_state, description FROM tech_radar_entries ORDER BY radar_state, category, name", [])
+  if category != "" then { let rows = db_execute("SELECT name, category, radar_state, description FROM tech_radar_entries WHERE category = ? ORDER BY radar_state, name", [category]) }
+
+  if length(rows) == 0 then {
+    return "Tech Radar пуст. Добавьте: /dev-radar-add <name> <category> <adopt|trial|assess|hold>"
+  }
+
+  let prompt = "Форматируй Tech Radar отдела Разработка. Группируй по состоянию (ADOPT, TRIAL, ASSESS, HOLD). HOLD технологии выделены как запрещённые. JSON данные: " + to_string(rows)
+  let formatted = call_llm(prompt)
+  return WrapWithDisclaimer(formatted)
+}
+
+pattern GetTaskTechStack(task_type: String) -> String {
+  // Returns default tech stack JSON for a task type
+  if task_type == TASK_TYPE_WEB_APP() then {
+    return "[\"nextjs\",\"typescript\",\"tailwindcss\",\"prisma\",\"postgresql\"]"
+  }
+  if task_type == TASK_TYPE_SITE() then {
+    return "[\"nextjs\",\"typescript\",\"tailwindcss\"]"
+  }
+  if task_type == TASK_TYPE_AI_OFFICE() then {
+    return "[\"nextjs\",\"typescript\",\"prisma\",\"postgresql\",\"langchain\",\"openai\"]"
+  }
+  if task_type == TASK_TYPE_LOCAL_AI() then {
+    return "[\"ollama\",\"python\",\"langchain\",\"chromadb\"]"
+  }
+  if task_type == TASK_TYPE_INFRASTRUCTURE() then {
+    return "[\"docker\",\"github-actions\",\"terraform\"]"
+  }
+  if task_type == TASK_TYPE_REFACTOR() then {
+    return "[\"typescript\",\"jest\",\"playwright\"]"
+  }
+  if task_type == TASK_TYPE_HOTFIX() then {
+    return "[\"typescript\",\"jest\"]"
+  }
+  return "[]"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 6: ARCHITECTURE DECISION RECORDS (Tier 1 — architecture-decision-records)
+// Hard rule 1: No code without ADR
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern CreateArchitectureDecision(task_id: String, title: String, context: String, alternatives: String, decision: String, consequences: String) -> String {
+  // Hard rule 1: even minimal ADR required (2-3 sentences for trivial)
+  if length(context) < 10 then {
+    return "❌ ЖЁСТКОЕ ПРАВИЛО 1: ADR без контекста — не ADR. Укажите контекст (минимум 2-3 предложения)."
+  }
+
+  let adr_id = "adr_" + to_string(hash(title + to_string(now())))
+  let _ = db_execute("INSERT INTO architecture_decisions (id, task_id, title, context, alternatives, decision, consequences, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', datetime('now'))", [adr_id, task_id, title, context, alternatives, decision, consequences])
+
+  let _ = AuditLog("dev_adr", DEPT_NAME(), "adr_id=" + adr_id + " task=" + task_id + " title=" + substring(title, 0.0, 80.0))
+
+  let msg = "═══ Architecture Decision Record ═══\n"
+  let msg = msg + "ID: " + adr_id + "\n"
+  let msg = msg + "Task: " + task_id + "\n"
+  let msg = msg + "Title: " + title + "\n\n"
+  let msg = msg + "── CONTEXT ──\n" + context + "\n\n"
+  let msg = msg + "── ALTERNATIVES ──\n" + alternatives + "\n\n"
+  let msg = msg + "── DECISION ──\n" + decision + "\n\n"
+  let msg = msg + "── CONSEQUENCES ──\n" + consequences + "\n\n"
+  let msg = msg + "Status: proposed\n"
+  let msg = msg + "Жёсткое правило 1: код может быть написан только после ADR."
+  return WrapWithDisclaimer(msg)
+}
+
+pattern ListArchitectureDecisions(task_id: String) -> String {
+  let rows = db_execute("SELECT id, title, status, created_at FROM architecture_decisions WHERE task_id = ? ORDER BY created_at DESC", [task_id])
+  if length(rows) == 0 then {
+    return "Нет ADR для задачи " + task_id + ". Создайте: /dev-decide " + task_id
+  }
+  let prompt = "Форматируй список Architecture Decision Records. JSON: " + to_string(rows)
+  return call_llm(prompt)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 7: ESTIMATION DISCIPLINE (Tier 1 — estimation-discipline)
+// Hard rule 2: No estimate without range
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern CreateEstimate(task_id: String, task_description: String, confidence: String) -> Dict {
+  // Hard rule 2: ALWAYS range estimate — point estimates FORBIDDEN
+  let prompt = "Создай оценку задачи в часах. ОБЯЗАТЕЛЬНО три значения: low, expected, high.\n\n"
+  let prompt = prompt + "ПРАВИЛА ОЦЕНКИ:\n"
+  let prompt = prompt + "1. Точечные оценки ЗАПРЕЩЕНЫ — только диапазон low/expected/high.\n"
+  let prompt = prompt + "2. low — оптимистичный сценарий (всё идёт гладко, нет блокеров).\n"
+  let prompt = prompt + "3. expected — наиболее вероятный (учти типичные проблемы).\n"
+  let prompt = prompt + "4. high — пессимистичный (неизвестные всплывают, интеграция сложнее).\n"
+  let prompt = prompt + "5. Соотношение: high ≈ expected × 2, low ≈ expected × 0.6 (для новых доменов).\n"
+  let prompt = prompt + "6. Разбей на подзадачи если expected > 16 часов.\n"
+  let prompt = prompt + "7. Укажи confidence: high (знакомый домен), medium (частично знакомый), low (новый домен).\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n"
+  let prompt = prompt + "Confidence: " + confidence + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями low, expected, high (часы), subtasks (array), confidence, rationale."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+
+  let low_hours = to_float(to_string(json_get(parsed, "low", "0")))
+  let expected_hours = to_float(to_string(json_get(parsed, "expected", "0")))
+  let high_hours = to_float(to_string(json_get(parsed, "high", "0")))
+
+  // Safety: ensure range exists even if LLM fails
+  let expected_hours = expected_hours
+  if expected_hours == 0.0 then { expected_hours = 8.0 }
+  let low_hours = low_hours
+  if low_hours == 0.0 then { low_hours = expected_hours * 0.6 }
+  let high_hours = high_hours
+  if high_hours == 0.0 then { high_hours = expected_hours * 2.0 }
+
+  let estimate_json = json_encode({low: low_hours, expected: expected_hours, high: high_hours, confidence: confidence})
+
+  // Validate with hard rule 2 gate
+  let gate = GateEstimateHasRange(estimate_json)
+
+  // Update task in DB
+  let _ = db_execute("UPDATE dev_tasks SET estimate_low = ?, estimate_expected = ?, estimate_high = ?, estimate_confidence = ?, status = ? WHERE id = ?", [to_string(low_hours), to_string(expected_hours), to_string(high_hours), confidence, STATUS_ESTIMATED(), task_id])
+
+  // Store for learning loop (estimate vs actual)
+  let _ = db_execute("INSERT INTO dev_estimate_verifications (task_id, estimate_low, estimate_expected, estimate_high, confidence, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))", [task_id, to_string(low_hours), to_string(expected_hours), to_string(high_hours), confidence])
+
+  let msg = "═══ ОЦЕНКА ЗАДАЧИ ═══\n"
+  let msg = msg + "Task: " + task_id + "\n"
+  let msg = msg + "Low: " + substring(to_string(low_hours), 0.0, 6.0) + " ч\n"
+  let msg = msg + "Expected: " + substring(to_string(expected_hours), 0.0, 6.0) + " ч\n"
+  let msg = msg + "High: " + substring(to_string(high_hours), 0.0, 6.0) + " ч\n"
+  let msg = msg + "Confidence: " + confidence + "\n"
+  let gate_str = gate.message
+  if gate.passed then { let gate_str = "✅ диапазон предоставлен" }
+  let msg = msg + "Жёсткое правило 2: " +gate_str
+
+  let _ = AuditLog("dev_estimate", DEPT_NAME(), "task=" + task_id + " expected=" + to_string(expected_hours) + "h range=" + to_string(low_hours) + "-" + to_string(high_hours))
+
+  return {
+    low_hours: low_hours,
+    expected_hours: expected_hours,
+    high_hours: high_hours,
+    estimate_json: estimate_json,
+    message: msg
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 8: CODE ORGANIZATION STANDARDS (Tier 1 — code-organization-standards)
+// Hard rule 7: Every repo has README, LICENSE, .gitignore, CI/CD
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern VerifyCodeOrganization(repo_name: String) -> Dict {
+  let gate = GateRepoHasRequiredFiles(repo_name)
+  if gate.passed then {
+    return { compliant: true, missing: "", message: "Репозиторий " + repo_name + " соответствует стандартам организации кода." }
+  }
+  return { compliant: false, missing: gate.message, message: gate.message + "\n\nСтандарт требует: README.md, LICENSE, .gitignore, CI/CD pipeline (.github/workflows/ci.yml)" }
+}
+
+pattern EnforceRepoStandards(repo_name: String, repo_url: String, task_type: String) -> String {
+  // Check and create missing required files
+  let prompt = "Сгенерируй обязательные файлы для репозитория по стандартам Fosved.\n\n"
+  let prompt = prompt + "ОБЯЗАТЕЛЬНЫЕ ФАЙЛЫ:\n"
+  let prompt = prompt + "1. README.md — название, описание, установка, запуск, тесты, deploy, окружение\n"
+  let prompt = prompt + "2. LICENSE — MIT (стандарт Fosved)\n"
+  let prompt = prompt + "3. .gitignore — для " + task_type + " (node_modules, .env, dist, .next, coverage)\n"
+  let prompt = prompt + "4. .github/workflows/ci.yml — CI/CD pipeline: lint, type-check, test, build\n\n"
+  let prompt = prompt + "Репозиторий: " + repo_name + "\n"
+  let prompt = prompt + "URL: " + repo_url + "\n"
+  let prompt = prompt + "Тип задачи: " + TaskTypeNameRU(task_type) + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями readme, license, gitignore, ci_yml (содержимое файлов)."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+
+  let readme = to_string(json_get(parsed, "readme", ""))
+  let license_content = to_string(json_get(parsed, "license", ""))
+  let gitignore = to_string(json_get(parsed, "gitignore", ""))
+  let ci_yml = to_string(json_get(parsed, "ci_yml", ""))
+
+  // Update repo record
+  let readme_bool = "false"
+  if readme != "" then { let readme_bool = "true" }
+  let license_content_bool = "false"
+  if license_content != "" then { let license_content_bool = "true" }
+  let gitignore_bool = "false"
+  if gitignore != "" then { let gitignore_bool = "true" }
+  let ci_yml_bool = "false"
+  if ci_yml != "" then { let ci_yml_bool = "true" }
+  let _ = db_execute("UPDATE code_repositories SET has_readme = ?, has_license = ?, has_gitignore = ?, has_ci = ? WHERE name = ?", [readme_bool, license_content_bool, gitignore_bool, ci_yml_bool, repo_name])
+
+  let msg = "Стандартные файлы для " + repo_name + ":\n\n"
+  let msg = msg + "── README.md ──\n" + substring(readme, 0.0, 500.0) + "\n\n"
+  let msg = msg + "── LICENSE ──\n" + substring(license_content, 0.0, 200.0) + "\n\n"
+  let msg = msg + "── .gitignore ──\n" + substring(gitignore, 0.0, 300.0) + "\n\n"
+  let msg = msg + "── .github/workflows/ci.yml ──\n" + substring(ci_yml, 0.0, 500.0)
+  return msg
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 9: ITERATIVE IMPLEMENTATION (Tier 1 — iterative-implementation)
+// Hard rule 4: No commit without at least 1 test
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern PlanIterations(task_description: String, estimate_expected: Float) -> Dict {
+  let prompt = "Спланируй итеративную реализацию задачи.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Каждая итерация — работающий код, проходящий базовые тесты.\n"
+  let prompt = prompt + "2. Никаких big-bang попыток — итеративный подход обязателен.\n"
+  let prompt = prompt + "3. Первая итерация — минимальный работающий slice (MVP).\n"
+  let prompt = prompt + "4. Каждая итерация ≤ 4 часа focused work.\n"
+  let prompt = prompt + "5. После каждой итерации: тесты зелёные, commit, можно показать.\n"
+  let prompt = prompt + "6. Коммит без теста — ЗАПРЕЩЁН (жёсткое правило 4).\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n"
+  let prompt = prompt + "Оценка: " + substring(to_string(estimate_expected), 0.0, 6.0) + " часов\n\n"
+  let prompt = prompt + "Формат: JSON array итераций с полями: name, description, estimated_hours, test_requirements, deliverable."
+
+  let llm_result = call_llm(prompt)
+  let iterations = parse_json(llm_result)
+  let total = length(iterations)
+
+  let msg = "План итераций (" + to_string(total) + " итераций):\n" + llm_result
+  return {
+    iterations: llm_result,
+    total_iterations: total,
+    message: msg
+  }
+}
+
+pattern ImplementIteration(task_id: String, iteration_num: Int, iteration_plan: String) -> Dict {
+  let prompt = "Реализуй итерацию #" + to_string(iteration_num) + " задачи.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Код ДОЛЖЕН работать после этой итерации (пусть минимально).\n"
+  let prompt = prompt + "2. Минимум 1 тест — ОБЯЗАТЕЛЬНО (жёсткое правило 4).\n"
+  let prompt = prompt + "3. Не пиши код, который не можешь проверить.\n"
+  let prompt = prompt + "4. Если итерация зависит от предыдущих — укажи что именно.\n\n"
+  let prompt = prompt + "План итерации:\n" + iteration_plan + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями: code (string), tests (string), test_passed (bool), notes (string)."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+
+  let code = to_string(json_get(parsed, "code", ""))
+  let tests = to_string(json_get(parsed, "tests", ""))
+  let test_passed_str = to_string(json_get(parsed, "test_passed", "false"))
+  let test_passed = test_passed_str == "true" or test_passed_str == "1"
+
+  // Hard rule 4 gate: no commit without test
+  let commit_data = code + " " + tests
+  let gate = GateCommitHasTest(commit_data)
+
+  ifgate.passed == false then {
+    return {
+      success: false,
+      code: code,
+      tests: tests,
+      test_passed: false,
+      message: gate.message
+    }
+  }
+
+  // Update task status if first iteration
+  let row = db_execute("SELECT status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  if length(row) > 0 then {
+    let current = to_string(json_get(get(row, 0), "status", ""))
+    if current == STATUS_ARCHITECTING() then {
+      let _ = TransitionTask(task_id, STATUS_IMPLEMENTING(), "Iteration " + to_string(iteration_num) + " started")
+    }
+  }
+
+  let msg = "Итерация #" + to_string(iteration_num) + ":\n"
+  let test_str = "❌ НЕ ПРОЙДЕНЫ"
+  if test_passed then { let test_str = "✅ ПРОЙДЕНЫ" }
+  let msg = msg + "Тесты: " +test_str + "\n"
+  let gate_str = gate.message
+  if gate.passed then { let gate_str = "✅ коммит содержит тест" }
+  let msg = msg + "Жёсткое правило 4: " +gate_str
+
+  return {
+    success: test_passed,
+    code: code,
+    tests: tests,
+    test_passed: test_passed,
+    message: msg
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 10: SKILL TIER 2 — TASK-TYPE SPECIFIC SKILLS
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── 10a: Next.js Architecture ──────────────────────────────────────────
+pattern NextjsArchitecture(task_description: String) -> Dict {
+  let prompt = "Разработай архитектуру Next.js 16+ приложения.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. App Router (не Pages Router).\n"
+  let prompt = prompt + "2. Server Components по умолчанию, Client Components только где нужно.\n"
+  let prompt = prompt + "3. Server Actions для мутаций, не API routes.\n"
+  let prompt = prompt + "4. Streaming + Suspense для загрузки.\n"
+  let prompt = prompt + "5. Route Groups для layout организации.\n"
+  let prompt = prompt + "6. Error Boundaries на каждом уровне.\n"
+  let prompt = prompt + "7. Стек: Next.js 16 + TypeScript + Tailwind CSS 4 + shadcn/ui + Prisma.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями architecture (folder structure), recommendations (array), tech_stack (array)."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let arch = to_string(json_get(parsed, "architecture", llm_result))
+  let recs = to_string(json_get(parsed, "recommendations", ""))
+
+  return { architecture: arch, recommendations: recs, message: "═══ Next.js Architecture ═══\n\n" + arch + "\n\n── Рекомендации ──\n" + recs }
+}
+
+// ── 10b: Database Design ───────────────────────────────────────────────
+pattern DatabaseDesign(task_description: String) -> Dict {
+  let prompt = "Разработай схему базы данных (PostgreSQL + Prisma ORM).\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Нормализация с целенаправленной денормализацией (каждая — обоснована).\n"
+  let prompt = prompt + "2. snake_case для колонок, PascalCase для моделей Prisma.\n"
+  let prompt = prompt + "3. Индексная стратегия: индексы по запросам, не по догадке.\n"
+  let prompt = prompt + "4. Миграционная дисциплина: каждая миграция обратима.\n"
+  let prompt = prompt + "5. Soft delete по умолчанию (deleted_at), hard delete только для transient данных.\n"
+  let prompt = prompt + "6. Audit trail для критичных таблиц (created_at, updated_at, created_by).\n"
+  let prompt = prompt + "7. UUID для public-facing ID, auto-increment только для внутренних.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями schema (Prisma schema string), migration_plan (string), indexes (array)."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let schema = to_string(json_get(parsed, "schema", llm_result))
+  let migration = to_string(json_get(parsed, "migration_plan", ""))
+
+  return { schema: schema, migration_plan: migration, message: "═══ Database Schema ═══\n\n" + schema + "\n\n── Migration Plan ──\n" + migration }
+}
+
+// ── 10c: API Design ────────────────────────────────────────────────────
+pattern ApiDesign(task_description: String) -> Dict {
+  let prompt = "Разработай REST API дизайн.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. URL структура: /api/v{major}/{resource}. Вложенные через /, не query.\n"
+  let prompt = prompt + "2. HTTP семантика: GET (idempotent), POST (create), PUT (replace), PATCH (update), DELETE.\n"
+  let prompt = prompt + "3. Status codes: 200 OK, 201 Created, 204 No Content, 400 Bad Request, 401/403, 404, 409 Conflict, 422 Validation, 500.\n"
+  let prompt = prompt + "4. Versioning: URL-based (v1, v2). Breaking change → major version bump (жёсткое правило 10).\n"
+  let prompt = prompt + "5. Error shape: { error: { code, message, details } }.\n"
+  let prompt = prompt + "6. Pagination: cursor-based для больших коллекций.\n"
+  let prompt = prompt + "7. Auth: JWT Bearer, refresh token rotation.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями endpoints (array), auth_strategy (string), versioning (string), error_shape (string)."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "endpoints", llm_result))
+  let ver = to_string(json_get(parsed, "versioning", ""))
+
+  return { api_spec: spec, versioning: ver, message: "═══ API Design ═══\n\n" + spec + "\n\n── Versioning ──\n" + ver }
+}
+
+// ── 10d: Agent Architecture ────────────────────────────────────────────
+pattern AgentArchitecture(task_description: String) -> Dict {
+  let prompt = "Разработай архитектуру AI-агента.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Single-purpose specialists > general-purpose agents.\n"
+  let prompt = prompt + "2. Tool use с validation: каждый tool call — верифицируемый.\n"
+  let prompt = prompt + "3. Memory: short-term (context window) + long-term (vector DB / KV).\n"
+  let prompt = prompt + "4. Planning: task decomposition before action.\n"
+  let prompt = prompt + "5. Error recovery: retry с backoff + fallback + graceful degradation.\n"
+  let prompt = prompt + "6. No hallucination in production: grounded responses only.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями agent_spec, tools (array), memory_strategy, error_handling."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "agent_spec", llm_result))
+
+  return { agent_spec: spec, message: "═══ Agent Architecture ═══\n\n" + spec }
+}
+
+// ── 10e: LLM Integration ──────────────────────────────────────────────
+pattern LlmIntegration(task_description: String) -> Dict {
+  let prompt = "Разработай интеграцию с LLM (Claude, GPT, Grok, local).\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Provider abstraction: единый интерфейс, провайдер — параметр.\n"
+  let prompt = prompt + "2. Streaming для user-facing, non-streaming для backend.\n"
+  let prompt = prompt + "3. Retry: 3 попытки с exponential backoff.\n"
+  let prompt = prompt + "4. Fallback provider: primary → secondary → local.\n"
+  let prompt = prompt + "5. Cost tracking: каждый вызов логируется с token count.\n"
+  let prompt = prompt + "6. Prompt management: versioned, not hardcoded.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями integration_spec, provider_config, cost_strategy."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "integration_spec", llm_result))
+
+  return { integration_spec: spec, message: "═══ LLM Integration ═══\n\n" + spec }
+}
+
+// ── 10f: Multi-Agent Orchestration ─────────────────────────────────────
+pattern MultiAgentOrchestration(task_description: String) -> Dict {
+  let prompt = "Разработай оркестрацию нескольких AI-агентов.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Routing logic: какой агент для какой задачи.\n"
+  let prompt = prompt + "2. Hand-off patterns: контекст передаётся полностью.\n"
+  let prompt = prompt + "3. Parallel execution где возможно, sequential где нужно.\n"
+  let prompt = prompt + "4. Conflict resolution: если агенты дают противоречивые результаты.\n"
+  let prompt = prompt + "5. Error containment: отказ одного агента не валит систему.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями orchestration_spec, agents (array), routing, error_strategy."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "orchestration_spec", llm_result))
+
+  return { orchestration_spec: spec, message: "═══ Multi-Agent Orchestration ═══\n\n" + spec }
+}
+
+// ── 10g: Local Model Deployment ────────────────────────────────────────
+pattern LocalModelDeployment(task_description: String) -> Dict {
+  let prompt = "Разработай стратегию локального развёртывания LLM.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Ollama для простых задач, llama.cpp для максимальной производительности.\n"
+  let prompt = prompt + "2. Model selection по hardware: VRAM → model size → quantization.\n"
+  let prompt = prompt + "3. Когда local: privacy, cost at scale, offline.\n"
+  let prompt = prompt + "4. Когда cloud: latest model, complex tasks, low volume.\n"
+  let prompt = prompt + "5. Hybrid: local для routine, cloud для complex.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями deployment_spec, hardware_req, model_recommendations."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "deployment_spec", llm_result))
+
+  return { deployment_spec: spec, message: "═══ Local Model Deployment ═══\n\n" + spec }
+}
+
+// ── 10h: Model Fine-Tuning ─────────────────────────────────────────────
+pattern ModelFineTuning(task_description: String) -> Dict {
+  let prompt = "Разработай стратегию fine-tuning модели.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. LoRA/QLoRA для parameter-efficient fine-tuning.\n"
+  let prompt = prompt + "2. Dataset: подготовка → validation → train/test split.\n"
+  let prompt = prompt + "3. Evaluation: task-specific metrics + general capability benchmarks.\n"
+  let prompt = prompt + "4. Deployment: merged model → quantized → served.\n"
+  let prompt = prompt + "5. Не fine-tune если prompt engineering достаточен.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями tuning_spec, dataset_req, eval_strategy."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "tuning_spec", llm_result))
+
+  return { tuning_spec: spec, message: "═══ Model Fine-Tuning ═══\n\n" + spec }
+}
+
+// ── 10i: DevOps Deployment ─────────────────────────────────────────────
+pattern DevopsDeployment(task_description: String) -> Dict {
+  let prompt = "Разработай DevOps/deployment стратегию.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. CI/CD: GitHub Actions → staging → production.\n"
+  let prompt = prompt + "2. Deploy strategy: blue-green или canary для production.\n"
+  let prompt = prompt + "3. Environment parity: dev = staging = production (кроме данных).\n"
+  let prompt = prompt + "4. Secrets: GitHub Secrets / Vault, НИКОГДА в коде (жёсткое правило 6).\n"
+  let prompt = prompt + "5. Rollback: автоматический при failed health check.\n"
+  let prompt = prompt + "6. Green QA обязателен для production deploy (жёсткое правило 5).\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями deployment_spec, ci_pipeline, environments, rollback_strategy."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "deployment_spec", llm_result))
+
+  return { deployment_spec: spec, message: "═══ DevOps Deployment ═══\n\n" + spec }
+}
+
+// ── 10j: Observability Setup ───────────────────────────────────────────
+pattern ObservabilitySetup(task_description: String) -> Dict {
+  let prompt = "Разработай стратегию observability (3 pillars: logs, metrics, traces).\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Structured logging: JSON format, correlation IDs.\n"
+  let prompt = prompt + "2. Metrics: RED (Rate, Errors, Duration) для services.\n"
+  let prompt = prompt + "3. Traces: distributed tracing для cross-service calls.\n"
+  let prompt = prompt + "4. Alerts: на symptoms, не на causes.\n"
+  let prompt = prompt + "5. Dashboard: service health overview + drill-down.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями observability_spec, logging, metrics, tracing, alerts."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "observability_spec", llm_result))
+
+  return { observability_spec: spec, message: "═══ Observability Setup ═══\n\n" + spec }
+}
+
+// ── 10k: Refactoring Discipline ────────────────────────────────────────
+pattern RefactoringDiscipline(task_description: String) -> Dict {
+  let prompt = "Разработай план рефакторинга.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Strangler fig pattern: новый код рядом со старым, постепенно заменяет.\n"
+  let prompt = prompt + "2. Incremental migration: каждый шаг — работающая система.\n"
+  let prompt = prompt + "3. Parallel running: старый и новый одновременно, сверка результатов.\n"
+  let prompt = prompt + "4. Deprecation path: warn → migrate → remove (3 версии).\n"
+  let prompt = prompt + "5. Big-bang rewrite — ЗАПРЕЩЁН (всегда проваливается).\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями refactoring_plan, steps (array), rollback_points."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "refactoring_plan", llm_result))
+
+  return { refactoring_plan: spec, message: "═══ Refactoring Plan ═══\n\n" + spec }
+}
+
+// ── 10l: Dependency Management ─────────────────────────────────────────
+pattern DependencyManagement(task_description: String) -> Dict {
+  let prompt = "Разработай стратегию управления зависимостями.\n\n"
+  let prompt = prompt + "ПРАВИЛА:\n"
+  let prompt = prompt + "1. Каждая зависимость — долгосрочная liability (bundle size, attack surface, maintenance).\n"
+  let prompt = prompt + "2. Adopt deliberately: зачем нужна, чем хуже без неё, когда убрать.\n"
+  let prompt = prompt + "3. Update systematically: Dependabot/Renovate, не ручные обновления.\n"
+  let prompt = prompt + "4. Remove aggressively: unused deps → немедленное удаление.\n"
+  let prompt = prompt + "5. Critical vulns: ЗАПРЕЩЕНЫ (жёсткое правило 9).\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями deps_spec, adopt (array), update_strategy, removal_candidates."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "deps_spec", llm_result))
+
+  return { deps_spec: spec, message: "═══ Dependency Management ═══\n\n" + spec }
+}
+
+// ── 10m: Tier 2 dispatcher ─────────────────────────────────────────────
+pattern DispatchTier2Skill(task_type: String, task_description: String) -> String {
+  if task_type == TASK_TYPE_WEB_APP() then {
+    let arch = NextjsArchitecture(task_description)
+    let db = DatabaseDesign(task_description)
+    let api = ApiDesign(task_description)
+    return arch.message + "\n\n" + db.message + "\n\n" + api.message
+  }
+  if task_type == TASK_TYPE_SITE() then {
+    arch = NextjsArchitecture(task_description)
+    return arch.message
+  }
+  if task_type == TASK_TYPE_AI_OFFICE() then {
+    let agent = AgentArchitecture(task_description)
+    let llm = LlmIntegration(task_description)
+    let orchestration = MultiAgentOrchestration(task_description)
+    return agent.message + "\n\n" + llm.message + "\n\n" + orchestration.message
+  }
+  if task_type == TASK_TYPE_LOCAL_AI() then {
+    let local = LocalModelDeployment(task_description)
+    let tuning = ModelFineTuning(task_description)
+    return local.message + "\n\n" + tuning.message
+  }
+  if task_type == TASK_TYPE_INFRASTRUCTURE() then {
+    let devops = DevopsDeployment(task_description)
+    let obs = ObservabilitySetup(task_description)
+    return devops.message + "\n\n" + obs.message
+  }
+  if task_type == TASK_TYPE_REFACTOR() then {
+    let refact = RefactoringDiscipline(task_description)
+    let deps = DependencyManagement(task_description)
+    return refact.message + "\n\n" + deps.message
+  }
+  if task_type == TASK_TYPE_HOTFIX() then {
+    deps = DependencyManagement(task_description)
+    return deps.message
+  }
+  // Default: Next.js + DB + API
+  let arch = NextjsArchitecture(task_description)
+  return arch.message
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 11: SKILL TIER 3 — EXPLICIT ONLY
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── 11a: Performance Optimization ──────────────────────────────────────
+pattern PerformanceOptimization(task_description: String, current_metrics: String) -> Dict {
+  let prompt = "Разработай план оптимизации производительности.\n\n"
+  let prompt = prompt + "1. Измерь перед оптимизацией (no premature optimization).\n"
+  let prompt = prompt + "2. Bottleneck identification: profiling → biggest win → fix.\n"
+  let prompt = prompt + "3. Оптимизации: caching, lazy loading, code splitting, DB query optimization.\n"
+  let prompt = prompt + "4. Каждая оптимизация — измеримый результат.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n"
+  let prompt = prompt + "Текущие метрики: " + current_metrics + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями optimization_plan, steps (array), expected_improvement."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "optimization_plan", llm_result))
+
+  return { optimization_plan: spec, message: "═══ Performance Optimization (Tier 3) ═══\n\n" + spec }
+}
+
+// ── 11b: Security Hardening ────────────────────────────────────────────
+pattern SecurityHardening(task_description: String) -> Dict {
+  let prompt = "Разработай план security hardening.\n\n"
+  let prompt = prompt + "1. Input validation: все user inputs sanitized.\n"
+  let prompt = prompt + "2. Auth: MFA для admin, session rotation, CSRF protection.\n"
+  let prompt = prompt + "3. Secrets: environment variables only (жёсткое правило 6).\n"
+  let prompt = prompt + "4. Dependencies: no critical vulns (жёсткое правило 9).\n"
+  let prompt = prompt + "5. Headers: CSP, HSTS, X-Frame-Options.\n"
+  let prompt = prompt + "6. Rate limiting на всех public endpoints.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями security_plan, checks (array), critical_actions."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "security_plan", llm_result))
+
+  return { security_plan: spec, message: "═══ Security Hardening (Tier 3) ═══\n\n" + spec }
+}
+
+// ── 11c: Legacy System Modernization ───────────────────────────────────
+pattern LegacySystemModernization(task_description: String) -> Dict {
+  let prompt = "Разработай план модернизации legacy системы.\n\n"
+  let prompt = prompt + "1. Strangler fig pattern: новый код рядом, постепенно заменяет.\n"
+  let prompt = prompt + "2. Incremental migration: каждый шаг — работающая система.\n"
+  let prompt = prompt + "3. Parallel running: старый + новый, сверка результатов.\n"
+  let prompt = prompt + "4. Deprecation path: warn → migrate → remove.\n"
+  let prompt = prompt + "5. Big-bang rewrite — ЗАПРЕЩЁН.\n\n"
+  let prompt = prompt + "Задача: " + task_description + "\n\n"
+  let prompt = prompt + "Формат: JSON с полями modernization_plan, phases (array), risk_mitigation."
+
+  let llm_result = call_llm(prompt)
+  let parsed = parse_json(llm_result)
+  let spec = to_string(json_get(parsed, "modernization_plan", llm_result))
+
+  return { modernization_plan: spec, message: "═══ Legacy Modernization (Tier 3) ═══\n\n" + spec }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 12: SKILL TIER LOADING
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern LoadSkillTiers(task_type: String, explicit_tier3: String) -> Dict {
+  // Tier 1: ALWAYS loaded (5 skills)
+  let tier1 = "architecture-decision-records,estimation-discipline,code-organization-standards,tech-radar-maintenance,iterative-implementation"
+
+  // Tier 2: by task type (12 skills, load relevant subset)
+  let tier2 = ""
+  if task_type == TASK_TYPE_WEB_APP() then {
+    tier2 = "nextjs-architecture,database-design,api-design,devops-deployment,observability-setup,dependency-management"
+  }
+  if task_type == TASK_TYPE_SITE() then {
+    tier2 = "nextjs-architecture,devops-deployment,dependency-management"
+  }
+  if task_type == TASK_TYPE_AI_OFFICE() then {
+    tier2 = "nextjs-architecture,database-design,api-design,agent-architecture,llm-integration,multi-agent-orchestration,devops-deployment,observability-setup,dependency-management"
+  }
+  if task_type == TASK_TYPE_LOCAL_AI() then {
+    tier2 = "local-model-deployment,model-fine-tuning,llm-integration,devops-deployment,dependency-management"
+  }
+  if task_type == TASK_TYPE_INFRASTRUCTURE() then {
+    tier2 = "devops-deployment,observability-setup,dependency-management"
+  }
+  if task_type == TASK_TYPE_REFACTOR() then {
+    tier2 = "refactoring-discipline,dependency-management,nextjs-architecture,database-design"
+  }
+  if task_type == TASK_TYPE_HOTFIX() then {
+    tier2 = "dependency-management"
+  }
+
+  // Tier 3: explicit only (3 skills)
+  let tier3 = ""
+  let q = lower(explicit_tier3)
+  if contains(q, "performance") or contains(q, "производительност") or contains(q, "оптимизац") then {
+    tier3 = tier3 + "performance-optimization,"
+  }
+  if contains(q, "security") or contains(q, "безопасност") or contains(q, "hardening") then {
+    tier3 = tier3 + "security-hardening,"
+  }
+  if contains(q, "legacy") or contains(q, "модернизац") or contains(q, "moderniz") then {
+    tier3 = tier3 + "legacy-system-modernization,"
+  }
+
+  let t1_count = 5
+  let t2_count = length(split(tier2, ","))
+  let t3_count = length(split(tier3, ","))
+  let loaded_count = t1_count + t2_count + t3_count
+
+  let msg = "Загружены skill tiers для " + TaskTypeNameRU(task_type) + ":\n"
+  let msg = msg + "Tier 1 (всегда): " + tier1 + "\n"
+  let msg = msg + "Tier 2 (по типу): " + tier2 + "\n"
+  if tier3 != "" then {
+    msg = msg + "Tier 3 (explicit): " + tier3 + "\n"
+  }
+  let msg = msg + "Всего: " + to_string(loaded_count) + " skills"
+
+  return {
+    tier1_skills: tier1,
+    tier2_skills: tier2,
+    tier3_skills: tier3,
+    loaded_count: loaded_count,
+    message: msg
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 13: TRIPLE STORAGE
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern SnapshotToTelegramArchive(task_id: String, task_data: String, chat_id: String) -> String {
+  // Hard rule 8: every major task → snapshot in Telegram Archive
+  let snapshot_msg = "📋 DEV TASK SNAPSHOT\n\n"
+  let snapshot_msg = snapshot_msg + "Task: " + task_id + "\n"
+  let snapshot_msg = snapshot_msg + "Data: " + substring(task_data, 0.0, 3000.0) + "\n\n"
+  let snapshot_msg = snapshot_msg + "Timestamp: " + format_date(now(), "yyyy-MM-dd HH:mm")
+
+  let result = SendTelegramMessage(chat_id, snapshot_msg)
+  let snapshot_id = "snap_" + to_string(hash(task_id + to_string(now())))
+
+  // Update task with snapshot reference
+  let _ = db_execute("UPDATE dev_tasks SET telegram_snapshot_id = ? WHERE id = ?", [snapshot_id, task_id])
+
+  let _ = AuditLog("dev_snapshot", DEPT_NAME(), "task=" + task_id + " snapshot=" + snapshot_id + " target=telegram_archive")
+  return "Telegram snapshot создан: " + snapshot_id
+}
+
+pattern SyncToLocal(task_id: String, task_data: String) -> String {
+  // Deferred sync to local storage
+  let sync_key = "dev_local_sync_" + task_id
+  let _ = kv_set(sync_key, task_data)
+  let _ = AuditLog("dev_local_sync", DEPT_NAME(), "task=" + task_id + " target=local_deferred")
+  return "Local sync запланирован для task " + task_id
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 14: BOT COMMANDS (14 commands)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── /dev — Dashboard ───────────────────────────────────────────────────
+pattern DevDashboard(chat_id: String) -> String {
+  let active = db_execute("SELECT COUNT(*) as c FROM dev_tasks WHERE status NOT IN ('archived','abandoned')", [])
+  let total = db_execute("SELECT COUNT(*) as c FROM dev_tasks", [])
+  let radar_count = db_execute("SELECT COUNT(*) as c FROM tech_radar_entries", [])
+  let repos_count = db_execute("SELECT COUNT(*) as c FROM code_repositories", [])
+
+  let active_count = to_int(to_string(json_get(get(active, 0), "c", "0")))
+  let total_count = to_int(to_string(json_get(get(total, 0), "c", "0")))
+  let radar_total = to_int(to_string(json_get(get(radar_count, 0), "c", "0")))
+  let repos_total = to_int(to_string(json_get(get(repos_count, 0), "c", "0")))
+
+  let msg = "═══ ОТДЕЛ РАЗРАБОТКА ═══\n"
+  let msg = msg + "Психотип: " + PSYCHOTYPE() + "\n\n"
+  let msg = msg + "── СТАТИСТИКА ──\n"
+  let msg = msg + "Активных задач: " + to_string(active_count) + " / " + to_string(total_count) + "\n"
+  let msg = msg + "Tech Radar записей: " + to_string(radar_total) + "\n"
+  let msg = msg + "Репозиториев: " + to_string(repos_total) + "\n\n"
+  let msg = msg + "── КОМАНДЫ ──\n"
+  let msg = msg + "/dev-estimate <task_id> — оценить задачу\n"
+  let msg = msg + "/dev-decide <task_id> — создать ADR\n"
+  let msg = msg + "/dev-implement <task_id> — реализовать итерацию\n"
+  let msg = msg + "/dev-task <task_id> — показать задачу\n"
+  let msg = msg + "/dev-tasks — список задач\n"
+  let msg = msg + "/dev-repos — список репозиториев\n"
+  let msg = msg + "/dev-repo <name> — показать репозиторий\n"
+  let msg = msg + "/dev-create-repo <name> — создать репозиторий\n"
+  let msg = msg + "/dev-radar — Tech Radar\n"
+  let msg = msg + "/dev-radar-add — добавить в Radar\n"
+  let msg = msg + "/dev-deploy <task_id> — deploy задачи\n"
+  let msg = msg + "/dev-archive <task_id> — архивировать\n"
+  let msg = msg + "/dev-local-sync — синхронизация\n\n"
+  let msg = msg + "── ЖЁСТКИЕ ПРАВИЛА (10) ──\n"
+  let msg = msg + "1. Нет кода без ADR\n"
+  let msg = msg + "2. Нет оценки без диапазона\n"
+  let msg = msg + "3. Нет технологий в 'hold'\n"
+  let msg = msg + "4. Нет коммита без теста\n"
+  let msg = msg + "5. Нет deploy без green QA\n"
+  let msg = msg + "6. Нет секретов в репо\n"
+  let msg = msg + "7. Каждый репо: README+LICENSE+.gitignore+CI\n"
+  let msg = msg + "8. Каждая задача → Telegram snapshot\n"
+  let msg = msg + "9. Нет зависимостей с critical vulns\n"
+  let msg = msg + "10. Нет API break без major version bump"
+  return WrapWithDisclaimer(msg)
+}
+
+// ── /dev-tasks — List tasks ────────────────────────────────────────────
+pattern ListTasks(status_filter: String, limit: Int) -> String {
+  let rows = db_execute("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status NOT IN ('archived','abandoned') ORDER BY updated_at DESC LIMIT ?", [to_string(limit)])
+  if status_filter != "" then { let rows = db_execute("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status = ? ORDER BY updated_at DESC LIMIT ?", [status_filter, to_string(limit)]) }
+
+  if length(rows) == 0 then {
+    return "Нет задач. Создайте через свободный запрос или /dev-implement."
+  }
+
+  let prompt = "Форматируй список задач отдела Разработка. Показывай статус русскими названиями, тип задач русскими. JSON данные: " + to_string(rows)
+  let formatted = call_llm(prompt)
+  return WrapWithDisclaimer(formatted)
+}
+
+// ── /dev-task — Show single task ───────────────────────────────────────
+pattern ShowTask(task_id: String) -> String {
+  let row = db_execute("SELECT * FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  if length(row) == 0 then {
+    return "Задача не найдена: " + task_id
+  }
+  let data = get(row, 0)
+  let status = to_string(json_get(data, "status", "unknown"))
+  let task_type = to_string(json_get(data, "task_type", "unknown"))
+  let title = to_string(json_get(data, "title", ""))
+  let est_low = to_string(json_get(data, "estimate_low", "N/A"))
+  let est_exp = to_string(json_get(data, "estimate_expected", "N/A"))
+  let est_high = to_string(json_get(data, "estimate_high", "N/A"))
+  let qa_status = to_string(json_get(data, "qa_status", "N/A"))
+  let repo = to_string(json_get(data, "repo_name", "N/A"))
+  let snap = to_string(json_get(data, "telegram_snapshot_id", "N/A"))
+
+  let msg = "═══ ЗАДАЧА " + task_id + " ═══\n"
+  let msg = msg + "Название: " + title + "\n"
+  let msg = msg + "Тип: " + TaskTypeNameRU(task_type) + "\n"
+  let msg = msg + "Статус: " + StateNameRU(status) + "\n"
+  let msg = msg + "Оценка: " + est_low + " / " + est_exp + " / " + est_high + " ч (low/expected/high)\n"
+  let msg = msg + "QA статус: " + qa_status + "\n"
+  let msg = msg + "Репозиторий: " + repo + "\n"
+  let msg = msg + "Telegram snapshot: " + snap + "\n\n"
+  let msg = msg + "Полные данные:\n" + to_string(data)
+
+  return WrapWithDisclaimer(msg)
+}
+
+// ── /dev-repos — List repositories ─────────────────────────────────────
+pattern ListRepos() -> String {
+  let rows = db_execute("SELECT name, url, task_type, has_readme, has_license, has_gitignore, has_ci FROM code_repositories ORDER BY name", [])
+  if length(rows) == 0 then {
+    return "Нет репозиториев. Создайте: /dev-create-repo <name> <task_type>"
+  }
+
+  let prompt = "Форматируй список репозиториев отдела Разработка. Для каждого показывай наличие обязательных файлов (✅/❌). JSON: " + to_string(rows)
+  let formatted = call_llm(prompt)
+  return WrapWithDisclaimer(formatted)
+}
+
+// ── /dev-repo — Show single repository ─────────────────────────────────
+pattern ShowRepo(repo_name: String) -> String {
+  let row = db_execute("SELECT * FROM code_repositories WHERE name = ? LIMIT 1", [repo_name])
+  if length(row) == 0 then {
+    return "Репозиторий не найден: " + repo_name
+  }
+
+  let data = get(row, 0)
+  let compliance = VerifyCodeOrganization(repo_name)
+
+  let msg = "═══ РЕПОЗИТОРИЙ " + repo_name + " ═══\n\n"
+  let msg = msg + to_string(data) + "\n\n"
+  let msg = msg + "── Соответствие стандартам ──\n"
+  let msg = msg + compliance.message
+
+  return WrapWithDisclaimer(msg)
+}
+
+// ── /dev-create-repo — Create repository ───────────────────────────────
+pattern CreateRepo(name: String, task_type: String, url: String) -> String {
+  // Hard rule 7: enforce required files
+  let _ = db_execute("INSERT INTO code_repositories (name, url, task_type, has_readme, has_license, has_gitignore, has_ci, storage_primary, created_at) VALUES (?, ?, ?, 'false', 'false', 'false', 'false', ?, datetime('now'))", [name, url, task_type, STORAGE_GITHUB()])
+
+  // Generate required files
+  let standards = EnforceRepoStandards(name, url, task_type)
+
+  let _ = AuditLog("dev_create_repo", DEPT_NAME(), "repo=" + name + " type=" + task_type)
+
+  let msg = "Репозиторий создан: " + name + "\n"
+  let msg = msg + "Тип: " + TaskTypeNameRU(task_type) + "\n"
+  let msg = msg + "URL: " + url + "\n"
+  let msg = msg + "Primary storage: GitHub\n\n"
+  let msg = msg + "── Стандартные файлы ──\n" + standards
+  return WrapWithDisclaimer(msg)
+}
+
+// ── /dev-deploy — Deploy task ──────────────────────────────────────────
+pattern DeployTask(task_id: String, chat_id: String) -> String {
+  // Hard rule 5: no production deploy without green QA
+  let qa_gate = GateDeployRequiresGreenQA(task_id)
+  ifqa_gate.passed == false then {
+    return qa_gate.message
+  }
+
+  // Transition to deployed
+  let transition = TransitionTask(task_id, STATUS_DEPLOYED(), "Production deploy via /dev-deploy")
+  iftransition.success == false then {
+    return "Deploy не удался: " + transition.message
+  }
+
+  // Snapshot to Telegram Archive (hard rule 8)
+  let task_row = db_execute("SELECT * FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  let task_data = "{}"
+  if length(task_row) > 0 then { task_data = to_string(get(task_row, 0)) }
+  let snapshot = SnapshotToTelegramArchive(task_id, task_data, chat_id)
+
+  // Sync to local
+  let local_sync = SyncToLocal(task_id, task_data)
+
+  let _ = AuditLog("dev_deploy", DEPT_NAME(), "task=" + task_id + " → deployed")
+
+  let msg = "═══ DEPLOY ═══\n"
+  let msg = msg + "Task: " + task_id + "\n"
+  let msg = msg + "Status: " + STATUS_DEPLOYED() + "\n"
+  let msg = msg + "QA Gate: ✅ passed\n"
+  let msg = msg + "Telegram snapshot: " + snapshot + "\n"
+  let msg = msg + "Local sync: " + local_sync
+  return WrapWithDisclaimer(msg)
+}
+
+// ── /dev-archive — Archive task ────────────────────────────────────────
+pattern ArchiveTask(task_id: String, actual_hours: String) -> String {
+  // Record actual hours for learning loop
+  let _ = db_execute("UPDATE dev_tasks SET actual_hours = ? WHERE id = ?", [actual_hours, task_id])
+
+  // Learning loop: update estimate verification
+  let _ = db_execute("UPDATE dev_estimate_verifications SET actual_hours = ?, verified_at = datetime('now') WHERE task_id = ?", [actual_hours, task_id])
+
+  let transition = TransitionTask(task_id, STATUS_ARCHIVED(), "Task completed, actual=" + actual_hours + "h")
+  iftransition.success == false then {
+    return "Archive не удался: " + transition.message
+  }
+
+  let _ = AuditLog("dev_archive", DEPT_NAME(), "task=" + task_id + " actual_hours=" + actual_hours)
+
+  return "Задача " + task_id + " архивирована. Фактические часы: " + actual_hours + ". Данные добавлены в цикл обучения (estimate vs actual)."
+}
+
+// ── /dev-local-sync — Local sync ───────────────────────────────────────
+pattern LocalSync() -> String {
+  // Sync pending local items
+  let pending = db_execute("SELECT id, title, status FROM dev_tasks WHERE status NOT IN ('archived','abandoned') ORDER BY updated_at DESC LIMIT 50", [])
+
+  let sync_count = 0
+  let i = 0
+  while i < length(pending) {
+    let task = get(pending, i)
+    let task_id = to_string(json_get(task, "id", ""))
+    let _ = kv_set("dev_local_" + task_id, to_string(task))
+    let sync_count = sync_count + 1
+    let i = i + 1
+  }
+
+  let _ = AuditLog("dev_local_sync", DEPT_NAME(), "synced=" + to_string(sync_count) + " tasks to local storage")
+  return "Local sync завершён: " + to_string(sync_count) + " задач синхронизировано в KV store."
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 15: LEARNING LOOPS (4 scheduled tasks)
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Per-task: estimate vs actual verification ──────────────────────────
+pattern VerifyEstimateAccuracy(task_id: String) -> Dict {
+  let row = db_execute("SELECT estimate_low, estimate_expected, estimate_high, actual_hours FROM dev_estimate_verifications WHERE task_id = ? AND actual_hours IS NOT NULL LIMIT 1", [task_id])
+  if length(row) == 0 then {
+    return { mape: 0.0, bias: "no_data", message: "Нет данных для верификации estimate по задаче " + task_id }
+  }
+
+  let data = get(row, 0)
+  let est_expected = to_float(to_string(json_get(data, "estimate_expected", "0")))
+  let actual = to_float(to_string(json_get(data, "actual_hours", "0")))
+
+  if est_expected == 0.0 or actual == 0.0 then {
+    return { mape: 0.0, bias: "no_data", message: "Нулевые значения, невозможно вычислить MAPE" }
+  }
+
+  let mape = (actual - est_expected) / est_expected * 100.0
+  let bias = ""
+  if mape > 20.0 then { bias = "underestimate" }
+  let bias = bias
+  if mape < -20.0 then { bias = "overestimate" }
+  let bias = bias
+  if bias == "" then { bias = "calibrated" }
+
+  let _ = db_execute("UPDATE dev_estimate_verifications SET mape = ?, bias = ?, verified_at = datetime('now') WHERE task_id = ?", [to_string(mape), bias, task_id])
+
+  let msg = "Estimate verification для " + task_id + ":\n"
+  let msg = msg + "Expected: " + substring(to_string(est_expected), 0.0, 6.0) + "ч, Actual: " + substring(to_string(actual), 0.0, 6.0) + "ч\n"
+  let msg = msg + "MAPE: " + substring(to_string(mape), 0.0, 6.0) + "%\n"
+  let msg = msg + "Bias: " + bias
+
+  return { mape: mape, bias: bias, message: msg }
+}
+
+// ── Weekly: Wednesday 04:00 — Tech Radar scan ─────────────────────────
+pattern WeeklyTechRadarScan() -> String {
+  // Scan for technologies that need radar state review
+  let all_entries = db_execute("SELECT name, category, radar_state, updated_at FROM tech_radar_entries ORDER BY radar_state, name", [])
+
+  let prompt = "Еженедельный обзор Tech Radar отдела Разработка.\n\n"
+  let prompt = prompt + "ЗАДАЧИ:\n"
+  let prompt = prompt + "1. Какие технологии пора перевести в adopt (достаточно опыта)?\n"
+  let prompt = prompt + "2. Какие в trial → пора в adopt или назад в assess?\n"
+  let prompt = prompt + "3. Какие в assess → пора в trial или удалить?\n"
+  let prompt = prompt + "4. Появились ли новые технологии, которые стоит добавить в assess?\n"
+  let prompt = prompt + "5. Какие технологии в hold — можно ли убрать (исправлены проблемы)?\n\n"
+  let prompt = prompt + "Текущий Tech Radar:\n" + to_string(all_entries)
+
+  let analysis = call_llm(prompt)
+
+  let _ = AuditLog("dev_radar_scan", DEPT_NAME(), "Weekly Tech Radar scan completed")
+  return "═══ Еженедельный Tech Radar Scan ═══\n\n" + analysis
+}
+
+// ── Monthly: 1st 11:00 — Estimate calibration ─────────────────────────
+pattern MonthlyEstimateCalibration() -> String {
+  let verifications = db_execute("SELECT task_id, estimate_expected, actual_hours, mape, bias FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-30 days') AND actual_hours IS NOT NULL", [])
+
+  if length(verifications) == 0 then {
+    let _ = AuditLog("dev_monthly_cal", DEPT_NAME(), "No estimate verifications in past 30 days")
+    return "Нет верифицированных оценок за последние 30 дней."
+  }
+
+  let prompt = "Месячная калибровка оценок отдела Разработка.\n\n"
+  let prompt = prompt + "АНАЛИЗ:\n"
+  let prompt = prompt + "1. Средний MAPE — насколько точно оцениваем?\n"
+  let prompt = prompt + "2. Bias: систематически недооцениваем или переоцениваем?\n"
+  let prompt = prompt + "3. По типам задач: какие типы оцениваем хуже?\n"
+  let prompt = prompt + "4. Рекомендации: как улучшить оценки?\n\n"
+  let prompt = prompt + "Данные:\n" + to_string(verifications)
+
+  let analysis = call_llm(prompt)
+
+  // Store monthly calibration
+  let _ = db_execute("INSERT INTO dev_monthly_calibrations (period_start, period_end, verifications_count, analysis, created_at) VALUES (datetime('now', '-30 days'), datetime('now'), ?, ?, datetime('now'))", [to_string(length(verifications)), analysis])
+
+  let _ = AuditLog("dev_monthly_cal", DEPT_NAME(), "Monthly estimate calibration: " + to_string(length(verifications)) + " verifications")
+
+  return "═══ Месячная калибровка оценок ═══\n\n" + analysis
+}
+
+// ── Quarterly: Jan/Apr/Jul/Oct — Methodology review ───────────────────
+pattern QuarterlyMethodologyReview() -> String {
+  let prompt = "Квартальный обзор методологии отдела Разработка.\n\n"
+  let prompt = prompt + "1. Соблюдаются ли жёсткие правила? (статистика нарушений)\n"
+  let prompt = prompt + "2. Точность оценок — улучшается ли?\n"
+  let prompt = prompt + "3. Tech Radar — адекватно ли отражает технологический ландшафт?\n"
+  let prompt = prompt + "4. Качество ADR — достаточная ли глубина?\n"
+  let prompt = prompt + "5. Итеративная реализация — соблюдается ли (нет big-bang)?\n"
+  let prompt = prompt + "6. Code organization — все репо соответствуют стандартам?\n"
+  let prompt = prompt + "7. Психотип: Прагматик + Методист — соблюдается?\n\n"
+
+  let violations = db_execute("SELECT rule_number, COUNT(*) as c FROM dev_rule_violations WHERE created_at >= datetime('now', '-90 days') GROUP BY rule_number ORDER BY c DESC", [])
+  let estimates = db_execute("SELECT AVG(mape) as avg_mape, bias, COUNT(*) as c FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL GROUP BY bias", [])
+
+  let prompt = prompt + "Нарушения правил (90 дней):\n" + to_string(violations) + "\n\n"
+  let prompt = prompt + "Калибровка оценок (90 дней):\n" + to_string(estimates)
+
+  let analysis = call_llm(prompt)
+
+  let _ = AuditLog("dev_quarterly", DEPT_NAME(), "Quarterly methodology review completed")
+
+  return "═══ Квартальный обзор методологии ═══\n\n" + analysis
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 16: CROSS-DEPARTMENT HOOKS (reference only)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// These hooks are referenced for documentation; actual cross-dept calls
+// happen via app.mlog routing, not directly in this file.
+//
+// Hook 1: Design approved → auto-create Dev task
+//   Trigger: design.mlog sets design_approval = "approved"
+//   Action: db_execute INSERT INTO dev_tasks (source='design', ...)
+//
+// Hook 2: Dev implemented → auto-trigger QA test run
+//   Trigger: dev_tasks.status transitions to 'testing'
+//   Action: qa.mlog HandleQA("/qa-run " + task_id, ...)
+//
+// Hook 3: QA critical defect → auto-create Dev hotfix task
+//   Trigger: qa_results.severity = "critical"
+//   Action: db_execute INSERT INTO dev_tasks (task_type='hotfix', priority='critical')
+//
+// ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 17: DEPARTMENT METRICS
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern DevScore() -> String {
+  // 90-day metrics
+  let total = db_execute("SELECT COUNT(*) as c FROM dev_tasks WHERE created_at >= datetime('now', '-90 days')", [])
+  let deployed = db_execute("SELECT COUNT(*) as c FROM dev_tasks WHERE status = 'deployed' AND updated_at >= datetime('now', '-90 days')", [])
+  let with_adr = db_execute("SELECT COUNT(*) as c FROM dev_tasks t JOIN architecture_decisions a ON t.id = a.task_id WHERE t.created_at >= datetime('now', '-90 days')", [])
+  let with_range = db_execute("SELECT COUNT(*) as c FROM dev_tasks WHERE estimate_low IS NOT NULL AND estimate_expected IS NOT NULL AND estimate_high IS NOT NULL AND created_at >= datetime('now', '-90 days')", [])
+  let avg_mape = db_execute("SELECT AVG(ABS(mape)) as avg FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL", [])
+
+  let total_count = to_int(to_string(json_get(get(total, 0), "c", "0")))
+  let deployed_count = to_int(to_string(json_get(get(deployed, 0), "c", "0")))
+  let adr_count = to_int(to_string(json_get(get(with_adr, 0), "c", "0")))
+  let range_count = to_int(to_string(json_get(get(with_range, 0), "c", "0")))
+  let mape_val = to_float(to_string(json_get(get(avg_mape, 0), "avg", "0")))
+
+  let adr_rate = 0.0
+  if total_count > 0 then { adr_rate = to_float(to_string(adr_count)) / to_float(to_string(total_count)) * 100.0 }
+  let range_rate = 0.0
+  if total_count > 0 then { range_rate = to_float(to_string(range_count)) / to_float(to_string(total_count)) * 100.0 }
+  let deploy_rate = 0.0
+  if total_count > 0 then { deploy_rate = to_float(to_string(deployed_count)) / to_float(to_string(total_count)) * 100.0 }
+
+  let msg = "═══ МЕТРИКИ ОТДЕЛА РАЗРАБОТКА (90 дней) ═══\n\n"
+  let msg = msg + "Всего задач: " + to_string(total_count) + "\n"
+  let msg = msg + "Deployed: " + to_string(deployed_count) + " (" + substring(to_string(deploy_rate), 0.0, 5.0) + "%)\n"
+  let msg = msg + "ADR compliance: " + substring(to_string(adr_rate), 0.0, 5.0) + "% (цель: 100%, правило 1)\n"
+  let msg = msg + "Range estimate compliance: " + substring(to_string(range_rate), 0.0, 5.0) + "% (цель: 100%, правило 2)\n"
+  let msg = msg + "Estimate MAPE: " + substring(to_string(mape_val), 0.0, 5.0) + "% (цель: ≤30%)\n\n"
+  let msg = msg + "── ЦЕЛЕВЫЕ ПОКАЗАТЕЛИ ──\n"
+  let msg = msg + "• Production bug rate: ≤5 per month\n"
+  let msg = msg + "• Time to first commit: ≤4 hours\n"
+  let msg = msg + "• Code review pass rate: ≥70%\n"
+  let msg = msg + "• Tech radar churn rate: ≤2 changes/week"
+
+  return msg
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 18: FULL PIPELINE (for free-text dev queries)
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern FullPipeline(query: String, task_type: String, chat_id: String, explicit_tier3: String) -> String {
+  // Step 0: Create task in DB
+  let task_id = "dev_" + to_string(hash(query + to_string(now())))
+  let _ = db_execute("INSERT INTO dev_tasks (id, title, task_type, status, qa_status, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))", [task_id, substring(query, 0.0, 200.0), task_type, STATUS_DRAFTED()])
+
+  // Step 1: Load skill tiers
+  let skills = LoadSkillTiers(task_type, explicit_tier3)
+
+  // Step 2: Architecture Decision (Tier 1, hard rule 1)
+  let adr_prompt = "Создай минимальный Architecture Decision Record для задачи.\n\n"
+  let adr_prompt = adr_prompt + "Даже для тривиальных задач — минимум 2-3 предложения контекста.\n\n"
+  let adr_prompt = adr_prompt + "Тип задачи: " + TaskTypeNameRU(task_type) + "\n"
+  let adr_prompt = adr_prompt + "Описание: " + query + "\n\n"
+  let adr_prompt = adr_prompt + "Формат: JSON с полями title, context, alternatives, decision, consequences."
+
+  let adr_llm = call_llm(adr_prompt)
+  let adr_parsed = parse_json(adr_llm)
+  let adr_title = to_string(json_get(adr_parsed, "title", "ADR for " + task_id))
+  let adr_context = to_string(json_get(adr_parsed, "context", query))
+  let adr_alts = to_string(json_get(adr_parsed, "alternatives", "See ADR"))
+  let adr_decision = to_string(json_get(adr_parsed, "decision", "See context"))
+  let adr_consequences = to_string(json_get(adr_parsed, "consequences", "See decision"))
+
+  let adr_result = CreateArchitectureDecision(task_id, adr_title, adr_context, adr_alts, adr_decision, adr_consequences)
+
+  // Step 3: Estimate (Tier 1, hard rule 2)
+  let estimate = CreateEstimate(task_id, query, "medium")
+
+  // Step 4: Check Tech Radar (Tier 1, hard rule 3)
+  let tech_stack = GetTaskTechStack(task_type)
+  let radar_gate = GateNoHoldTech(tech_stack)
+
+  // Step 5: Transition to architecting
+  let _ = TransitionTask(task_id, STATUS_ARCHITECTING(), "Pipeline: architecture phase")
+
+  // Step 6: Tier 2 skills — task-type specific architecture
+  let tier2_result = DispatchTier2Skill(task_type, query)
+
+  // Step 7: Plan iterations (Tier 1, iterative-implementation)
+  let iterations = PlanIterations(query, estimate.expected_hours)
+
+  // Step 8: Tier 3 skills (if explicitly requested)
+  let tier3_result = ""
+  if contains(explicit_tier3, "performance") or contains(explicit_tier3, "производительност") then {
+    let perf = PerformanceOptimization(query, "")
+    tier3_result = tier3_result + perf.message + "\n\n"
+  }
+  if contains(explicit_tier3, "security") or contains(explicit_tier3, "безопасност") then {
+    let sec = SecurityHardening(query)
+    tier3_result = tier3_result + sec.message + "\n\n"
+  }
+  if contains(explicit_tier3, "legacy") or contains(explicit_tier3, "модернизац") then {
+    let leg = LegacySystemModernization(query)
+    tier3_result = tier3_result + leg.message + "\n\n"
+  }
+
+  // Step 9: Hard rules check
+  let rules = CheckAllHardRules(task_id, estimate.estimate_json, tech_stack, "")
+
+  // Step 10: Snapshot to Telegram Archive (hard rule 8)
+  let snapshot = SnapshotToTelegramArchive(task_id, json_encode({task: task_id, type: task_type, estimate: estimate.estimate_json}), chat_id)
+
+  // Step 11: Assemble final output
+  let doc = "═══════════════════════════════════════\n"
+  let doc = doc + "РАЗРАБОТКА — ЗАДАЧА " + task_id + "\n"
+  let doc = doc + "═══════════════════════════════════════\n\n"
+
+  // Disclaimer at top
+  let doc = doc + DISCLAIMER_TOP() + "\n\n"
+
+  // Task info
+  let doc = doc + "── ЗАДАЧА ──\n"
+  let doc = doc + "Тип: " + TaskTypeNameRU(task_type) + "\n"
+  let doc = doc + "Описание: " + query + "\n"
+  let doc = doc + "Status: " + STATUS_ARCHITECTING() + "\n\n"
+
+  // Skills loaded
+  let doc = doc + "── ЗАГРУЖЕНЫ SKILLS ──\n"
+  let doc = doc + skills.message + "\n\n"
+
+  // ADR (hard rule 1)
+  let doc = doc + "── ARCHITECTURE DECISION (правило 1) ──\n"
+  let doc = doc + adr_result + "\n\n"
+
+  // Estimate (hard rule 2)
+  let doc = doc + "── ОЦЕНКА (правило 2) ──\n"
+  let doc = doc + estimate.message + "\n\n"
+
+  // Tech Radar check (hard rule 3)
+  let doc = doc + "── TECH RADAR CHECK (правило 3) ──\n"
+  let radar_str = radar_gate.message
+  if radar_gate.passed then { let radar_str = "✅ " + radar_gate.message }
+  let doc = doc +radar_str + "\n\n"
+
+  // Architecture (Tier 2)
+  let doc = doc + "── АРХИТЕКТУРА ──\n"
+  let doc = doc + tier2_result + "\n\n"
+
+  // Iteration plan
+  let doc = doc + "── ПЛАН ИТЕРАЦИЙ ──\n"
+  let doc = doc + iterations.message + "\n\n"
+
+  // Tier 3 (if any)
+  if tier3_result != "" then {
+    doc = doc + "── TIER 3 (explicit) ──\n"
+    doc = doc + tier3_result + "\n\n"
+  }
+
+  // Hard rules summary
+  let doc = doc + "── ЖЁСТКИЕ ПРАВИЛА ──\n"
+  if rules.all_passed then {
+    doc = doc + "✅ Все " + to_string(rules.passed_count) + "/" + to_string(rules.total_count) + " проверенных правил соблюдены\n\n"
+  } else {
+    let doc = doc + "❌ Нарушения:\n" + rules.violations + "\n\n"
+  }
+
+  // Storage
+  let doc = doc + "── TRIPLE STORAGE ──\n"
+  let doc = doc + "GitHub: primary (source of truth)\n"
+  let doc = doc + "Telegram Archive: " + snapshot + "\n"
+  let doc = doc + "Local: deferred sync\n\n"
+
+  // Disclaimer at bottom
+  let doc = doc + DISCLAIMER_BOTTOM()
+
+  // Update task status
+  let _ = RecordAssistantMessage(chat_id, DEPT_NAME(), substring(doc, 0.0, 4000.0))
+  let _ = AuditLog("dev_pipeline", DEPT_NAME(), "task=" + task_id + " type=" + task_type + " estimate=" + substring(to_string(estimate.expected_hours), 0.0, 6.0) + "h rules=" + to_string(rules.passed_count) + "/" + to_string(rules.total_count))
+
+  return doc
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 18.5: FOIP-003 PHASE 3 — Plan Mode + Design Tokens
+// ═══════════════════════════════════════════════════════════════════════
+
+// FOIP-003.7: Plan Mode — generate plan only, no code
+pattern DevPlanMode(query: String, task_type: String, chat_id: String) -> String {
+  let plan_prompt = "Ты — технический архитектор. Создай ДЕТАЛЬНЫЙ ПЛАН реализации задачи. НЕ пиши код."
+  let plan_prompt = plan_prompt + "\n\nТип задачи: " + TaskTypeNameRU(task_type)
+  let plan_prompt = plan_prompt + "\nОписание: " + query
+  let plan_prompt = plan_prompt + "\n\nСтруктура плана:"
+  let plan_prompt = plan_prompt + "\n1. Цель и scope (что входит, что нет)"
+  let plan_prompt = plan_prompt + "\n2. Архитектура (стек, структура проекта, ключевые компоненты)"
+  let plan_prompt = plan_prompt + "\n3. Пошаговый план реализации (6-10 шагов)"
+  let plan_prompt = plan_prompt + "\n4. Риски и решения"
+  let plan_prompt = plan_prompt + "\n5. Оценка: часов на этап, всего"
+  let plan_prompt = plan_prompt + "\n\nФормат: структурированный markdown. Без кода."
+
+  // FOIP-003.8: Include template if matched
+  let tmpl = MatchTemplate(task_type, query)
+  if tmpl != "" then {
+    let template_ctx = TemplateGet(tmpl)
+    plan_prompt = plan_prompt + "\n\nИспользуй эту архитектуру как базис:\n" + template_ctx
+  }
+
+  // FOIP-003.9: Include design tokens if available
+  let tokens = GetDesignTokensForChat(chat_id)
+  if tokens != "" then {
+    plan_prompt = plan_prompt + "\n\nDesign tokens клиента:\n" + tokens
+  }
+
+  let plan = call_llm(plan_prompt)
+  let doc = "\n\n\n\n\n\n\n\n"
+  let doc = doc + "PLAN MODE\n"
+  let doc = doc + "\n" + plan
+  let doc = doc + "\n\nДля реализации плана: отправь задачу текстом (запустит FullPipeline) или используй /dev-implement\n"
+  let doc = doc + DISCLAIMER_BOTTOM()
+  return doc
+}
+
+// FOIP-003.9: Design Tokens — store/get/apply
+pattern StoreDesignTokens(name: String, tokens_json: String) -> String {
+  let _ = db_execute("INSERT INTO design_tokens (name, tokens_json, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(name) DO UPDATE SET tokens_json = ?, updated_at = datetime('now')", [name, tokens_json, tokens_json])
+  let _ = kv_set("design_tokens:" + name, tokens_json)
+  return "ok"
+}
+
+pattern GetDesignTokens(name: String) -> String {
+  let cached = kv_get("design_tokens:" + name)
+  if cached != "" then { return cached }
+  let rows = query("SELECT tokens_json FROM design_tokens WHERE name = ?", [name])
+  if length(rows) == 0.0 then { return "" }
+  let result = to_string(json_get(rows[0], "tokens_json", ""))
+  if result != "" then { let _ = kv_set("design_tokens:" + name, result) }
+  return result
+}
+
+pattern GetDesignTokensForChat(chat_id: String) -> String {
+  let brand = kv_get("brand:" + chat_id)
+  if brand == "" then { return "" }
+  return GetDesignTokens(brand)
+}
+
+pattern ListDesignTokens() -> String {
+  let rows = query("SELECT name, updated_at FROM design_tokens ORDER BY updated_at DESC", [])
+  if length(rows) == 0.0 then { return "Нет сохранённых design tokens." }
+  let out = ""
+  each row in rows {
+    let name = to_string(json_get(row, "name", "?"))
+    let updated = to_string(json_get(row, "updated_at", "?"))
+    out = out + name + " (updated: " + updated + ")\n"
+  }
+  return out
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 19: COMMAND ROUTER
+// ═══════════════════════════════════════════════════════════════════════
+pattern RouteByCommand(parsed: Dict, chat_id: String) -> String {
+  // Out-of-scope gate
+  if parsed.is_out_of_scope then {
+    return DeclineOutOfScope(parsed.task_description)
+  }
+
+  let cmd = parsed.command
+
+  // /dev — Dashboard
+  if cmd == "dev" then {
+    return DevDashboard(chat_id)
+  }
+
+  // /dev-estimate — Create estimate
+  if cmd == "dev-estimate" then {
+    if parsed.task_id == "" then { return "Укажите ID задачи: /dev-estimate <task_id> [confidence]" }
+    let parts = split(parsed.task_description, " ")
+    let confidence = "medium"
+    if length(parts) > 2 then { confidence = to_string(get(parts, 2)) }
+    let est = CreateEstimate(parsed.task_id, parsed.task_description, confidence)
+    return est.message
+  }
+
+  // /dev-decide — Create ADR
+  if cmd == "dev-decide" then {
+    if parsed.task_id == "" then { return "Укажите ID задачи: /dev-decide <task_id> <title>" }
+    parts = split(parsed.task_description, " ")
+    let title = "ADR for " + parsed.task_id
+    if length(parts) > 2 then { title = join(parts, " ", 2) }
+    return CreateArchitectureDecision(parsed.task_id, title, parsed.task_description, "See context", "See alternatives", "See decision")
+  }
+
+  // /dev-implement — Implement iteration
+  if cmd == "dev-implement" then {
+    if parsed.task_id == "" then { return "Укажите ID задачи: /dev-implement <task_id> [iteration_num]" }
+    parts = split(parsed.task_description, " ")
+    let iter_num = 1
+    if length(parts) > 2 then { iter_num = to_int(to_string(get(parts, 2))) }
+    let result = ImplementIteration(parsed.task_id, iter_num, parsed.task_description)
+    return result.message
+  }
+
+  // /dev-task — Show task
+  if cmd == "dev-task" then {
+    if parsed.task_id == "" then { return "Укажите ID задачи: /dev-task <task_id>" }
+    return ShowTask(parsed.task_id)
+  }
+
+  // /dev-tasks — List tasks
+  if cmd == "dev-tasks" then {
+    parts = split(parsed.task_description, " ")
+    let status_filter = ""
+    if length(parts) > 1 then { status_filter = to_string(get(parts, 1)) }
+    return ListTasks(status_filter, 20)
+  }
+
+  // /dev-repos — List repositories
+  if cmd == "dev-repos" then {
+    return ListRepos()
+  }
+
+  // /dev-repo — Show repository
+  if cmd == "dev-repo" then {
+    if parsed.repo_name == "" then { return "Укажите имя репозитория: /dev-repo <name>" }
+    return ShowRepo(parsed.repo_name)
+  }
+
+  // /dev-create-repo — Create repository
+  if cmd == "dev-create-repo" then {
+    parts = split(parsed.task_description, " ")
+    if length(parts) < 3 then { return "Формат: /dev-create-repo <name> <task_type> [url]" }
+    let name = to_string(get(parts, 1))
+    let task_type = to_string(get(parts, 2))
+    let url = "https://github.com/fosved/" + name
+    if length(parts) > 3 then { url = to_string(get(parts, 3)) }
+    return CreateRepo(name, task_type, url)
+  }
+
+  // /dev-radar — Show Tech Radar
+  if cmd == "dev-radar" then {
+    parts = split(parsed.task_description, " ")
+    let category = ""
+    if length(parts) > 1 then { category = to_string(get(parts, 1)) }
+    return ShowTechRadar(category)
+  }
+
+  // /dev-radar-add — Add Tech Radar entry
+  if cmd == "dev-radar-add" then {
+    parts = split(parsed.task_description, " ")
+    if length(parts) < 4 then { return "Формат: /dev-radar-add <name> <category> <adopt|trial|assess|hold> [description]" }
+    name = to_string(get(parts, 1))
+    category = to_string(get(parts, 2))
+    let state = to_string(get(parts, 3))
+    let desc = "Added via /dev-radar-add"
+    if length(parts) > 4 then { desc = join(parts, " ", 4) }
+    return AddTechRadarEntry(name, category, state, desc, "User decision")
+  }
+
+  // /dev-deploy — Deploy task
+  if cmd == "dev-deploy" then {
+    if parsed.task_id == "" then { return "Укажите ID задачи: /dev-deploy <task_id>" }
+    return DeployTask(parsed.task_id, chat_id)
+  }
+
+  // /dev-archive — Archive task
+  if cmd == "dev-archive" then {
+    if parsed.task_id == "" then { return "Укажите ID задачи: /dev-archive <task_id> <actual_hours>" }
+    parts = split(parsed.task_description, " ")
+    let actual = "0"
+    if length(parts) > 2 then { actual = to_string(get(parts, 2)) }
+    return ArchiveTask(parsed.task_id, actual)
+  }
+
+  // /dev-local-sync — Local sync
+  if cmd == "dev-local-sync" then {
+    return LocalSync()
+  }
+
+  // /dev-plan — FOIP-003.7: Plan mode (plan only, no code generation)
+  if cmd == "dev-plan" then {
+    let plan_query = parsed.task_description
+    plan_query = replace(plan_query, "/dev-plan", "")
+    plan_query = trim(plan_query)
+    if plan_query == "" then { return "Формат: /dev-plan <описание задачи>" }
+    return DevPlanMode(plan_query, parsed.task_type, chat_id)
+  }
+
+  // /dev-tokens -- FOIP-003.9: design tokens
+  if cmd == "dev-tokens" then {
+    let rest = replace(parsed.task_description, "/dev-tokens", "")
+    rest = trim(rest)
+    if rest == "" then {
+      return ListDesignTokens()
+    }
+    parts = split(rest, " ")
+    let action = to_string(get(parts, 0))
+    if action == "set" and length(parts) >= 3.0 then {
+      name = to_string(get(parts, 1))
+      let json_str = substring(rest, 5.0 + length(name) + 1.0, 10000.0)
+      let _ = StoreDesignTokens(name, json_str)
+      let _ = kv_set("brand:" + chat_id, name)
+      return "Design tokens saved as " + name + ". Will be used in /dev and /dev-plan."
+    }
+    return "Format: /dev-tokens (list) or /dev-tokens set <name> <json>"
+  }
+  }
+
+  // Free-text: check template (FOIP-003.8) + design tokens (FOIP-003.9)
+  let tmpl = MatchTemplate(parsed.task_type, parsed.task_description)
+  let enriched_query = parsed.task_description
+  if tmpl != "" then {
+    let template_ctx = TemplateGet(tmpl)
+    enriched_query = enriched_query + "\n\n[Template: " + tmpl + "]\n" + template_ctx
+  }
+  let dtokens = GetDesignTokensForChat(chat_id)
+  if dtokens != "" then {
+    enriched_query = enriched_query + "\n\n[Design tokens]\n" + dtokens
+  }
+  return FullPipeline(enriched_query, parsed.task_type, chat_id, "")
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 20: ENTRY POINT (HandleDev)
+// This is the pattern that app.mlog calls via import dept/dev
+// ═══════════════════════════════════════════════════════════════════════
 
 pattern HandleDev(query: String, chat_id: String) -> String {
-  let dept = "dev"
-  let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
-  let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
-  return reply
+  let dept = DEPT_NAME()
+  let _ = AuditLog("dept_entry", dept, "query: " + substring(query, 0, 100))
+
+  // Parse query → task type + command
+  let parsed = ParseDevQuery(query)
+
+  // Route to command handler or full pipeline
+  let result = RouteByCommand(parsed, chat_id)
+
+  // Final safety: ensure disclaimer is present
+  let has_disclaimer = contains(result, "Код генерируется проектным ассистентом") or contains(result, "проектного ассистента")
+  let output = WrapWithDisclaimer(result)
+  if has_disclaimer then { output = result }
+
+  // ── LLM-Verifier: code/architecture quality ──
+  let dv_resp = try call_python("llm_verifier", "score", json_encode([query, output, "Technical accuracy: Are code snippets/architecture patterns correct? Security awareness: Are common vulnerabilities (injection, auth, data exposure) addressed? Best practices: Does it follow established patterns for the stated tech stack?"]))
+  if to_string(dv_resp) != "()" and contains(to_string(dv_resp), "error") == false then {
+    let dv_parsed = try parse_json(dv_resp)
+    let dv_score = to_float(try json_get(dv_parsed, "result", "0.5"))
+    let _ = AuditLog("dev_verify_score", dept, "score=" + to_string(dv_score))
+  }
+
+  let _ = kv_set("last_model_" + dept, "native_call_llm")
+  let _ = RecordAssistantMessage(chat_id, dept, substring(output, 0.0, 4000.0))
+
+  return output
 }

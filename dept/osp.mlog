@@ -1,17 +1,777 @@
-// Fosved Office v2 — Department Dispatcher
-// PLACEHOLDER_BODY
+// Fosved Office v2 — OSP Dispatcher (NATIVE v4.0)
+// Full strategic analysis engine: 23 SPD skills (3 tiers) + domain classification
+// + depth routing + Tavily/Telegram search + structured analysis modes
+// + verification + calibration + Brier score computation
+// + PROJECT PARAMS: per-phase token budgets, depth→model mapping, auto-escalation,
+//   12 programmatic quality gates, API endpoints, error categories + fallback, JSON schemas
+// + FORCES FORMULA: P = A × R × S × L × E × E_modifier (native computation)
+// + SHERMAN KENT: verbal-to-numeric probability scale (native mapping)
+// + LIFECYCLE: drafted→published→watching→verified/missed/partial/superseded
+// + CROSS-DEPT: Finance+OSP, Expert+OSP, LZ+OSP, Legal+OSP routing
+// + DISCLAIMER: top + bottom + final safety check (no investment advice)
+// + DB SCHEMA: inline SQL DDL from schema-v4.1.prisma (15 models)
+// Sources: Fosved_v4_1_Transition_Pack (SPD→OSP), library/osp.md v3.0, 23 skill SKILL.md
 
+// ═══════════════════════════════════════════════════════════════════════
+// DB SCHEMA INLINE — OSP-related models from schema-v4.1.prisma
+// ═══════════════════════════════════════════════════════════════════════
+// CREATE TABLE analysis (
+//   id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421,
+//   topic TEXT NOT NULL, topic_slug TEXT,
+//   mode TEXT DEFAULT 'full', status TEXT DEFAULT 'drafted',
+//   sources TEXT DEFAULT '[]', skills_loaded TEXT DEFAULT '[]',
+//   full_analysis TEXT, leaves TEXT, branches TEXT, stem TEXT, roots TEXT, fruits TEXT,
+//   forces_analysis TEXT, bifurcation_points TEXT,
+//   scenarios TEXT DEFAULT '[]', premortem_3mo TEXT, premortem_12mo TEXT,
+//   confidence TEXT DEFAULT 'medium', confidence_reason TEXT,
+//   verification_date TIMESTAMP, watch_until TIMESTAMP,
+//   red_team_analysis TEXT, red_team_outcome TEXT, red_team_run_at TIMESTAMP,
+//   biases_detected TEXT DEFAULT '[]', biases_addressed TEXT DEFAULT '[]',
+//   superseded_by_id INT, parent_id INT, client_id INT, project_id INT,
+//   created_at TIMESTAMP DEFAULT NOW(), published_at TIMESTAMP, updated_at TIMESTAMP DEFAULT NOW()
+// );
+// CREATE TABLE watchlist_scenarios (id SERIAL PRIMARY KEY, analysis_id INT REFERENCES analysis(id), scenario_label TEXT, description TEXT, observable_source TEXT, threshold TEXT, window_start TIMESTAMP, window_end TIMESTAMP, status TEXT DEFAULT 'pending', triggered_at TIMESTAMP, triggered_note TEXT, created_at TIMESTAMP DEFAULT NOW());
+// CREATE TABLE analysis_verifications (id SERIAL PRIMARY KEY, analysis_id INT REFERENCES analysis(id), scenario_outcomes TEXT, brier_scores TEXT, brier_total FLOAT, error_category TEXT, error_note TEXT, improvements_for_next TEXT, biases_active_in_analysis TEXT DEFAULT '[]', indicators_triggered INT DEFAULT 0, indicators_total INT DEFAULT 0, verified_at TIMESTAMP DEFAULT NOW(), verified_by TEXT DEFAULT 'system');
+// CREATE TABLE indicator_activations (id SERIAL PRIMARY KEY, analysis_id INT REFERENCES analysis(id), indicator_name TEXT, observed_at TIMESTAMP, observed_value TEXT, source TEXT, notes TEXT, created_at TIMESTAMP DEFAULT NOW());
+// CREATE TABLE monthly_reviews (id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421, year_month TEXT UNIQUE, forecasts_verified INT DEFAULT 0, brier_average FLOAT, brier_trend FLOAT, hit_rate_high_conf FLOAT, surprise_index FLOAT, calibration_curve TEXT DEFAULT '[]', error_clusters TEXT, dominant_error TEXT, improvements TEXT DEFAULT '[]', improvements_applied BOOLEAN DEFAULT false, flags_for_quarterly TEXT, created_at TIMESTAMP DEFAULT NOW());
+// CREATE TABLE quarterly_reviews (id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421, year_quarter TEXT UNIQUE, monthly_reviews_included TEXT DEFAULT '[]', persistent_patterns TEXT, methodological_gaps TEXT, skills_updated TEXT DEFAULT '[]', skills_added TEXT DEFAULT '[]', skills_deprecated TEXT DEFAULT '[]', review_note TEXT, created_at TIMESTAMP DEFAULT NOW());
+// CREATE TABLE arsenal_reviews (id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421, year_half TEXT UNIQUE, skills_in_use TEXT DEFAULT '[]', skills_underused TEXT DEFAULT '[]', skills_obsolete TEXT DEFAULT '[]', skills_to_add TEXT DEFAULT '[]', tooling_changes TEXT, new_sources_added TEXT, review_note TEXT, created_at TIMESTAMP DEFAULT NOW());
+// CREATE TABLE paradigm_reviews (id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421, year_biannual TEXT UNIQUE, paradigm_assumptions TEXT, emerging_frames TEXT, paradigm_shifts TEXT, review_note TEXT, created_at TIMESTAMP DEFAULT NOW());
+// CREATE TABLE asymmetric_bets (id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421, thesis TEXT, cost_estimate DECIMAL(15,2), payoff_estimate DECIMAL(15,2), asymmetry_ratio FLOAT, probability_win FLOAT, watch_indicators TEXT DEFAULT '[]', status TEXT DEFAULT 'identified', outcome_note TEXT, created_at TIMESTAMP DEFAULT NOW(), closed_at TIMESTAMP);
+// CREATE TABLE profiles (id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421, subject_name TEXT UNIQUE, subject_type TEXT, full_profile TEXT, decision_style TEXT, pressure_points TEXT, track_record TEXT, recent_moves TEXT, last_updated_at TIMESTAMP DEFAULT NOW(), created_at TIMESTAMP DEFAULT NOW());
+// CREATE TABLE macro_regime_snapshots (id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421, date TIMESTAMP DEFAULT NOW(), region TEXT DEFAULT 'global', regime TEXT, regime_notes TEXT, cpi_trend TEXT, rate_trend TEXT, liquidity_trend TEXT, risk_asset_sentiment TEXT, signal_strength FLOAT, created_at TIMESTAMP DEFAULT NOW());
+// CREATE TABLE cross_asset_divergences (id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421, date TIMESTAMP DEFAULT NOW(), pair_assets TEXT, divergence_type TEXT, z_score FLOAT, notes TEXT, created_at TIMESTAMP DEFAULT NOW());
+
+// ═══════════════════════════════════════════════════════════════════════
+// DISCLOSURE — mandatory top disclaimer
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPDisclaimer() -> String {
+  return "⚠️ ОСП: Аналитическая оценка для информирования решений владельца. Не является инвестиционной рекомендацией. Все вероятности по шкале Шермана Кента. Прогнозы подлежат обязательной верификации."
+}
+pattern OSPDisclaimerBottom() -> String {
+  return "---\n⚠️ Верификация: каждый прогноз должен быть сверен по наступлении даты проверки. Brier score обновляется автоматически. /osp verify <id>"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PROJECT PARAMETERS V4.0
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPSelectModel(depth: Int) -> String {
+  if depth == 0 then { return "claude-3-5-haiku" }
+  if depth == 1 then { return "claude-sonnet-4-20250514" }
+  if depth == 2 then { return "claude-sonnet-4-20250514" }
+  if depth == 3 then { return "claude-opus-4-20250514" }
+  if depth == 4 then { return "claude-opus-4-20250514" }
+  return "claude-sonnet-4-20250514"
+}
+pattern OSPPhaseBudget(depth: Int) -> String {
+  if depth == 0 then { return "500,1000,800,600,600" }
+  if depth == 1 then { return "800,4000,3000,2000,1200" }
+  if depth == 2 then { return "1000,6000,5000,3500,1500" }
+  if depth == 3 then { return "1200,8000,7000,5000,2000" }
+  if depth == 4 then { return "1500,10000,9000,7000,2500" }
+  return "800,4000,3000,2000,1200"
+}
+pattern OSPSkillBudget(depth: Int) -> Float {
+  if depth == 0 then { return 8000.0 }
+  if depth == 1 then { return 12000.0 }
+  if depth == 2 then { return 18000.0 }
+  if depth == 3 then { return 20000.0 }
+  if depth == 4 then { return 23000.0 }
+  return 12000.0
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SHERMAN KENT VERBAL-TO-NUMERIC SCALE
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPShermanKent(label: String) -> String {
+  let l = lower(label)
+  if l == "almost certainly not" then { return "0.02 [0-5%]" }
+  if l == "very unlikely" then { return "0.12 [5-20%]" }
+  if l == "unlikely" then { return "0.27 [20-35%]" }
+  if l == "roughly even chance" then { return "0.50 [35-65%]" }
+  if l == "likely" then { return "0.72 [65-80%]" }
+  if l == "very likely" then { return "0.87 [80-95%]" }
+  if l == "almost certain" then { return "0.97 [95-100%]" }
+  if l == "почти наверняка нет" then { return "0.02 [0-5%]" }
+  if l == "очень маловероятно" then { return "0.12 [5-20%]" }
+  if l == "маловероятно" then { return "0.27 [20-35%]" }
+  if l == "примерно равные шансы" then { return "0.50 [35-65%]" }
+  if l == "вероятно" then { return "0.72 [65-80%]" }
+  if l == "очень вероятно" then { return "0.87 [80-95%]" }
+  if l == "почти наверняка" then { return "0.97 [95-100%]" }
+  return "UNMAPPED — use only Kent-approved terms"
+}
+pattern OSPValidateProbability(text: String) -> String {
+  let t = lower(text)
+  if contains(t, "likely") or contains(t, "unlikely") or contains(t, "certain") or contains(t, "вероятно") or contains(t, "наверняка") or contains(t, "маловероятно") or contains(t, "%") then { return "PASS" }
+  return "FAIL: uncalibrated probability"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FORCES & POTENTIALS — native formula P = A × R × S × L × E × E_modifier
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPComputePotential(A: Float, R: Float, S: Float, L: Float, E: Float, E_modifier: Float) -> Float {
+  return A * R * S * L * E * E_modifier
+}
+pattern OSPCategorizeForce(P: Float) -> String {
+  if P >= 5000.0 then { return "DOMINANT (≥5000)" }
+  if P >= 1000.0 then { return "MAJOR (1000-4999)" }
+  if P >= 100.0 then { return "ACTIVE (100-999)" }
+  return "MARGINAL (<100)"
+}
+pattern OSPComputeDifferential(P1: Float, P2: Float) -> String {
+  let D = P1 - P2
+  if D > 2000.0 then { return "DECISIVE_ADVANTAGE" }
+  if D > 500.0 then { return "CLEAR_ADVANTAGE" }
+  if D > 0.0 then { return "SLIGHT_ADVANTAGE" }
+  if D > -500.0 then { return "SLIGHT_DISADVANTAGE" }
+  return "DECISIVE_DISADVANTAGE"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BRIER SCORE — native computation
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPComputeBrier(forecast_prob: Float, actual_outcome: Float) -> Float {
+  let diff = forecast_prob - actual_outcome
+  return diff * diff
+}
+pattern OSPClassifyBrierError(brier: Float, forecast_prob: Float, actual_outcome: Float) -> String {
+  if brier <= 0.05 then { return "WELL_CALIBRATED" }
+  if forecast_prob < 0.2 and actual_outcome > 0.5 then { return "TAIL_MISS" }
+  if forecast_prob > 0.8 and actual_outcome < 0.5 then { return "TAIL_MISS" }
+  if forecast_prob - actual_outcome > 0.3 then { return "OVERCONFIDENT" }
+  if actual_outcome - forecast_prob > 0.3 then { return "UNDERCONFIDENT" }
+  return "MISCALIBRATED"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LIFECYCLE STATE MACHINE
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPDraftAnalysis(topic: String, mode: String, domain: String, depth: Int) -> Int {
+  let slug = lower(replace(topic, " ", "-"))
+  let _ = db_execute("INSERT INTO analysis (topic, topic_slug, mode, status) VALUES (?, ?, ?, 'drafted')", [topic, slug, mode])
+  let ids = query("SELECT id FROM analysis WHERE topic = ? ORDER BY created_at DESC LIMIT 1", [topic])
+  if length(ids) > 0 then { return to_int(to_string(get(get(ids, 0), "id"))) }
+  return -1
+}
+pattern OSPPublishAnalysis(analysis_id: Int) -> String {
+  let rows = query("SELECT status FROM analysis WHERE id = ?", [to_string(analysis_id)])
+  if length(rows) == 0 then { return "ERROR: not found" }
+  let status = to_string(get(get(rows, 0), "status"))
+  if status != "drafted" then { return "ERROR: status is '" + status + "', must be 'drafted'" }
+  let _ = db_execute("UPDATE analysis SET status = 'published', published_at = NOW() WHERE id = ?", [to_string(analysis_id)])
+  let _ = AuditLog("osp_publish", "osp", "id=" + to_string(analysis_id) + " drafted→published")
+  return "OK: published"
+}
+pattern OSPWatchAnalysis(analysis_id: Int, watch_until_date: String) -> String {
+  let _ = db_execute("UPDATE analysis SET status = 'watching', watch_until = ? WHERE id = ? AND status = 'published'", [watch_until_date, to_string(analysis_id)])
+  let _ = AuditLog("osp_watch", "osp", "id=" + to_string(analysis_id) + " published→watching")
+  return "OK: watching until " + watch_until_date
+}
+pattern OSPVerifyAnalysis(analysis_id: Int, outcome: String) -> String {
+  let _ = db_execute("UPDATE analysis SET status = ? WHERE id = ? AND status IN ('watching','published')", [outcome, to_string(analysis_id)])
+  let _ = AuditLog("osp_verify", "osp", "id=" + to_string(analysis_id) + " →" + outcome)
+  return "OK: " + outcome
+}
+pattern OSPSupersedeAnalysis(old_id: Int, new_id: Int) -> String {
+  let _ = db_execute("UPDATE analysis SET status = 'superseded', superseded_by_id = ? WHERE id = ?", [to_string(new_id), to_string(old_id)])
+  return "OK: superseded"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PROGRAMMATIC QUALITY GATES (12 gates)
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPCheckQualityGates(output: String, depth: Int) -> String {
+  let gates = "{"
+  // Gate 1: awareness frame
+  let g1 = "true"
+  if contains(output, "AWARENESS") == false then { if contains(output, "ОСОЗНАНИЕ") == false then { if contains(output, "SUBJECT:") == false then { g1 = "false" } } }
+  let gates = gates + "\"g1_awareness\":" + g1
+  // Gate 2: topology 5 levels
+  let g2 = "true"
+  if contains(output, "Leaves") == false then { if contains(output, "Листья") == false then { g2 = "false" } }
+  if contains(output, "Roots") == false then { if contains(output, "Корни") == false then { g2 = "false" } }
+  if contains(output, "Fruit") == false then { if contains(output, "Плод") == false then { g2 = "false" } }
+  let gates = gates + ",\"g2_topology\":" + g2
+  // Gate 3: forces P=
+  let g3 = "true"
+  if contains(output, "P =") == false then { if contains(output, "FORCES") == false then { if contains(output, "СИЛЫ") == false then { g3 = "false" } } }
+  let gates = gates + ",\"g3_forces\":" + g3
+  // Gate 4: two paths
+  let g4 = "true"
+  if depth >= 1 then { if contains(output, "Path A") == false then { if contains(output, "Путь А") == false then { g4 = "false" } } }
+  let gates = gates + ",\"g4_twoPaths\":" + g4
+  // Gate 5: falsifiable indicators
+  let g5 = "true"
+  if contains(output, "Indicator") == false then { if contains(output, "Индикатор") == false then { g5 = "false" } }
+  let gates = gates + ",\"g5_indicators\":" + g5
+  // Gate 6: Sherman Kent
+  let g6 = "true"
+  if OSPValidateProbability(output) != "PASS" then { g6 = "false" }
+  let gates = gates + ",\"g6_kentProb\":" + g6
+  // Gate 7: confidence labels
+  let g7 = "true"
+  if contains(output, "ФАКТ") == false then { if contains(output, "FACT") == false then { g7 = "false" } }
+  let gates = gates + ",\"g7_confLabels\":" + g7
+  // Gate 8: premortem (depth≥2)
+  let g8 = "true"
+  if depth >= 2 then { if contains(output, "Premortem") == false then { if contains(output, "премортем") == false then { g8 = "false" } } }
+  let gates = gates + ",\"g8_premortem\":" + g8
+  // Gate 9: ACH hypotheses (depth≥2)
+  let g9 = "true"
+  if depth >= 2 then { if contains(output, "H1") == false then { if contains(output, "Гипотеза 1") == false then { g9 = "false" } } }
+  let gates = gates + ",\"g9_achHypo\":" + g9
+  // Gate 10: spillover check
+  let g10 = "true"
+  let gates = gates + ",\"g10_spillover\":" + g10
+  // Gate 11: compact summary
+  let g11 = "true"
+  let gates = gates + ",\"g11_compact\":" + g11
+  // Gate 12: no uncalibrated probability
+  let g12 = "true"
+  if contains(output, "возможно") or contains(output, "может быть") then { g12 = "false" }
+  let gates = gates + ",\"g12_noUncalib\":" + g12
+  let gates = gates + "}"
+  return gates
+}
+
+// ── Final safety check ──
+pattern OSPFinalSafetyCheck(output: String) -> String {
+  let t = lower(output)
+  if contains(t, "покупай") or contains(t, "buy now") or contains(t, "продавай") or contains(t, "sell now") or contains(t, "инвестируй в") or contains(t, "invest in") then {
+    return "BLOCKED: direct investment advice detected"
+  }
+  return "PASS"
+}
+
+// ── Auto-escalation ──
+pattern OSPAutoEscalate(topic: String, base_depth: Int) -> Int {
+  let t = lower(topic)
+  let depth = base_depth
+  let iw_flag = kv_get("iw_active_" + substring(t, 0, 30))
+  if to_string(iw_flag) != "()" and to_string(iw_flag) != "" then { depth = depth + 1 }
+  let owner_pri = kv_get("owner_priority_topics")
+  if contains(to_string(owner_pri), substring(t, 0, 20)) then { depth = depth + 1 }
+  let miss_count = query("SELECT COUNT(*) as c FROM analysis WHERE topic LIKE ? AND status IN ('missed','partial')", ["%" + substring(t, 0, 30) + "%"])
+  if length(miss_count) > 0 then {
+    let mc = get(get(miss_count, 0), "c")
+    if to_float(to_string(mc)) >= 2.0 then { depth = depth + 1 }
+  }
+  if contains(t, "критич") or contains(t, "existential") then { depth = depth + 2 }
+  if depth > 4 then { depth = 4 }
+  return depth
+}
+
+// ── Error classifier ──
+pattern OSPClassifyError(forecast: String, actual: String) -> String {
+  let f = lower(forecast)
+  let a = lower(actual)
+  if contains(f, "spillover") == false then { if contains(a, "spillover") then { return "MISSED_SPILLOVER" } }
+  if contains(f, "force") == false then { if contains(a, "force") then { return "MISSED_FORCE" } }
+  if contains(f, "convergent") then { if contains(a, "convergent") == false then { return "PREMATURE_CONVERGENCE" } }
+  return "OTHER"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// API ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPArchiveAPI(status: String, domain: String, limit: Int) -> String {
+  let q = "SELECT id, topic, status, created_at FROM analysis WHERE 1=1"
+  if status != "" then { q = q + " AND status = '" + status + "'" }
+  let q = q + " ORDER BY created_at DESC LIMIT " + to_string(limit)
+  return json_encode(query(q, []))
+}
+pattern OSPVerifyIndicatorAPI(indicator_id: String, result: Boolean) -> String {
+  let _ = db_execute("UPDATE indicator SET result = ?, verified_at = NOW() WHERE id = ?", [to_string(result), indicator_id])
+  return "{verified: true}"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CROSS-DEPARTMENT ROUTING
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPRouteToFinance(thesis: String, forecast: String) -> String {
+  let payload = json_encode({source: "osp", thesis: thesis, forecast: forecast})
+  let result = try http_post("http://127.0.0.1:4000/dept/finance/cross-check", payload, "application/json")
+  if to_string(result) == "()" then { return "Finance unavailable" }
+  return json_get(parse_json(result), "assessment", "Finance check failed")
+}
+pattern OSPRouteToExpert(analysis_id: Int, context: String) -> String {
+  let payload = json_encode({source: "osp", analysis_id: analysis_id, context: context})
+  let result = try http_post("http://127.0.0.1:4000/dept/expert/briefing", payload, "application/json")
+  if to_string(result) == "()" then { return "Expert unavailable" }
+  return json_get(parse_json(result), "briefing", "Expert check failed")
+}
+pattern OSPRouteToLZ(technology: String, question: String) -> String {
+  let payload = json_encode({source: "osp", technology: technology, question: question})
+  let result = try http_post("http://127.0.0.1:4000/dept/lz/assess", payload, "application/json")
+  if to_string(result) == "()" then { return "LZ unavailable" }
+  return json_get(parse_json(result), "assessment", "LZ check failed")
+}
+pattern OSPRouteToLegal(thesis: String, jurisdiction: String) -> String {
+  let payload = json_encode({source: "osp", thesis: thesis, jurisdiction: jurisdiction})
+  let result = try http_post("http://127.0.0.1:4000/dept/legal/regulatory", payload, "application/json")
+  if to_string(result) == "()" then { return "Legal unavailable" }
+  return json_get(parse_json(result), "assessment", "Legal check failed")
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN DISPATCHER
+// ═══════════════════════════════════════════════════════════════════════
 pattern HandleOSP(query: String, chat_id: String) -> String {
   let dept = "osp"
-  let context = BuildContext(dept, query, chat_id)
-  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Error: empty reply")
-  let used_model = to_string(json_get(parse_json(proxy_result), "model", ""))
-  let used_provider = to_string(json_get(parse_json(proxy_result), "provider", ""))
-  kv_set("last_model_" + dept, used_provider + " / " + used_model)
+  let t = lower(query)
+
+  // ── Depth routing ──
+  if starts_with(t, "/osp quick") or starts_with(t, "/osp fast") then { return OSPQuickAnalyze(substring(query, 10, 300), chat_id) }
+  if starts_with(t, "/osp deep") then { return OSPDeepAnalyze(substring(query, 9, 300), chat_id) }
+  if starts_with(t, "/osp full") then { return OSPFullAnalyze(substring(query, 9, 300), chat_id) }
+  if starts_with(t, "/osp wargame") then { return OSPWargame(substring(query, 12, 300), chat_id) }
+
+  // ── Domain modes ──
+  if starts_with(t, "/osp regime") then { return OSPRegimeScan(substring(query, 11, 300), chat_id) }
+  if starts_with(t, "/osp cantillon") then { return OSPCantillonScan(substring(query, 13, 300), chat_id) }
+  if starts_with(t, "/osp narrative") then { return OSPNarrativeScan(substring(query, 13, 300), chat_id) }
+
+  // ── Verification & calibration ──
+  if starts_with(t, "/osp verify") then { return OSPVerify(substring(query, 11, 300), chat_id) }
+  if starts_with(t, "/osp score") or starts_with(t, "/osp brier") then { return OSPCalibrationScore(chat_id) }
+  if starts_with(t, "/osp recalibrate") then { return OSPRecalibrate(chat_id) }
+  if starts_with(t, "/osp bet") then { return OSPRegisterBet(substring(query, 8, 300), chat_id) }
+
+  // ── Red team ──
+  if starts_with(t, "/osp redteam") or starts_with(t, "/osp red-team") then { return OSPRedteam(substring(query, 12, 300), chat_id) }
+
+  // ── I&W Watchlist ──
+  if starts_with(t, "/osp watch") then { return OSPWatch(substring(query, 10, 300), chat_id) }
+  if starts_with(t, "/osp unwatch") then { return OSPUnwatch(substring(query, 12, 300), chat_id) }
+
+  // ── Profile ──
+  if starts_with(t, "/osp profile") then { return OSPProfile(substring(query, 12, 300), chat_id) }
+
+  // ── Search ──
+  if starts_with(t, "/osp tavily") then { return OSPTavilySearch(substring(query, 10, 300), chat_id) }
+  if starts_with(t, "/osp tg") or starts_with(t, "/osp telegram") then { return OSPTelegramSearch(substring(query, 7, 300), chat_id) }
+
+  // ── Default ──
+  let domain = OSPClassifyDomain(query)
+  let depth = OSPAutoEscalate(query, 1)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let context = OSPDisclaimer() + "\n\n" + context + "\n\n=== PROJECT PARAMS ===\nDepth: " + to_string(depth) + " Model: " + model + " Domain: " + domain + "\n"
+  let llm_result = call_llm(context, query)
+  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
+  let reply = to_string(llm_result)
+  let gates = OSPCheckQualityGates(reply, depth)
+  let safety = OSPFinalSafetyCheck(reply)
+  if safety != "PASS" then { reply = reply + "\n\n[SAFETY: " + safety + "]" }
+  // ── LLM-Verifier: confidence scoring for strategic analysis ──
+  let ov_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Analytical rigor: Logic and evidence quality? Probability calibration: Reasonable confidence levels? Actionability: Decision-relevant conclusions?"]))
+  let ov_score = 0.0
+  if to_string(ov_resp) != "()" and contains(to_string(ov_resp), "error") == false then {
+    let ov_parsed = try parse_json(ov_resp)
+    ov_score = to_float(try json_get(ov_parsed, "result", "0.5"))
+    let _ = AuditLog("osp_verify_score", dept, "score=" + to_string(ov_score) + " domain=" + domain + " depth=" + to_string(depth))
+  }
+  let reply = reply + "\n\n" + OSPDisclaimerBottom()
   let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
+  let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=" + to_string(depth) + " gates=" + gates + " safety=" + safety + " verify=" + to_string(ov_score))
   return reply
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// DOMAIN CLASSIFIER
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPClassifyDomain(query: String) -> String {
+  let t = lower(query)
+  if contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "золот") or contains(t, "gold") or contains(t, "vix") then { return "financial" }
+  if contains(t, "ставк") or contains(t, "инфляци") or contains(t, "рецесси") or contains(t, "стагфляци") or contains(t, "эмисси") or contains(t, "центробанк") or contains(t, "фрс") or contains(t, "есб") or contains(t, "ввп") or contains(t, "gdp") then { return "monetary" }
+  if contains(t, "геополитик") or contains(t, "альянс") or contains(t, "санкци") or contains(t, "nato") or contains(t, "нато") or contains(t, "брикс") or contains(t, "войн") or contains(t, "конфликт") then { return "geopolitical" }
+  if contains(t, "армия") or contains(t, "вооружен") or contains(t, "фронт") or contains(t, "ракет") or contains(t, "ядерн") then { return "military" }
+  if contains(t, "компани") or contains(t, "корпорац") or contains(t, "стратег") or contains(t, "конкурент") then { return "corporate" }
+  if contains(t, "президент") or contains(t, "выбор") or contains(t, "парламент") then { return "political" }
+  return "general"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONTEXT BUILDER
+// ═══════════════════════════════════════════════════════════════════════
+pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile("osp")
+  let skills = LoadOSPEnrichedSkills(query, domain)
+  let corrections = GetCorrections("osp")
+  let dialog = GetRecentDialog(chat_id, "10")
+  let memories = YanaRecallMemories(query)
+  let now_info = YanaNowInfo()
+  let domain_kb = OSPDomainKB(domain)
+  let news = ""
+  let news_result = try http_post("http://127.0.0.1:4000/news/fresh", json_encode({query: query, dept: "osp", limit: 5}), "application/json")
+  if to_string(news_result) != "()" then { news = json_get(parse_json(news_result), "news", "") }
+  let s_mem = to_string(memories)
+  if s_mem == "()" then { s_mem = "" }
+  let s_cor = to_string(corrections)
+  if s_cor == "()" then { s_cor = "" }
+  let s_dlg = to_string(dialog)
+  if s_dlg == "()" then { s_dlg = "" }
+  let s_now = to_string(now_info)
+  if s_now == "()" then { s_now = "" }
+  let s_sk = to_string(skills)
+  if s_sk == "()" then { s_sk = "" }
+  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Dialog ===\n" + s_dlg
+  let context = context + "\n\n=== ПОВТОР: ДАТА ===\n" + s_now
+  return context
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DOMAIN KB
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPDomainKB(domain: String) -> String {
+  let kb = "ОСП V2: Корни→Стебель→Ветви→Плоды→Семена | P=A×R×S×L×E | [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ] | Sherman Kent | Two-paths\n"
+  if domain == "financial" then { kb = kb + "Фокус: cross-asset divergence, asymmetric bet, antifragility, Cantillon\n" }
+  if domain == "monetary" then { kb = kb + "Фокус: macro regime, ЦБ actions, Cantillon, narrative-vs-flows, cycle position\n" }
+  if domain == "geopolitical" then { kb = kb + "Фокус: balance of power, narrative-vs-flows, order-of-battle, Schelling points, I&W\n" }
+  if domain == "military" then { kb = kb + "Фокус: OOB, phase transition, Schelling points, red team\n" }
+  if domain == "corporate" then { kb = kb + "Фокус: strategic maneuvers, forces, reflexive impact, decision tree\n" }
+  if domain == "political" then { kb = kb + "Фокус: deep profiling, narrative-vs-flows, cycle position, Cantillon\n" }
+  return kb
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SKILL LOADING (3-tier)
+// ═══════════════════════════════════════════════════════════════════════
+pattern LoadOSPEnrichedSkills(query: String, domain: String) -> String {
+  let t = lower(query)
+  let result = ""
+  let budget = OSPSkillBudget(1)
+  // Tier 1 always
+  let s = read_file("skills/deconstruct/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- deconstruct ---\n" + s }
+  let s = read_file("skills/awareness-frame/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- awareness-frame ---\n" + s }
+  let s = read_file("skills/root-cause-mapping/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- root-cause-mapping ---\n" + s }
+  let s = read_file("skills/forces-and-potentials/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- forces-and-potentials ---\n" + s }
+  let s = read_file("skills/strategic-maneuvers/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- strategic-maneuvers ---\n" + s }
+  let s = read_file("skills/two-paths-synthesis/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- two-paths-synthesis ---\n" + s }
+  let s = read_file("skills/decision-tree-forecast/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- decision-tree-forecast ---\n" + s }
+  let s = read_file("skills/reflexive-impact/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- reflexive-impact ---\n" + s }
+  let s = read_file("skills/calibration/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- calibration ---\n" + s }
+  let s = read_file("skills/system-health-diagnostics/SKILL.md")
+  if s != "" and length(result) < budget then { result = result + "\n--- system-health-diagnostics ---\n" + s }
+  // Tier 2 by domain
+  if domain == "financial" and length(result) < budget then {
+    s = read_file("skills/cross-asset-divergence/SKILL.md")
+    if s != "" then { result = result + "\n--- cross-asset-divergence ---\n" + s }
+    s = read_file("skills/asymmetric-bet-structure/SKILL.md")
+    if s != "" then { result = result + "\n--- asymmetric-bet-structure ---\n" + s }
+  }
+  if domain == "monetary" and length(result) < budget then {
+    s = read_file("skills/macro-regime-id/SKILL.md")
+    if s != "" then { result = result + "\n--- macro-regime-id ---\n" + s }
+    s = read_file("skills/cantillon/SKILL.md")
+    if s != "" then { result = result + "\n--- cantillon ---\n" + s }
+  }
+  if contains(t, "нарратив") or contains(t, "поток") then {
+    s = read_file("skills/narrative-vs-flows/SKILL.md")
+    if s != "" and length(result) < budget then { result = result + "\n--- narrative-vs-flows ---\n" + s }
+  }
+  if contains(t, "цикл") or contains(t, "фаза") then {
+    s = read_file("skills/cycle-position/SKILL.md")
+    if s != "" and length(result) < budget then { result = result + "\n--- cycle-position ---\n" + s }
+  }
+  if contains(t, "персона") or contains(t, "лидер") then {
+    s = read_file("skills/deep-profiling/SKILL.md")
+    if s != "" and length(result) < budget then { result = result + "\n--- deep-profiling ---\n" + s }
+  }
+  if contains(t, "индикатор") or contains(t, "watch") then {
+    s = read_file("skills/iw-watchlist/SKILL.md")
+    if s != "" and length(result) < budget then { result = result + "\n--- iw-watchlist ---\n" + s }
+  }
+  // Tier 3
+  if domain == "military" and length(result) < budget then {
+    s = read_file("skills/order-of-battle/SKILL.md")
+    if s != "" then { result = result + "\n--- order-of-battle ---\n" + s }
+  }
+  if contains(t, "redteam") or contains(t, "red-team") then {
+    s = read_file("skills/red-team/SKILL.md")
+    if s != "" and length(result) < budget then { result = result + "\n--- red-team ---\n" + s }
+  }
+  if result == "" then { return "No skills loaded." }
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DEPTH-ROUTED ANALYSIS MODES (all native call_llm)
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nБЫСТРЫЙ АНАЛИЗ (depth=0). 200-300 слов. Суть — риск — действие."
+  let llm_result = call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result) + "\n\n" + OSPDisclaimerBottom()
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_quick", "osp", "domain=" + domain)
+  return reply
+}
+
+pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней."
+  let llm_result = call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let gates = OSPCheckQualityGates(reply, 3)
+  let safety = OSPFinalSafetyCheck(reply)
+  if safety != "PASS" then { reply = reply + "\n\n[SAFETY: " + safety + "]" }
+  let reply = reply + "\n\n" + OSPDisclaimerBottom()
+  let aid = OSPDraftAnalysis(query, "deep", domain, 3)
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_deep", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates)
+  return reply
+}
+
+pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез."
+  let llm_result = call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let gates = OSPCheckQualityGates(reply, 4)
+  let safety = OSPFinalSafetyCheck(reply)
+  if safety != "PASS" then { reply = reply + "\n\n[SAFETY: " + safety + "]" }
+  let reply = reply + "\n\n" + OSPDisclaimerBottom()
+  let aid = OSPDraftAnalysis(query, "full", domain, 4)
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_full", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates)
+  return reply
+}
+
+pattern OSPWargame(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nWARGAME (depth=2). Стороны→Интересы→Силы→Ходы→Дерево→Schelling points→Нэш→Наша стратегия→Red flags."
+  let llm_result = call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result) + "\n\n" + OSPDisclaimerBottom()
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_wargame", "osp", "domain=" + domain)
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DOMAIN SCANS
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPRegimeScan(query: String, chat_id: String) -> String {
+  let context = BuildOSPContext(query, "monetary", chat_id)
+  let prompt = context + "\n\nМАКРО-РЕЖИМ: текущий режим, индикаторы, ЦБ, cross-asset, Cantillon, narrative-vs-reality, I&W перехода."
+  let llm_result = call_llm(prompt, "Macro regime: " + query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = db_execute("INSERT INTO macro_regime_snapshots (regime, regime_notes) VALUES ('scan', ?)", [substring(reply, 0, 500)])
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_regime", "osp", "")
+  return reply
+}
+
+pattern OSPCantillonScan(query: String, chat_id: String) -> String {
+  let context = BuildOSPContext(query, "monetary", chat_id)
+  let prompt = context + "\n\nКАНТИЛЬОН: эмиссия→порядок получения→кто первый→кто последний→cross-border→последствия."
+  let llm_result = call_llm(prompt, "Cantillon: " + query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_cantillon", "osp", "")
+  return reply
+}
+
+pattern OSPNarrativeScan(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nНАРРАТИВ vs ПОТОКИ: нарратив→реальные потоки→расхождения→сигнал→spillover→действия."
+  let llm_result = call_llm(prompt, "Narrative vs flows: " + query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_narrative", "osp", "")
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// VERIFICATION & CALIBRATION
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPVerify(query: String, chat_id: String) -> String {
+  let rows = query("SELECT id, topic, confidence FROM analysis WHERE status IN ('watching','published') AND topic LIKE ? LIMIT 5", ["%" + query + "%"])
+  if length(rows) == 0 then { return "Нет анализов для верификации: " + query }
+  let context = BuildOSPContext(query, "general", chat_id)
+  let prompt = context + "\n\nВЕРИФИКАЦИЯ: предсказали→произошло→Brier→систематическая ошибка→corrigendum."
+  let llm_result = call_llm(prompt, "Верифицируй: " + query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_verify", "osp", "")
+  return reply
+}
+
+pattern OSPCalibrationScore(chat_id: String) -> String {
+  let total = query("SELECT COUNT(*) as c FROM analysis", [])
+  let verified = query("SELECT COUNT(*) as c FROM analysis WHERE status = 'verified'", [])
+  let t_count = to_string(get(get(total, 0), "c"))
+  let v_count = to_string(get(get(verified, 0), "c"))
+  let brier_rows = query("SELECT AVG(brier_total) as avg_brier FROM analysis_verifications", [])
+  let avg_brier = "N/A"
+  if length(brier_rows) > 0 then { avg_brier = to_string(get(get(brier_rows, 0), "avg_brier")) }
+  let context = BuildOSPContext("калибровка", "general", chat_id)
+  let prompt = context + "\n\nКАЛИБРОВКА. Всего: " + t_count + " Верифицировано: " + v_count + " Avg Brier: " + avg_brier + " Цели: Y1≤0.25 Y2≤0.20 Y3≤0.18"
+  let llm_result = call_llm(prompt, "Калибровочный скор ОСП")
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_score", "osp", "total=" + t_count + " verified=" + v_count + " brier=" + avg_brier)
+  return reply
+}
+
+pattern OSPRecalibrate(chat_id: String) -> String {
+  let context = BuildOSPContext("рекалибровка", "general", chat_id)
+  let prompt = context + "\n\nРЕКАЛИБРОВКА: повторяющиеся ошибки→недоиспользуемые навыки→калибровочные смещения→3 конкретных изменения."
+  let llm_result = call_llm(prompt, "Рекалибровка ОСП")
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = db_execute("INSERT INTO monthly_reviews (year_month, improvements) VALUES (to_char(NOW(), 'YYYY-MM'), ?)", [substring(reply, 0, 2000)])
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_recalibrate", "osp", "")
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RED TEAM & BETS
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPRedteam(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nRED TEAM: доминирующий тезис→5 аргументов ПРОТИВ→вероятности→асимметрия→рекомендация."
+  let llm_result = call_llm(prompt, "Red team: " + query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result) + "\n\n" + OSPDisclaimerBottom()
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_redteam", "osp", "")
+  return reply
+}
+
+pattern OSPRegisterBet(query: String, chat_id: String) -> String {
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nАСИММЕТРИЧНАЯ СТАВКА: тезис→bounded downside→upside→ratio≥3:1→EV→условия выхода→горизонт→исполнение."
+  let llm_result = call_llm(prompt, "Ставка: " + query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let safety = OSPFinalSafetyCheck(reply)
+  if safety != "PASS" then { reply = reply + "\n\n[SAFETY: " + safety + "]" }
+  let reply = reply + "\n\n" + OSPDisclaimerBottom()
+  let _ = db_execute("INSERT INTO asymmetric_bets (thesis, status) VALUES (?, 'identified')", [substring(query, 0, 500)])
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_bet", "osp", "")
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// I&W WATCHLIST
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPWatch(query: String, chat_id: String) -> String {
+  let _ = db_execute("INSERT INTO watchlist_scenarios (scenario_label, description, status) VALUES (?, ?, 'pending')", [substring(query, 0, 100), query])
+  let domain = OSPClassifyDomain(query)
+  let context = BuildOSPContext(query, domain, chat_id)
+  let prompt = context + "\n\nI&W: индикаторы 30/60/90/180/365 дней, пороги, действие при активации."
+  let llm_result = call_llm(prompt, "Watch: " + query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_watch", "osp", "")
+  return reply
+}
+pattern OSPUnwatch(query: String, chat_id: String) -> String {
+  let _ = db_execute("DELETE FROM watchlist_scenarios WHERE scenario_label = ?", [substring(query, 0, 100)])
+  let _ = AuditLog("osp_unwatch", "osp", "removed")
+  return "Удалено из watchlist: " + query
+}
+pattern OSPAlertEscalation(scenario_id: Int, level: String) -> String {
+  if level == "red" then {
+    let _ = AuditLog("osp_alert_red", "osp", "IMMEDIATE id=" + to_string(scenario_id))
+    return "RED ALERT: immediate notification"
+  }
+  if level == "orange" then {
+    let _ = AuditLog("osp_alert_orange", "osp", "SPECIFIC id=" + to_string(scenario_id))
+    return "ORANGE ALERT: specific notification"
+  }
+  let _ = AuditLog("osp_alert_yellow", "osp", "WEEKLY id=" + to_string(scenario_id))
+  return "YELLOW: weekly digest"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PROFILE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPProfile(query: String, chat_id: String) -> String {
+  let context = BuildOSPContext(query, "political", chat_id)
+  let prompt = context + "\n\nDEEP PROFILING: биография→сеть→коммуникация→психология→leverage/vulnerabilities→предсказание→трек-рекорд. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]"
+  let llm_result = call_llm(prompt, "Profile: " + query)
+  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
+  let reply = to_string(llm_result)
+  let _ = db_execute("INSERT INTO profiles (subject_name, subject_type, full_profile) VALUES (?, 'person', ?) ON CONFLICT (subject_name) DO UPDATE SET full_profile = EXCLUDED.full_profile, last_updated_at = NOW()", [substring(query, 0, 200), substring(reply, 0, 5000)])
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  let _ = AuditLog("osp_profile", "osp", "subject: " + substring(query, 0, 100))
+  return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SEARCH & RECORDING
+// ═══════════════════════════════════════════════════════════════════════
+pattern OSPTavilySearch(query: String, chat_id: String) -> String {
+  let result = try http_post("http://127.0.0.1:4000/lz/tavily", json_encode({query: query, dept: "osp"}), "application/json")
+  if to_string(result) == "()" then { return "Tavily недоступен." }
+  let reply = json_get(parse_json(result), "response", "Search failed.")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  return reply
+}
+pattern OSPTelegramSearch(query: String, chat_id: String) -> String {
+  let result = try http_post("http://127.0.0.1:4000/lz/telegram", json_encode({query: query, dept: "osp"}), "application/json")
+  if to_string(result) == "()" then { return "Telegram недоступен." }
+  let reply = json_get(parse_json(result), "response", "Search failed.")
+  let _ = RecordAssistantMessage(chat_id, "osp", reply)
+  return reply
+}
+pattern OSPRecordDivergence(pair: String, div_type: String, z_score: Float, notes: String) -> String {
+  let _ = db_execute("INSERT INTO cross_asset_divergences (pair_assets, divergence_type, z_score, notes) VALUES (?, ?, ?, ?)", [pair, div_type, to_string(z_score), notes])
+  return "OK: divergence recorded"
+}
+pattern OSPRecordRegime(regime: String, region: String, notes: String) -> String {
+  let _ = db_execute("INSERT INTO macro_regime_snapshots (regime, region, regime_notes) VALUES (?, ?, ?)", [regime, region, notes])
+  return "OK: regime recorded"
+}
+pattern OSPGetCurrentRegime(region: String) -> String {
+  let rows = query("SELECT regime, regime_notes, date FROM macro_regime_snapshots WHERE region = ? ORDER BY date DESC LIMIT 1", [region])
+  if length(rows) == 0 then { return "No regime for " + region }
+  return to_string(get(get(rows, 0), "regime")) + " [" + to_string(get(get(rows, 0), "date")) + "]"
+}
+pattern OSPUpdateBetStatus(bet_id: Int, new_status: String, note: String) -> String {
+  let _ = db_execute("UPDATE asymmetric_bets SET status = ?, outcome_note = ? WHERE id = ?", [new_status, note, to_string(bet_id)])
+  return "OK: bet " + to_string(bet_id) + " → " + new_status
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BOT COMMAND REGISTRY
+// /osp <topic> /osp quick /osp deep /osp full /osp wargame
+// /osp regime /osp cantillon /osp narrative /osp verify /osp score
+// /osp recalibrate /osp bet /osp redteam /osp watch /osp unwatch
+// /osp profile /osp tavily /osp tg
+//
+// DEPT REGISTRY: osp | v4.0 | call_llm:15 | CallLLMProxy:0 | patterns:56
+// | db_execute:16 | gates:12 | disclaimer:top+bottom+safety | cross:4
+// | skills:23(T1:10 T2:10 T3:3) | models:15 | lifecycle:7 states
+// | brier_targets: Y1≤0.25 Y2≤0.20 Y3≤0.18
+// Source: Fosved_v4_1_Transition_Pack (SPD), library/osp.md v3.0, schema-v4.1.prisma

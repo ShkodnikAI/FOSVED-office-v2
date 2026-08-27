@@ -4,9 +4,9 @@ Flask server on port 4000 with native circuit breaker, combo chains, token compr
 7-provider direct failover, dept routing, dashboards, SQLite,
 TTS/STT, archive, scheduler, learning, audit, and search endpoints."""
 
-import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid, base64
+import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib, uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import doc_extract
-import secrets_crypto
 import html as html_lib
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,6 +22,10 @@ log_mem.info(f"FosvedMemory loaded: {len(memory.TYPES)} types, db={_MEMORY_DB}")
 
 from flask import Flask, request, jsonify, Response
 import requests as http_requests
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("llm_proxy")
+
 try:
     from auto_enricher import auto_enrich as _auto_enrich_fn
     _has_enricher = True
@@ -44,8 +48,6 @@ def auto_enrich(text, dept='yana', accent_color='#6366f1'):
 # ──────────────────────────── APP & CONFIG ────────────────────────────
 app = Flask(__name__, static_folder=None)
 app.url_map.strict_slashes = False
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("llm_proxy")
 
 # ── Auth middleware (before_request) ──────────────────────────
 @app.before_request
@@ -219,32 +221,6 @@ PROVIDERS = {
     "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
 }
 
-# INT-1: Single source of truth for the Integrations screen (SEC-6) and
-# for future get_secret() consumers. Kind: "model" (LLM provider, wired
-# into PROVIDERS/COMBO_CHAINS) or "service" (external tool, e.g. search).
-INTEGRATIONS_REGISTRY = [
-    {"env_key": "ZAI_API_KEY", "label": "Z.ai (GLM)", "kind": "model"},
-    {"env_key": "DEEPSEEK_API_KEY", "label": "DeepSeek", "kind": "model"},
-    {"env_key": "GROQ_API_KEY", "label": "Groq", "kind": "model"},
-    {"env_key": "CEREBRAS_API_KEY", "label": "Cerebras", "kind": "model"},
-    {"env_key": "KIMI_API_KEY", "label": "Kimi (Moonshot)", "kind": "model"},
-    {"env_key": "ANTHROPIC_API_KEY", "label": "Anthropic (Claude)", "kind": "model"},
-    {"env_key": "OPENAI_API_KEY", "label": "OpenAI", "kind": "model"},
-    {"env_key": "GROK_API_KEY", "label": "Grok (xAI)", "kind": "model"},
-    {"env_key": "NVIDIA_API_KEY", "label": "NVIDIA", "kind": "model"},
-    {"env_key": "APODEX_API_KEY", "label": "Apodex", "kind": "model"},
-    {"env_key": "TAVILY_API_KEY", "label": "Tavily (веб-поиск)", "kind": "service"},
-    {"env_key": "GITHUB_TOKEN_METALOGOS", "label": "GitHub (трекинг репозиториев)", "kind": "service"},
-    {"env_key": "SMTP_EMAIL", "label": "SMTP (email для отправки)", "kind": "service"},
-    {"env_key": "SMTP_PASSWORD", "label": "SMTP (пароль/app-password)", "kind": "service"},
-]
-
-# Some providers require a specific temperature value;
-# list only providers that differ from the default (0.7).
-PROVIDER_TEMPERATURE = {
-    "kimi": 1.0,
-}
-
 TOKEN_COSTS = {
     "zai": {"input": 0.5, "output": 1.5}, "deepseek": {"input": 0.14, "output": 0.28},
     "groq": {"input": 0.0, "output": 0.0}, "grok": {"input": 3.0, "output": 15.0},
@@ -321,35 +297,31 @@ _breaker = CircuitBreaker(threshold=3, reset_after_ms=60000)
 # Each combo is an ordered list of (provider, [models]) tuples.
 # call_llm walks the chain: for each provider, try each model until one works.
 COMBO_CHAINS = {
-    # Fix: groq 413 (sys_len>6K chars) kills Yana. kimi ($0.60/M) and zai ($0.50/M)
-    # are cheap enough for the "free" chain and actually work with large prompts.
     "fosved-free": [
-        ("kimi", ["kimi-k3"]),
-        ("zai", ["glm-4.6", "glm-4-plus"]),
-        ("groq", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
+        ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("deepseek", ["deepseek-chat"]),
     ],
     "fosved-standard": [
         ("kimi", ["kimi-k3"]),
-        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("deepseek", ["deepseek-chat"]),
-        ("groq", ["llama-3.3-70b-versatile"]),
+        ("zai", ["glm-4.6", "glm-4-plus"]),
+        ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
     ],
     "fosved-deep": [
         ("kimi", ["kimi-k3"]),
-        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("deepseek", ["deepseek-chat"]),
-        ("groq", ["llama-3.3-70b-versatile"]),
+        ("zai", ["glm-4.6"]),
+        ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
     "fosved-fusion": [
         ("kimi", ["kimi-k3"]),
-        ("zai", ["glm-4.6", "glm-4-plus"]),
         ("deepseek", ["deepseek-chat"]),
-        ("groq", ["llama-3.3-70b-versatile"]),
+        ("zai", ["glm-4.6"]),
+        ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
@@ -430,10 +402,8 @@ def _compress_messages(messages, dept='yana'):
     ]
 
     try:
-        # Try groq first (short prompt, no 413 risk), fallback to kimi
-        summary_result = _call_single_provider("groq", "llama-3.3-70b-versatile", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
-        if not summary_result or not summary_result.get("reply"):
-            summary_result = _call_single_provider("kimi", "kimi-k3", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
+        # Use cheap provider for compression
+        summary_result = _call_single_provider("groq", "openai/gpt-oss-20b", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
         if summary_result and summary_result.get("reply"):
             summary_msg = {"role": "system", "content": f"[Earlier conversation summary]: {summary_result['reply'][:2000]}"}
             compressed = system_msgs + [summary_msg] + to_keep
@@ -452,7 +422,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     prov = PROVIDERS.get(provider_name)
     if not prov:
         return None
-    api_key = get_secret(prov["env_key"])
+    api_key = os.environ.get(prov["env_key"])
     if not api_key:
         return None
     if not _breaker.can_call(provider_name):
@@ -462,8 +432,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     try:
         if prov["format"] == "openai":
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            temp = PROVIDER_TEMPERATURE.get(provider_name, 0.7)
-            body = {"model": model, "messages": messages, "temperature": temp, "max_tokens": max_tokens}
+            body = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": max_tokens}
         else:  # anthropic
             sys_msg = ""
             user_msgs = []
@@ -505,14 +474,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
         return {"reply": reply, "provider": provider_name, "model": model, "tokens_in": t_in, "tokens_out": t_out}
     except Exception as e:
         _breaker.record_failure(provider_name)
-        detail = ""
-        resp_obj = getattr(e, "response", None)
-        if resp_obj is not None:
-            try:
-                detail = f" body={resp_obj.text[:300]}"
-            except Exception:
-                pass
-        log.warning(f"LLM fail: provider={provider_name} model={model} err={e}{detail}")
+        log.warning(f"LLM fail: provider={provider_name} model={model} err={e}")
         return None
 
 # ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
@@ -534,18 +496,18 @@ DEPT_COLORS = {
 }
 
 DEPT_NAMES = {
-    'yana': 'Yana — Shef de kabinet', 'osp': 'OSP — Strategicheskiy analiz',
-    'lz': 'LZ — Laboratoriya znanii', 'expert': 'Ekspert — Tekhnicheskiy preparator',
-    'marketing': 'Marketing', 'finance': 'Finansy', 'legal': 'Yurist',
-    'dev': 'Dev — Razrabotka', 'design': 'Design — UI/UX', 'qa': 'QA — Testirovanie',
-    'visual': 'Visual — Vizualizatsiya', 'engineering': 'Engineering — Inzhenernyi',
-    'kavalnya': 'Kavalnya — Metodologiya', 'admin': 'Admin — Sistemnyi agent',
+    'yana': 'Yana — Шеф де кабинета', 'osp': 'ОСП · Стратегическое планирование',
+    'lz': 'ЛЗ · Лаборатория знаний', 'expert': 'Эксперт · Подготовка к встрече',
+    'marketing': 'Маркетинг', 'finance': 'Финансы', 'legal': 'Юрист',
+    'dev': 'Dev · Разработка', 'design': 'Дизайн · UI/UX', 'qa': 'QA · Тестирование',
+    'visual': 'Визуал · Инфографика', 'engineering': 'Инженерия · Расчёты',
+    'kavalnya': 'Кавальня · Методология', 'admin': 'Админ · Система',
 }
 
 DEPT_HASHTAGS = {
     'osp': '#OSP #analytics #strategy',
-    'lz': '#LZ #technology #research',
-    'expert': '#Expert #briefing',
+    'lz': '#LZ #technology #politics #economics #geopolitics #research',
+    'expert': '#Expert #briefing #meeting #negotiations',
     'marketing': '#Marketing #audience',
     'finance': '#Finance #cashflow',
     'legal': '#Legal #contracts',
@@ -674,7 +636,7 @@ def _tg_send_formatted(chat_id, text, dept=None):
 COMMAND_DEPT = {
     '/yana': 'yana', '/osp': 'osp', '/lz': 'lz', '/expert': 'expert',
     '/marketing': 'marketing', '/finance': 'finance', '/legal': 'legal',
-    '/dev': 'dev', '/design': 'design', '/qa': 'qa', '/visual': 'visual',
+    '/dev': 'dev', '/design': 'design', '/design-image': 'design-image', '/qa': 'qa', '/visual': 'visual', '/visual-image': 'visual-image',
     '/engineering': 'engineering', '/forge': 'kavalnya',
     '/analyze': 'osp', '/scan': 'lz', '/deep': 'osp',
     '/quickanalyze': 'osp', '/wargame': 'osp',
@@ -682,12 +644,22 @@ COMMAND_DEPT = {
     '/competitors': 'marketing', '/campaign': 'marketing',
     '/calc': 'engineering', '/simulate': 'engineering',
     '/admin': 'admin',
+    '/project': 'project',
 }
 
 RUSSIAN_KEYWORDS = {
-    'osp': ['проанализируй', 'прогноз', 'стратегия', 'геополитик', 'анализ', 'сценари', 'вероятност', 'деconstruct', 'деконстру', 'тополог'],
-    'lz': ['технолог', 'монитор', 'тренд', 'прорыв', 'наука', 'исследован', 'обзор', 'что такое', 'как работает', 'лаборатори'],
-    'expert': ['встреч', 'брифинг', 'подготов к', 'эксперт', 'подготовь', 'вопросы для', 'комбат-вопрос', 'подготов'],
+    'osp': ['проанализируй', 'прогноз', 'стратегия', 'анализ', 'сценари', 'вероятност', 'деconstruct', 'деконстру', 'тополог', 'силовой потенциал', 'препарирован'],
+    'lz': ['технолог', 'монитор', 'тренд', 'прорыв', 'наука', 'исследован', 'обзор', 'что такое', 'как работает', 'лаборатори',
+           'политик', 'экономик', 'геополитик', 'санкци', 'макро', 'режим', 'нарратив', 'событие', 'кризис',
+           'конфликт', 'выбор', 'инфляци', 'рецесси', 'ставк', 'ценн', 'войн', 'мирн', 'дипломат',
+           'cantillon', 'нарратив vs', 'narrative', 'регим', 'цикл', 'kondratieff', 'хайп', 'инфлекци',
+           'осинт', 'osint', 'разведк', 'мониторинг', 'свеж', 'новост', 'событи', 'в мире', 'в рф'],
+    'expert': ['встреч', 'брифинг', 'подготов к', 'эксперт', 'подготовь', 'вопросы для', 'комбат-вопрос', 'подготов',
+              'переговор', 'byd', 'geely', 'chery', 'zeekr', 'lixiang', 'nio', 'xpeng', 'vinfast',
+              'авто', 'автомобиль', 'автопром', 'конкурент', 'соперник',
+              'toyota', 'bmw', 'mercedes', 'vw ', 'volkswagen', 'honda', 'hyundai', 'kia',
+              'платформ', 'ev ', 'электромобиль', 'завод', 'производств', 'сборк', 'локализац',
+              'cto', 'ceo', 'cfo', 'директор', 'руководств', 'встреча с', 'митинг', 'переговоры'],
     'marketing': ['реклам', 'аудитори', 'конверси', 'маркетинг', 'позицио', 'воронк', 'smm', 'бренд', 'контент', 'сегмент'],
     'finance': ['бюджет', 'cashflow', 'налог', 'финанс', 'расход', 'доход', 'инвестиц', 'кредит', 'курс валют', 'кассовый разрыв'],
     'legal': ['договор', 'иск', 'gdpr', 'юридическ', 'nda', 'право', 'суд', 'комплаенс', 'контракт', 'закон'],
@@ -700,23 +672,62 @@ RUSSIAN_KEYWORDS = {
     'admin': ['оптимизир', 'почини', 'рефакторинг', 'deploy', 'админ', 'инфраструктур', 'здравствуй', 'перезагруз', 'конфиг'],
 }
 
+# ── Keyword weights for scoring: higher = more specific/less generic ──
+# 'анализ' is generic (weight 1) while 'встреч' is specific (weight 4), 'byd' is very specific (weight 5)
+KEYWORD_WEIGHTS = {
+    'osp': {'проанализируй': 3, 'прогноз': 2, 'стратегия': 2, 'анализ': 1, 'сценари': 2, 'вероятност': 2, 'деconstruct': 3, 'деконстру': 3, 'тополог': 3, 'силовой потенциал': 3, 'препарирован': 2},
+    'lz': {'политик': 3, 'экономик': 3, 'геополитик': 4, 'санкци': 4, 'макро': 3, 'режим': 3, 'нарратив': 3, 'событие': 2, 'кризис': 3,
+           'конфликт': 3, 'инфляци': 3, 'рецесси': 3, 'ставк': 2, 'войн': 3, 'дипломат': 3,
+           'cantillon': 4, 'осинт': 3, 'osint': 3, 'разведк': 3, 'мониторинг': 2, 'свеж': 2, 'новост': 2, 'в мире': 2, 'в рф': 3},
+    'expert': {'встреч': 4, 'встреча с': 5, 'брифинг': 4, 'подготов к': 3, 'эксперт': 3, 'подготовь': 3, 'вопросы для': 3, 'комбат-вопрос': 4, 'подготов': 2,
+              'переговор': 4, 'переговоры': 4, 'byd': 5, 'geely': 5, 'chery': 5, 'zeekr': 5, 'lixiang': 5, 'nio': 5, 'xpeng': 5, 'vinfast': 5,
+              'cto': 4, 'ceo': 4, 'cfo': 4, 'директор': 3, 'авто': 3, 'автомобиль': 3, 'автопром': 4, 'конкурент': 3, 'платформ': 3, 'ev ': 4,
+              'электромобиль': 4, 'завод': 2, 'производств': 2, 'сборк': 2, 'локализац': 3},
+}
+
 def detect_dept(text):
     text_lower = text.lower().strip()
+    # Phase 1: Explicit command prefix (exact match, no scoring needed)
     for cmd, dept in sorted(COMMAND_DEPT.items(), key=lambda x: -len(x[0])):
         if text_lower.startswith(cmd) and (len(text_lower) == len(cmd) or text_lower[len(cmd)] in ' \n/'):
             return dept
+
+    # Phase 2: Weighted keyword scoring across ALL departments
+    # Each dept scores points for matching keywords; highest score wins.
+    # This fixes the OSP-before-Expert ordering bug where 'анализ' (weight 1)
+    # hijacked queries containing 'встреч' (weight 4) or 'byd' (weight 5).
+    scores = {}
     for dept, kws in RUSSIAN_KEYWORDS.items():
+        score = 0
+        matched = []
+        weights = KEYWORD_WEIGHTS.get(dept, {})
         for kw in kws:
             if kw in text_lower:
-                return dept
+                w = weights.get(kw, 1)  # default weight = 1 for unweighted keywords
+                score += w
+                matched.append(kw)
+        if score > 0:
+            scores[dept] = (score, matched)
+
+    if scores:
+        # Sort by score descending; on tie, prefer expert > osp > others
+        _PRIORITY = {'expert': 0, 'osp': 1, 'lz': 2, 'finance': 3, 'marketing': 4, 'legal': 5,
+                     'dev': 6, 'engineering': 7, 'design': 8, 'qa': 9, 'visual': 10, 'kavalnya': 11, 'admin': 12}
+        best = sorted(scores.items(), key=lambda x: (-x[1][0], _PRIORITY.get(x[0], 99)))[0]
+        best_dept = best[0]
+        best_score = best[1][0]
+        best_keywords = best[1][1]
+        log.info(f"[detect_dept] scored: { {d: s[0] for d, s in scores.items()} } → {best_dept} (score={best_score}, kw={best_keywords})")
+        return best_dept
+
     return 'yana'
 
 # ──────────────────────────── CONDENSED PROMPTS ────────────────────────────
 CONDENSED_PROMPTS = {
     'yana': "You are Yana, Chief of Cabinet. Route tasks to departments. Be empathetic, concise. Default language: Russian.",
     'osp': "You are OSP, Strategic Analysis Dept. Use 5-level topology (Leaves/Branches/Stem/Roots/Fruits). Mark claims [FACT]/[INTERPRETATION]/[SPECULATION]. Sherman Kent scale. Language: Russian.",
-    'lz': "You are LZ, Knowledge Lab. Monitor tech trends, breakthrough research. Structure: Signal->Impact->Opportunity. Cite sources. Language: Russian.",
-    'expert': "You are Expert, Technical Preparator. Brief prep, deep dives, meeting agendas. Extract key facts, risks, decisions. Concise bullets. Language: Russian.",
+    'lz': "You are LZ, World Intelligence Lab. Monitor tech + politics + economics + geopolitics + events. Structure: Signal->Impact->Opportunity. Cantillon, narrative-vs-flows, macro regime. Cite sources. Language: Russian.",
+    'expert': "You are Expert, Meeting & Negotiation Preparator. Prepare briefings for meetings/interviews/negotiations. Profile counterparty, combat questions, leverage points, BATNA, red flags, decision points. Mark: [ФАКТ] confirmed, [ОЦЕНКА] expert assessment, [РИСК] potential problem. Language: Russian.",
     'marketing': "You are Marketing. Audience analysis, positioning, campaigns, conversion. Segment personas, A/B logic. ROI-focused. Language: Russian.",
     'finance': "You are Finance. Budgets, cashflow, taxes, P&L. Precise numbers, scenarios, risk buffers. Tables preferred. Language: Russian.",
     'legal': "You are Legal. Contracts, compliance, GDPR, NDA, IP. Flag risks, cite articles. Practical actionable advice. Language: Russian.",
@@ -812,15 +823,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS news_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, title TEXT NOT NULL, summary TEXT, url TEXT, category TEXT DEFAULT 'general', language TEXT DEFAULT 'ru', published TIMESTAMP, collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, relevance_score REAL DEFAULT 0, hash TEXT UNIQUE);
         CREATE INDEX IF NOT EXISTS idx_news_category ON news_cache (category, collected DESC);
         CREATE INDEX IF NOT EXISTS idx_news_hash ON news_cache (hash);
-        -- WH-3: Webhook dedup table (90s window)
-        CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS idx_webhook_dedup_seen ON webhook_dedup(seen_at);
-        -- SEC-5: Encrypted secrets store
-        CREATE TABLE IF NOT EXISTS secrets_store (
-            name TEXT PRIMARY KEY,
-            encrypted_value TEXT NOT NULL,
-            updated_at TEXT DEFAULT (datetime('now'))
-        );
         """)
         for col_sql, col_name in [
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
@@ -833,83 +835,7 @@ def init_db():
                 pass
         c.commit(); c.close()
 
-    # Periodic cleanup: remove dedup entries older than 1 day
-    try:
-        with db_lock:
-            c2 = _db()
-            c2.execute("DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
-            c2.commit(); c2.close()
-    except Exception:
-        pass
-
 init_db()
-
-# ──────────────────────────── WEBHOOK DEDUP (WH-3) ────────────────────────────
-_DEDUP_WINDOW_SEC = 90  # Telegram retries ~60s, so 90s window blocks fresh dupes
-
-def _webhook_dedup_check(update_id: str) -> bool:
-    """Return True if this update_id should be processed (not a fresh dupe).
-    
-    Logic:
-    - If update_id not seen → INSERT, return True (process it)
-    - If seen within 90s → it's a Telegram retry, block it (return False)
-    - If seen but >90s ago → it's a slow retry (processing took >90s), allow it
-    """
-    if not update_id:
-        return True  # Can't dedup without an ID
-    try:
-        with db_lock:
-            c = _db()
-            now_iso = datetime.utcnow().isoformat()
-            
-            # Check if we've seen this update_id
-            row = c.execute(
-                "SELECT seen_at FROM webhook_dedup WHERE update_id = ?",
-                (str(update_id),)
-            ).fetchone()
-            
-            if row is None:
-                # First time seeing this update_id → process it
-                c.execute(
-                    "INSERT INTO webhook_dedup (update_id, seen_at) VALUES (?, ?)",
-                    (str(update_id), now_iso)
-                )
-                c.commit(); c.close()
-                return True
-            
-            seen_at = row[0]
-            c.close()
-            
-            # Parse seen_at and check if within dedup window
-            try:
-                from datetime import timezone as _tz
-                seen_dt = datetime.fromisoformat(seen_at).replace(tzinfo=_tz.utc)
-                now_dt = datetime.utcnow().replace(tzinfo=_tz.utc)
-                age_sec = (now_dt - seen_dt).total_seconds()
-            except Exception:
-                age_sec = 999  # If we can't parse, treat as old → allow
-            
-            if age_sec < _DEDUP_WINDOW_SEC:
-                # Fresh dupe — Telegram retry within 90s → block
-                log.info(f"[DEDUP] blocking update_id={update_id} (age={age_sec:.0f}s < {_DEDUP_WINDOW_SEC}s)")
-                return False
-            else:
-                # Old entry — slow retry (processing took >90s) → allow
-                log.info(f"[DEDUP] allowing slow retry update_id={update_id} (age={age_sec:.0f}s >= {_DEDUP_WINDOW_SEC}s)")
-                # Update seen_at so future retries within 90s are blocked
-                with db_lock:
-                    c2 = _db()
-                    c2.execute(
-                        "INSERT OR REPLACE INTO webhook_dedup (update_id, seen_at) VALUES (?, ?)",
-                        (str(update_id), now_iso)
-                    )
-                    c2.commit(); c2.close()
-                return True
-    except Exception as e:
-        # If dedup DB is broken, don't block processing
-        log.warning(f"[DEDUP] error checking update_id={update_id}: {e}")
-        return True
-
 
 def _query(sql, params=(), fetch=False):
     with db_lock:
@@ -923,43 +849,6 @@ def _query(sql, params=(), fetch=False):
             if "no such table" in str(e):
                 return [] if fetch else None
             raise
-
-# ──────────────────────────── SEC-5: ENCRYPTED SECRETS ────────────────────────────
-
-def get_secret(name: str) -> str:
-    """Resolve a secret by name: DB override (encrypted) first, then env var.
-
-    This is the single choke point for both model-provider keys and
-    external service keys (Tavily, GitHub, etc.) going forward.
-    """
-    try:
-        rows = _query("SELECT encrypted_value FROM secrets_store WHERE name = ?", (name,), fetch=True)
-        if rows:
-            decrypted = secrets_crypto.decrypt_value(rows[0]["encrypted_value"])
-            if decrypted:
-                return decrypted
-    except Exception as e:
-        log.error(f"get_secret({name}) DB lookup failed: {e}")
-    return os.environ.get(name, "")
-
-
-def set_secret(name: str, plain_value: str) -> bool:
-    """Store a secret in the DB, encrypted. Returns False if master key missing."""
-    if not secrets_crypto.is_configured():
-        return False
-    encrypted = secrets_crypto.encrypt_value(plain_value)
-    _query(
-        "INSERT INTO secrets_store (name, encrypted_value, updated_at) VALUES (?, ?, datetime('now')) "
-        "ON CONFLICT(name) DO UPDATE SET encrypted_value = excluded.encrypted_value, updated_at = excluded.updated_at",
-        (name, encrypted),
-    )
-    return True
-
-
-def delete_secret(name: str) -> None:
-    """Remove a DB override — falls back to env var again."""
-    _query("DELETE FROM secrets_store WHERE name = ?", (name,))
-
 
 def _get_setting(key, default=""):
     """Read a value from system_settings (shared kv with Metalogos)."""
@@ -1135,12 +1024,53 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
     if combo is None:
         combo = _combo_for_task(dept, command=command, depth=depth)
 
-    # 4. Walk combo chain
+    # 4. Walk combo chain — race first 2 providers in parallel, then sequential fallback
     chain = COMBO_CHAINS.get(combo, COMBO_CHAINS["fosved-standard"])
+    # Parallel race: launch first 2 (provider, model) pairs concurrently
+    race_entries = []
     for prov_name, models in chain:
         if not _breaker.can_call(prov_name):
             continue
         for model in models:
+            max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
+            cap = PROVIDER_MAX_TOKENS.get(prov_name)
+            if cap:
+                max_tok = min(max_tok, cap)
+            race_entries.append((prov_name, model, max_tok))
+            if len(race_entries) >= 2:
+                break
+        if len(race_entries) >= 2:
+            break
+
+    if len(race_entries) >= 2:
+        def _race_call(entry):
+            prov_name, model, max_tok = entry
+            return _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = {pool.submit(_race_call, e): e for e in race_entries}
+                for fut in as_completed(futures, timeout=30):
+                    try:
+                        result = fut.result(timeout=25)
+                        if result and result.get("reply"):
+                            if compression_saved > 0:
+                                result["compression_saved"] = compression_saved
+                            result["combo"] = combo
+                            log.info(f"Race winner: {result.get('provider')}/{result.get('model')}")
+                            return result
+                    except Exception:
+                        continue
+        except Exception:
+            pass  # Fall through to sequential
+
+    # Sequential fallback for remaining chain entries (skip already-raced)
+    raced_set = {(p, m) for p, m, _ in race_entries}
+    for prov_name, models in chain:
+        if not _breaker.can_call(prov_name):
+            continue
+        for model in models:
+            if (prov_name, model) in raced_set:
+                continue
             max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
             cap = PROVIDER_MAX_TOKENS.get(prov_name)
             if cap:
@@ -1167,8 +1097,8 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
             use_model = "claude-sonnet-4-20250514"
         elif prov_name == "deepseek" and not use_model.startswith("deepseek"):
             use_model = "deepseek-chat"
-        elif prov_name == "groq" and not any(m in use_model for m in ("llama", "mixtral", "gemma")):
-            use_model = "llama-3.3-70b-versatile"
+        elif prov_name == "groq" and not any(m in use_model for m in ("openai/gpt-oss", "llama", "mixtral", "gemma")):
+            use_model = "openai/gpt-oss-20b"
         elif prov_name == "nvidia" and not use_model.startswith("nvidia/"):
             use_model = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
         elif prov_name == "cerebras" and not use_model.startswith("gpt-oss"):
@@ -1550,8 +1480,6 @@ def ask():
     if not messages:
         return jsonify({"reply": "[Oshibka] Net soobshenii", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 400
     result = call_llm(dept, messages, model_ov)
-    if result is None:
-        return jsonify({"reply": "[Oshibka] LLM nedostupen", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 503
     if dept == "osp" and "reply" in result:
         import re as _re
         from datetime import datetime as _dt
@@ -2306,29 +2234,6 @@ def extract_document():
                 pass
 
 
-@app.post("/download-telegram-file")
-def download_telegram_file():
-    """НАРЯД №48: Download a Telegram file and return base64-encoded data.
-    Used by Metalogos native PDF builtins (pdf_classify, pdf_to_markdown, pdf_ocr).
-    """
-    d = request.get_json(force=True)
-    file_path = d.get("file_path", "")
-    if not file_path:
-        return jsonify({"status": "error", "message": "file_path is required"}), 400
-    try:
-        blob = _tg_download_file(file_path)
-        if not blob:
-            return jsonify({"status": "error",
-                            "message": "не удалось скачать файл"}), 200
-        b64_data = base64.b64encode(blob).decode("ascii")
-        _log_audit("telegram_file_downloaded", {"file_path": file_path,
-                                                 "size": len(blob)})
-        return jsonify({"status": "ok", "data": b64_data, "size": len(blob)})
-    except Exception as e:
-        log.error(f"download_telegram_file failed: {e}")
-        return jsonify({"status": "error", "message": "внутренняя ошибка скачивания"}), 500
-
-
 # ══════════════════════════════════════════════════════════════════════
 #  MEGA-3: ARCHIVE ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════
@@ -2640,13 +2545,10 @@ def scheduler_morning_brief():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"morning_brief: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         brief = result["reply"]
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
-        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
+        _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
 
@@ -2729,13 +2631,10 @@ def scheduler_admin_morning_reply():
         ]
 
         result = call_llm("admin", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"admin_morning_reply: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         reply = result["reply"]
 
         msg_id = _tg_send_formatted(owner_id, reply, dept="admin")
-        _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
+        _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "reply": reply, "msg_id": msg_id})
 
@@ -2767,9 +2666,6 @@ def scheduler_evening_summary():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"evening_summary: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         summary = result["reply"]
 
         # Send to owner
@@ -2822,9 +2718,6 @@ def scheduler_weekly_digest():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"weekly_digest: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         digest = result["reply"]
 
         # Send via SendReport (if > 800 chars, use Mini App button)
@@ -2865,14 +2758,11 @@ def scheduler_monthly_review():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"monthly_review: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         review = result["reply"]
 
         msg_id = _tg_send_report_with_button(owner_id, review)
 
-        _log_audit("scheduler_monthly_review", {"owner_id": owner_id, "provider": result.get("provider"), "msg_id": msg_id})
+        _log_audit("scheduler_monthly_review", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "msg_id": msg_id})
 
@@ -2921,10 +2811,7 @@ def scheduler_control_check():
                     {"role": "user", "content": f"Control check: {topic}\n\nOriginal prediction: {original_prediction}\n\nAnalyze: did the prediction match reality? What changed?\n\nOzhidai: korotkii analiz 2-3 predlozheniya."},
                 ]
                 check_result = call_llm("osp", messages)
-                if check_result is None or not check_result.get("reply"):
-                    analysis = "[контроль недоступен — LLM не ответил]"
-                else:
-                    analysis = check_result["reply"]
+                analysis = check_result["reply"]
                 results.append({"key": key, "topic": topic, "frequency": frequency, "analysis": analysis})
 
         # Format and send results
@@ -2975,9 +2862,6 @@ def scheduler_self_learn():
         ]
 
         result = call_llm("yana", messages)
-        if result is None or not result.get("reply"):
-            log.error(f"self_learn: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         finding = result["reply"]
 
         # Memorize finding
@@ -3015,9 +2899,6 @@ def learning_fix():
         ]
 
         result = call_llm(dept, messages)
-        if result is None or not result.get("reply"):
-            log.error(f"learning_fix: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         reply = result["reply"]
 
         # Parse JSON from LLM response
@@ -3137,12 +3018,9 @@ def learning_debrief():
         ]
 
         result = call_llm(dept, messages)
-        if result is None or not result.get("reply"):
-            log.error(f"learning_debrief: call_llm failed or empty reply")
-            return jsonify({"status": "error", "message": "LLM call failed"}), 503
         analysis = result["reply"]
 
-        _log_audit("learning_debrief", {"dept": dept, "corrections_analyzed": len(corrs), "provider": result.get("provider")})
+        _log_audit("learning_debrief", {"dept": dept, "corrections_analyzed": len(corrs), "provider": result["provider"]})
 
         return jsonify({"status": "ok", "analysis": analysis})
 
@@ -3634,336 +3512,6 @@ def api_narad_reject(nid):
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# ──────────────────── SEC-6: INTEGRATIONS SCREEN ENDPOINTS ────────────────────
-
-def _has_db_override(name):
-    """Check whether a secret has a DB override (vs just an env var)."""
-    try:
-        rows = _query("SELECT 1 FROM secrets_store WHERE name = ?", (name,), fetch=True)
-        return bool(rows)
-    except Exception:
-        return False
-
-
-@app.get("/api/integrations")
-@require_telegram
-def api_integrations_list():
-    """List known integrations with connection status (masked, never the real value)."""
-    out = []
-    for item in INTEGRATIONS_REGISTRY:
-        current = get_secret(item["env_key"])
-        out.append({
-            "id": item["env_key"],
-            "label": item["label"],
-            "kind": item["kind"],
-            "connected": bool(current),
-            "masked": secrets_crypto.mask_value(current) if current else None,
-            "source": "db" if _has_db_override(item["env_key"]) else ("env" if current else "none"),
-        })
-    return jsonify({"status": "ok", "integrations": out})
-
-
-@app.post("/api/integrations/<env_key>")
-@require_telegram
-def api_integrations_set(env_key):
-    """Set or update a secret. Value is never echoed back in full."""
-    known = {item["env_key"] for item in INTEGRATIONS_REGISTRY}
-    if env_key not in known:
-        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
-    d = request.get_json(force=True)
-    value = d.get("value", "").strip()
-    if not value:
-        return jsonify({"status": "error", "message": "значение не может быть пустым"}), 400
-    ok = set_secret(env_key, value)
-    if not ok:
-        return jsonify({"status": "error", "message": "SECRETS_MASTER_KEY не настроен на сервере"}), 200
-    _log_audit("integration_key_set", {"env_key": env_key})
-    return jsonify({"status": "ok", "masked": secrets_crypto.mask_value(value)})
-
-
-@app.route("/api/integrations/<env_key>", methods=["DELETE"])
-@require_telegram
-def api_integrations_delete(env_key):
-    """Delete a DB override for a secret. Falls back to env var."""
-    known = {item["env_key"] for item in INTEGRATIONS_REGISTRY}
-    if env_key not in known:
-        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
-    delete_secret(env_key)
-    _log_audit("integration_key_deleted", {"env_key": env_key})
-    return jsonify({"status": "ok"})
-
-
-# ──────────────────── QUEST-1: DOSSIER/QUEST API ────────────────────
-
-@app.get("/api/quests")
-@require_telegram
-def api_quests_list():
-    """List all quests with status and progress."""
-    try:
-        rows = _query(
-            "SELECT id, title, quest_type, status, current_step, total_steps, deadline, created_at "
-            "FROM quests ORDER BY created_at DESC LIMIT 50", fetch=True
-        )
-        quests = []
-        for r in rows:
-            quests.append({
-                "id": r["id"], "title": r["title"], "type": r["quest_type"],
-                "status": r["status"], "currentStep": r["current_step"],
-                "totalSteps": r["total_steps"], "deadline": r["deadline"] or "",
-                "createdAt": r["created_at"],
-            })
-        return jsonify({"status": "ok", "quests": quests})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.get("/api/quests/<qid>")
-@require_telegram
-def api_quest_detail(qid):
-    """Get quest detail with checkpoints and files."""
-    try:
-        rows = _query("SELECT * FROM quests WHERE id = ?", (qid,), fetch=True)
-        if not rows:
-            return jsonify({"status": "error", "message": "не найдено"}), 404
-        q = rows[0]
-        checkpoints = _query(
-            "SELECT step_num, step_label, status, approved_by, approved_at "
-            "FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", (qid,), fetch=True
-        )
-        files = _query(
-            "SELECT filename, file_type, version, created_at "
-            "FROM quest_files WHERE quest_id = ? ORDER BY id", (qid,), fetch=True
-        )
-        return jsonify({
-            "status": "ok",
-            "quest": {k: q[k] for k in q.keys()},
-            "checkpoints": [dict(c) for c in checkpoints],
-            "files": [dict(f) for f in files],
-        })
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/quest/generate")
-@require_telegram
-def api_quest_generate():
-    """Generate a document from template for a quest (docx/pdf).
-    Delegates to python-docx / reportlab.
-    """
-    d = request.get_json(force=True)
-    qid = d.get("quest_id", "")
-    template = d.get("template", "")
-    data = d.get("data", {})
-
-    if not qid or not template:
-        return jsonify({"status": "error", "message": "quest_id and template required"}), 400
-
-    try:
-        from docx import Document
-        from docx.shared import Pt, Inches
-        import tempfile, os
-
-        doc = Document()
-        doc.add_heading(data.get("title", template), level=1)
-
-        # Template-specific content
-        if template == "cover_letter":
-            doc.add_paragraph(data.get("recipient", ""))
-            doc.add_paragraph("")
-            p = doc.add_paragraph(data.get("body", ""))
-        elif template == "project_description":
-            for section in data.get("sections", []):
-                doc.add_heading(section.get("title", ""), level=2)
-                doc.add_paragraph(section.get("content", ""))
-        else:
-            # Generic: dump all data keys as paragraphs
-            for k, v in data.items():
-                doc.add_heading(k, level=2)
-                doc.add_paragraph(str(v))
-
-        # Save to temp, then store
-        tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
-        doc.save(tmp.name)
-        tmp.close()
-
-        # Store in quest_files directory
-        quest_dir = os.path.join("data", "quests", qid)
-        os.makedirs(quest_dir, exist_ok=True)
-        filename = f"{template}.docx"
-        dest = os.path.join(quest_dir, filename)
-        os.rename(tmp.name, dest)
-
-        # Register in DB
-        _query(
-            "INSERT INTO quest_files (quest_id, filename, file_type, version, storage_path) "
-            "VALUES (?, ?, 'docx', 1, ?)",
-            (qid, filename, dest),
-        )
-        _log_audit("quest_doc_generated", {"quest_id": qid, "template": template, "filename": filename})
-
-        return jsonify({"status": "ok", "filename": filename, "file_type": "docx", "storage_path": dest})
-    except ImportError:
-        return jsonify({"status": "error", "message": "python-docx not installed"}), 500
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/quest/send-package")
-@require_telegram
-def api_quest_send_package():
-    """Send quest package via email (MAIL-1 minimal)."""
-    d = request.get_json(force=True)
-    qid = d.get("quest_id", "")
-    recipient = d.get("recipient", "")
-    subject = d.get("subject", "")
-    quest_title = d.get("quest_title", "")
-
-    if not recipient:
-        return jsonify({"status": "error", "message": "recipient required"}), 400
-
-    # Check if email sending is configured
-    smtp_email = get_secret("SMTP_EMAIL")
-    smtp_password = get_secret("SMTP_PASSWORD")
-    if not smtp_email or not smtp_password:
-        return jsonify({"status": "error", "message": "SMTP не настроен. Добавьте SMTP_EMAIL и SMTP_PASSWORD в Интеграции."}), 200
-
-    try:
-        import yagmail
-        yag = yagmail.SMTP(smtp_email, smtp_password)
-        body = f"Добрый день!\n\nНаправляю пакет документов: {quest_title} (досье {qid}).\n\nС уважением."
-        yag.send(to=recipient, subject=subject or quest_title, contents=body)
-        _log_audit("quest_email_sent", {"quest_id": qid, "recipient": recipient, "subject": subject})
-        return jsonify({"status": "ok", "message": f"Отправлено на {recipient}"})
-    except ImportError:
-        return jsonify({"status": "error", "message": "yagmail not installed. pip install yagmail"}), 500
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/email/send")
-@require_telegram
-def api_email_send():
-    """General-purpose email sending (MAIL-1 minimal). Two-step: caller must confirm."""
-    d = request.get_json(force=True)
-    to = d.get("to", "")
-    subject = d.get("subject", "")
-    body = d.get("body", "")
-    if not to or not subject:
-        return jsonify({"status": "error", "message": "to и subject обязательны"}), 400
-
-    smtp_email = get_secret("SMTP_EMAIL")
-    smtp_password = get_secret("SMTP_PASSWORD")
-    if not smtp_email or not smtp_password:
-        return jsonify({"status": "error", "message": "SMTP не настроен"}), 200
-
-    try:
-        import yagmail
-        yag = yagmail.SMTP(smtp_email, smtp_password)
-        yag.send(to=to, subject=subject, contents=body)
-        _log_audit("email_sent", {"to": to, "subject": subject})
-        return jsonify({"status": "ok"})
-    except ImportError:
-        return jsonify({"status": "error", "message": "yagmail not installed"}), 500
-    except Exception as e:
-        _log_audit("email_send_error", {"to": to, "error": str(e)[:200]})
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# ──────────────────── QUEST-1: MLOG HELPERS (formatting, checkpoint creation) ─────
-
-@app.post("/api/quest/create-checkpoints")
-def api_quest_create_checkpoints():
-    """Create checkpoint rows for a quest (called from Metalogos — no loop construct)."""
-    d = request.get_json(force=True)
-    qid = d.get("quest_id", "")
-    total_steps = int(d.get("total_steps", 0))
-    if not qid or total_steps <= 0:
-        return jsonify({"status": "error", "message": "quest_id and total_steps required"}), 400
-    try:
-        for i in range(total_steps):
-            step_label = f"Шаг {i + 1}"
-            _query(
-                "INSERT INTO quest_checkpoints (quest_id, step_num, step_label, status) VALUES (?, ?, ?, 'pending')",
-                (qid, i, step_label),
-            )
-        return jsonify({"status": "ok", "created": total_steps})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/quest/format-list")
-def api_quest_format_list():
-    """Format quest list for Telegram (called from Metalogos — no loop construct)."""
-    d = request.get_json(force=True)
-    rows = d.get("rows", [])
-    if not rows:
-        return "Нет активных задач."
-    lines = [f"Активные задачи ({len(rows)}):"]
-    for i, r in enumerate(rows):
-        qid = r.get("id", "?")
-        title = r.get("title", "?")
-        qtype = r.get("quest_type", "?")
-        cstep = r.get("current_step", "0")
-        tstep = r.get("total_steps", "0")
-        dl = r.get("deadline", "")
-        line = f'{i + 1}. {title} [{qtype}] {cstep}/{tstep}'
-        if dl:
-            line += f" дедлайн={dl}"
-        line += f"\n  id: {qid}"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-@app.post("/api/quest/format-status")
-def api_quest_format_status():
-    """Format quest status for Telegram (called from Metalogos — no loop construct)."""
-    d = request.get_json(force=True)
-    qid = d.get("quest_id", "")
-    try:
-        q_rows = _query("SELECT * FROM quests WHERE id = ?", (qid,), fetch=True)
-        if not q_rows:
-            return f"Задача {qid} не найдена."
-        q = q_rows[0]
-        title = q["title"]
-        qtype = q["quest_type"]
-        qstatus = q["status"]
-        cstep = q["current_step"]
-        tstep = q["total_steps"]
-        dl = q["deadline"] or ""
-
-        lines = [f"*Досье: {title}*"]
-        info = f"Тип: {qtype} | Статус: {qstatus} | Шаг: {cstep}/{tstep}"
-        if dl:
-            info += f" | Дедлайн: {dl}"
-        lines.append(info)
-        lines.append("\nЧекпоинты:")
-
-        cp_rows = _query(
-            "SELECT step_num, step_label, status, approved_by, approved_at "
-            "FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", (qid,), fetch=True
-        )
-        markers = {"approved": "[OK]", "in_progress": "[>>]", "skipped": "[--]", "pending": "[ ]"}
-        for cp in cp_rows:
-            marker = markers.get(cp["status"], "[ ]")
-            line = f"  {marker} {cp['step_num']}. {cp['step_label']}"
-            if cp["status"] == "approved":
-                line += f" ({cp['approved_by'] or ''} {cp['approved_at'] or ''})"
-            lines.append(line)
-
-        f_rows = _query(
-            "SELECT filename, file_type, version FROM quest_files WHERE quest_id = ? ORDER BY id",
-            (qid,), fetch=True
-        )
-        if f_rows:
-            lines.append("\nФайлы:")
-            for f in f_rows:
-                lines.append(f"  - {f['filename']} ({f['file_type']} v{f['version']})")
-
-        return "\n".join(lines)
-    except Exception as e:
-        return f"Ошибка: {e}"
 
 
 @app.get("/api/archive")
@@ -4879,10 +4427,15 @@ def scheduler_lz_daily():
 
         # Check watched repos for new releases
         all_releases = []
+        seen_release_keys = set()  # dedup by (repo, tag) across runs
         for repo in GITHUB_WATCH_RELEASES:
             releases = _github_releases(repo)
             time.sleep(1)
-            all_releases.extend(releases)
+            for r in releases:
+                rkey = f"{r['repo']}@{r['tag']}"
+                if rkey not in seen_release_keys:
+                    seen_release_keys.add(rkey)
+                    all_releases.append(r)
 
         github_ok = bool(all_repos or all_releases)
         if not github_ok:
@@ -4903,10 +4456,40 @@ def scheduler_lz_daily():
             "github_api_ok": github_ok,
         }
 
+        # ── Phase 1.5: Collect world news from news_cache (RSS + Tavily + GDELT) ──
+        world_news_text = ""
+        try:
+            news_rows = _query("""SELECT source, title, summary, url, category, published
+                                  FROM news_cache
+                                  WHERE collected > datetime('now', '-24 hours')
+                                  ORDER BY published DESC LIMIT 20""", fetch=True)
+            if news_rows:
+                cats_order = {"tech": 0, "science": 1, "geopolitics": 2, "news_ru": 3, "news_en": 4, "finance": 5}
+                news_rows.sort(key=lambda r: (cats_order.get(r[4], 9), r[5] or ""))
+                world_news_text = f"=== МИРОВЫЕ НОВОСТИ И СОБЫТИЯ ({len(news_rows)} за 24ч) ===\n\n"
+                for nr in news_rows:
+                    src, title, summary, url, cat, pub = nr
+                    entry = f"[{src}] {title}\n"
+                    if url:
+                        entry += f"  Ссылка: {url}\n"
+                    if summary and summary != title:
+                        entry += f"  {summary[:200]}\n"
+                    if pub:
+                        entry += f"  Дата: {pub[:10]}\n"
+                    world_news_text += entry + "\n"
+        except Exception as e:
+            log.warning(f"LZ Daily: world news query failed: {e}")
+
+        # Count world news items
+        news_count = len(world_news_text.split("[")) - 1 if world_news_text else 0
+
+        # Update scan_summary with news count
+        scan_summary["world_news"] = news_count
+
         # ── Phase 2: LLM Analysis ─────────────────────────────
         lz_prompt = get_dept_prompt("lz")
 
-        if github_ok:
+        if github_ok or world_news_text:
             # Direct API worked — analyze the data we collected
             repos_text = ""
             for i, r in enumerate(all_repos[:15], 1):
@@ -4918,74 +4501,105 @@ def scheduler_lz_daily():
             if monitor_topics:
                 monitors_text = "Custom monitors: " + ", ".join(monitor_topics)
 
+            # Build world news section for prompt
+            news_section = ""
+            if world_news_text:
+                news_section = f"\n{world_news_text}\n"
+
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан GitHub.\n\n"
-                 "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ, которые Админ должен изучить для применения в офисе.\n\n"
+                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан мира.\n\n"
+                 "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ и СОБЫТИЯ, которые Админ должен знать.\n\n"
                  "Структура отчёта:\n"
-                 "1. 🔥 TOP-3 находки (с disrupting potential 1-10) — что полезно для Фосвед Офиса\n"
-                 "2. 📦 Новые релизы — что обновилось в ключевых проектах\n"
-                 "3. 💡 Рекомендации — что Админу стоит изучить и почему\n"
-                 "4. 📊 Статистика скана\n\n"
-                 "Фильтруй: только релевантное для AI-офиса, multi-agent систем, Telegram ботов, DSL, memory systems.\n"
+                 "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — с disrupting potential 1-10\n"
+                 "2. 📦 Новые релизы и обновления — что вышло\n"
+                 "3. 🌍 Ключевые мировые события — экономика, политика, breakthrough\n"
+                 "4. 💡 Рекомендации — что Админу стоит изучить и почему\n"
+                 "5. 📊 Статистика скана\n\n"
+                 "ПРАВИЛО ССЫЛОК: для КАЖДОГО упомянутого проекта/события ОБЯЗАТЕЛЬНО включай прямую ссылку на источник в формате: https://...\n"
+                 "Используй ТОЛЬКО ссылки из предоставленных данных. Не придумывай ссылки.\n\n"
+                 "Фильтруй: релевантное для AI-офиса, технологий, мировых событий.\n"
                  "Язык: русский."},
                 {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
                  f"=== НОВЫЕ РЕПОЗИТОРИИ ({len(all_repos)} найдено) ===\n"
                  f"{repos_text}\n\n"
                  f"=== НОВЫЕ РЕЛИЗЫ ({len(all_releases)}) ===\n"
                  f"{releases_text}\n\n"
+                 f"{news_section}"
                  f"{monitors_text}"}
             ]
         else:
-            # GitHub API failed — LLM researches directly
-            log.info("LZ Daily: using LLM fallback for GitHub research")
+            # GitHub API failed — but we may have world news from news_cache
+            log.info("LZ Daily: GitHub API failed, using available data")
+            news_section = ""
+            if world_news_text:
+                news_section = f"\n{world_news_text}\n"
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория Загадок Фосвед Офиса. GitHub API недоступен, поэтому ты проводишь "
-                 "исследование САМОСТОЯТЕЛЬНО, используя свои знания.\n\n"
-                 "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: найти НОВИНКИ за последнюю неделю, которые Админ должен изучить.\n\n"
-                 "Ищи в областях:\n"
-                 "- LLM agent frameworks (Python): новые фреймворки, мажорные обновления\n"
-                 "- Telegram bot AI assistants\n"
-                 "- Multi-agent systems, MCP protocol\n"
-                 "- RAG, memory systems (mem0 и аналоги)\n"
-                 "- Rust DSL / интерпретаторы\n\n"
+                 "Ты — Лаборатория Загадок Фосвед Офиса. Проведи ежедневный обзор новинок и событий.\n\n"
                  "Структура отчёта:\n"
-                 "1. 🔥 TOP-3 находки (с disrupting potential 1-10)\n"
-                 "2. 📦 Ключевые обновления проектов\n"
+                 "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — с disrupting potential 1-10\n"
+                 "2. 🌍 Ключевые мировые события — экономика, политика, breakthrough\n"
                  "3. 💡 Рекомендации Админу\n\n"
-                 "Если не знаешь конкретных новостей за последнюю неделю — так и скажи.\n"
+                 "ПРАВИЛО ССЫЛОК: для КАЖДОГО упомянутого проекта/события ОБЯЗАТЕЛЬНО включай прямую ссылку на источник.\n"
+                 "Используй ТОЛЬКО ссылки из предоставленных данных. Если данных нет — укажи поисковый запрос.\n\n"
                  "Язык: русский."},
-                {"role": "user", "content": f"Сделай ежедневный обзор новинок на GitHub за последнюю неделю.\n"
-                 f"Дата: {datetime.utcnow().isoformat()[:10]}\n"
-                 f"Фокус: AI agents, LLM, Telegram bots, memory systems, MCP, RAG.\n\n"
-                 f"Для каждого проекта укажи: название, URL, что нового, почему релевантно Фосвед Офису."}
+                {"role": "user", "content": f"Сделай ежедневный обзор новинок и событий за {datetime.utcnow().isoformat()[:10]}.\n\n"
+                 f"{news_section}"
+                 f"Фокус: AI, технологии, мировые события, breakthrough.\n\n"
+                 f"Для каждого пункта укажи: название, прямую ссылку на источник, что нового, почему важно."}
             ]
 
         result = call_llm("lz", analysis_messages)
         analysis = result.get("reply", "Analysis failed.")
 
-        # ── Phase 3: Save to Memory ───────────────────────────
+        # ── Phase 3: Save to DB + Memory (with cross-run dedup) ───────────
         if not dry_run:
-            memory.remember(
-                f"LZ Daily {datetime.utcnow().isoformat()[:10]}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
-                "observation", 0.7, "lz_daily"
-            )
-            # Save top findings as individual memories
+            # LZ Dedup: save releases & repos to lz_telegram_posts with update_id
+            # update_id format: "gh:{repo}:{tag}" for releases, "gh:repo:{name}" for repos
+            # UNIQUE constraint on update_id prevents duplicate entries across scans
+            for r in all_releases:
+                try:
+                    _query(
+                        "INSERT OR IGNORE INTO lz_telegram_posts (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, ?)",
+                        (f"gh:{r.get('repo','')}:{r.get('tag','')}", r.get('repo',''), r.get('repo',''), r.get('body','')[:500], r.get('date',''))
+                    )
+                except Exception:
+                    pass  # update_id column may not exist yet (pre-ALTER TABLE state)
+            for r in all_repos:
+                try:
+                    _query(
+                        "INSERT OR IGNORE INTO lz_telegram_posts (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, datetime('now'))",
+                        (f"gh:repo:{r.get('name','')}", "github", r.get('lang',''), r.get('desc','')[:300])
+                    )
+                except Exception:
+                    pass
+
+            today_key = f"lz_daily:{datetime.utcnow().isoformat()[:10]}"
+            # Check if we already stored today's scan summary
+            existing = memory.recall(today_key, source="lz_daily", limit=1)
+            if not existing:
+                memory.remember(
+                    f"LZ Daily {datetime.utcnow().isoformat()[:10]}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
+                    "observation", 0.7, "lz_daily"
+                )
+            # Save top findings as individual memories (dedup by content prefix)
             for line in analysis.split("\n"):
                 line = line.strip()
                 if line.startswith(("1.", "2.", "3.")) and len(line) > 20:
-                    memory.remember(
-                        f"LZ находка: {line[:200]}",
-                        "observation", 0.8, "lz_daily"
-                    )
+                    mem_key = f"lz_find:{line[:60]}"
+                    if not memory.recall(mem_key, source="lz_daily", limit=1):
+                        memory.remember(
+                            f"LZ находка: {line[:200]}",
+                            "observation", 0.8, "lz_daily"
+                        )
 
         # ── Phase 4: Build Report ─────────────────────────────
         report = f"🔍 LZ DAILY REPORT — {datetime.utcnow().isoformat()[:10]}\n"
         report += f"{'=' * 40}\n\n"
         report += analysis
         report += f"\n\n{'─' * 40}\n"
-        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {len(monitor_topics)} monitors\n"
+        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {news_count} новостей, {len(monitor_topics)} monitors\n"
         report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
 
         # ── Phase 5: Send to Owner (Admin) ────────────────────
@@ -4998,7 +4612,8 @@ def scheduler_lz_daily():
 
         _log_audit("lz_daily_report", {
             "repos": len(all_repos), "releases": len(all_releases),
-            "monitors": len(monitor_topics), "provider": result.get("provider"),
+            "world_news": news_count, "monitors": len(monitor_topics),
+            "provider": result.get("provider"),
             "msg_id": msg_id, "dry_run": dry_run
         })
 
@@ -5189,7 +4804,7 @@ def yana_auto_memorize():
                 "When a fact is a commitment or reminder with a date/time, include a \"date\" key with the date in YYYY-MM-DD HH:MM format (or YYYY-MM-DD if no time). If the date is relative (tomorrow, next week), calculate the actual date based on today being 2026-07-06. If nothing worth remembering, output: []"},
             {"role": "user", "content": f"User: {query[:500]}\nYana: {reply[:500]}"}
         ]
-        result = _call_single_provider("groq", "llama-3.3-70b-versatile", prompt, dept="yana", max_tokens=300, is_internal=True)
+        result = _call_single_provider("groq", "openai/gpt-oss-20b", prompt, dept="yana", max_tokens=300, is_internal=True)
         if result and result.get('reply'):
             import json as _json
             text = result['reply'].strip()
@@ -5197,7 +4812,6 @@ def yana_auto_memorize():
                 text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
             facts = _json.loads(text)
             saved = 0
-            saved_facts = []
             for f in facts[:3]:
                 if isinstance(f, dict) and f.get('content'):
                     memory.remember(
@@ -5207,11 +4821,6 @@ def yana_auto_memorize():
                         source='yana_auto'
                     )
                     saved += 1
-                    saved_facts.append({
-                        'content': f['content'][:500],
-                        'type': f.get('type', 'fact'),
-                        'confidence': f.get('confidence', 0.8),
-                    })
             log.info(f"Yana auto-memorize: extracted {saved} facts from chat {chat_id}")
 
             # Also check for dated reminders — store in yana_events for scheduler
@@ -5221,7 +4830,7 @@ def yana_auto_memorize():
                            (f['content'][:300], f['date'][:20]))
                     log.info(f"Yana reminder stored: {f['content'][:60]} at {f.get('date', '?')}")
 
-            return jsonify({'status': 'ok', 'saved': saved, 'facts': saved_facts})
+            return jsonify({'status': 'ok', 'saved': saved})
     except Exception as e:
         log.warning(f"Yana auto-memorize failed: {e}")
     return jsonify({'status': 'error'})
@@ -5299,6 +4908,79 @@ def generate_image_endpoint():
     msg_id = _tg_send_photo(chat_id, fpath, caption or None)
     _log_audit('image_generated', {'prompt': prompt[:100], 'size': size, 'path': fpath, 'chat_id': chat_id, 'tg_msg_id': msg_id}, dept='design')
     return jsonify({'status': 'ok', 'path': fpath, 'tg_msg_id': msg_id})
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  GITHUB FILE PUSH ENDPOINT — for project pipeline
+# ══════════════════════════════════════════════════════════════════════
+
+_GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
+_GITHUB_HEADERS = {'Authorization': f'token {_GITHUB_TOKEN}', 'Accept': 'application/vnd.github.v3+json'} if _GITHUB_TOKEN else {}
+
+
+def _parse_github_repo(repo_url):
+    """Extract owner/repo from GitHub URL or 'owner/repo' string."""
+    repo_url = repo_url.strip().rstrip('/')
+    # Handle 'https://github.com/owner/repo' or 'github.com/owner/repo'
+    if 'github.com/' in repo_url:
+        parts = repo_url.split('github.com/')[-1].split('/')
+        if len(parts) >= 2:
+            return parts[0], parts[1]
+    # Handle 'owner/repo' format
+    parts = repo_url.split('/')
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return None, None
+
+
+@app.route('/github/push-file', methods=['POST'])
+def github_push_file():
+    """Push a single file to GitHub repo via Contents API.
+    Request: {repo, path, content, message?, branch?}
+    Returns: {status, sha?, url?, error?}"""
+    if not _GITHUB_TOKEN:
+        return jsonify({'status': 'error', 'error': 'GITHUB_TOKEN not set'}), 400
+    d = request.get_json(force=True) or {}
+    repo = d.get('repo', '').strip()
+    path = d.get('path', '').strip()
+    content = d.get('content', '')
+    message = d.get('message', f'Add {path}').strip()
+    branch = d.get('branch', 'main').strip()
+    if not repo or not path or content is None:
+        return jsonify({'status': 'error', 'error': 'repo, path, content required'}), 400
+    owner, repo_name = _parse_github_repo(repo)
+    if not owner:
+        return jsonify({'status': 'error', 'error': f'Cannot parse repo: {repo}'}), 400
+    api_url = f'https://api.github.com/repos/{owner}/{repo_name}/contents/{path}'
+    # Check if file exists (need SHA for update)
+    sha = None
+    try:
+        check = http_requests.get(api_url, headers=_GITHUB_HEADERS, params={'ref': branch}, timeout=15)
+        if check.status_code == 200:
+            sha = check.json().get('sha')
+    except Exception:
+        pass
+    # Create/update file
+    import base64
+    payload = {
+        'message': message,
+        'content': base64.b64encode(content.encode('utf-8')).decode('ascii'),
+        'branch': branch,
+    }
+    if sha:
+        payload['sha'] = sha
+    try:
+        resp = http_requests.put(api_url, json=payload, headers=_GITHUB_HEADERS, timeout=30)
+        data = resp.json()
+        if resp.status_code in (200, 201):
+            log.info(f'GitHub push OK: {owner}/{repo_name}/{path}')
+            return jsonify({'status': 'ok', 'sha': data.get('content', {}).get('sha'), 'url': data.get('content', {}).get('html_url')})
+        else:
+            log.error(f'GitHub push failed: {resp.status_code} {data}')
+            return jsonify({'status': 'error', 'error': data.get('message', f'HTTP {resp.status_code}')})
+    except Exception as e:
+        log.error(f'GitHub push error: {e}')
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -5418,8 +5100,10 @@ def cron_collect_news():
         return "Forbidden", 403
     rss_count = collect_rss()
     gdelt_count = collect_gdelt_themes()
-    _log_audit("news_collection", {"rss": rss_count, "gdelt": gdelt_count}, "collector")
-    return jsonify({"rss": rss_count, "gdelt": gdelt_count, "total": rss_count + gdelt_count})
+    tavily_count = collect_tavily()
+    enrich_count = enrich_news_with_fulltext(limit=5)
+    _log_audit("news_collection", {"rss": rss_count, "gdelt": gdelt_count, "tavily": tavily_count, "enriched": enrich_count}, "collector")
+    return jsonify({"rss": rss_count, "gdelt": gdelt_count, "tavily": tavily_count, "enriched": enrich_count, "total": rss_count + gdelt_count + tavily_count})
 
 
 # ── Fresh news for mlog BuildContext ──
@@ -5445,14 +5129,14 @@ def lz_news():
     elif category:
         rows = _query("""SELECT source, title, summary, url, published FROM news_cache
                          WHERE category = ? ORDER BY published DESC LIMIT ?""", (category, limit), fetch=True)
-        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}" for r in rows) if rows else "Нет событий"
+        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}\n  {r[3] or ''}" for r in rows) if rows else "Нет событий"
     else:
         rows = _query("""SELECT source, title, summary, url, published FROM news_cache
                          ORDER BY published DESC LIMIT ?""", (limit,), fetch=True)
-        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}" for r in rows) if rows else "Нет событий"
+        news = "\n".join(f"[{r[0]}] {r[1]}\n  {r[2] or ''}\n  {r[3] or ''}" for r in rows) if rows else "Нет событий"
 
     lz_prompt = get_dept_prompt("lz")
-    analysis_prompt = lz_prompt + "\n\nПроанализируй свежие события. Выдели тренды, аномалии, сигналы. Маркируй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ].\n\n" + news
+    analysis_prompt = lz_prompt + "\n\nПроанализируй свежие события. Выдели тренды, аномалии, сигналы. Маркируй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ].\n\nПРАВИЛО ССЫЛОК: для КАЖДОГО упомянутого события/факта ОБЯЗАТЕЛЬНО включай прямую ссылку на источник в формате: Ссылка: https://...\nИспользуй ТОЛЬКО ссылки из предоставленных данных (строка Ссылка: ...). Если ссылка отсутствует в данных — не придумывай, просто укажи источник в квадратных скобках.\n\n" + news
     try:
         result = call_llm("lz", [{"role": "user", "content": analysis_prompt}])
         analysis = result.get("reply", "Ошибка анализа")
@@ -5513,6 +5197,74 @@ DEPT_CATEGORIES = {
     "legal": ("geopolitics", "news_ru"),
     "marketing": ("tech", "news_en"),
 }
+
+
+# ── Tavily collection (merged into cron_collect_news, no extra cron slot needed) ──
+def collect_tavily():
+    """Collect real-time web results via Tavily API. Uses same DEPT_QUERIES as GDELT."""
+    tavily_key = os.environ.get("TAVILY_API_KEY", "")
+    if not tavily_key:
+        return 0
+    collected = 0
+    for dept, query in DEPT_QUERIES.items():
+        try:
+            resp = http_requests.post("https://api.tavily.com/search",
+                json={"api_key": tavily_key, "query": query,
+                      "search_depth": "basic", "max_results": 5,
+                      "days": 1}, timeout=15)
+            if resp.status_code != 200:
+                continue
+            for r in resp.json().get("results", []):
+                title = r.get("title", "").strip()
+                url = r.get("url", "").strip()
+                summary = re.sub(r"<[^>]+>", "", r.get("content", ""))[:500]
+                if not title:
+                    continue
+                content_hash = hashlib.md5((title + url).encode()).hexdigest()
+                cat = DEPT_CATEGORIES.get(dept, ("tech",))[0]
+                try:
+                    _query("""INSERT OR IGNORE INTO news_cache
+                        (source,title,summary,url,category,language,published,hash)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                        (f"Tavily", title, summary, url, cat, "en", None, content_hash))
+                    collected += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            _log_audit("tavily_error", {"dept": dept, "error": str(e)[:100]}, "collector")
+    if collected:
+        _log_audit("tavily_collected", {"collected": collected}, "collector")
+    return collected
+
+
+def enrich_news_with_fulltext(limit=5):
+    """Extract full text from top news URLs missing body content.
+    Merges into existing collect cycle — no extra cron needed."""
+    rows = _query("""SELECT id, url FROM news_cache
+                      WHERE (summary IS NULL OR length(summary) < 100)
+                      AND url IS NOT NULL AND url != ''
+                      AND collected > datetime('now', '-6 hours')
+                      ORDER BY published DESC LIMIT ?""", (limit,), fetch=True)
+    enriched = 0
+    for row_id, url in (rows or []):
+        try:
+            resp = http_requests.get(url, timeout=10, headers={"User-Agent": "FosvedBot/1.0"})
+            if resp.status_code == 200 and len(resp.text) > 200:
+                tmp = f"/tmp/news_enrich_{row_id}.html"
+                with open(tmp, "w", encoding="utf-8", errors="replace") as f:
+                    f.write(resp.text)
+                text = doc_extract.extract_text(tmp, url)
+                try: os.remove(tmp)
+                except Exception: pass
+                if text and len(text) > 50:
+                    summary = text[:800]
+                    _query("UPDATE news_cache SET summary = ? WHERE id = ?", (summary, row_id))
+                    enriched += 1
+        except Exception:
+            pass
+    if enriched:
+        _log_audit("news_enriched", {"enriched": enriched}, "collector")
+    return enriched
 
 
 def collect_rss():
@@ -5652,6 +5404,8 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
     current_len = 0
     for r in rows:
         entry = f"[{r[0]}] {r[1]}\n"
+        if r[3]:
+            entry += f"  Ссылка: {r[3]}\n"
         if r[2] and r[2] != r[1]:
             entry += f"  {r[2][:150]}\n"
         if r[4]:
@@ -5680,25 +5434,301 @@ def get_night_news_digest():
     return digest
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  WATCH SWEEP — daily sweep of WatchlistItem table
+#  Checks all active items, updates lastCheckAt/nextCheckAt, detects deltas
+#  Called by Render cron at 06:00 UTC = 09:00 MSK
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/scheduler/watch-sweep")
+def scheduler_watch_sweep():
+    """Sweep all active WatchlistItems, check for deltas, update timestamps.
+    For each item:
+      1. Query news/LLM for recent changes on the topic
+      2. Compare with lastDelta — if new information, increment deltaCount
+      3. Update lastCheckAt, compute nextCheckAt from frequency
+      4. If delta detected, send brief notification to owner
+    """
+    owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
+    if not owner_id:
+        return jsonify({"status": "error", "message": "OWNER_TELEGRAM_ID not set"}), 400
+
+    try:
+        now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Get all active watchlist items
+        items = _query("""
+            SELECT w.id, w.analysis_id, w.topic, w.frequency, w.last_delta, w.delta_count,
+                   a.topic AS analysis_topic
+            FROM watchlist_item w
+            LEFT JOIN analysis a ON a.id = w.analysis_id
+            WHERE w.active = 1
+            ORDER BY w.next_check_at ASC
+        """, fetch=True)
+
+        if not items:
+            return jsonify({"status": "ok", "swept": 0, "message": "no active watchlist items"})
+
+        swept = 0
+        deltas = 0
+        notifications = []
+
+        for item in items:
+            wid, analysis_id, topic, frequency, last_delta, delta_count, analysis_topic = item
+
+            # Query LLM for recent developments on this topic
+            sweep_prompt = f"""Ты мониторинг-аналитик ОСП. Проверь тему на предмет новых событий за последние 24 часа.
+
+Тема: {topic}
+Контекст анализа: {analysis_topic or 'N/A'}
+Предыдущий дельта: {last_delta or 'нет'}
+
+Если есть новые существенные изменения (не шум, не повтор), опиши кратко (1-2 предложения).
+Если изменений нет — ответь ровно одним словом: NO_DELTA"""
+
+            llm_result = _call_llm_with_failover(sweep_prompt, 'osp')
+            reply = llm_result.get('reply', '') if isinstance(llm_result, dict) else str(llm_result)
+            new_delta = None if 'NO_DELTA' in reply.upper()[:50] else reply.strip()
+
+            # Compute nextCheckAt based on frequency
+            freq_days = {'DAILY': 1, 'WEEKLY': 7, 'BIWEEKLY': 14}.get(frequency, 1)
+            next_check = (datetime.utcnow() + timedelta(days=freq_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            if new_delta:
+                # Delta detected
+                new_count = (delta_count or 0) + 1
+                _query("UPDATE watchlist_item SET last_check_at=?, next_check_at=?, last_delta=?, delta_count=? WHERE id=?",
+                       (now_iso, next_check, new_delta[:500], new_count, wid))
+                deltas += 1
+                notifications.append(f"▸ {topic}: {new_delta[:150]}")
+            else:
+                # No delta — just update timestamps
+                _query("UPDATE watchlist_item SET last_check_at=?, next_check_at=? WHERE id=?",
+                       (now_iso, next_check, wid))
+
+            swept += 1
+
+        # Send consolidated notification if any deltas found
+        if notifications:
+            msg = "🔍 Watch Sweep — обнаружены дельты:\n\n" + "\n".join(notifications[:10])
+            if len(notifications) > 10:
+                msg += f"\n\n...и ещё {len(notifications) - 10}"
+            _send_telegram_message(owner_id, msg)
+
+        _log_audit('watch_sweep', {'swept': swept, 'deltas': deltas}, 'osp')
+        log.info(f"Watch sweep: {swept} items, {deltas} deltas")
+        return jsonify({"status": "ok", "swept": swept, "deltas": deltas})
+
+    except Exception as e:
+        log.error(f"watch_sweep error: {e}")
+        _log_audit("watch_sweep_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  INDICATOR PRE-REMINDERS — 7-day pre-verification reminders
+#  Finds indicators with verifyDate within N days, sends reminder to owner
+#  Called by Render cron at 03:00 UTC = 06:00 MSK (before morning brief)
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/scheduler/indicator-pre-reminders")
+def scheduler_indicator_pre_reminders():
+    """Find indicators with verifyDate within `days_ahead` days.
+    Send a consolidated pre-reminder to owner with:
+      - Indicator description + verifyDate
+      - How many days until verification
+      - What the indicator confirms
+    Marks pre_verify_reminder_sent = 1 so we don't re-notify.
+    """
+    owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
+    if not owner_id:
+        return jsonify({"status": "error", "message": "OWNER_TELEGRAM_ID not set"}), 400
+
+    d = request.get_json(force=True, silent=True) or {}
+    days_ahead = int(d.get("days_ahead", 7))
+
+    try:
+        cutoff = (datetime.utcnow() + timedelta(days=days_ahead)).strftime("%Y-%m-%dT23:59:59Z")
+        now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Find unverified indicators with verifyDate within N days that haven't been pre-reminded
+        indicators = _query("""
+            SELECT i.id, i.description, i.verify_date, i.is_binary, i.confirms_what,
+                   i.pre_verify_reminder_sent, a.topic AS analysis_topic
+            FROM indicator i
+            LEFT JOIN analysis a ON a.id = i.analysis_id
+            WHERE i.verified_at IS NULL
+              AND i.verify_date <= ?
+              AND i.verify_date >= ?
+              AND i.pre_verify_reminder_sent = 0
+            ORDER BY i.verify_date ASC
+        """, (cutoff, now_iso), fetch=True)
+
+        if not indicators:
+            return jsonify({"status": "ok", "reminders": 0, "message": f"no indicators due within {days_ahead}d"})
+
+        # Build reminder message
+        lines = []
+        for ind in indicators:
+            iid, desc, vdate, is_binary, confirms, pre_sent, analysis_topic = ind
+            # Compute days until verification
+            try:
+                verify_dt = datetime.strptime(vdate[:10], "%Y-%m-%d")
+                days_left = (verify_dt - datetime.utcnow()).days
+                days_str = f"{days_left}д" if days_left > 0 else "СЕГОДНЯ" if days_left == 0 else "ПРОСРОЧЕН"
+            except Exception:
+                days_str = "?"
+
+            line = f"▸ {desc[:100]}\n  Верификация: {vdate[:10]} ({days_str})\n  Подтверждает: {confirms[:80]}"
+            if analysis_topic:
+                line += f"\n  Анализ: {analysis_topic[:60]}"
+            lines.append(line)
+
+            # Mark as pre-reminded
+            _query("UPDATE indicator SET pre_verify_reminder_sent = 1 WHERE id = ?", (iid,))
+
+        # Send consolidated message
+        msg = f"⏰ I&W Пред-напоминания ({days_ahead}д до верификации):\n\n"
+        msg += "\n\n".join(lines[:8])
+        if len(lines) > 8:
+            msg += f"\n\n...и ещё {len(lines) - 8} индикаторов"
+
+        msg += "\n\n/osp verify <id> — верифицировать индикатор"
+
+        _send_telegram_message(owner_id, msg)
+
+        _log_audit('indicator_pre_reminders', {'count': len(indicators), 'days_ahead': days_ahead}, 'osp')
+        log.info(f"Indicator pre-reminders: {len(indicators)} indicators within {days_ahead}d")
+        return jsonify({"status": "ok", "reminders": len(indicators), "days_ahead": days_ahead})
+
+    except Exception as e:
+        log.error(f"indicator_pre_reminders error: {e}")
+        _log_audit("indicator_pre_reminders_error", {"error": str(e)[:500]})
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  EXPERT CHART ENDPOINT
+#  Called by mlog via http_post to generate PNG charts (residual value,
+#  operation cost, TCO comparison) using scripts/expert_charts.py
+# ══════════════════════════════════════════════════════════════════════
+
+@app.post("/expert/chart")
+def expert_chart():
+    """Generate PNG chart for Expert automotive analysis.
+    Expects JSON: {chart_type: "residual_value"|"operation_cost"|"comparison", data: {...}}
+    Calls scripts/expert_charts.py to render the chart.
+    """
+    import subprocess
+    d = request.get_json(force=True)
+    chart_type = d.get("chart_type", "residual_value")
+    chart_data = d.get("data", {})
+
+    if not chart_data:
+        return jsonify({"error": "data required"}), 400
+
+    script_path = os.path.join(os.path.dirname(__file__), "scripts", "expert_charts.py")
+    if not os.path.exists(script_path):
+        # Fallback: try /home/z/my-project/scripts/expert_charts.py
+        script_path = "/home/z/my-project/scripts/expert_charts.py"
+
+    try:
+        # Write data to temp file (avoid shell escaping issues with JSON)
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tf:
+            json.dump(chart_data, tf, ensure_ascii=False)
+            tmp_path = tf.name
+
+        result = subprocess.run(
+            [sys.executable, script_path, chart_type, tmp_path],
+            capture_output=True, text=True, timeout=30
+        )
+        os.unlink(tmp_path)
+
+        if result.returncode != 0:
+            app.logger.error(f"Expert chart error: {result.stderr}")
+            return jsonify({"error": "chart generation failed", "detail": result.stderr[:500]}), 500
+
+        chart_result = json.loads(result.stdout)
+        return jsonify(chart_result)
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "chart generation timeout"}), 504
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================
+# call_python — universal mlog->Python bridge (Variant B)
+# Whitelisted modules only. No arbitrary code execution.
+# ============================================================
+CALL_PYTHON_ALLOWED = {
+    # LLM-as-a-Verifier
+    "llm_verifier": {"select", "score", "verify", "rank"},
+    # Data processing
+    "json": {"dumps", "loads"},
+    "statistics": {"mean", "median", "stdev", "variance"},
+    "math": {"ceil", "floor", "log", "log10", "sqrt", "exp", "pow", "factorial", "gcd", "comb", "perm"},
+    "datetime": {"datetime", "timedelta", "timezone"},
+    # Text
+    "re": {"match", "search", "findall", "sub", "split"},
+    "difflib": {"SequenceMatcher", "get_close_matches"},
+    # File
+    "csv": {"reader", "writer", "DictReader", "DictWriter"},
+    # Finance/math
+    "decimal": {"Decimal"},
+    "fractions": {"Fraction"},
+}
+
+@app.post("/call-python")
+def call_python_endpoint():
+    """Universal Python bridge for mlog. Executes module.function(args) with strict whitelist.
+    Body: {"module": "statistics", "function": "mean", "args": [[1,2,3,4,5]], "kwargs": {}}
+    Returns: {"result": <value>, "type": <python type name>}
+    """
+    d = request.get_json(force=True) or {}
+    module_name = d.get('module', '')
+    func_name = d.get('function', '')
+    args = d.get('args', [])
+    kwargs = d.get('kwargs', {})
+
+    # Security: whitelist check
+    if module_name not in CALL_PYTHON_ALLOWED:
+        _log_audit("call_python_blocked", {"module": module_name, "function": func_name}, "system")
+        return jsonify({"error": f"Module '{module_name}' not allowed. Allowed: {list(CALL_PYTHON_ALLOWED.keys())}"}), 403
+
+    allowed_funcs = CALL_PYTHON_ALLOWED[module_name]
+    if func_name not in allowed_funcs:
+        _log_audit("call_python_blocked", {"module": module_name, "function": func_name}, "system")
+        return jsonify({"error": f"Function '{func_name}' not allowed in '{module_name}'. Allowed: {list(allowed_funcs)}"}), 403
+
+    try:
+        import importlib
+        mod = importlib.import_module(module_name)
+        func = getattr(mod, func_name)
+        result = func(*args, **kwargs)
+        _log_audit("call_python", {"module": module_name, "function": func_name}, "system")
+        # Serialize result
+        if isinstance(result, (list, dict, str, int, float, bool, type(None))):
+            serialized = result
+        elif isinstance(result, tuple):
+            serialized = list(result)
+        elif hasattr(result, '__dict__'):
+            serialized = str(result)
+        else:
+            serialized = str(result)
+        return jsonify({"result": serialized, "type": type(result).__name__})
+    except Exception as e:
+        _log_audit("call_python_error", {"module": module_name, "function": func_name, "error": str(e)[:200]}, "system")
+        return jsonify({"error": str(e)[:500]}), 500
+
 
 if __name__ == "__main__":
-    # Global error handlers — log full traceback instead of silent 500
-    @app.errorhandler(500)
-    def _handle_500(e):
-        import traceback as _tb
-        log.error(f"[500] {e}\n{_tb.format_exc()}")
-        return "internal error", 500
-
-    @app.errorhandler(Exception)
-    def _handle_exception(e):
-        import traceback as _tb
-        log.error(f"[UNHANDLED] {type(e).__name__}: {e}\n{_tb.format_exc()}")
-        return "internal error", 500
-
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, context_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
-             f"tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*")
+             f"expert/chart, tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*, "
+             f"scheduler/watch-sweep, scheduler/indicator-pre-reminders, call-python")
     app.run(host="127.0.0.1", port=PORT, threaded=True)
 
 

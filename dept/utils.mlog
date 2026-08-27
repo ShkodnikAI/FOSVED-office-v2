@@ -3,7 +3,10 @@
 
 // ── Audit Log (18 action types) ──────────────────────────────────────
 pattern AuditLog(action: String, dept: String, details: String) -> String {
-  db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES (?1, 'system', ?2, ?3, 'ok')", [action, dept, details])
+  let escaped_details = escape_json(details)
+  let escaped_action = escape_json(action)
+  let escaped_dept = escape_json(dept)
+  db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('" + escaped_action + "', 'system', '" + escaped_dept + "', '" + escaped_details + "', 'ok')")
   return "ok"
 }
 
@@ -81,7 +84,7 @@ pattern StripHtml(text: String) -> String {
 // ── Department hashtags for archive channel ─────────────────────────
 pattern DeptHashtags(dept: String) -> String {
   if dept == "osp" then { return "#OSP #analytics #strategy" }
-  if dept == "lz" then { return "#LZ #technology #research" }
+  if dept == "lz" then { return "#LZ #technology #research #политика #экономика #события" }
   if dept == "expert" then { return "#Expert #briefing" }
   if dept == "marketing" then { return "#Marketing #audience" }
   if dept == "finance" then { return "#Finance #cashflow" }
@@ -100,9 +103,9 @@ pattern DeptHashtags(dept: String) -> String {
 // ── Department display name (extended) ─────────────────────────────
 pattern DeptDisplayName(dept: String) -> String {
   if dept == "yana" then { return "Yana — Shef de kabinet" }
-  if dept == "osp" then { return "OSP — Strategicheskij analiz" }
-  if dept == "lz" then { return "LZ — Laboratoriya znanij" }
-  if dept == "expert" then { return "Expert" }
+  if dept == "osp" then { return "ОСП · Стратегическое планирование" }
+  if dept == "lz" then { return "ЛЗ · Лаборатория знаний" }
+  if dept == "expert" then { return "Эксперт · Подготовка к встрече" }
   if dept == "marketing" then { return "Marketing" }
   if dept == "finance" then { return "Finance" }
   if dept == "legal" then { return "Legal" }
@@ -116,13 +119,60 @@ pattern DeptDisplayName(dept: String) -> String {
   return dept
 }
 
-// ── Publish to archive channel ──────────────────────────────────────
+// ── Publish to archive channel (MIGRATED from Python /archive/publish) ──
+// Native mlog: StripHtml → build compact record → Telegram send → channel_archive
 pattern PublishToArchive(doc_id: String, dept: String, title: String, content: String) -> String {
-  // Delegate to Python proxy for proper HTML stripping and Telegram sending
-  let body = json_encode({doc_id: doc_id, dept: dept, title: title, content: content})
-  let result = try http_post("http://127.0.0.1:4000/archive/publish", body, "application/json")
-  if to_string(result) == "()" then { return "" }
-  let msg_id = json_get(parse_json(result), "msg_id", "")
+  let channel_id = env("TELEGRAM_ARCHIVE_CHANNEL_ID")
+  if channel_id == "" then { return "" }
+
+  // 1. Strip HTML for plain text
+  let plain = StripHtml(content)
+
+  // 2. Build summary (first 200 chars, collapse whitespace)
+  let summary = substring(plain, 0.0, 200.0)
+
+  // 3. Build compact archive record
+  let day = substring(to_string(now()), 0.0, 10.0)
+  let hashtags = DeptHashtags(dept)
+  let render_url = env("RENDER_URL")
+  let link = ""
+  if doc_id != "" and render_url != "" then {
+    link = render_url + "/miniapp/" + doc_id
+  }
+
+  let record = day + " | " + dept
+  if title != "" then {
+    record = record + "\n" + substring(title, 0.0, 150.0)
+  }
+  if summary != "" then {
+    record = record + "\n\n" + summary
+  }
+  if link != "" then {
+    record = record + "\n\nОткрыть: " + link
+  }
+  if hashtags != "" then {
+    record = record + "\n\n" + hashtags
+  }
+  // Cap at 1024 chars (Telegram limit is 4096 but we keep compact)
+  let record = substring(record, 0.0, 1024.0)
+
+  // 4. Send to archive channel via Telegram
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let body = json_encode({chat_id: to_float(channel_id), text: record})
+  let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+  let msg_id = ""
+  if to_string(result) != "()" then {
+    let parsed = parse_json(result)
+    let ok = json_get(parsed, "ok", "")
+    if ok == "true" then {
+      let result_msg = json_get(parsed, "result", "")
+      msg_id = to_string(try json_get(result_msg, "message_id", ""))
+    }
+  }
+
+  // 5. Save to channel_archive table
+  db_execute("INSERT INTO channel_archive (doc_id, dept, title, channel_message_id, archived_at) VALUES (?1, ?2, ?3, ?4, datetime('now'))", [doc_id, dept, title, msg_id])
+
   let _ = AuditLog("archive_publish", dept, "doc: " + doc_id + " msg_id: " + msg_id)
   return msg_id
 }
@@ -135,46 +185,103 @@ pattern PublishDailyDigest() -> String {
   return "ok"
 }
 
-// ── Learning: classify correction via LLM ────────────────────────────
+// ── Learning: classify correction via LLM (MIGRATED from Python /learning/fix) ──
+// Native mlog: call_llm for classification → db_execute for saving
 pattern ClassifyCorrection(text: String, dept: String) -> String {
-  let body = json_encode({text: text, dept: dept})
-  let result = try http_post("http://127.0.0.1:4000/learning/fix", body, "application/json")
-  if to_string(result) == "()" then { return "" }
-  return result
+  let dept_prompt = read_file("library/" + dept + ".md")
+  let classify_prompt = dept_prompt + "\n\nYou are a quality control classifier. Analyze the user's correction text and classify the error type. Also suggest how to fix it going forward. Output JSON only: {\"error_type\": \"TOO_GENERAL|WRONG_FACTS|WRONG_DEPT|BAD_FORMAT|MISSING_CONTEXT|OTHER\", \"suggestion\": \"your suggestion\"}. Language: Russian."
+  let llm_result = try call_llm(classify_prompt, "Классифицируй эту коррекцию:\n\n" + text + "\n\nВерни только JSON.")
+  if to_string(llm_result) == "()" then {
+    // Fallback: save as OTHER
+    db_execute("INSERT INTO error_patterns (dept, error_type, query_text) VALUES (?1, 'OTHER', ?2)", [dept, substring(text, 0, 2000)])
+    db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, corr_type) VALUES (?1, ?2, '', 'OTHER')", [dept, substring(text, 0, 2000)])
+    return json_encode({status: "ok", error_type: "OTHER", suggestion: "LLM unavailable"})
+  }
+  let reply = json_get(parse_json(llm_result), "content", "")
+
+  // Parse JSON from LLM response — find { } block
+  let json_start = index_of(reply, "{")
+  let json_end = (index_of(substring(reply, json_start, 10000.0), "}") + json_start)
+  let error_type = "OTHER"
+  let suggestion = reply
+  if json_start >= 0.0 and json_end > json_start then {
+    let json_str = substring(reply, json_start, json_end + 1.0)
+    let parsed = try parse_json(json_str)
+    if to_string(parsed) != "()" then {
+      let et = json_get(parsed, "error_type", "OTHER")
+      if et != "" then { error_type = et }
+      let sg = json_get(parsed, "suggestion", "")
+      if sg != "" then { suggestion = sg }
+    }
+  }
+
+  // Save to error_patterns and adapt_corrections
+  db_execute("INSERT INTO error_patterns (dept, error_type, query_text) VALUES (?1, ?2, ?3)", [dept, error_type, substring(text, 0, 2000)])
+  db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, corr_type) VALUES (?1, ?2, ?3, ?4)", [dept, substring(text, 0, 2000), substring(suggestion, 0, 2000), error_type])
+
+  let _ = AuditLog("learning_fix", dept, "error_type=" + error_type)
+  return json_encode({status: "ok", error_type: error_type, suggestion: suggestion})
 }
 
-// ── Learning: record positive example ───────────────────────────────
+// ── Learning: record positive example (MIGRATED from Python /learning/good) ──
 pattern RecordPositiveExample(dept: String, query: String, response: String) -> String {
-  let body = json_encode({dept: dept, query: query, response: response})
-  let result = try http_post("http://127.0.0.1:4000/learning/good", body, "application/json")
-  if to_string(result) == "()" then { return "" }
+  db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, corr_type) VALUES (?1, ?2, ?3, 'positive')", [dept, substring(query, 0.0, 2000.0), substring(response, 0.0, 2000.0)])
   let _ = AuditLog("positive_example", dept, "recorded positive")
-  return result
+  return json_encode({status: "ok"})
 }
 
-// ── Learning: get stats ──────────────────────────────────────────────
+// ── Learning: get stats (MIGRATED from Python /learning/stats) ──────────
 pattern GetLearningStats() -> String {
-  let body = json_encode({trigger: "scheduler"})
-  let result = try http_post("http://127.0.0.1:4000/learning/stats", body, "application/json")
-  if to_string(result) == "()" then { return "{}" }
-  return result
+  // Corrections count (7d, non-positive)
+  let corr_rows = query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days') AND corr_type != 'positive'", [])
+  let corrections_7d = to_string(try json_get(corr_rows[0], "c", "0"))
+
+  // Positive examples total
+  let pos_rows = query("SELECT COUNT(*) as c FROM adapt_corrections WHERE corr_type = 'positive'", [])
+  let positive_total = to_string(try json_get(pos_rows[0], "c", "0"))
+
+  // Error pattern breakdown
+  let pattern_rows = query("SELECT error_type, COUNT(*) as c FROM error_patterns GROUP BY error_type ORDER BY c DESC", [])
+
+  // Per-dept corrections (7d)
+  let dept_rows = query("SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days') AND corr_type != 'positive' GROUP BY dept ORDER BY c DESC", [])
+
+  return json_encode({
+    corrections_7d: corrections_7d,
+    positive_total: positive_total,
+    error_patterns: pattern_rows,
+    dept_corrections: dept_rows
+  })
 }
 
-// ── Learning: debrief department ────────────────────────────────────
+// ── Learning: debrief department (MIGRATED from Python /learning/debrief) ──
+// Native mlog: collect corrections + call_llm for debrief generation
 pattern DebriefDepartment(dept: String) -> String {
-  let body = json_encode({dept: dept})
-  let result = try http_post("http://127.0.0.1:4000/learning/debrief", body, "application/json")
-  if to_string(result) == "()" then { return "" }
-  let _ = AuditLog("debrief", dept, "dept debrief requested")
-  return result
+  // Collect corrections for the department (last 30 days)
+  let corr_rows = query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept = ? AND created_at > datetime('now', '-30 days') ORDER BY created_at DESC LIMIT 50", [dept])
+  let corrections_data = json_encode(corr_rows)
+
+  // Generate debrief via LLM
+  let dept_prompt = read_file("library/" + dept + ".md")
+  let debrief_prompt = dept_prompt + "\n\nGenerate a debrief for the " + dept + " department based on the last 30 days of corrections. Identify patterns, recurring errors, and suggest improvements. Language: Russian."
+  let llm_result = try call_llm(debrief_prompt, "Коррекции за 30 дней:\n" + corrections_data)
+  if to_string(llm_result) == "()" then { return "Debrief unavailable (LLM error)." }
+  let reply = json_get(parse_json(llm_result), "content", "")
+
+  // Save debrief
+  db_execute("INSERT INTO debriefs (dept, period, content) VALUES (?1, '30d', ?2)", [dept, reply])
+  let _ = AuditLog("debrief", dept, "dept debrief completed")
+  return reply
 }
 
-// ── Search archive ───────────────────────────────────────────────────
+// ── Search archive (MIGRATED from Python /search) ───────────────────
+// Native mlog: direct SQL LIKE query — identical to Python implementation
 pattern SearchArchive(query_text: String) -> String {
-  let body = json_encode({query: query_text})
-  let result = try http_post("http://127.0.0.1:4000/search", body, "application/json")
-  if to_string(result) == "()" then { return "{}" }
-  return result
+  let search_term = "%" + query_text + "%"
+  let rows = query("SELECT id, dept, title, created_at FROM miniapp_responses WHERE (raw_text LIKE ?1 OR title LIKE ?1) ORDER BY id DESC LIMIT 50", [search_term])
+  let mem_rows = query("SELECT id, 'yana' as dept, event_text as title, created_at FROM yana_events WHERE event_text LIKE ?1 ORDER BY id DESC LIMIT 50", [search_term])
+  let count = length(rows) + length(mem_rows)
+  return json_encode({status: "ok", results: rows, memories: mem_rows, count: count})
 }
 
 // ── TTS helper — send voice reply if voice is enabled ───────────────
@@ -182,19 +289,19 @@ pattern SearchArchive(query_text: String) -> String {
 pattern SendVoiceReply(chat_id: String, text: String, dept: String) -> String {
   let voice_on = kv_get("voice_enabled")
   if voice_on != "true" then { return "" }
-  if len(text) < 5.0 then { return "" }
+  if length(text) < 5.0 then { return "" }
   let tts_text = ""
-  if dept != "yana" and dept != "admin" and len(text) > 1000.0 then {
-    let tts_text = substring(text, 0.0, 500.0) + "... Продолжение в текстовом отчёте."
+  if dept != "yana" and dept != "admin" and length(text) > 1000.0 then {
+    tts_text = substring(text, 0.0, 500.0) + "... Продолжение в текстовом отчёте."
   }
   if tts_text == "" then {
-    let tts_text = text
+    tts_text = text
   }
   let voice_name = kv_get("tts_voice")
-  if len(voice_name) < 3.0 then { let voice_name = "ru-RU-DmitryNeural" }
+  if length(voice_name) < 3.0 then { voice_name = "ru-RU-DmitryNeural" }
   let tts_body = json_encode({text: tts_text, voice: voice_name, chat_id: chat_id})
   let _ = try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
-  let _ = AuditLog("tts_reply", dept, "len=" + to_string(len(tts_text)) + " orig_len=" + to_string(len(text)))
+  let _ = AuditLog("tts_reply", dept, "len=" + to_string(length(tts_text)) + " orig_len=" + to_string(length(text)))
   return "ok"
 }
 

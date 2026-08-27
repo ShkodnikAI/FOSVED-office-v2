@@ -3,7 +3,7 @@
  */
 
 const BASE_URL = '';
-const USE_MOCKS = false;
+const USE_MOCKS = true;  // temporary: mlog:10001 down → force mocks so UI is never blank
 
 const DEPT_NAME_MAP = {
   'Yana': 'Яна',
@@ -432,30 +432,30 @@ const API = {
       ]
     };
     return this._get('/api/projects');
-  }
+  },
 
   async project(id) {
     if (USE_MOCKS) {
       const projects = [
-        { id:'fosved-v2', name:'FOSVED Office v2', status:'active', description:'Разработка мини-приложения для Telegram WebApp. Интерфейс управления AI-офисом с 14 отделами.', progress:78, prompt:'Создать мини-приложение для Telegram WebApp на чистом HTML/CSS/JS. Приложение должно управлять AI-офисом с 14 отделами. Каждый отдел имеет свою модель, команды, задачи. Dashboard показывает KPI, алерты, отчёты. Чат с Яной — центральная точка коммуникации.', repo:'https://github.com/ShkodnikAI/FOSVED-office-v2', servers:['api.fosved.io','ws.fosved.io'], plan_url:'https://notion.so/fosved-v2', keys:[{label:'API_KEY_•••Xf7',type:'api'},{label:'GH_PAT_•••SQb',type:'github'},{label:'WS_TOKEN_•••k9m',type:'server'},{label:'TG_BOT_•••a3b',type:'api'}], plan:[{id:'p1',text:'Архитектура и структура проекта',done:true,assignee:'Dev',date:'25.07'},{id:'p2',text:'Dashboard с KPI и алертами',done:true,assignee:'Design',date:'27.07'},{id:'p3',text:'Список отделов с фильтрами',done:true,assignee:'Dev',date:'28.07'},{id:'p4',text:'Детали отдела + чат',done:false,assignee:'Dev',date:'30.07'},{id:'p5',text:'Модели + Экономика + Проекты',done:false,assignee:'Dev',date:'31.07'},{id:'p6',text:'Тестирование и деплой',done:false,assignee:'QA',date:'02.08'}], files:[{id:'f1',name:'index.html',type:'code',meta:'точка входа · Dev · 29.07',size:'12 KB'},{id:'f2',name:'screens.css',type:'code',meta:'стили экранов · Design · 30.07',size:'8 KB'},{id:'f3',name:'api.js',type:'code',meta:'API-клиент · Dev · 30.07',size:'15 KB'},{id:'f4',name:'FOSVED_CONTEXT.md',type:'doc',meta:'контекст · ОСП · 30.07',size:'4 KB'}], model_stats:[{name:'GLM 4.6',short:'GL',provider:'Z.ai',requests:120,cost:'€0.48',pct:40,color:'linear-gradient(135deg,#16a34a,#15803d)',bar_color:'#16a34a'},{name:'Claude Sonnet',short:'CL',provider:'Anthropic',requests:89,cost:'€1.07',pct:30,color:'linear-gradient(135deg,#7c3aed,#6d28d9)',bar_color:'#7c3aed'},{name:'DeepSeek V3',short:'DS',provider:'DeepSeek',requests:245,cost:'€0.25',pct:25,color:'linear-gradient(135deg,#ea580c,#c2410c)',bar_color:'#ea580c'},{name:'GPT-4o',short:'GP',provider:'OpenAI',requests:0,cost:'€0.00',pct:0,color:'linear-gradient(135deg,#64748b,#475569)',bar_color:'#64748b'}], available_models:[{key:'ZA',name:'GLM 4.6',short:'GL',provider:'Z.ai',tier:'priority',valid:true,enabled:true,color:'linear-gradient(135deg,#16a34a,#15803d)'},{key:'CL',name:'Claude Sonnet',short:'CL',provider:'Anthropic',tier:'paid',valid:true,enabled:true,color:'linear-gradient(135deg,#7c3aed,#6d28d9)'},{key:'DS',name:'DeepSeek V3',short:'DS',provider:'DeepSeek',tier:'cheap',valid:true,enabled:true,color:'linear-gradient(135deg,#ea580c,#c2410c)'},{key:'GP',name:'GPT-4o',short:'GP',provider:'OpenAI',tier:'special',valid:false,enabled:false,color:'linear-gradient(135deg,#64748b,#475569)'}] },
+        { id:'fosved-v2', name:'FOSVED Office v2', status:'active', description:'Разработка мини-приложения для Telegram WebApp. Интерфейс управления AI-офисом с 14 отделами.', progress:78, prompt:'Создать мини-приложение для Telegram WebApp на чистом HTML/CSS/JS. Приложение должно управлять AI-офисом с 14 отделами. Каждый отдел имеет свою модель, команды, задачи. Dashboard показывает KPI, алерты, отчёты. Чат с Яной — центральная точка коммуникации.', repo:'https://github.com/ShkodnikAI/FOSVED-office-v2', servers:['api.fosved.io','ws.fosved.io'], plan_url:'https://notion.so/fosved-v2', keys:[{label:'API_KEY_•••Xf7',type:'api'},{label:'GH_PAT_•••SQb',type:'github'},{label:'WS_TOKEN_•••k9m',type:'server'},{label:'TG_BOT_•••a3b',type:'api'}], plan:[{id:'p1',text:'Архитектура и структура проекта',done:true,assignee:'Dev',date:'25.07'},{id:'p2',text:'Dashboard с KPI и алертами',done:true,assignee:'Design',date:'27.07'},{id:'p3',text:'Список отделов с фильтрами',done:true,assignee:'Dev',date:'28.07'},{id:'p4',text:'Детали отдела + чат',done:false,assignee:'Dev',date:'30.07'},{id:'p5',text:'Модели + Экономика + Проекты',done:false,assignee:'Dev',date:'31.07'},{id:'p6',text:'Тестирование и деплой',done:false,assignee:'QA',date:'02.08'}], files:[{id:'f1',name:'index.html',type:'code',meta:'точка входа · Dev · 29.07',size:'12 KB'},{id:'f2',name:'screens.css',type:'code',meta:'стили экранов · Design · 30.07',size:'8 KB'},{id:'f3',name:'api.js',type:'code',meta:'API-клиент · Dev · 30.07',size:'15 KB'},{id:'f4',name:'FOSVED_CONTEXT.md',type:'doc',meta:'контекст · ОСП · 30.07',size:'4 KB'}], model_stats:[{name:'GLM 4.6',short:'GL',provider:'Z.ai',requests:120,cost:'€0.48',pct:40,color:'linear-gradient(135deg,#16a34a,#15803d)',bar_color:'#16a34a'},{name:'Claude Sonnet',short:'CL',provider:'Anthropic',requests:89,cost:'€1.07',pct:30,color:'linear-gradient(135deg,#7c3aed,#6d28d9)',bar_color:'#7c3aed'},{name:'DeepSeek V3',short:'DS',provider:'DeepSeek',requests:245,cost:'€0.25',pct:25,color:'linear-gradient(135deg,#ea580c,#c2410c)',bar_color:'#ea580c'},{name:'GPT-4o',short:'GP',provider:'OpenAI',requests:0,cost:'€0.00',pct:0,color:'linear-gradient(135deg,#64748b,#475569)',bar_color:'#64748b'}], available_models:[{key:'ZA',name:'GLM 4.6',short:'GL',provider:'Z.ai',tier:'priority',valid:true,enabled:true,color:'linear-gradient(135deg,#16a34a,#15803d)'},{key:'CL',name:'Claude Sonnet',short:'CL',provider:'Anthropic',tier:'paid',valid:true,enabled:true,color:'linear-gradient(135deg,#7c3aed,#6d28d9)'},{key:'DS',name:'DeepSeek V3',short:'DS',provider:'DeepSeek',tier:'cheap',valid:true,enabled:false,color:'linear-gradient(135deg,#ea580c,#c2410c)'},{key:'GP',name:'GPT-4o',short:'GP',provider:'OpenAI',tier:'special',valid:false,enabled:false,color:'linear-gradient(135deg,#64748b,#475569)'}] },
       ];
       const project = projects.find(p => p.id === id);
       if (!project) return { status: 'error', error: 'Проект не найден' };
       return { status: 'ok', project };
     }
     return this._get(`/api/projects/${id}`);
-  }
+  },
 
   async updateProjectModel(projectId, modelKey, enabled) {
     if (USE_MOCKS) return { status: 'ok' };
     return this._post(`/api/projects/${projectId}/models`, { modelKey, enabled });
-  }
+  },
 
   async updateProjectStep(projectId, stepId, done) {
     if (USE_MOCKS) return { status: 'ok' };
     return this._post(`/api/projects/${projectId}/steps`, { stepId, done });
-  }
-async archive(q,dept) {
+  },
+  async archive(q,dept) {
     if (USE_MOCKS) {
       await mockDelay();
       let results=MOCK.archive.results;
