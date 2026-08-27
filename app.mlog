@@ -89,6 +89,10 @@ pattern InitDB() -> String {
   // System
   db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)")
 
+  // Rate limiting (FOIP-003.16)
+  db_execute("CREATE TABLE IF NOT EXISTS rate_limits (provider TEXT, created_at TEXT)")
+  let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_rl_provider ON rate_limits(provider, created_at)")
+
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
   // Yana events - alter table extensions
@@ -329,7 +333,30 @@ pattern LogSessionEvent(chat_id: String, event_type: String, dept: String, data:
 }
 
 // ── FOIP-003.2: Resilient LLM Calling with fallback + cooldown ──
+// ── FOIP-003.15: Model-Tier Routing ──
+// Priority: tier-specific > dept-specific > global > default
 pattern GetModelFallbackChain(dept: String) -> String {
+  // FOIP-003.15: Check tier-specific override first (set via kv "query_tier" by caller)
+  let tier = kv_get("query_tier")
+  if tier != "" then {
+    let tier_file = "config/tier_" + tier + ".txt"
+    let tier_content = read_file(tier_file)
+    if tier_content != "" then {
+      let lines = split(tier_content, "\n")
+      let models = ""
+      each line in lines {
+        let trimmed = trim(line)
+        if length(trimmed) > 0 and starts_with(trimmed, "#") == false then {
+          if models != "" then { models = models + "," }
+          models = models + trimmed
+        }
+      }
+      if models != "" then {
+        let _ = AuditLog("tier_routing", "system", "tier=" + tier + " models=" + models)
+        return models
+      }
+    }
+  }
   // Read dept-specific override, fallback to global priority_model
   let override_file = "config/override_" + dept + ".txt"
   let override_content = read_file(override_file)
@@ -372,6 +399,80 @@ pattern ClearModelFails(model: String) -> String {
   return "ok"
 }
 
+// ============================================================
+// FOIP-003.14: Internal Endpoint Auth
+// ============================================================
+pattern RequireInternalAuth() -> String {
+  let token = query_param("token")
+  let expected = env("INTERNAL_API_TOKEN")
+  if expected == "" then { return "ok" }
+  if token == expected then { return "ok" }
+  return "unauthorized"
+}
+
+// ============================================================
+// FOIP-003.15: Model-Tier Classification
+// Tiers: "quick" (cheap/fast), "standard" (default), "deep" (powerful)
+// ============================================================
+pattern ClassifyQueryTier(text: String, dept: String) -> String {
+  let t = lower(trim(text))
+  // Quick tier: exact match simple commands
+  let quick_cmds = ["/start", "/help", "/status", "/office", "/dept", "/stats", "/cost", "/costs", "/budget", "/model", "/learning", "/наряды", "/rate", "/yana"]
+  each cmd in quick_cmds {
+    if t == cmd then { return "quick" }
+  }
+  // Bare short greetings
+  if t == "привет" or t == "здравствуй" or t == "спасибо" or t == "ок" or t == "ok" or t == "hello" then { return "quick" }
+  // Very short messages (likely simple)
+  if length(t) < 20.0 then { return "quick" }
+  // Deep tier: explicit complex commands
+  if starts_with(text, "/osp deep") then { return "deep" }
+  if starts_with(text, "/osp full") then { return "deep" }
+  if starts_with(text, "/osp wargame") then { return "deep" }
+  if starts_with(text, "/lz deep") then { return "deep" }
+  if starts_with(text, "/chain") then { return "deep" }
+  if starts_with(text, "/debrief") then { return "deep" }
+  // Keyword-based deep detection
+  let deep_kw = ["анализ", "исследование", "wargame", "стратегия", "прогноз", "моделирование", "сценарий", "глубокий", "подробный", "развернутый", "комплексный", "сравнительный", "анализируй", "исследуй", "спрогнозируй", "рассчитай", "сделай анализ", "разберись", "deep analysis", "research"]
+  each kw in deep_kw {
+    if contains(t, kw) then { return "deep" }
+  }
+  // Standard: everything else
+  return "standard"
+}
+
+// ============================================================
+// FOIP-003.16: Per-Provider Rate Limiting
+// ============================================================
+pattern GetProviderRateLimit(provider: String) -> String {
+  let key = "rate_limit:" + provider
+  let val = kv_get(key)
+  if val != "" then { return val }
+  // Default: 20 req/min per provider
+  return "20"
+}
+
+pattern CheckRateLimit(provider: String) -> String {
+  let limit = to_float(GetProviderRateLimit(provider))
+  let rows = query("SELECT COUNT(*) as c FROM rate_limits WHERE provider = ? AND created_at > datetime('now', '-1 minute')", [provider])
+  if to_string(rows) == "()" then { return "ok" }
+  let count = to_float(json_get(rows[0], "c", "0"))
+  if count >= limit then { return "limited" }
+  return "ok"
+}
+
+pattern RecordRateLimitCall(provider: String) -> String {
+  let _ = db_execute("INSERT INTO rate_limits (provider, created_at) VALUES (?, datetime('now'))", [provider])
+  // Cleanup old entries (keep last 2 min)
+  let _ = try db_execute("DELETE FROM rate_limits WHERE created_at < datetime('now', '-2 minutes')", [])
+  return "ok"
+}
+
+pattern SetProviderRateLimit(provider: String, limit: String) -> String {
+  let _ = kv_set("rate_limit:" + provider, limit)
+  return "ok"
+}
+
 pattern CallLLMResilient(dept: String, messages: String) -> String {
   let chain = try GetModelFallbackChain(dept)
   if to_string(chain) == "()" then { return json_encode({reply: "Error: GetModelFallbackChain crashed", model: "", tokens_in: "0", tokens_out: "0", error: "GetModelFallbackChain"}) }
@@ -392,7 +493,14 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
       if status == "cooled" then {
         last_error = "model " + model + " cooled (3+ fails)"
       } else {
-        let msgs_parsed = try parse_json(messages)
+        // FOIP-003.16: Rate limit check
+        let rl_status = try CheckRateLimit(model)
+        if to_string(rl_status) == "()" then { rl_status = "ok" }
+        if rl_status == "limited" then {
+          last_error = "model " + model + " rate-limited (too many requests)"
+        } else {
+          let _ = try RecordRateLimitCall(model)
+          let msgs_parsed = try parse_json(messages)
         if to_string(msgs_parsed) == "()" then {
           last_error = "parse_json(messages) crashed"
         } else {
@@ -426,9 +534,13 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
             }
           }
         }
+        }  // closes else-RL (rate limit bypass)
       }
     }
   }
+
+  // Clear tier after use
+  let _ = kv_set("query_tier", "")
 
   if reply == "" then {
     return json_encode({reply: "Error: all models failed (" + last_error + "). Try again later.", model: "", tokens_in: "0", tokens_out: "0", error: last_error})
@@ -1829,6 +1941,8 @@ mlogserver {
 
   // Version check — call /version to verify deployed code matches git
   route "/version" method=GET {
+    let auth = RequireInternalAuth()
+    if auth == "unauthorized" then { return respond("401 Unauthorized") }
     let yana_src = read_file("dept/yana.mlog")
     let has_anti_format = "0"
     if contains(yana_src, "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА") then { has_anti_format = "1" }
@@ -3414,6 +3528,9 @@ return respond("200 ok") }
 
     let dept = DetectDepartment(text)
    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook',?,'ok')", ["step_0_after_detect_dept=" + dept])
+    // FOIP-003.15: Classify query tier for model routing
+    let tier = ClassifyQueryTier(text, dept)
+    let _ = kv_set("query_tier", tier)
     let query = text
     let handled = 0.0
 
