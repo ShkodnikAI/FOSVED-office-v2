@@ -89,6 +89,10 @@ pattern InitDB() -> String {
   // System
   db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)")
 
+  // FOIP-003.16: Per-provider rate limiting
+  db_execute("CREATE TABLE IF NOT EXISTS rate_limits (provider TEXT, created_at TEXT)")
+  let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_rl_provider ON rate_limits(provider, created_at)")
+
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
   // Yana events - alter table extensions
@@ -329,22 +333,45 @@ pattern LogSessionEvent(chat_id: String, event_type: String, dept: String, data:
 }
 
 // ── FOIP-003.2: Resilient LLM Calling with fallback + cooldown ──
+// ── FOIP-003.15: Model-Tier Routing ──
+// Priority: tier-specific > dept-specific > global > default
 pattern GetModelFallbackChain(dept: String) -> String {
+  // FOIP-003.15: Check tier-specific override first
+  let tier = kv_get("query_tier")
+  if tier != "" then {
+    let tier_file = "config/tier_" + tier + ".txt"
+    let tier_content = read_file(tier_file)
+    if tier_content != "" then {
+      let tier_lines = split(tier_content, "\n")
+      let mut tier_models = ""
+      each tl in tier_lines {
+        let trimmed = trim(tl)
+        if length(trimmed) > 0 and starts_with(trimmed, "#") == false then {
+          if tier_models != "" then { tier_models = tier_models + "," }
+          tier_models = tier_models + trimmed
+        }
+      }
+      if tier_models != "" then {
+        let _ = AuditLog("tier_routing", "system", "tier=" + tier + " models=" + tier_models)
+        return tier_models
+      }
+    }
+  }
   // Read dept-specific override, fallback to global priority_model
   let override_file = "config/override_" + dept + ".txt"
   let override_content = read_file(override_file)
   if override_content != "" then {
     // Extract model lines (skip comments and empty)
-    let lines = split(override_content, "\n")
-    let models = ""
-    each line in lines {
-      let trimmed = trim(line)
+    let ov_lines = split(override_content, "\n")
+    let mut ov_models = ""
+    each ov_line in ov_lines {
+      let trimmed = trim(ov_line)
       if length(trimmed) > 0 and starts_with(trimmed, "#") == false then {
-        if models != "" then { models = models + "," }
-        let models = models + trimmed
+        if ov_models != "" then { ov_models = ov_models + "," }
+        ov_models = ov_models + trimmed
       }
     }
-    if models != "" then { return models }
+    if ov_models != "" then { return ov_models }
   }
   let global = read_file("config/priority_model.txt")
   if global != "" then { return trim(global) }
@@ -372,17 +399,83 @@ pattern ClearModelFails(model: String) -> String {
   return "ok"
 }
 
+// ============================================================
+// FOIP-003.14: Internal Endpoint Auth
+// ============================================================
+pattern RequireInternalAuth() -> String {
+  let token = query_param("token")
+  let expected = env("INTERNAL_API_TOKEN")
+  if expected == "" then { return "ok" }
+  if token == expected then { return "ok" }
+  return "unauthorized"
+}
+
+// ============================================================
+// FOIP-003.15: Model-Tier Classification
+// Tiers: "quick" (cheap/fast), "standard" (default), "deep" (powerful)
+// ============================================================
+pattern ClassifyQueryTier(text: String, dept: String) -> String {
+  let t = lower(trim(text))
+  let quick_cmds = ["/start", "/help", "/status", "/office", "/dept", "/stats", "/cost", "/costs", "/budget", "/model", "/learning", "/\u043d\u0430\u0440\u044f\u0434\u044b", "/rate", "/yana"]
+  each cmd in quick_cmds {
+    if t == cmd then { return "quick" }
+  }
+  if t == "\u043f\u0440\u0438\u0432\u0435\u0442" or t == "\u0437\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439" or t == "\u0441\u043f\u0430\u0441\u0438\u0431\u043e" or t == "\u043e\u043a" or t == "ok" or t == "hello" then { return "quick" }
+  if length(t) < 20.0 then { return "quick" }
+  if starts_with(text, "/osp deep") then { return "deep" }
+  if starts_with(text, "/osp full") then { return "deep" }
+  if starts_with(text, "/osp wargame") then { return "deep" }
+  if starts_with(text, "/lz deep") then { return "deep" }
+  if starts_with(text, "/chain") then { return "deep" }
+  if starts_with(text, "/debrief") then { return "deep" }
+  let deep_kw = ["\u0430\u043d\u0430\u043b\u0438\u0437", "\u0438\u0441\u0441\u043b\u0435\u0434\u043e\u0432\u0430\u043d\u0438\u0435", "wargame", "\u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u044f", "\u043f\u0440\u043e\u0433\u043d\u043e\u0437", "\u043c\u043e\u0434\u0435\u043b\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435", "\u0441\u0446\u0435\u043d\u0430\u0440\u0438\u0439", "\u0433\u043b\u0443\u0431\u043e\u043a\u0438\u0439", "\u043f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0439", "\u0440\u0430\u0437\u0432\u0435\u0440\u043d\u0443\u0442\u044b\u0439", "\u043a\u043e\u043c\u043f\u043b\u0435\u043a\u0441\u043d\u044b\u0439", "\u0441\u0440\u0430\u0432\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439", "\u0430\u043d\u0430\u043b\u0438\u0437\u0438\u0440\u0443\u0439", "\u0438\u0441\u0441\u043b\u0435\u0434\u0443\u0439", "\u0441\u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0438\u0440\u0443\u0439", "\u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u0439", "research"]
+  each kw in deep_kw {
+    if contains(t, kw) then { return "deep" }
+  }
+  return "standard"
+}
+
+// ============================================================
+// FOIP-003.16: Per-Provider Rate Limiting
+// ============================================================
+pattern GetProviderRateLimit(provider: String) -> String {
+  let key = "rate_limit:" + provider
+  let val = kv_get(key)
+  if val != "" then { return val }
+  return "20"
+}
+
+pattern CheckRateLimit(provider: String) -> String {
+  let limit = to_float(GetProviderRateLimit(provider))
+  let rows = query("SELECT COUNT(*) as c FROM rate_limits WHERE provider = ? AND created_at > datetime('now', '-1 minute')", [provider])
+  if to_string(rows) == "()" then { return "ok" }
+  let count = to_float(json_get(rows[0], "c", "0"))
+  if count >= limit then { return "limited" }
+  return "ok"
+}
+
+pattern RecordRateLimitCall(provider: String) -> String {
+  let _ = db_execute("INSERT INTO rate_limits (provider, created_at) VALUES (?, datetime('now'))", [provider])
+  let _ = try db_execute("DELETE FROM rate_limits WHERE created_at < datetime('now', '-2 minutes')", [])
+  return "ok"
+}
+
+pattern SetProviderRateLimit(provider: String, limit: String) -> String {
+  let _ = kv_set("rate_limit:" + provider, limit)
+  return "ok"
+}
+
 pattern CallLLMResilient(dept: String, messages: String) -> String {
   let chain = try GetModelFallbackChain(dept)
   if to_string(chain) == "()" then { return json_encode({reply: "Error: GetModelFallbackChain crashed", model: "", tokens_in: "0", tokens_out: "0", error: "GetModelFallbackChain"}) }
   let models = try split(chain, ",")
   if to_string(models) == "()" then { return json_encode({reply: "Error: split chain crashed", model: "", tokens_in: "0", tokens_out: "0", error: "split"}) }
-  let last_error = ""
-  let reply = ""
-  let used_model = ""
-  let tokens_in = "0"
-  let tokens_out = "0"
-  let found = ""
+  let mut last_error = ""
+  let mut reply = ""
+  let mut used_model = ""
+  let mut tokens_in = "0"
+  let mut tokens_out = "0"
+  let mut found = ""
 
   each raw_model in models {
     let model = trim(raw_model)
@@ -390,37 +483,45 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
       let status = try IsModelCooled(model)
       if to_string(status) == "()" then { status = "available" }
       if status == "cooled" then {
-        let last_error = "model " + model + " cooled (3+ fails)"
+        last_error = "model " + model + " cooled (3+ fails)"
       } else {
-        let msgs_parsed = try parse_json(messages)
-        if to_string(msgs_parsed) == "()" then {
-          let last_error = "parse_json(messages) crashed"
+        // FOIP-003.16: Rate limit check
+        let rl_status = try CheckRateLimit(model)
+        if to_string(rl_status) == "()" then { rl_status = "ok" }
+        if rl_status == "limited" then {
+          last_error = "model " + model + " rate-limited"
         } else {
-          let body = try json_encode({dept: dept, messages: msgs_parsed, model_override: model})
-          if to_string(body) == "()" then {
-            let last_error = "json_encode body crashed"
+          let _ = try RecordRateLimitCall(model)
+          let msgs_parsed = try parse_json(messages)
+          if to_string(msgs_parsed) == "()" then {
+            last_error = "parse_json(messages) crashed"
           } else {
-            let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
-            if to_string(result) == "()" then {
-              let last_error = "no response from " + model
-              let _ = try MarkModelFail(model)
+            let body = try json_encode({dept: dept, messages: msgs_parsed, model_override: model})
+            if to_string(body) == "()" then {
+              last_error = "json_encode body crashed"
             } else {
-              let parsed = try parse_json(result)
-              if to_string(parsed) == "()" then {
-                let last_error = "parse error from " + model
+              let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
+              if to_string(result) == "()" then {
+                last_error = "no response from " + model
                 let _ = try MarkModelFail(model)
               } else {
-                let r = to_string(try json_get(parsed, "reply", ""))
-                if r == "" or r == "()" then {
-                  let last_error = "empty reply from " + model
+                let parsed = try parse_json(result)
+                if to_string(parsed) == "()" then {
+                  last_error = "parse error from " + model
                   let _ = try MarkModelFail(model)
                 } else {
-                  let reply = r
-                  let used_model = to_string(try json_get(parsed, "model", model))
-                  let tokens_in = to_string(try json_get(parsed, "tokens_in", "0"))
-                  let tokens_out = to_string(try json_get(parsed, "tokens_out", "0"))
-                  let _ = try ClearModelFails(model)
-                  let found = "yes"
+                  let r = to_string(try json_get(parsed, "reply", ""))
+                  if r == "" or r == "()" then {
+                    last_error = "empty reply from " + model
+                    let _ = try MarkModelFail(model)
+                  } else {
+                    reply = r
+                    used_model = to_string(try json_get(parsed, "model", model))
+                    tokens_in = to_string(try json_get(parsed, "tokens_in", "0"))
+                    tokens_out = to_string(try json_get(parsed, "tokens_out", "0"))
+                    let _ = try ClearModelFails(model)
+                    found = "yes"
+                  }
                 }
               }
             }
@@ -429,6 +530,9 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
       }
     }
   }
+
+  // Clear tier after use
+  let _ = kv_set("query_tier", "")
 
   if reply == "" then {
     return json_encode({reply: "Error: all models failed (" + last_error + "). Try again later.", model: "", tokens_in: "0", tokens_out: "0", error: last_error})
@@ -1829,28 +1933,13 @@ mlogserver {
 
   // Version check — call /version to verify deployed code matches git
   route "/version" method=GET {
+    let auth = RequireInternalAuth()
+    if auth == "unauthorized" then { return respond("401 Unauthorized") }
     let yana_src = read_file("dept/yana.mlog")
     let has_anti_format = "0"
     if contains(yana_src, "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА") then { let has_anti_format = "1" }
     if contains(yana_src, "has_layers") then { let has_anti_format = "1" }
     return respond("200 version=" + env("RENDER_GIT_COMMIT") + " anti_format=" + has_anti_format)
-  }
-
-  // Debug: check Telegram webhook info (GET, no auth needed — temporary diagnostic)
-  route "/debug/wh-info" method=GET {
-    let _ = InitDB()
-    let token = env("TELEGRAM_BOT_TOKEN")
-    let wh_result = try http_post("https://api.telegram.org/bot" + token + "/getWebhookInfo", "{}", "application/json", 10.0)
-    if to_string(wh_result) == "()" then {
-      return respond("500 failed_to_reach_telegram_api")
-    }
-    // Also get recent webhook-related audit entries
-    let rows = query("SELECT action, details, timestamp FROM audit_log WHERE action IN ('checkpoint','webhook_in','status_check') ORDER BY id DESC LIMIT 5", [])
-    let audit_str = ""
-    each r in rows {
-      let audit_str = audit_str + to_string(json_get(r, "timestamp", "")) + " " + to_string(json_get(r, "action", "")) + " " + substring(to_string(json_get(r, "details", "")), 0.0, 80.0) + "\n"
-    }
-    return respond("200 WEBHOOK_DIAG\n" + wh_result + "\n\nRECENT_AUDIT:\n" + audit_str)
   }
 
   // ============================================================
@@ -1863,14 +1952,9 @@ mlogserver {
     let chat_id = to_string(json_get(data, "message.chat.id", "0"))
     let user_id = to_string(json_get(data, "message.from.id", "0"))
     let owner_id = env("OWNER_TELEGRAM_ID")
-    let _ = try db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('webhook_in','telegram','webhook',?,'ok')", ["step_1_parsed cid=" + chat_id + " uid=" + user_id + " oid=" + owner_id])
 
     // Owner check — ignore non-owner
-    if user_id != owner_id then {
-      let _ = try db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('webhook_in','telegram','webhook',?,'dropped')", ["step_2_owner_check_fail uid=" + user_id + " oid=" + owner_id])
-      return respond("200 ok")
-    }
-    let _ = try db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('webhook_in','telegram','webhook','step_3_owner_ok','ok')", [])
+    if user_id != owner_id then { return respond("200 ok") }
 
     // Idempotency: игнорируем быстрый повтор (в пределах 90 с), пропускаем медленный ретрай (WH-3)
     let update_id = to_string(json_get(data, "update_id", ""))
@@ -3436,6 +3520,9 @@ return respond("200 ok") }
 
     let dept = DetectDepartment(text)
    let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook',?,'ok')", ["step_0_after_detect_dept=" + dept])
+    // FOIP-003.15: Classify query tier for model routing
+    let tier = ClassifyQueryTier(text, dept)
+    let _ = kv_set("query_tier", tier)
     let query = text
     let handled = 0.0
 
