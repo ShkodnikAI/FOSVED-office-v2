@@ -1836,6 +1836,23 @@ mlogserver {
     return respond("200 version=" + env("RENDER_GIT_COMMIT") + " anti_format=" + has_anti_format)
   }
 
+  // Debug: check Telegram webhook info (GET, no auth needed — temporary diagnostic)
+  route "/debug/wh-info" method=GET {
+    let _ = InitDB()
+    let token = env("TELEGRAM_BOT_TOKEN")
+    let wh_result = try http_post("https://api.telegram.org/bot" + token + "/getWebhookInfo", "{}", "application/json", 10.0)
+    if to_string(wh_result) == "()" then {
+      return respond("500 failed_to_reach_telegram_api")
+    }
+    // Also get recent webhook-related audit entries
+    let rows = query("SELECT action, details, timestamp FROM audit_log WHERE action IN ('checkpoint','webhook_in','status_check') ORDER BY id DESC LIMIT 5", [])
+    let audit_str = ""
+    each r in rows {
+      audit_str = audit_str + to_string(json_get(r, "timestamp", "")) + " " + to_string(json_get(r, "action", "")) + " " + substring(to_string(json_get(r, "details", "")), 0.0, 80.0) + "\n"
+    }
+    return respond("200 WEBHOOK_DIAG\n" + wh_result + "\n\nRECENT_AUDIT:\n" + audit_str)
+  }
+
   // ============================================================
   // WEBHOOK — Telegram
   // ============================================================
@@ -1846,9 +1863,14 @@ mlogserver {
     let chat_id = to_string(json_get(data, "message.chat.id", "0"))
     let user_id = to_string(json_get(data, "message.from.id", "0"))
     let owner_id = env("OWNER_TELEGRAM_ID")
+    let _ = try db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('webhook_in','telegram','webhook',?,'ok')", ["step_1_parsed cid=" + chat_id + " uid=" + user_id + " oid=" + owner_id])
 
     // Owner check — ignore non-owner
-    if user_id != owner_id then { return respond("200 ok") }
+    if user_id != owner_id then {
+      let _ = try db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('webhook_in','telegram','webhook',?,'dropped')", ["step_2_owner_check_fail uid=" + user_id + " oid=" + owner_id])
+      return respond("200 ok")
+    }
+    let _ = try db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('webhook_in','telegram','webhook','step_3_owner_ok','ok')", [])
 
     // Idempotency: игнорируем быстрый повтор (в пределах 90 с), пропускаем медленный ретрай (WH-3)
     let update_id = to_string(json_get(data, "update_id", ""))
