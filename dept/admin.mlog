@@ -206,7 +206,7 @@ pattern SaveFindings(issues: String) -> String {
 
       let issue_marker = "ISSUE:"
       let issue_idx = index_of(trimmed, issue_marker)
-      let issue_text = ""
+      let mut issue_text = ""
       if issue_idx > 0.0 then {
         issue_text = substring(trimmed, issue_idx + 6.0, length(trimmed))
       }
@@ -322,7 +322,7 @@ pattern ImpactAnalysis(file_path: String) -> String {
 
   let dep_count = length(dependents)
 
-  let risk = "low"
+  let mut risk = "low"
   if dep_count > 5.0 then { risk = "high" }
   if dep_count > 2.0 and dep_count <= 5.0 then { risk = "medium" }
 
@@ -428,7 +428,7 @@ pattern AdminAutoFix(issues: String) -> String {
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let plan = to_string(llm_result)
 
-  let fixes_applied = ""
+  let mut fixes_applied = ""
 
   if contains(plan, "NONE") then {
     fixes_applied = "No autofixes needed"
@@ -551,23 +551,31 @@ pattern AdminNightCycle() -> String {
 // /admin status
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminStatus() -> String {
-  let findings_open = query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open'", [])
-  let proposals_pending = query("SELECT COUNT(*) as cnt FROM admin_proposals WHERE status = 'pending'", [])
-  let narads_pending = query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", [])
-  let autofixes_today = query("SELECT COUNT(*) as cnt FROM audit_log WHERE action = 'autofix_planned' AND created_at > datetime('now', '-24 hours')", [])
-  let last_night = query("SELECT created_at FROM admin_reports WHERE type = 'night_cycle' ORDER BY created_at DESC LIMIT 1", [])
-  let graph_nodes = query("SELECT COUNT(*) as cnt FROM knowledge_graph", [])
-  let graph_edges = query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
-  let findings_high = query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open' AND severity = 'high'", [])
+  let findings_open = try query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open'", [])
+  let proposals_pending = try query("SELECT COUNT(*) as cnt FROM admin_proposals WHERE status = 'pending'", [])
+  let narads_pending = try query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", [])
+  let autofixes_today = try query("SELECT COUNT(*) as cnt FROM audit_log WHERE action = 'autofix_planned' AND created_at > datetime('now', '-24 hours')", [])
+  let last_night = try query("SELECT created_at FROM admin_reports WHERE type = 'night_cycle' ORDER BY created_at DESC LIMIT 1", [])
+  let graph_nodes = try query("SELECT COUNT(*) as cnt FROM knowledge_graph", [])
+  let graph_edges = try query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
+  let findings_high = try query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open' AND severity = 'high'", [])
 
-  let f_open = to_string(try json_get(findings_open[0], "cnt", "0"))
-  let p_pending = to_string(try json_get(proposals_pending[0], "cnt", "0"))
-  let n_pending = to_string(try json_get(narads_pending[0], "cnt", "0"))
-  let a_today = to_string(try json_get(autofixes_today[0], "cnt", "0"))
-  let last_n = to_string(try json_get(last_night[0], "created_at", "never"))
-  let g_nodes = to_string(try json_get(graph_nodes[0], "cnt", "0"))
-  let g_edges = to_string(try json_get(graph_edges[0], "cnt", "0"))
-  let f_high = to_string(try json_get(findings_high[0], "cnt", "0"))
+  let mut f_open = "0"
+  if to_string(findings_open) != "()" and length(findings_open) > 0.0 then { f_open = to_string(try json_get(findings_open[0], "cnt", "0")) }
+  let mut p_pending = "0"
+  if to_string(proposals_pending) != "()" and length(proposals_pending) > 0.0 then { p_pending = to_string(try json_get(proposals_pending[0], "cnt", "0")) }
+  let mut n_pending = "0"
+  if to_string(narads_pending) != "()" and length(narads_pending) > 0.0 then { n_pending = to_string(try json_get(narads_pending[0], "cnt", "0")) }
+  let mut a_today = "0"
+  if to_string(autofixes_today) != "()" and length(autofixes_today) > 0.0 then { a_today = to_string(try json_get(autofixes_today[0], "cnt", "0")) }
+  let mut last_n = "never"
+  if to_string(last_night) != "()" and length(last_night) > 0.0 then { last_n = to_string(try json_get(last_night[0], "created_at", "never")) }
+  let mut g_nodes = "0"
+  if to_string(graph_nodes) != "()" and length(graph_nodes) > 0.0 then { g_nodes = to_string(try json_get(graph_nodes[0], "cnt", "0")) }
+  let mut g_edges = "0"
+  if to_string(graph_edges) != "()" and length(graph_edges) > 0.0 then { g_edges = to_string(try json_get(graph_edges[0], "cnt", "0")) }
+  let mut f_high = "0"
+  if to_string(findings_high) != "()" and length(findings_high) > 0.0 then { f_high = to_string(try json_get(findings_high[0], "cnt", "0")) }
 
   let mut msg = "Admin v2.0 — status\n\n"
   msg = msg + "Graph: " + g_nodes + " nodes, " + g_edges + " edges\n"
@@ -822,26 +830,69 @@ pattern AdminReport() -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// /admin health — real health score from UA
+// /admin health — native health check (no external deps)
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminHealth() -> String {
-  let review_result = try http_get("http://127.0.0.1:4000/admin-ua/review")
-  if to_string(review_result) == "()" then {
-    let _ = AuditLog("admin_health", "admin", "http_get to admin-ua/review failed")
-    return "Admin health: внутренний эндпоент admin-ua/review недоступен."
-  }
-  let parsed = try parse_json(review_result)
-  if to_string(parsed) == "()" then {
-    let _ = AuditLog("admin_health", "admin", "parse_json failed on review result")
-    return "Admin health: ошибка парсинга ответа эндпоента."
-  }
-  let health = to_string(json_get(parsed, "health_score", "?"))
-  let review_summary = to_string(json_get(parsed, "summary", ""))
+  let mut score = 10.0
+  let mut issues = ""
 
-  let disclaimer = AdminDisclaimer()
-  let mut health_msg = "Code health: " + health + "/10\n"
-  health_msg = health_msg + review_summary + "\n\n" + disclaimer
-  let _ = AuditLog("admin_health", "admin", "health=" + health)
+  // 1. DB tables exist?
+  let tables_check = try query("SELECT name FROM sqlite_master WHERE type='table'", [])
+  if to_string(tables_check) == "()" then {
+    score = score - 3.0
+    issues = issues + "- DB query failed\n"
+  }
+
+  // 2. Key tables present
+  let mut tables_found = 0.0
+  let key_tables = ["dialog_history", "audit_log", "knowledge_graph", "admin_findings", "narads"]
+  each kt in key_tables {
+    let tr = try query("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [kt])
+    if to_string(tr) != "()" and length(tr) > 0.0 then { tables_found = tables_found + 1.0 }
+  }
+  if tables_found < 5.0 then {
+    score = score - 2.0
+    issues = issues + "- Missing tables: " + to_string(to_int(tables_found)) + "/5\n"
+  }
+
+  // 3. Recent audit activity
+  let audit_check = try query("SELECT COUNT(*) as c FROM audit_log WHERE created_at > datetime('now', '-1 hour')", [])
+  if to_string(audit_check) == "()" then {
+    score = score - 1.0
+    issues = issues + "- audit_log unreachable\n"
+  }
+
+  // 4. LLM proxy reachable?
+  let proxy_check = try http_get("http://127.0.0.1:4000/health")
+  if to_string(proxy_check) == "()" then {
+    score = score - 2.0
+    issues = issues + "- LLM proxy (port 4000) unreachable\n"
+  }
+
+  // 5. Open findings
+  let findings_check = try query("SELECT COUNT(*) as c FROM admin_findings WHERE status = 'open'", [])
+  let mut open_findings = 0.0
+  if to_string(findings_check) != "()" and length(findings_check) > 0.0 then {
+    open_findings = to_float(json_get(findings_check[0], "c", "0"))
+  }
+  if open_findings > 0.0 then {
+    score = score - 1.0
+    issues = issues + "- Open findings: " + to_string(to_int(open_findings)) + "\n"
+  }
+
+  if score < 0.0 then { score = 0.0 }
+
+  let mut health_msg = "Admin health: " + to_string(to_int(score)) + "/10"
+  if issues != "" then {
+    health_msg = health_msg + "\n\nIssues:\n" + issues
+  } else {
+    health_msg = health_msg + " — all systems nominal"
+  }
+  health_msg = health_msg + "\nTables: " + to_string(to_int(tables_found)) + "/5"
+  health_msg = health_msg + "\nOpen findings: " + to_string(to_int(open_findings))
+  health_msg = health_msg + "\nLLM proxy: " + (if to_string(proxy_check) == "()" then { "DOWN" } else { "UP" })
+
+  let _ = AuditLog("admin_health", "admin", "score=" + to_string(to_int(score)))
   return health_msg
 }
 

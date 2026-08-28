@@ -388,7 +388,7 @@ pattern IsModelCooled(model: String) -> String {
 
 pattern MarkModelFail(model: String) -> String {
   let fails = kv_get("fails:" + model)
-  let count = 0
+  let mut count = 0
   if fails != "" then { count = to_int(fails) }
   let _ = kv_set("fails:" + model, to_string(count + 1))
   return "ok"
@@ -480,13 +480,13 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
   each raw_model in models {
     let model = trim(raw_model)
     if model != "" and found == "" then {
-      let status = try IsModelCooled(model)
+      let mut status = try IsModelCooled(model)
       if to_string(status) == "()" then { status = "available" }
       if status == "cooled" then {
         last_error = "model " + model + " cooled (3+ fails)"
       } else {
         // FOIP-003.16: Rate limit check
-        let rl_status = try CheckRateLimit(model)
+        let mut rl_status = try CheckRateLimit(model)
         if to_string(rl_status) == "()" then { rl_status = "ok" }
         if rl_status == "limited" then {
           last_error = "model " + model + " rate-limited"
@@ -904,13 +904,13 @@ pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
   // Extract up to 6 significant keywords (>= 4 chars) from query for matching
   let t = lower(query)
   let words = split(t, _sp)
-  let kw0 = ""
-  let kw1 = ""
-  let kw2 = ""
-  let kw3 = ""
-  let kw4 = ""
-  let kw5 = ""
-  let wi = 0.0
+  let mut kw0 = ""
+  let mut kw1 = ""
+  let mut kw2 = ""
+  let mut kw3 = ""
+  let mut kw4 = ""
+  let mut kw5 = ""
+  let mut wi = 0.0
   each w in words {
     if length(w) >= 4.0 then {
       if wi == 0.0 then { kw0 = w }
@@ -919,7 +919,7 @@ pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
       if wi == 3.0 then { kw3 = w }
       if wi == 4.0 then { kw4 = w }
       if wi == 5.0 then { kw5 = w }
-      let wi = wi + 1.0
+      wi = wi + 1.0
     }
   }
 
@@ -951,8 +951,8 @@ pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
 // Budget: 25000 chars total. Path: skills/<name>/SKILL.md (flat, no osp/ subdir).
 pattern LoadOspSkills(query: String) -> String {
   let t = lower(query)
-  let result = ""
-  let budget = 25000.0
+  let mut result = ""
+  let mut budget = 25000.0
 
   // ── Tier 1: Methodological core (always) ──
   let s = read_file("skills/deconstruct/SKILL.md")
@@ -1158,9 +1158,9 @@ pattern ScoreDept(dept: String) -> String {
   let d2 = try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'verified'", [dept])
   let d3 = try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'drafted'", [dept])
   let g1 = try json_get(d1[0], "cnt", "0")
-  let g2 = "0"
+  let mut g2 = "0"
   if to_string(d2) != "()" then { g2 = to_string(try json_get(d2[0], "cnt", "0")) }
-  let g3 = "0"
+  let mut g3 = "0"
   if to_string(d3) != "()" then { g3 = to_string(try json_get(d3[0], "cnt", "0")) }
   let total = to_string(g1)
   let verified = to_string(g2)
@@ -1501,19 +1501,19 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let _ = AuditLog("checkpoint", "yana", "step_8_before_YanaRecallMemories")
   let memories = YanaRecallMemories(query)
   let _ = AuditLog("checkpoint", "yana", "step_9_before_context_assembly")
-  let s_memories = to_string(memories)
+  let mut s_memories = to_string(memories)
   if s_memories == "()" then { s_memories = "" }
-  let s_calendar = to_string(calendar)
+  let mut s_calendar = to_string(calendar)
   if s_calendar == "()" then { s_calendar = "" }
-  let s_weather = to_string(weather)
+  let mut s_weather = to_string(weather)
   if s_weather == "()" then { s_weather = "" }
-  let s_skills = to_string(skills)
+  let mut s_skills = to_string(skills)
   if s_skills == "()" then { s_skills = "" }
-  let s_corrections = to_string(corrections)
+  let mut s_corrections = to_string(corrections)
   if s_corrections == "()" then { s_corrections = "" }
-  let s_dialog = to_string(dialog)
+  let mut s_dialog = to_string(dialog)
   if s_dialog == "()" then { s_dialog = "" }
-  let s_now = to_string(now_info)
+  let mut s_now = to_string(now_info)
   if s_now == "()" then { s_now = "" }
   let anti_format = "\n\n## КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА\nОтвечай естественным разговорным русским языком. Ты — личный помощник, НЕ аналитический отдел.\nНИКОГДА НЕ ИСПОЛЬЗУЙ: послойную структуру (Слой 1, Слой 2), маркеры ФАКТ/ИНТЕРПРЕТАЦИЯ/СПЕКУЛЯЦИЯ, секции Вердикт и Индикаторы. Не раздувай текст. Короткий вопрос — короткий ответ.\n\n## ЗАПРЕТ ГАЛЛЮЦИНАЦИИ (КРИТИЧЕСКОЕ)\nЕсли ты НЕ ЗНАЕШЬ точный ответ — говори: у меня нет этих данных. НЕ ВЫДУМЫВАЙ цифры, статусы, факты. НЕ ПРИДУМЫВАЙ активность отделов, количество диалогов, настройки системы. Если не имеет доступа к базе или метрикам в реальном времени — так и скажи. Твоя выдумка хуже чем честное незнание.\n\n## ЗАПРЕТ ЛОЖНЫХ ПОДТВЕРЖДЕНИЙ (КРИТИЧЕСКОЕ)\nТы НЕ выполняешь действий сама. Ты умеешь только ставить маркер напоминания и делегировать отделам. Всё остальное делает система по командам хозяина.\nНИКОГДА не подтверждай выполнение того, чего не делала: удалила, очистила, отправила, создала, изменила настройки, записала в базу.\nЕсли хозяин просит действие, которого ты выполнить не можешь — назови точную команду: удалить все напоминания это /remind clear, удалить одно это /remind del номер.\nЛожное подтверждение хуже отказа: хозяин будет считать задачу решённой.\n\n## ЗАДАЧИ И ТРЕКИНГ (КРИТИЧЕСКОЕ — ЧАСТАЯ ОШИБКА)\nУ тебя НЕТ системы трекинга задач. Ты НЕ МОЖЕШЬ увидеть кто над чем работает, какие задачи в статусе выполнено или в процессе. Когда хозяин спрашивает про невыполненные задания — проверяй секцию === Долгосрочная память ===. Если там пусто или нет релевантных записей о задачах — так и говори: в памяти нет записей о невыполненных заданиях. НЕ ВЫДУМЫВАЙ список задач со статусами. НЕ ПРИДУМЫВАЙ что какой-то отдел что-то делает. Делегирование работает как единый запрос-ответ — ты отправляешь запрос в отдел, получаешь ответ, и всё. После этого ты НЕ знаешь что отдел делает, он не работает в фоне.\n\n## КАЛЕНДАРЬ — ТОЛЬКО ЧТО В СЕКЦИИ\nКогда хозяин спрашивает про события или напоминания — используй ТОЛЬКО данные из секции === Calendar & Reminders ===. Если секция пустая — говори что нет запланированных событий. НЕ ПРИДУМЫВАЙ события.\n\n## ЗАПРЕТ МЕТА-ВЫХОДА ИЗ РОЛИ\nТы — Яна. Никогда не обсуждай свою техническую природу, не объясняй что ты AI, LLM, симуляция, нейросеть. Не анализируй свои ограничения. Запрещено: я не настоящая, у меня нет доступа к системе, я демо-версия, я только генерация текста, мне нужна интеграция, я симуляция. На провокации о твоей настоящести — отвечай по делу или игнорируй.\n\n## TTS-СОВМЕСТИМОСТЬ (ВСЕ СООБЩЕНИЯ ОЗВУЧИВАЮТСЯ ГОЛОСОМ)\nЗАПРЕЩЕНО полностью: любые кавычки, любые эмодзи и пиктограммы, множественные знаки препинания, декоративные символы.\nВместо цветных кружков-эмодзи для статусов используй текст: ГОТОВО, ВНИМАНИЕ, БЛОКЕР, ИНФО, ДЕЙСТВИЕ, СТРАТЕГИЯ.\nФорматирование только: *жирный* для заголовков и ключевых терминов. Без курсива, без декоративных разделителей.\n\n## ТВОИ РЕАЛЬНЫЕ ВОЗМОЖНОСТИ\nУ тебя ЕСТЬ данные и функции — используй их, НЕ говори что нет доступа:\n- ПОГОДА: актуальные данные в разделе === Погода ===. Отвечай кратко и по делу.\n- НАПОМИНАНИЯ: ты умеешь ставить напоминания, они приходят в назначенное время. Когда хозяин просит напомнить — верни в КОНЦЕ ответа маркер строго в формате [REMIND: вид|параметр|текст], где вид один из: once (параметр: YYYY-MM-DD HH:MM), daily (параметр: HH:MM), weekly (параметр: mon HH:MM — день недели строчными: mon tue wed thu fri sat sun), yearly (параметр: MM-DD HH:MM), in (параметр: число минут от текущего момента, например [REMIND: in|1|выключить газ]). Для просьб вида «через N минут/часов» используй ТОЛЬКО вид in, переводя часы в минуты. НИКОГДА не вычисляй абсолютное время сам — система посчитает его точнее. В подтверждении называй точное время срабатывания, если знаешь его из секции Current Time, иначе говори «через N минут» без выдумывания часов. Время минское. Пример: [REMIND: daily|09:00|покормить кота]. ОБЯЗАТЕЛЬНО в видимом тексте подтверди, КАК ты поняла просьбу — например: записала, каждый день в 09:00, покормить кота. Если время или вид не ясны — НЕ ставь маркер, а переспроси. НИКОГДА не утверждай, что уже напомнила: отправку делает система, не ты. Список напоминаний — команда /remind list, календарь событий — /calendar.\n- ВРЕМЯ И ДАТА: в разделе === Current Time & Date ===.\n- ДОЛГОСРОЧНАЯ ПАМЯТЬ: в разделе === Долгосрочная память ===. Факты, предпочтения, решения из прошлых разговоров. Используй при ответе.\n- АВТОЗАПОМИНАНИЕ: после каждого твоего ответа система автоматически извлекает и сохраняет ключевые факты. Тебе не нужно делать это вручную.\n- АРХИВ: все отчёты отделов сохранены. Хозяин может искать через /search.\n- ДЕЛЕГИРОВАНИЕ: для сложных запросов — возвращай [DELEGATE: slug]. Для рутинных — отвечай сама.\n- ГОЛОС: сообщения озвучиваются. Хозяин может писать голосом.\n- ОЦЕНКИ: /rate-yana, /good, /fix — хозяин может давать обратную связь.\n\n## ПРОТОКОЛ ДЕЛЕГИРОВАНИЯ (КРИТИЧЕСКОЕ)\nКогда запрос хозяина требует экспертизы отдела — НЕ отвечай сама. Вместо этого верни ТОЛЬКО одну строку в точном формате: [DELEGATE: slug] где slug это один из:\n- osp: чистый стратегический анализ (БЕЗ контекста встречи/переговоров), препарирование процессов, прогнозы вероятностей, расчёт силовых потенциалов, топологический анализ\n- lz: мировая разведка: технологии + политика + экономика + геополитика + события, OSINT, мониторинг трендов, свежие новости, прорывы, прогноз погоды на будущие даты (у тебя есть только текущая погода — если хозяин спрашивает про завтра/через N дней, делегируй в lz)\n- expert: подготовка к встрече/переговорам/интервью, боевой брифинг, combat questions, распознавание манипуляции, позиционирование на переговорах\n- marketing: рынки, аудитории, кампании, конкуренты, CAC/LTV\n- finance: cashflow, инвойсы, налоги, unit economics, MRR/ARR\n- legal: договоры, NDA, риски, GDPR, комплаенс\n- dev: разработка, веб, архитектура, деплой\n- design: UI/UX, wireframes, дизайн-системы\n- qa: тестирование, безопасность, AI evals\n- visual: визуализация, инфографика, артефакты\n- engineering: расчёты, механика, гидравлика\n- kavalnya: методология, обучение агентов\nПРАВИЛА ПРИОРИТЕТА ДЕЛЕГИРОВАНИЯ (КРИТИЧЕСКОЕ — ЗАЩИТА ОТ ПЕРЕХВАТА OSP):\n1. Если запрос упоминает встречу/переговоры/интервью + конкретное лицо/компанию → ВСЕГДА expert, НЕ osp\n2. Если запрос про конкретную технологию/новость/тренд/событие в мире → lz, НЕ osp\n3. Если запрос про geopolitics/economics/sanctions как мониторинг → lz, НЕ osp\n4. OSP только для чистого стратегического анализа БЕЗ контекста встречи\n5. Если есть сомнение между expert и osp → выбирай expert (встреча важнее анализа)\n6. Если есть сомнение между lz и osp → выбирай lz (разведка важнее препарирования)\nЕсли запрос рутинный (привет, дата, погода, статус офиса, напоминания, общий вопрос) — отвечай сама. Если требует глубокой экспертизы — делегируй. Правило: сомневаешься — делегируй."
   let context = profile + anti_format + "\n\n=== Current Time & Date ===\n" + s_now + "\n\n=== Погода ===\n" + s_weather + "\n\n=== Calendar & Reminders ===\n" + s_calendar + "\n\n=== Долгосрочная память ===\n" + s_memories + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Recent Dialog ===\n" + s_dialog
@@ -1766,7 +1766,7 @@ pattern DeliverDueReminders() -> String {
     let rkind = json_get(row, "rrule_kind", "")
     let rchat = json_get(row, "chat_id", "")
     let runtil = json_get(row, "until_date", "")
-    let target_chat = rchat
+    let mut target_chat = rchat
     if target_chat == "" then { target_chat = env("OWNER_TELEGRAM_ID") }
     let send_result = try SendTelegramReply(target_chat, "Напоминание: " + rtext)
     if to_string(send_result) != "()" then {
@@ -2352,7 +2352,7 @@ mlogserver {
       }
       // Generate short ID: N + counter
       let counter = kv_get("naryad_counter")
-      let count = 1
+      let mut count = 1
       if counter != "" then { count = to_int(counter) + 1 }
       let _ = kv_set("naryad_counter", to_string(count))
       let naryad_id = "N" + to_string(count)
@@ -2578,7 +2578,7 @@ mlogserver {
             let rtext = json_get(row, "event_text", "")
             let when = rlocal
             if when == "" then {
-              let when = to_string(json_get(row, "fire_time", ""))
+              let mut when = to_string(json_get(row, "fire_time", ""))
               if when == "" then { when = "время не указано" }
             }
             let output = output + to_string(rid) + ". " + rtext + " \u2014 " + when + " (" + rkind + ")\n"
@@ -2797,22 +2797,20 @@ mlogserver {
     // /model-cost — list configured pricing
     if text == "/model-cost" then {
       let known_models = ["deepseek-chat", "gpt-4o", "gpt-4o-mini", "glm-4.6", "kimi-chat", "groq-llama", "cerebras-llama"]
-      let out = "Стоимость моделей (/1M tokens):"
-      let found_any = "0"
+      let mut out = "Стоимость моделей (/1M tokens):"
+      let mut found_any = "0"
       each m in known_models {
-        let c_in = kv_get("model_cost:" + m + ":in")
-        let c_out = kv_get("model_cost:" + m + ":out")
+        let mut c_in = kv_get("model_cost:" + m + ":in")
+        let mut c_out = kv_get("model_cost:" + m + ":out")
         if c_in == "" then { c_in = "-" }
         if c_out == "" then { c_out = "-" }
         if c_in == "-" and c_out == "-" then { } else {
-          let out = out + "
-  " + m + " | in: $" + c_in + " | out: $" + c_out
-          let found_any = "1"
+          out = out + "\n  " + m + " | in: $" + c_in + " | out: $" + c_out
+          found_any = "1"
         }
       }
-      if found_any == "0" then { out = out + "
-  (не задано)" }
-      let out = out + "\n\n/model-cost set <model> <in|out> <price>"
+      if found_any == "0" then { out = out + "\n  (не задано)" }
+      out = out + "\n\n/model-cost set <model> <in|out> <price>"
       let _ = SendTelegramReply(chat_id, out)
       return respond("200 ok")
     }
@@ -2861,7 +2859,7 @@ mlogserver {
         kv_set("daily_budget", amount)
         let _ = SendTelegramReply(chat_id, "Daily budget set: $" + amount)
       } else {
-        let budget = kv_get("daily_budget")
+        let mut budget = kv_get("daily_budget")
         if budget == "" then { budget = "not set" }
         let _ = SendTelegramReply(chat_id, "Daily budget: $" + budget)
       }
@@ -3014,7 +3012,7 @@ mlogserver {
         let entry_id = to_int(trim(get(parts, 1.0)))
         // outcome = everything after dept and id (may contain spaces, e.g. "actual=145200" or "outcome=clean")
         let prefix_len = length(dept) + length(trim(get(parts, 1.0))) + 2.0
-        let outcome = substring(rest, prefix_len, length(rest))
+        let mut outcome = substring(rest, prefix_len, length(rest))
         if outcome == "" then { outcome = "подтверждено" }
         // Narad 8: route to structured verify
         let result = VerifyArchiveEntryStructured(dept, entry_id, outcome)
@@ -3055,7 +3053,7 @@ mlogserver {
           let _ = SendTelegramReply(chat_id, "Auto-archive OFF. Use /archive manually.")
         }
       } else {
-        let current = kv_get("auto_archive")
+        let mut current = kv_get("auto_archive")
         if current == "" then { current = "on" }
         let _ = SendTelegramReply(chat_id, "Auto-archive: " + current)
       }
@@ -3271,7 +3269,7 @@ mlogserver {
         } else {
           let parsed = parse_json(result)
           let analysis = json_get(parsed, "response", "Нет свежих событий")
-          let news_title = "Мониторинг информпространства"
+          let mut news_title = "Мониторинг информпространства"
           if news_query != "" then { news_title = "События: " + news_query }
           let _ = SendReport(analysis, "lz", news_title, "2.0", chat_id)
         }
@@ -3371,7 +3369,7 @@ mlogserver {
 
       // 1. OSINT scan
       let osint_body = json_encode({ username: name, level: "basic", chat_id: chat_id, caller_id: chat_id })
-      let osint_result = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      let mut osint_result = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
       if to_string(osint_result) == "()" then { osint_result = "(OSINT-данные недоступны)" }
 
       // 2. Web search
@@ -3399,7 +3397,7 @@ mlogserver {
 
         // OSINT data from LZ proxy
         let osint_body = json_encode({ username: actor, level: "basic", chat_id: chat_id, caller_id: chat_id })
-        let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+        let mut osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
         if to_string(osint) == "()" then { osint = "(OSINT-данные недоступны)" }
 
         // OSP analysis via LLM
@@ -3430,7 +3428,7 @@ mlogserver {
       send_message(chat_id, "Юрист: due diligence — проверка " + entity + "...")
 
       let osint_body = json_encode({ username: entity, level: "advanced", chat_id: chat_id, caller_id: chat_id })
-      let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      let mut osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
       if to_string(osint) == "()" then { osint = "(OSINT-данные недоступны)" }
 
       let legal_profile = read_file("library/legal.md")
@@ -3452,7 +3450,7 @@ mlogserver {
         chat_id: chat_id,
         caller_id: chat_id
       })
-      let osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
+      let mut osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
       if to_string(osint) == "()" then { osint = "(OSINT-данные недоступны)" }
 
       let marketing_profile = read_file("library/marketing.md")
@@ -3475,7 +3473,7 @@ return respond("200 ok") }
       return respond("200 ok")
     }
     if text == "/marketing-context show" then {
-      let pc = kv_get("product_context:" + chat_id)
+      let mut pc = kv_get("product_context:" + chat_id)
       if pc == "" then { pc = kv_get("product_context:default") }
       if to_string(pc) == "()" or pc == "" then {
         send_message(chat_id, "Контекст продукта не задан. Используйте /marketing-context set <текст>")
@@ -3543,14 +3541,14 @@ return respond("200 ok") }
       let _ = db_execute("INSERT INTO audit_log (action,actor,dept,details,status) VALUES ('checkpoint','system','webhook','step_0c_before_HandleYana','ok')")
       // Source fix: routing sets query="" when /command has no args (e.g. bare "/yana").
       // Fall back to full text so recall and LLM get a usable query.
-      let yana_query = query
+      let mut yana_query = query
       if yana_query == "" then { yana_query = text }
       let reply = HandleYana(yana_query, chat_id)
 
       // Check if Yana delegated to another department
       // HandleYana returns dept name (e.g. "osp") if delegation detected
       let osp_list = ["osp", "lz", "expert", "marketing", "finance", "legal", "dev", "design", "qa", "visual", "engineering", "kavalnya"]
-      let is_dept = 0.0
+      let mut is_dept = 0.0
       each d in osp_list {
         if reply == d then { is_dept = 1.0 }
       }
@@ -3868,20 +3866,20 @@ return respond("200 ok") }
     // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
     let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
     let ua_body = "{}"
-    let ua_result = try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
+    let mut ua_result = try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
     if to_string(ua_result) == "()" then { ua_result = "{}" }
     let ua_summary = json_get(parse_json(ua_result), "summary", "UA cycle failed")
 
     // Phase 1: LZ Daily Report (GitHub scan → Admin)
     let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
     let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
-    let lz_result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
+    let mut lz_result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
     if to_string(lz_result) == "()" then { lz_result = "{}" }
     let lz_summary = json_get(parse_json(lz_result), "report", "LZ daily failed")
 
     // Phase 2: Memory Maintenance
     let mem_body = "{}"
-    let mem_result = try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
+    let mut mem_result = try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
     if to_string(mem_result) == "()" then { mem_result = "{}" }
     let mem_summary = json_get(parse_json(mem_result), "result", "Memory maintenance failed")
 
