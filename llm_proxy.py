@@ -2496,6 +2496,15 @@ def scheduler_morning_brief():
     if not owner_id:
         return jsonify({"status": "error", "message": "owner_id is required"}), 400
 
+    # BRIEF-1: dedup — избегаем двойной отправки при повторном вызове эндпоинта
+    recent = _query(
+        "SELECT COUNT(*) as c FROM audit_log WHERE action='scheduler_morning_brief' "
+        "AND status='ok' AND timestamp > datetime('now', '-10 minutes')",
+        fetch=True
+    )
+    if recent and recent[0]["c"] > 0:
+        return jsonify({"status": "skipped", "message": "brief already sent within last 10 minutes"}), 200
+
     try:
         now = datetime.utcnow()
         # Minsk time for display (UTC+3 year-round)
@@ -2557,7 +2566,12 @@ def scheduler_morning_brief():
         except Exception:
             pass
 
-        # ── 4. Build prompt ──
+        # ── 4. Night news (with explicit empty marker) ──
+        night_news = get_night_news_digest()
+        if not night_news:
+            night_news = "\n📰 Топ события за ночь: НЕТ ДАННЫХ (сборщик новостей не вернул результатов)\n"
+
+        # ── 5. Build prompt ──
         dept_prompt = get_dept_prompt("yana")
         user_prompt = f"""Составь утренний отчёт для хозяина офиса.
 
@@ -2578,14 +2592,14 @@ def scheduler_morning_brief():
 === НАХОДКИ ЛАБОРАТОРИИ ЗНАНИЙ ===
 {lz_findings if lz_findings else 'За последние сутки нет новых находок'}
 
-{get_night_news_digest()}
+{night_news}
 
 === ТВОЯ ЗАДАЧА ===
 Напиши утренний отчёт на русском. Структура:
 1. 📅 Дата, время, день недели
 2. 🌤 Прогноз погоды в Минске
 3. 🏢 Статус офиса — кратко, что происходит
-4. 🌍 Важные мировые события — что актуально (на основе своих знаний)
+4. 🌍 Важные мировые события — ТОЛЬКО из раздела «Топ события за ночь» ниже, если он есть. Если раздела нет или он пуст — напиши буквально «За ночь значимых событий не зафиксировано» и не добавляй ничего от себя. ЗАПРЕЩЕНО придумывать события, даже правдоподобные.
 5. 🔍 Ключевые находки ЛЗ (если есть)
 6. ⚡ Что требует внимания хозяина
 
