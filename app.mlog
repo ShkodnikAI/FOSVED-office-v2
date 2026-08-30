@@ -813,10 +813,23 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   // FOIP-003.6: Cross-dept inject + mid-turn steer
   let injected = GetInjectedContext(dept)
   let steer = GetSteerContext(dept)
-  // FOIP-003.5: Use compacted history for long conversations
-  let dialog = GetCompactedHistory(chat_id, "10")
+  // IDEA-4: Context Budget — use budgeted history (max 4000 tokens)
+  let dialog = GetBudgetedHistory(chat_id, "10", "4000")
   let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
+
+  // IDEA-1: Read consensus memory (cross-session baton)
+  let consensus = ReadConsensus()
+  // IDEA-2: Recall past learnings for this dept+query
+  let learnings = RecallLearnings(dept, query)
+  // IDEA-5: Expert Persona Injection
+  let mut persona = ""
+  if dept != "yana" then { let persona = GetExpertPersona(dept) }
+  // IDEA-6: Brand Contract for design dept
+  let mut brand = ""
+  if dept == "design" then { let brand = GetBrandContract() }
+  // IDEA-7: Sub-Agent resolution
+  let sub_agent = ResolveSubAgent(dept, query)
 
   // Fresh news for OSP and LZ departments
   let news = ""
@@ -846,7 +859,26 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   if s_injected == "()" then { let s_injected = "" }
   let s_steer = to_string(steer)
   if s_steer == "()" then { let s_steer = "" }
+  let s_persona = to_string(persona)
+  if s_persona == "()" then { let s_persona = "" }
+  let s_brand = to_string(brand)
+  if s_brand == "()" then { let s_brand = "" }
+  let s_consensus = to_string(consensus)
+  if s_consensus == "()" then { let s_consensus = "" }
+  let s_learnings = to_string(learnings)
+  if s_learnings == "()" then { let s_learnings = "" }
+  let s_sub_agent = to_string(sub_agent)
+  if s_sub_agent == "()" then { let s_sub_agent = "" }
   let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Cross-dept Context ===" + s_injected + "\n\n=== Steering ===" + s_steer + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
+
+  // IDEA-5/6/7: Append persona, brand, sub-agent if present
+  if s_persona != "" then { let context = context + "\n\n" + s_persona }
+  if s_brand != "" then { let context = context + "\n\n" + s_brand }
+  if s_sub_agent != "" then { let context = context + "\n\n=== Sub-Agent Specialization ===\nТы работаешь в роли суб-агента: " + s_sub_agent + ". Применяй специализацию этого под-роли."
+  }
+  // IDEA-1/2: Append consensus and learnings
+  if s_consensus != "" then { let context = context + "\n\n=== Cross-Session Consensus (baton) ===\n" + s_consensus }
+  if s_learnings != "" then { let context = context + "\n\n" + s_learnings }
 
   // Append fresh news if available
   if news != "" then {
@@ -1207,6 +1239,220 @@ pattern FormatArchiveRows(rows: Any) -> String {
 // END GENERIC ARCHIVE
 // ============================================================
 
+// ============================================================
+// IDEA-1: Consensus Memory (from Auto-Company)
+// Single baton file read before query, updated after.
+// ============================================================
+
+pattern ReadConsensus() -> String {
+  let content = read_file("memories/consensus.mlog")
+  if content == "" then { return "" }
+  // Extract only the section between === CONSENSUS === markers
+  let start_marker = "=== CONSENSUS ==="
+  let end_marker = "=== END CONSENSUS ==="
+  if contains(content, start_marker) == false then { return "" }
+  let si = index_of(content, start_marker)
+  let si = si + length(start_marker)
+  if contains(content, end_marker) then {
+    let ei = index_of(content, end_marker)
+    if ei > si then {
+      let section = substring(content, si, ei)
+      return trim(section)
+    }
+  }
+  return ""
+}
+
+pattern UpdateConsensus(dept: String, query: String, result_summary: String) -> String {
+  let now_ts = to_string(now())
+  let date_rows = query("SELECT datetime('now') as d", [])
+  let mut now_str = ""
+  each dr in date_rows { let now_str = to_string(json_get(dr, "d", "")) }
+  // Append new entry before === END CONSENSUS ===
+  let entry = "\n[" + now_str + "] " + dept + ": " + substring(query, 0.0, 80.0) + "\n  result: " + substring(result_summary, 0.0, 200.0) + "\n"
+  let content = read_file("memories/consensus.mlog")
+  if content == "" then { return "" }
+  // Replace "Last updated: never" with current timestamp
+  let content = replace(content, "Last updated: never", "Last updated: " + now_str)
+  let content = replace(content, "Last updated: initialized", "Last updated: " + now_str)
+  // Insert before END CONSENSUS
+  let content = replace(content, "=== END CONSENSUS ===", entry + "=== END CONSENSUS ===")
+  let _ = write_file("memories/consensus.mlog", content)
+  return "ok"
+}
+
+// ============================================================
+// IDEA-2: Continuous Learning — record successful patterns
+// After each dept query, extract and store what worked.
+// ============================================================
+
+pattern RecordLearning(dept: String, query: String, reply: String, verify_score: String) -> String {
+  // Only record if verification passed (score >= 0.7) and reply is substantive
+  let score = to_float(verify_score)
+  if score < 0.7 then { return "" }
+  if length(reply) < 50.0 then { return "" }
+  // Build a learning pattern: query category -> what approach worked
+  let body = json_encode({dept: dept, query: substring(query, 0.0, 500.0), approach: substring(reply, 0.0, 500.0), score: verify_score})
+  let _ = try http_post("http://127.0.0.1:4000/learning/record", body, "application/json")
+  return "ok"
+}
+
+pattern RecallLearnings(dept: String, query: String) -> String {
+  let body = json_encode({dept: dept, query: query, limit: 3})
+  let resp = try http_post("http://127.0.0.1:4000/learning/recall", body, "application/json")
+  if to_string(resp) == "()" then { return "" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "" }
+  let count = to_float(json_get(parsed, "count", "0"))
+  if count == 0.0 then { return "" }
+  let results = try json_get(parsed, "results", "[]")
+  if to_string(results) == "()" then { return "" }
+  let mut learnings_text = ""
+  each r in results {
+    let approach = to_string(json_get(r, "approach", ""))
+    let sc = to_string(json_get(r, "score", ""))
+    if approach != "" then {
+      let learnings_text = learnings_text + "- [score:" + sc + "] " + approach + "\n"
+    }
+  }
+  if learnings_text != "" then {
+    return "=== Что сработало ранее (Continuous Learning) ===\n" + learnings_text
+  }
+  return ""
+}
+
+// ============================================================
+// IDEA-3: Verify Step — self-check before sending (non-blocking)
+// Uses existing llm_verifier.py, only for substantive queries.
+// ============================================================
+
+pattern VerifyReply(query: String, reply: String, dept: String) -> String {
+  // Skip verification for short/trivial queries
+  if length(query) < 30.0 then { return "0.9" }
+  if length(reply) < 50.0 then { return "0.9" }
+  // Skip for yana — already has its own verify at line 1552
+  if dept == "yana" then { return "0.9" }
+  let v_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Correct information? Relevance: Addresses question? No hallucination?"]))
+  if to_string(v_resp) == "()" then { return "0.8" }
+  // v_resp may be a bare float or a JSON string
+  let v_str = to_string(v_resp)
+  // If it looks like a number directly
+  if contains(v_str, "error") then { return "0.8" }
+  return v_str
+}
+
+// ============================================================
+// IDEA-4: Context Budget — enforce max tokens on dialog history
+// ============================================================
+
+pattern GetBudgetedHistory(chat_id: String, limit: String, max_tokens_str: String) -> String {
+  let max_tokens = to_float(max_tokens_str)
+  if max_tokens <= 0.0 then { max_tokens = 4000.0 }
+  let raw = GetCompactedHistory(chat_id, limit)
+  // Estimate tokens: ~4 chars per token
+  let est = length(raw) / 4.0
+  if est <= max_tokens then { return raw }
+  // Trim from the beginning (keep recent messages)
+  let mut trimmed = raw
+  while length(trimmed) / 4.0 > max_tokens {
+    let nl = index_of(trimmed, "\n")
+    if nl < 0.0 then { break }
+    let trimmed = substring(trimmed, nl + 1.0, length(trimmed))
+  }
+  let trimmed = trim(trimmed)
+  let cut_note = "\n[... context trimmed to ~" + to_string(to_int(max_tokens)) + " token budget ...]\n"
+  return cut_note + trimmed
+}
+
+// ============================================================
+// IDEA-5: Expert Persona Injection
+// Reads library/personas.mlog and injects the relevant expert mental model.
+// ============================================================
+
+pattern GetExpertPersona(dept: String) -> String {
+  let content = read_file("library/personas.mlog")
+  if content == "" then { return "" }
+  // Find the section for this department: "## dept"
+  let marker = "## " + dept
+  if contains(content, marker) == false then { return "" }
+  let si = index_of(content, marker)
+  // Find the end: next "## " or end of file
+  let rest = substring(content, si + length(marker), length(content))
+  let mut ei = length(rest)
+  let next_section = index_of(rest, "\n## ")
+  if next_section > 0.0 then { let ei = next_section }
+  let section = substring(rest, 0.0, ei)
+  // Trim to max 1500 chars to avoid bloating context
+  if length(section) > 1500.0 then {
+    let section = substring(section, 0.0, 1500.0) + "\n... (persona truncated)"
+  }
+  return "=== Expert Persona (Mental Model) ===\n" + section
+}
+
+// ============================================================
+// IDEA-6: Brand Contract — inject brand.mlog into design dept context
+// ============================================================
+
+pattern GetBrandContract() -> String {
+  let content = read_file("library/brand.mlog")
+  if content == "" then { return "" }
+  // Trim to 2000 chars max
+  if length(content) > 2000.0 then {
+    let content = substring(content, 0.0, 2000.0) + "\n... (brand contract truncated)"
+  }
+  return "=== Brand Contract ===\n" + content
+}
+
+// ============================================================
+// IDEA-7: Sub-Agent Routing — route to specialized sub-role within dept
+// ============================================================
+
+pattern ResolveSubAgent(dept: String, query: String) -> String {
+  // Each dept maps query keywords to a sub-role specialization
+  let t = lower(query)
+  if dept == "finance" then {
+    if contains(t, "cashflow") or contains(t, "кэшфло") or contains(t, "cash flow") then { return "cashflow" }
+    if contains(t, "инвойс") or contains(t, "invoice") or contains(t, "платёж") or contains(t, "оплата") then { return "invoicing" }
+    if contains(t, "налог") or contains(t, "tax") or contains(t, "ндс") then { return "tax" }
+    if contains(t, "unit economics") or contains(t, "unit") or contains(t, "cac") or contains(t, "ltv") or contains(t, "mrr") or contains(t, "arr") then { return "unit-economics" }
+    return "general"
+  }
+  if dept == "osp" then {
+    if contains(t, "препар") or contains(t, "analys") or contains(t, "анализ") then { return "analysis" }
+    if contains(t, "прогноз") or contains(t, "forecast") or contains(t, "scenario") then { return "forecasting" }
+    if contains(t, "риск") or contains(t, "risk") or contains(t, "wargame") then { return "risk" }
+    return "strategic"
+  }
+  if dept == "marketing" then {
+    if contains(t, "кампан") or contains(t, "campaign") then { return "campaigns" }
+    if contains(t, "конкурент") or contains(t, "competitor") then { return "competitive" }
+    if contains(t, "цифр") or contains(t, "cac") or contains(t, "воронк") or contains(t, "funnel") then { return "digital" }
+    return "strategy"
+  }
+  if dept == "legal" then {
+    if contains(t, "договор") or contains(t, "контракт") or contains(t, "contract") then { return "contracts" }
+    if contains(t, "нда") or contains(t, "nda") or contains(t, "конфиденц") then { return "nda" }
+    if contains(t, "gdpr") or contains(t, "персональн") or contains(t, "комплаенс") then { return "compliance" }
+    return "general-counsel" }
+  }
+  if dept == "expert" then {
+    if contains(t, "встреч") or contains(t, "переговор") or contains(t, "negotiat") then { return "negotiation" }
+    if contains(t, "интервью") or contains(t, "interview") then { return "interview" }
+    return "briefing"
+  }
+  if dept == "engineering" then {
+    if contains(t, "расчёт") or contains(t, "calculation") or contains(t, "моделирован") then { return "calculation" }
+    if contains(t, "simulat") or contains(t, "симуляц") then { return "simulation" }
+    return "analysis"
+  }
+  // Default: no sub-agent specialization
+  return ""
+}
+
+// ============================================================
+// END: OFFICE INTELLIGENCE — 7 IDEAS
+// ============================================================
+
 pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String {
   let context = BuildContext(dept, query, chat_id)
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
@@ -1233,6 +1479,9 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   }
   // FOIP-003.1: Log assistant message to session
   let _ = LogSessionEvent(chat_id, "assistant_message", dept, substring(reply, 0.0, 2000.0), used_model, tokens_in, tokens_out)
+  // IDEA-3: Verify step — self-check before sending (non-blocking)
+  let verify_score = VerifyReply(query, reply, dept)
+  let _ = AuditLog("dept_verify", dept, "score=" + verify_score + " query: " + substring(query, 0.0, 50.0))
   // Store model info for SendReport meta section
   if used_model != "" then { let _ = kv_set("last_model_" + dept, used_model) }
   let _ = kv_set("last_tokens_" + dept, tokens_in + "+" + tokens_out)
@@ -1244,7 +1493,11 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   let final_reply = reply + footer
   let _ = RecordAssistantMessage(chat_id, dept, final_reply)
   let _ = YanaAutoMemorize(query, reply, chat_id)
-  let _ = AuditLog("dept_query", dept, "model=" + used_model + " tokens=" + tokens_in + "+" + tokens_out + " query: " + substring(query, 0.0, 100.0))
+  // IDEA-1: Update consensus with this interaction
+  let _ = UpdateConsensus(dept, query, reply)
+  // IDEA-2: Record learning if verify score is high
+  let _ = RecordLearning(dept, query, reply, verify_score)
+  let _ = AuditLog("dept_query", dept, "model=" + used_model + " tokens=" + tokens_in + "+" + tokens_out + " verify=" + verify_score + " query: " + substring(query, 0.0, 100.0))
   return final_reply
 }
 

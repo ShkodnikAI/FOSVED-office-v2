@@ -882,6 +882,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS admin_night_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_data TEXT, review_data TEXT, health_score INTEGER, findings_count INTEGER, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, frequency TEXT DEFAULT 'daily', created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS news_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, title TEXT NOT NULL, summary TEXT, url TEXT, category TEXT DEFAULT 'general', language TEXT DEFAULT 'ru', published TIMESTAMP, collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, relevance_score REAL DEFAULT 0, hash TEXT UNIQUE);
+        CREATE TABLE IF NOT EXISTS continuous_learning (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT NOT NULL, query TEXT, approach TEXT, score REAL DEFAULT 0.5, created_at TEXT DEFAULT (datetime('now')));
+        CREATE INDEX IF NOT EXISTS idx_cl_dept ON continuous_learning(dept);
         CREATE INDEX IF NOT EXISTS idx_news_category ON news_cache (category, collected DESC);
         CREATE INDEX IF NOT EXISTS idx_news_hash ON news_cache (hash);
         """)
@@ -3066,6 +3068,81 @@ def learning_stats():
     except Exception as e:
         log.error(f"learning_stats error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+# ── IDEA-2: Continuous Learning — record & recall patterns ──
+
+@app.post("/learning/record")
+def learning_record():
+    """Record a successful pattern for continuous learning.
+
+    Stores query -> approach pairs that scored well in verification.
+    Used by HandleDeptQuery in app.mlog after successful verify."""
+    d = request.get_json(force=True)
+    dept = d.get("dept", "")
+    query = d.get("query", "")
+    approach = d.get("approach", "")
+    score = d.get("score", "0.5")
+
+    if not dept or not query or not approach:
+        return jsonify({"status": "error", "message": "dept, query, approach required"}), 400
+
+    try:
+        _execute("INSERT INTO continuous_learning (dept, query, approach, score, created_at) VALUES (?,?,?,?,datetime('now'))",
+                 (dept, query[:1000], approach[:2000], float(score)))
+        log.info(f"learning_record: dept={dept} score={score} query={query[:60]}")
+        return jsonify({"status": "ok"})
+
+    except Exception as e:
+        log.error(f"learning_record error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/learning/recall")
+def learning_recall():
+    """Recall past successful patterns for a dept+query.
+
+    Searches continuous_learning table by dept + keyword matching.
+    Returns the most recent high-score approaches."""
+    d = request.get_json(force=True)
+    dept = d.get("dept", "")
+    query = d.get("query", "")
+    limit = d.get("limit", 3)
+
+    if not dept or not query:
+        return jsonify({"status": "error", "count": 0, "results": []})
+
+    try:
+        # Extract keywords (words >= 4 chars) from query for LIKE matching
+        keywords = [w for w in query.lower().split() if len(w) >= 4][:6]
+        if not keywords:
+            return jsonify({"status": "ok", "count": 0, "results": []})
+
+        # Build LIKE conditions with OR
+        conditions = []
+        params = []
+        for kw in keywords:
+            conditions.append("LOWER(query) LIKE ?")
+            params.append(f"%{kw}%")
+
+        where_clause = " AND ".join(conditions)
+        sql = f"SELECT approach, score, created_at FROM continuous_learning WHERE dept=? AND ({where_clause}) ORDER BY score DESC, id DESC LIMIT ?"
+        params.extend([dept, int(limit)])
+
+        rows = _query(sql, params, fetch=True)
+        results = []
+        for r in (rows or []):
+            results.append({
+                "approach": r.get("approach", ""),
+                "score": r.get("score", "0.5"),
+                "created_at": r.get("created_at", ""),
+            })
+
+        return jsonify({"status": "ok", "count": len(results), "results": results})
+
+    except Exception as e:
+        log.error(f"learning_recall error: {e}")
+        return jsonify({"status": "ok", "count": 0, "results": []})  # non-blocking
+
 
 @app.post("/learning/debrief")
 def learning_debrief():
