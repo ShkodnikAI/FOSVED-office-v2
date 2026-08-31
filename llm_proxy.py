@@ -22,6 +22,7 @@ log_mem.info(f"FosvedMemory loaded: {len(memory.TYPES)} types, db={_MEMORY_DB}")
 
 from flask import Flask, request, jsonify, Response
 import requests as http_requests
+import secrets_crypto
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("llm_proxy")
@@ -220,6 +221,59 @@ PROVIDERS = {
     "cerebras": {"url": "https://api.cerebras.ai/v1/chat/completions", "env_key": "CEREBRAS_API_KEY", "format": "openai", "timeout": 120},
     "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
 }
+
+# ──────────────────────────── SEC-5/SEC-6: секреты и интеграции ────────────────────────────
+
+def get_secret(name: str) -> str:
+    """Единая точка чтения секрета: сначала БД (расшифровать), иначе env var."""
+    try:
+        rows = _query("SELECT encrypted_value FROM secrets_store WHERE name = ?", (name,), fetch=True)
+        if rows:
+            decrypted = secrets_crypto.decrypt_value(rows[0]["encrypted_value"])
+            if decrypted:
+                return decrypted
+    except Exception as e:
+        log.error(f"get_secret({name}) DB lookup failed: {e}")
+    return os.environ.get(name, "")
+
+
+def set_secret(name: str, plain_value: str) -> bool:
+    """Сохранить секрет в БД зашифрованным. False, если SECRETS_MASTER_KEY не настроен."""
+    if not secrets_crypto.is_configured():
+        return False
+    encrypted = secrets_crypto.encrypt_value(plain_value)
+    _query(
+        "INSERT INTO secrets_store (name, encrypted_value, updated_at) VALUES (?, ?, datetime('now')) "
+        "ON CONFLICT(name) DO UPDATE SET encrypted_value = excluded.encrypted_value, updated_at = excluded.updated_at",
+        (name, encrypted),
+    )
+    return True
+
+
+def delete_secret(name: str) -> None:
+    """Удалить переопределение из БД — вернуться к значению из env var."""
+    _query("DELETE FROM secrets_store WHERE name = ?", (name,))
+
+
+def _has_db_override(name: str) -> bool:
+    rows = _query("SELECT 1 FROM secrets_store WHERE name = ?", (name,), fetch=True)
+    return bool(rows)
+
+
+INTEGRATIONS_REGISTRY = [
+    {"env_key": "ZAI_API_KEY", "label": "Z.ai (GLM)", "kind": "model"},
+    {"env_key": "DEEPSEEK_API_KEY", "label": "DeepSeek", "kind": "model"},
+    {"env_key": "GROQ_API_KEY", "label": "Groq", "kind": "model"},
+    {"env_key": "GROK_API_KEY", "label": "Grok (xAI)", "kind": "model"},
+    {"env_key": "ANTHROPIC_API_KEY", "label": "Anthropic (Claude)", "kind": "model"},
+    {"env_key": "OPENAI_API_KEY", "label": "OpenAI", "kind": "model"},
+    {"env_key": "APODEX_API_KEY", "label": "Apodex", "kind": "model"},
+    {"env_key": "NVIDIA_API_KEY", "label": "NVIDIA", "kind": "model"},
+    {"env_key": "CEREBRAS_API_KEY", "label": "Cerebras", "kind": "model"},
+    {"env_key": "KIMI_API_KEY", "label": "Kimi (Moonshot)", "kind": "model"},
+    {"env_key": "TAVILY_API_KEY", "label": "Tavily (веб-поиск)", "kind": "service"},
+    {"env_key": "GITHUB_TOKEN_METALOGOS", "label": "GitHub (трекинг репозиториев)", "kind": "service"},
+]
 
 TOKEN_COSTS = {
     "zai": {"input": 0.5, "output": 1.5}, "deepseek": {"input": 0.14, "output": 0.28},
@@ -422,7 +476,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     prov = PROVIDERS.get(provider_name)
     if not prov:
         return None
-    api_key = os.environ.get(prov["env_key"])
+    api_key = get_secret(prov["env_key"])
     if not api_key:
         return None
     if not _breaker.can_call(provider_name):
@@ -803,6 +857,13 @@ def _db():
 def init_db():
     with db_lock:
         c = _db()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS secrets_store (
+                name TEXT PRIMARY KEY,
+                encrypted_value TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         c.executescript("""
         CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, title TEXT, query TEXT, raw_text TEXT DEFAULT '', html TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')), archived INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created_at TEXT DEFAULT (datetime('now')));
@@ -4280,6 +4341,50 @@ def miniapp_redirect():
     """Redirect /miniapp to /miniapp-spa."""
     from flask import redirect
     return redirect("/miniapp-spa", code=301)
+
+@app.get("/api/integrations")
+def api_integrations_list():
+    """Список известных интеграций со статусом. Значение ключа никогда не отдаётся целиком."""
+    out = []
+    for item in INTEGRATIONS_REGISTRY:
+        current = get_secret(item["env_key"])
+        out.append({
+            "id": item["env_key"],
+            "label": item["label"],
+            "kind": item["kind"],
+            "connected": bool(current),
+            "masked": secrets_crypto.mask_value(current) if current else None,
+            "source": "db" if _has_db_override(item["env_key"]) else ("env" if current else "none"),
+        })
+    return jsonify({"status": "ok", "integrations": out, "master_key_configured": secrets_crypto.is_configured()})
+
+
+@app.post("/api/integrations/<env_key>")
+def api_integrations_set(env_key):
+    """Задать или обновить секрет. Значение никогда не возвращается целиком."""
+    known = {item["env_key"] for item in INTEGRATIONS_REGISTRY}
+    if env_key not in known:
+        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
+    d = request.get_json(force=True, silent=True) or {}
+    value = (d.get("value") or "").strip()
+    if not value:
+        return jsonify({"status": "error", "message": "значение не может быть пустым"}), 400
+    ok = set_secret(env_key, value)
+    if not ok:
+        return jsonify({"status": "error", "message": "SECRETS_MASTER_KEY не настроен на сервере"}), 200
+    _log_audit("integration_key_set", {"env_key": env_key})
+    return jsonify({"status": "ok", "masked": secrets_crypto.mask_value(value)})
+
+
+@app.route("/api/integrations/<env_key>", methods=["DELETE"])
+def api_integrations_delete(env_key):
+    known = {item["env_key"] for item in INTEGRATIONS_REGISTRY}
+    if env_key not in known:
+        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
+    delete_secret(env_key)
+    _log_audit("integration_key_deleted", {"env_key": env_key})
+    return jsonify({"status": "ok"})
+
 
 @app.get("/miniapp-spa")
 @app.get("/miniapp-spa/")
