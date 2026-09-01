@@ -259,16 +259,8 @@ pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> S
   return "Factory flow completed."
 }
 
-pattern LZDeepScan(query: String, chat_id: String) -> String {
-  let _ = AuditLog("lz_deep_scan", "lz", "query: " + substring(query, 0.0, 100.0))
-  let context = BuildContext("lz", "Deep research: " + query, chat_id)
-  let messages = json_encode([{role: "system", content: context + "\n\nIMPORTANT: This is a DEEP SCAN request. Use all available sources. Structure findings with [FACT verified] badges."}, {role: "user", content: query}])
-  let proxy_result = CallLLMProxy("lz", messages)
-  if to_string(proxy_result) == "()" then { return "Deep scan unavailable (proxy down)." }
-  let reply = json_get(parse_json(proxy_result), "reply", "Deep scan failed.")
-  let _ = RecordAssistantMessage(chat_id, "lz", reply)
-  return reply
-}
+// LZDeepScan, LZAllScan are defined in dept/lz.mlog (imported above) — they call real scanners (ScanWeb, ScanGitHub, etc.)
+// Do NOT re-define them here or they will shadow the real implementations.
 
 pattern RecordUserMessage(chat_id: String, dept: String, text: String) -> String {
   db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES (?1, 'user', ?2, ?3)", [chat_id, dept, text])
@@ -3530,9 +3522,21 @@ mlogserver {
         return respond("200 ok")
       }
 
-      // Default /lz handler
-      let reply = HandleDeptQuery("lz", query, chat_id)
-      let _ = SendReport(reply, "lz", query, "2.0", chat_id)
+      // Default /lz handler — auto-detect scan intent
+      let t = lower(query)
+      let is_scan = contains(t, "скан") or contains(t, "развед") or contains(t, "новости") or contains(t, "событи") or contains(t, "что происход") or contains(t, "свеж") or contains(t, "монитор") or contains(t, "обзор") or contains(t, "дайджест") or contains(t, "что нового") or contains(t, "scan") or contains(t, "intelligence") or contains(t, "briefing")
+      if is_scan then {
+        let reply = try LZDeepScan(query, chat_id)
+        if to_string(reply) == "()" or reply == "" then {
+          let reply = HandleDeptQuery("lz", query, chat_id)
+          let _ = SendReport(reply, "lz", query, "2.0", chat_id)
+        } else {
+          let _ = SendReport(reply, "lz", "Scan: " + query, "3.0", chat_id)
+        }
+      } else {
+        let reply = HandleDeptQuery("lz", query, chat_id)
+        let _ = SendReport(reply, "lz", query, "2.0", chat_id)
+      }
       return respond("200 ok")
     }
 
