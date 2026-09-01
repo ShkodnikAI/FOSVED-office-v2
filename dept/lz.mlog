@@ -493,44 +493,83 @@ pattern LZDeepResearcherProfile(query: String, chat_id: String) -> String {
 // MULTI-SOURCE SCANNERS
 // ═══════════════════════════════════════════════════════════════════════
 
+// Web: real Tavily + RSS + GDELT via /news/fresh endpoint
 pattern ScanWeb(query: String) -> String {
-  let result = call_llm("web search scan for: " + query + ". Extract: key findings, disruption signals, source reliability, novelty rating.")
-  return result
+  let body = json_encode({query: query, dept: "lz", limit: 8})
+  let resp = try http_post("http://127.0.0.1:4000/news/fresh", body, "application/json")
+  if to_string(resp) == "()" then { return "[web scan: proxy unavailable]" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "[web scan: parse error]" }
+  return to_string(json_get(parsed, "news", "no results"))
 }
 
-pattern ScanYouTube(query: String) -> String {
-  let result = call_llm("YouTube transcripts scan for: " + query + ". Extract: key findings, disruption signals, source reliability, novelty rating.")
-  return result
-}
-
-pattern ScanReddit(query: String) -> String {
-  let result = call_llm("Reddit discussions scan for: " + query + ". Extract: key findings, disruption signals, source reliability, novelty rating.")
-  return result
-}
-
-pattern ScanScience(query: String) -> String {
-  let result = call_llm("arxiv/biorxiv/medrxiv scan for: " + query + ". Extract: key findings, disruption signals, source reliability, novelty rating.")
-  return result
-}
-
+// GitHub: real GitHub API via /lz/github-scan endpoint
 pattern ScanGitHub(query: String) -> String {
-  let result = call_llm("GitHub repositories scan for: " + query + ". Extract: key findings, disruption signals, source reliability, novelty rating.")
-  return result
+  let body = json_encode({query: query, limit: 5})
+  let resp = try http_post("http://127.0.0.1:4000/lz/github-scan", body, "application/json")
+  if to_string(resp) == "()" then { return "[github scan: proxy unavailable]" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "[github scan: parse error]" }
+  return to_string(parsed)
 }
 
+// YouTube: via web search with site:youtube.com
+pattern ScanYouTube(query: String) -> String {
+  let yq = query + " site:youtube.com"
+  let body = json_encode({query: yq, dept: "lz", limit: 5})
+  let resp = try http_post("http://127.0.0.1:4000/news/fresh", body, "application/json")
+  if to_string(resp) == "()" then { return "[youtube: no data]" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "[youtube: parse error]" }
+  return to_string(json_get(parsed, "news", "no results"))
+}
+
+// Reddit: via web search with site:reddit.com
+pattern ScanReddit(query: String) -> String {
+  let rq = query + " site:reddit.com"
+  let body = json_encode({query: rq, dept: "lz", limit: 5})
+  let resp = try http_post("http://127.0.0.1:4000/news/fresh", body, "application/json")
+  if to_string(resp) == "()" then { return "[reddit: no data]" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "[reddit: parse error]" }
+  return to_string(json_get(parsed, "news", "no results"))
+}
+
+// Science: via arxiv RSS (already in news_cache as category=science)
+pattern ScanScience(query: String) -> String {
+  let body = json_encode({query: query, dept: "lz", limit: 5})
+  let resp = try http_post("http://127.0.0.1:4000/news/fresh", body, "application/json")
+  if to_string(resp) == "()" then { return "[science: no data]" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "[science: parse error]" }
+  return to_string(json_get(parsed, "news", "no results"))
+}
+
+// Social (Twitter/X, TikTok, Instagram): via web search — no direct API
 pattern ScanSocial(query: String) -> String {
-  let result = call_llm("social media scan for: " + query + ". Extract: key findings, disruption signals, source reliability, novelty rating.")
-  return result
+  let sq = query + " (twitter OR x.com OR tiktok OR instagram)"
+  let body = json_encode({query: sq, dept: "lz", limit: 5})
+  let resp = try http_post("http://127.0.0.1:4000/news/fresh", body, "application/json")
+  if to_string(resp) == "()" then { return "[social: no data]" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "[social: parse error]" }
+  return to_string(json_get(parsed, "news", "no results"))
 }
 
+// Telegram: no direct API — uses web search for public channel mirrors
 pattern ScanTelegram(query: String) -> String {
-  let result = call_llm("Telegram channels scan for: " + query + ". Extract: key findings, disruption signals, source reliability, novelty rating.")
-  return result
+  let tq = query + " (telegram channel OR t.me)"
+  let body = json_encode({query: tq, dept: "lz", limit: 5})
+  let resp = try http_post("http://127.0.0.1:4000/news/fresh", body, "application/json")
+  if to_string(resp) == "()" then { return "[telegram: no direct API, web search only]" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "[telegram: parse error]" }
+  return to_string(json_get(parsed, "news", "no results"))
 }
 
+// Darknet: not available — honest placeholder
 pattern ScanDarknet(query: String) -> String {
-  let result = call_llm("darknet forums scan for: " + query + ". Extract: key findings, disruption signals, source reliability, novelty rating.")
-  return result
+  return "[darknet scan: unavailable — no anonymous access infrastructure]"
 }
 
 pattern LZDeepScan(query: String, chat_id: String) -> String {

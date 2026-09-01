@@ -270,6 +270,7 @@ INTEGRATIONS_REGISTRY = [
     {"env_key": "APODEX_API_KEY", "label": "Apodex", "kind": "model"},
     {"env_key": "NVIDIA_API_KEY", "label": "NVIDIA", "kind": "model"},
     {"env_key": "CEREBRAS_API_KEY", "label": "Cerebras", "kind": "model"},
+    {"env_key": "SAKANA_API_KEY", "label": "Sakana Fugu", "kind": "model"},
     {"env_key": "KIMI_API_KEY", "label": "Kimi (Moonshot)", "kind": "model"},
     {"env_key": "TAVILY_API_KEY", "label": "Tavily (веб-поиск)", "kind": "service"},
     {"env_key": "GITHUB_TOKEN_METALOGOS", "label": "GitHub (трекинг репозиториев)", "kind": "service"},
@@ -5311,6 +5312,20 @@ def news_fresh():
     limit = int(d.get("limit", 5))
     news = get_fresh_news(query, dept=dept, limit=limit)
     return jsonify({"news": news})
+
+
+# ── /lz/github-scan endpoint (used by ScanGitHub in lz.mlog) ──
+@app.route("/lz/github-scan", methods=["POST"])
+def lz_github_scan():
+    """Search GitHub repos for LZ. Thin wrapper around _github_search."""
+    d = request.get_json(force=True)
+    query = d.get("query", "")
+    limit = int(d.get("limit", 5))
+    if not query:
+        return jsonify({"repos": [], "total": 0})
+    repos = _github_search(query, per_page=limit)
+    text = "\n".join([f"- {r['name']} ({r['stars']}★, {r['lang']}) — {r['desc']}\n  {r['url']}" for r in repos])
+    return jsonify({"repos": repos, "total": len(repos), "text": text})
 
 
 # ── /lz news endpoint ──
