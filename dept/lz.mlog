@@ -448,16 +448,23 @@ pattern LZGeopoliticsScan(query: String, chat_id: String) -> String {
 
 pattern LZTavilySearch(query: String, chat_id: String) -> String {
   // Tavily API for real-time web search
-  let response = http_post("https://api.tavily.com/search", {api_key: env("TAVILY_API_KEY"), query: query, search_depth: "advanced", max_results: 5})
-  let analysis = call_llm("Synthesize Tavily results for ЛЗ intelligence: " + query + "\nResults: " + to_string(response) + "\n\nExtract: key findings, disruption signals, inflection indicators, cross-domain opportunities.")
-  db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, ?)", ["tavily", "tavily", 5])
+  // ВНИМАНИЕ: прямой внешний вызов в обход 127.0.0.1:4000 — может быть
+  // заблокирован сетевой политикой окружения независимо от ключа.
+  // См. /lz/diagnose для честной проверки достижимости.
+  let response = try http_post("https://api.tavily.com/search", json_encode({api_key: env("TAVILY_API_KEY"), query: query, search_depth: "advanced", max_results: 5}), "application/json")
+  if to_string(response) == "()" then { return "[tavily: сеть недоступна или ключ не задан — см. /lz/diagnose]" }
+  let analysis = call_llm("Synthesize Tavily results for ЛЗ intelligence: extract key findings, disruption signals, inflection indicators, cross-domain opportunities.", "Запрос: " + query + "\nРезультаты: " + to_string(response))
+  let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, ?)", ["tavily", "tavily", 5])
   return analysis
 }
 
 pattern LZTelegramSearch(query: String, chat_id: String) -> String {
   // Search monitored Telegram channels
-  let channels = db_execute("SELECT channel_id, category FROM lz_channels WHERE status = ?", ["active"])
-  let result = call_llm("Search Telegram channels for: " + query + "\nMonitored channels: " + to_string(channels) + "\n\nAnalyze posts for: emerging tech signals, insider intel, sentiment shifts, early indicators.")
+  let channels = try query("SELECT channel_id, category FROM lz_channels WHERE status = ?", ["active"])
+  if to_string(channels) == "()" then { return "[telegram: нет отслеживаемых каналов — таблица lz_channels пуста или недоступна]" }
+  let ch_str = to_string(channels)
+  if ch_str == "[]" then { return "[telegram: список каналов пуст, добавь через /lz channel add]" }
+  let result = call_llm("Search Telegram channels for: " + query + "\nMonitored channels: " + ch_str + "\n\nAnalyze posts for: emerging tech signals, insider intel, sentiment shifts, early indicators.", query)
   return result
 }
 

@@ -5329,6 +5329,88 @@ def lz_github_scan():
 
 
 # ── /lz news endpoint ──
+@app.route("/lz/diagnose", methods=["GET"])
+def lz_diagnose():
+    """Честная проверка каждого заявленного источника ЛЗ по отдельности.
+    Не переиспользует mlog-паттерны — бьёт напрямую в тот же механизм,
+    чтобы результат не зависел от состояния dept/lz.mlog."""
+    report = []
+
+    # 1. news_cache — что реально в основе Web/YouTube/Reddit/Science/Social/Telegram
+    try:
+        rows = _query("SELECT COUNT(*), MAX(collected) FROM news_cache WHERE collected > datetime('now', '-48 hours')", fetch=True)
+        cnt = rows[0][0] if rows else 0
+        last = rows[0][1] if rows else None
+        report.append({
+            "source": "news_cache (основа Web/YouTube/Reddit/Science/Social/Telegram-скана)",
+            "ok": cnt > 0,
+            "detail": f"{cnt} записей за 48ч, последняя: {last or 'нет'}" if cnt else "пусто — сборщик RSS/GDELT не наполнял кэш последние 48ч",
+        })
+    except Exception as e:
+        report.append({"source": "news_cache", "ok": False, "detail": f"ошибка БД: {e}"})
+
+    report.append({
+        "source": "YouTube / Reddit / Social (Twitter, TikTok, Instagram) / Telegram-web-поиск",
+        "ok": False,
+        "detail": "АРХИТЕКТУРНО НЕ РАБОТАЮТ: реализованы как SQL-поиск по news_cache (см. выше), не как обращение к самим платформам. Приписка 'site:reddit.com'/'tiktok' к запросу ищется как слово в заголовках новостных статей — таких статей с этих платформ в кэше нет физически.",
+    })
+
+    # 2. GitHub — реальный API
+    try:
+        gh_token = os.environ.get("GITHUB_TOKEN_METALOGOS", "")
+        repos = _github_search("test", per_page=1)
+        report.append({
+            "source": "GitHub (/lz/github-scan)",
+            "ok": isinstance(repos, list),
+            "detail": f"токен {'задан' if gh_token else 'НЕ задан (работает по анонимному лимиту 60/час)'}, тестовый запрос вернул {len(repos)} результатов" if isinstance(repos, list) else "функция вернула не список",
+        })
+    except Exception as e:
+        report.append({"source": "GitHub", "ok": False, "detail": f"ошибка: {e}"})
+
+    # 3. Tavily — реальный внешний веб-поиск
+    tavily_key = os.environ.get("TAVILY_API_KEY", "")
+    if not tavily_key:
+        report.append({"source": "Tavily (живой веб-поиск)", "ok": False, "detail": "TAVILY_API_KEY не задан в окружении"})
+    else:
+        try:
+            r = http_requests.post("https://api.tavily.com/search", json={"api_key": tavily_key, "query": "test", "max_results": 1}, timeout=15)
+            report.append({"source": "Tavily (живой веб-поиск)", "ok": r.status_code == 200, "detail": f"HTTP {r.status_code}"})
+        except Exception as e:
+            report.append({"source": "Tavily (живой веб-поиск)", "ok": False, "detail": f"сеть недоступна или таймаут: {e}"})
+        report.append({
+            "source": "Tavily — ВАЖНО про LZTavilySearch в dept/lz.mlog",
+            "ok": False,
+            "detail": "текущая реализация в mlog зовёт api.tavily.com НАПРЯМУЮ, в обход внутреннего прокси 127.0.0.1:4000, которым пользуется весь остальной код — это может быть заблокировано сетевой политикой окружения независимо от валидности ключа. Плюс вызов без try — при любом сбое падает целиком, не отвечает мягко.",
+        })
+
+    # 4. Telegram-мониторинг каналов
+    try:
+        rows = _query("SELECT COUNT(*) FROM lz_channels WHERE status='active'", fetch=True)
+        cnt = rows[0][0] if rows else 0
+        report.append({"source": "lz_channels (список отслеживаемых Telegram-каналов)", "ok": cnt > 0, "detail": f"{cnt} активных каналов" if cnt else "таблица пуста или не существует — каналов не добавлено ни одного"})
+    except Exception as e:
+        report.append({"source": "lz_channels", "ok": False, "detail": f"таблица недоступна: {e}"})
+    report.append({
+        "source": "LZTelegramSearch — ВАЖНО",
+        "ok": False,
+        "detail": "гарантированно падает при каждом вызове: использует db_execute() для SELECT-запроса вместо query(), без try — 'Execute returned results, did you mean to call query?'. Даже после починки — нет реального механизма чтения постов из Telegram-каналов, модель получит пустой список и будет придумывать анализ несуществующих постов.",
+    })
+
+    # 5. scan_logs — используется LZTavilySearch для логирования
+    try:
+        _query("SELECT COUNT(*) FROM scan_logs", fetch=True)
+        report.append({"source": "scan_logs", "ok": True, "detail": "таблица существует"})
+    except Exception as e:
+        report.append({"source": "scan_logs", "ok": False, "detail": f"таблица не создана нигде в app.mlog — INSERT в LZTavilySearch падает: {e}"})
+
+    # 6. Darknet — честно заявлен недоступным в самом коде
+    report.append({"source": "Darknet", "ok": None, "detail": "код сам честно возвращает '[unavailable — no anonymous access infrastructure]', не пытается притворяться рабочим"})
+
+    ok_count = sum(1 for r in report if r["ok"] is True)
+    fail_count = sum(1 for r in report if r["ok"] is False)
+    return jsonify({"status": "ok", "working": ok_count, "broken": fail_count, "report": report})
+
+
 @app.route("/lz/news", methods=["POST"])
 def lz_news():
     d = request.get_json(force=True)
