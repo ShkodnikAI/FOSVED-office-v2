@@ -79,7 +79,7 @@ pattern LZDisclaimer() -> String {
 
 // Gate 1: Minimum 3 independent confirmations before disruption alert
 pattern LZGateConfirmations(artifact_id: Int) -> String {
-  let rows = db_execute("SELECT confirmation_count, status FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+  let rows = query("SELECT confirmation_count, status FROM knowledge_artifacts WHERE id = ?", [artifact_id])
   if length(rows) == 0 then { return "FAIL: artifact not found" }
   let count = to_float(get(get(rows, 0), "confirmation_count"))
   let status = to_string(get(get(rows, 0), "status"))
@@ -97,7 +97,7 @@ pattern LZGateTimeline(claim: String) -> String {
 
 // Gate 3: Must not ignore negative signals after initial enthusiasm
 pattern LZGateNegativeSignals(artifact_id: Int) -> String {
-  let rows = db_execute("SELECT title, hype_cycle_stage, disruption_score FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+  let rows = query("SELECT title, hype_cycle_stage, disruption_score FROM knowledge_artifacts WHERE id = ?", [artifact_id])
   if len(rows) == 0 then { return "FAIL: not found" }
   let stage = to_string(get(get(rows, 0), "hype_cycle_stage"))
   if stage == "peak" then {
@@ -258,9 +258,16 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   // Gate 5: Check for investment implications
   let ref = LZGateOSPReferral(query)
 
-  let result = call_llm("ЛЗ (" + domain + "): " + query + "\nContext: " + context + "\n\nProvide intelligence assessment. If this involves investment, say INVEST_REFERRAL instead.")
+  // Для доменов, где важна свежесть (не «вечное» tech-знание) — добираем
+  // живой веб-поиск перед синтезом, а не отдаём модель без данных.
+  let live = ""
+  if domain == "geopolitics" or domain == "politics" or domain == "events" then {
+    let live = "\n\n" + LZTavilySearch(query, chat_id)
+  }
+
+  let result = call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать». Если это involves investment — начни ответ со слова INVEST_REFERRAL.", query + "\nContext: " + context + live)
   if starts_with(result, "INVEST_REFERRAL") then {
-    http_post("/osp/analyze", {source: "lz", query: query, domain: domain})
+    let _ = try http_post("http://127.0.0.1:4000/osp/analyze", json_encode({source: "lz", query: query, domain: domain}), "application/json")
     return disclaimer + "\n🔄 Передано в ОСП для инвестиционного анализа"
   }
 
@@ -273,7 +280,7 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   }
 
   // Log scan
-  db_execute("INSERT INTO scan_logs (scan_type, artifacts_found, alerts_generated) VALUES (?, 1, 0)", ["realtime"])
+  let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["realtime", domain])
 
   return disclaimer + "\n" + result
 }
@@ -416,29 +423,33 @@ pattern LZCompetingAlternatives(query: String, chat_id: String) -> String {
 
 pattern LZPoliticsScan(query: String, chat_id: String) -> String {
   let context = BuildLZContext(query, "politics", chat_id)
-  let result = call_llm("ЛЗ Politics: " + query + "\n" + context + "\n\nAnalyze political intelligence: geopolitical shifts, elections, sanctions, conflicts, cyber warfare. Apply cantillon, narrative-vs-flows, cycle-position lenses.")
-  db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["politics", "rss,gdlt,tavily"])
+  let live = LZTavilySearch(query, chat_id)
+  let result = call_llm("ЛЗ Politics: analyze political intelligence — geopolitical shifts, elections, sanctions, conflicts, cyber warfare. Apply cantillon, narrative-vs-flows, cycle-position lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live)
+  let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["politics", "rss,gdlt,tavily"])
   return result
 }
 
 pattern LZEconomicsScan(query: String, chat_id: String) -> String {
   let context = BuildLZContext(query, "economics", chat_id)
-  let result = call_llm("ЛЗ Economics: " + query + "\n" + context + "\n\nAnalyze economic intelligence: macro indicators, monetary policy, commodity markets, crisis signals. Apply macro-regime-id, cross-asset-divergence, cantillon lenses.")
-  db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["economics", "rss,gdlt,tavily"])
+  let live = LZTavilySearch(query, chat_id)
+  let result = call_llm("ЛЗ Economics: analyze economic intelligence — macro indicators, monetary policy, commodity markets, crisis signals. Apply macro-regime-id, cross-asset-divergence, cantillon lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live)
+  let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["economics", "rss,gdlt,tavily"])
   return result
 }
 
 pattern LZEventsScan(query: String, chat_id: String) -> String {
   let context = BuildLZContext(query, "events", chat_id)
-  let result = call_llm("ЛЗ Events: " + query + "\n" + context + "\n\nAnalyze event intelligence: disasters, protests, pandemics, corporate events, scientific breakthroughs. Apply domain-rapid-entry, failure-modes-mapping, adjacent-field-cross-check lenses.")
-  db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["events", "rss,gdlt,tavily"])
+  let live = LZTavilySearch(query, chat_id)
+  let result = call_llm("ЛЗ Events: analyze event intelligence — disasters, protests, pandemics, corporate events, scientific breakthroughs. Apply domain-rapid-entry, failure-modes-mapping, adjacent-field-cross-check lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live)
+  let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["events", "rss,gdlt,tavily"])
   return result
 }
 
 pattern LZGeopoliticsScan(query: String, chat_id: String) -> String {
   let context = BuildLZContext(query, "geopolitics", chat_id)
-  let result = call_llm("ЛЗ Geopolitics: " + query + "\n" + context + "\n\nDeep geopolitical analysis: spheres of influence, military alliances, energy geopolitics, tech sovereignty, sanctions regimes. Apply cantillon, narrative-vs-flows, iw-watchlist lenses.")
-  db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["geopolitics", "rss,gdlt,tavily"])
+  let live = LZTavilySearch(query, chat_id)
+  let result = call_llm("ЛЗ Geopolitics: deep geopolitical analysis — spheres of influence, military alliances, energy geopolitics, tech sovereignty, sanctions regimes. Apply cantillon, narrative-vs-flows, iw-watchlist lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live)
+  let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["geopolitics", "rss,gdlt,tavily"])
   return result
 }
 
@@ -622,32 +633,32 @@ pattern LZWatchRemove(topic: String) -> String {
 }
 
 pattern LZWatchList() -> String {
-  let rows = db_execute("SELECT topic, domain, threshold_disruption, status FROM watchlist_entries WHERE status = ? ORDER BY created_at DESC", ["active"])
+  let rows = query("SELECT topic, domain, threshold_disruption, status FROM watchlist_entries WHERE status = ? ORDER BY created_at DESC", ["active"])
   return "👁️ Watchlist:\n" + to_string(rows)
 }
 
 pattern LZWatchRelevance(query: String) -> String {
-  let rows = db_execute("SELECT topic, domain FROM watchlist_entries WHERE status = ?", ["active"])
+  let rows = query("SELECT topic, domain FROM watchlist_entries WHERE status = ?", ["active"])
   let result = call_llm("Which watchlist entries are relevant to this query? Query: " + query + "\nWatchlist: " + to_string(rows) + "\n\nList relevant entries or reply NONE.")
   return result
 }
 
 pattern LZRecentArtifacts(domain: String, limit: Float) -> String {
-  let rows = db_execute("SELECT title, disruption_score, status, created_at FROM knowledge_artifacts WHERE domain = ? ORDER BY created_at DESC LIMIT ?", [domain, limit])
+  let rows = query("SELECT title, disruption_score, status, created_at FROM knowledge_artifacts WHERE domain = ? ORDER BY created_at DESC LIMIT ?", [domain, limit])
   return to_string(rows)
 }
 
 pattern LZArchiveSearch(query: String) -> String {
-  let rows = db_execute("SELECT id, title, domain, hype_cycle_stage, disruption_score, status FROM knowledge_artifacts WHERE title ILIKE ? ORDER BY updated_at DESC LIMIT 10", ["%" + query + "%"])
+  let rows = query("SELECT id, title, domain, hype_cycle_stage, disruption_score, status FROM knowledge_artifacts WHERE title ILIKE ? ORDER BY updated_at DESC LIMIT 10", ["%" + query + "%"])
   return "📚 Archive:\n" + to_string(rows)
 }
 
 pattern LZMetricsScore() -> String {
-  let total = db_execute("SELECT COUNT(*) as c FROM knowledge_artifacts", [])
-  let hot = db_execute("SELECT COUNT(*) as c FROM knowledge_artifacts WHERE status = ?", ["hot"])
-  let confirmed = db_execute("SELECT COUNT(*) as c FROM knowledge_artifacts WHERE status = ?", ["confirmed_disruption"])
-  let watch = db_execute("SELECT COUNT(*) as c FROM watchlist_entries WHERE status = ?", ["active"])
-  let scans = db_execute("SELECT COUNT(*) as c FROM scan_logs", [])
+  let total = query("SELECT COUNT(*) as c FROM knowledge_artifacts", [])
+  let hot = query("SELECT COUNT(*) as c FROM knowledge_artifacts WHERE status = ?", ["hot"])
+  let confirmed = query("SELECT COUNT(*) as c FROM knowledge_artifacts WHERE status = ?", ["confirmed_disruption"])
+  let watch = query("SELECT COUNT(*) as c FROM watchlist_entries WHERE status = ?", ["active"])
+  let scans = query("SELECT COUNT(*) as c FROM scan_logs", [])
   return "📊 ЛЗ Metrics:\nTotal artifacts: " + to_string(total) + "\nHot: " + to_string(hot) + "\nConfirmed disruptions: " + to_string(confirmed) + "\nActive watchlist: " + to_string(watch) + "\nTotal scans: " + to_string(scans)
 }
 
@@ -657,7 +668,7 @@ pattern LZMetricsScore() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 
 pattern LZLifecycleTransition(artifact_id: Int, new_status: String) -> String {
-  let rows = db_execute("SELECT status, confirmation_count FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+  let rows = query("SELECT status, confirmation_count FROM knowledge_artifacts WHERE id = ?", [artifact_id])
   if length(rows) == 0 then { return "FAIL: artifact not found" }
   let current = to_string(get(get(rows, 0), "status"))
   let confirmations = to_float(get(get(rows, 0), "confirmation_count"))
@@ -702,8 +713,8 @@ pattern LZIncrementalScan() -> String {
 
 // Daily 06:00: digest
 pattern LZDailyDigest() -> String {
-  let hot = db_execute("SELECT title, disruption_score FROM knowledge_artifacts WHERE status = ? ORDER BY disruption_score DESC LIMIT 3", ["hot"])
-  let watch = db_execute("SELECT topic FROM watchlist_entries WHERE status = ?", ["active"])
+  let hot = query("SELECT title, disruption_score FROM knowledge_artifacts WHERE status = ? ORDER BY disruption_score DESC LIMIT 3", ["hot"])
+  let watch = query("SELECT topic FROM watchlist_entries WHERE status = ?", ["active"])
   let result = call_llm("Daily ЛЗ digest:\nHot artifacts: " + to_string(hot) + "\nActive watchlist: " + to_string(watch) + "\n\nSummarize top-3 events + any alerts triggered by watchlist thresholds.")
   db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 3)", ["daily", "all"])
   // Send digest to Yana
@@ -713,7 +724,7 @@ pattern LZDailyDigest() -> String {
 
 // Weekly: inflection candidates review
 pattern LZWeeklyReview() -> String {
-  let candidates = db_execute("SELECT title, hype_cycle_stage, disruption_score FROM knowledge_artifacts WHERE status IN (?, ?) ORDER BY disruption_score DESC LIMIT 10", ["tracking", "hot"])
+  let candidates = query("SELECT title, hype_cycle_stage, disruption_score FROM knowledge_artifacts WHERE status IN (?, ?) ORDER BY disruption_score DESC LIMIT 10", ["tracking", "hot"])
   let result = call_llm("Weekly ЛЗ inflection review:\nCandidates: " + to_string(candidates) + "\n\nFor each: Is inflection approaching? Any new signals? Update hype cycle position if changed.")
   db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 10)", ["weekly"])
   return result
@@ -721,7 +732,7 @@ pattern LZWeeklyReview() -> String {
 
 // Monthly: disruption probability re-scoring
 pattern LZMonthlyRescoring() -> String {
-  let tracked = db_execute("SELECT id, title, disruption_score FROM tracked_technologies ORDER BY disruption_score DESC LIMIT 20", [])
+  let tracked = query("SELECT id, title, disruption_score FROM tracked_technologies ORDER BY disruption_score DESC LIMIT 20", [])
   let result = call_llm("Monthly re-scoring of tracked technologies:\n" + to_string(tracked) + "\n\nRe-evaluate disruption probability at 1y/3y/5y/10y horizons based on latest data.")
   db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 20)", ["monthly"])
   return result
@@ -729,7 +740,7 @@ pattern LZMonthlyRescoring() -> String {
 
 // Quarterly: report to owner
 pattern LZQuarterlyReport() -> String {
-  let top = db_execute("SELECT title, domain, disruption_score, hype_cycle_stage, status FROM knowledge_artifacts WHERE status IN (?, ?) ORDER BY disruption_score DESC LIMIT 10", ["hot", "confirmed_disruption"])
+  let top = query("SELECT title, domain, disruption_score, hype_cycle_stage, status FROM knowledge_artifacts WHERE status IN (?, ?) ORDER BY disruption_score DESC LIMIT 10", ["hot", "confirmed_disruption"])
   let result = call_llm("Quarterly ЛЗ report to owner:\nTop 10 emerging technologies:\n" + to_string(top) + "\n\nFor each: disruption assessment, investment implications (referral to ОСП), timeline, confidence level.\n\nDISCLAIMER: This is intelligence, not investment advice.")
   // Cross-dept: send to OSP for strategic analysis
   http_post("/osp/quarterly-intel", {source: "lz", report: result})
@@ -744,7 +755,7 @@ pattern LZChannelAdd(channel_id: String, category: String) -> String {
 }
 
 pattern LZChannels() -> String {
-  let rows = db_execute("SELECT channel_id, category, status FROM lz_channels ORDER BY category", [])
+  let rows = query("SELECT channel_id, category, status FROM lz_channels ORDER BY category", [])
   return "📡 Channels:\n" + to_string(rows)
 }
 
