@@ -334,7 +334,8 @@ pattern HandleFinance(query: String, chat_id: String) -> String {
   let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
   let disclaimer_top = FinanceDisclaimerTop()
   let prompt = disclaimer_top + "\n\n" + context + "\n\n=== ЗАПРОС ===\n" + query + "\n\nПравила ответа:\n1. Юрисдикция: " + jurisdiction + ", форма: " + business_form + "\n2. Числа конкретные — никаких «приблизительно»\n3. Если не хватает данных — честно скажи, чего не хватает\n4. Не давай инвестиционных советов\n5. Уточняй любую неоднозначность (валюта, дата, юрисдикция)\n6. Каждое число должно иметь источник или допущение\n7. Если расчёт — назначь verification date"
-  let llm_result = call_llm(prompt, query)
+  let llm_result = try call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
@@ -498,7 +499,8 @@ pattern FinanceCashflowForecast(query: String, chat_id: String) -> String {
 
   let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: CASHFLOW FORECAST\n\nПараметры:\n- Горизонт: " + to_string(period) + " дней\n- Юрисдикция: " + jurisdiction + "\n- Форма бизнеса: " + business_form + "\n- Verification date: " + verification_date + "\n\nСтруктура ответа:\n1. Opening balance (на сегодня)\n2. Недельный/месячный breakdown: inflows, outflows, net, cumulative\n3. Closing balance (через " + to_string(period) + " дней)\n4. Риски: что может пойти не так (3 сценария: optimistic/base/pessimistic)\n5. Кассовый разрыв?: да/нет, когда, сколько не хватает\n6. Рекомендации: конкретные действия\n7. Verification date: " + verification_date + " — именно в этот день сверим прогноз с фактом\n\nПРАВИЛА:\n- Все суммы с точностью до копеек\n- Конвертация по курсу на дату операции\n- Если данных не хватает — честно укажи, какие данные нужны\n- Не округляй под комфортный отчёт"
 
-  let llm_result = call_llm(prompt, query)
+  let llm_result = try call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
@@ -537,7 +539,8 @@ pattern FinanceInvoiceHandler(query: String, chat_id: String) -> String {
   if length(invoices) == 0.0 then {
     let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
     let prompt = context + "\n\nРЕЖИМ: INVOICE MANAGEMENT\nНет инвойсов по указанному фильтру. Помоги владельцу:\n1. Объясни как создать инвойс\n2. Какие статусы инвойсов существуют\n3. Aging report: как читать"
-    let llm_result = call_llm(prompt, query)
+    let llm_result = try call_llm(prompt, query)
+    if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
     if to_string(llm_result) == "()" then { return "📭 Инвойсов нет. Используйте /finance-invoice для списка." }
     let reply = to_string(llm_result)
     let _ = RecordAssistantMessage(chat_id, "finance", reply)
@@ -549,7 +552,8 @@ pattern FinanceInvoiceHandler(query: String, chat_id: String) -> String {
   let invoice_json = json_encode(invoices)
   let prompt = context + "\n\nРЕЖИМ: INVOICE LIST + AGING REPORT\n\nИнвойсы из базы:\n" + invoice_json + "\n\nСтруктура ответа:\n1. Список инвойсов: номер, клиент, сумма, валюта, статус, due date\n2. Aging report: группировка по возрасту (0-30д, 31-60д, 61-90д, 90+д)\n3. Сумма по каждому bucket\n4. Рекомендации: какие инвойсы требуют внимания\n5. Автоматические действия: какие статусы должны быть обновлены (overdue → escalation after 14d, pre-legal after 60d)"
 
-  let llm_result = call_llm(prompt, query)
+  let llm_result = try call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
@@ -625,7 +629,8 @@ pattern FinanceTaxCalc(query: String, chat_id: String) -> String {
 
   let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: НАЛОГОВЫЙ РАСЧЁТ\n\nЮрисдикция: " + jurisdiction + "\nФорма бизнеса: " + business_form + "\n\nСтруктура ответа:\n1. Тип налога и ставка (из KB юрисдикции)\n2. Gross amount (до налога)\n3. Tax amount (сумма налога)\n4. Net amount (после налога)\n5. Если НДС — уточни: включая НДС или без? (расчёт разный)\n6. Дедлайн уплаты (из tax calendar)\n7. Куда платить (орган, реквизиты если есть в KB)\n8. Что нужно для подачи расчёта бухгалтеру\n\nПРАВИЛА:\n- Ставки берём ТОЛЬКО из jurisdiction KB\n- Если ставка изменилась недавно — предупреди\n- Не подаём декларацию — только расчёт\n- Уточняй ambiguous: «включая НДС или без?»"
 
-  let llm_result = call_llm(prompt, query)
+  let llm_result = try call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
@@ -650,7 +655,8 @@ pattern FinanceVerifyForecast(query: String, chat_id: String) -> String {
 
   let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: ВЕРИФИКАЦИЯ ПРОГНОЗА\n\nСтруктура:\n1. Найти прошлый прогноз по теме (из архива financial_forecasts)\n2. Что предсказали: сумма, дата, юрисдикция, форма\n3. Что произошло на самом деле\n4. MAPE = |(actual - forecast) / forecast| × 100%\n5. Outcome: verified (MAPE ≤ target) / partial (MAPE ≤ 1.5×target) / missed (MAPE > 1.5×target)\n6. Систематическая ошибка: завышение/занижение\n7. Что сработало в прогнозе\n8. Что не сработало и почему\n9. Corrigendum: что исправить в методологии\n\nЦелевые MAPE: 30d ≤ 5%, 60d ≤ 10%, 90d ≤ 15%\nНе выдумывай actual values — если не знаешь факт, так и скажи."
 
-  let llm_result = call_llm(prompt, "Верифицируй: " + query)
+  let llm_result = try call_llm(prompt, "Верифицируй: " + query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
@@ -668,7 +674,8 @@ pattern FinanceArchiveSearch(query: String, chat_id: String) -> String {
 
   let context = BuildFinanceContext(query, "BY", "ooo", chat_id)
   let prompt = context + "\n\nРЕЖИМ: АРХИВ FINANCE\n\nЗаписи из архива:\n" + json_encode(rows) + "\n\nФильтр: " + query + "\n\nСтруктура ответа:\n1. Найденные записи (ID, тип, статус, юрисдикция, дата)\n2. Если запрос содержит фильтр — применить\n3. Краткая сводка: сколько записей каждого типа и статуса"
-  let llm_result = call_llm(prompt, query)
+  let llm_result = try call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
@@ -739,7 +746,8 @@ pattern FinanceRunwayCalc(query: String, chat_id: String) -> String {
 
   let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: RUNWAY & BURN RATE\n\nСтруктура:\n1. Current cash (свободные средства)\n2. Monthly burn rate (расходы за последние 3 месяца / 3)\n3. Runway = current_cash / monthly_burn (в месяцах)\n4. Breakeven: когда доходы = расходы (если есть projection)\n5. Сценарии: optimistic/base/pessimistic burn\n6. Критические пороги: <6м — CRITICAL, <12м — WARNING, ≥12м — OK\n7. Действия если runway < 6м: конкретные шаги\n8. Verification date: +30 дней (пересчитать)\n\nЕсли данных не хватает — честно скажи. Не выдумывай cash и burn."
 
-  let llm_result = call_llm(prompt, query)
+  let llm_result = try call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
@@ -767,7 +775,8 @@ pattern FinanceUnitEconomics(query: String, chat_id: String) -> String {
 
   let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: UNIT ECONOMICS\n\nСтруктура:\n1. CAC (Customer Acquisition Cost) = marketing_spend / new_customers\n2. LTV (Lifetime Value) = ARPU × average_lifetime\n3. Payback period = CAC / (ARPU × gross_margin)\n4. LTV/CAC ratio (target ≥ 3:1)\n5. Cohort analysis: по месяцам если есть данные\n6. Verification date: +90 дней (unit economics нужны 90+ дней для meaningful comparison)\n\nПРАВИЛА:\n- Если данных не хватает — честно скажи: 'нужны marketing_spend и new_customers за период'\n- Cohort-корректный расчёт (не смешивай когорты)\n- Не выдумывай ARPU и churn — возьми из данных или скажи что их нет"
 
-  let llm_result = call_llm(prompt, query)
+  let llm_result = try call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
@@ -795,7 +804,8 @@ pattern FinanceMrrArr(query: String, chat_id: String) -> String {
 
   let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: MRR/ARR ОТЧЁТ\n\nСтруктура:\n1. MRR (Monthly Recurring Revenue) — разбивка по планам/тиерам\n2. ARR = MRR × 12\n3. Expansion revenue (upgrade revenue этот месяц)\n4. Contraction revenue (downgrade)\n5. Churn rate = lost_MRR / start_MRR × 100%\n6. Net MRR growth = new + expansion - contraction - churn\n7. MRR trend: последние 6 месяцев\n8. Прогноз MRR на +3 месяца (linear + churn-adjusted)\n\nТолько для подписочных продуктов. Если бизнес не подписочный — так и скажи."
 
-  let llm_result = call_llm(prompt, query)
+  let llm_result = try call_llm(prompt, query)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 

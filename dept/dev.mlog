@@ -217,7 +217,7 @@ pattern DeclineOutOfScope(query: String) -> String {
 
 // ── Hard Rule 1: No code without architecture decision ─────────────────
 pattern GateNoCodeWithoutDecision(task_id: String) -> Dict {
-  let row = db_execute("SELECT id FROM architecture_decisions WHERE task_id = ? LIMIT 1", [task_id])
+  let row = query("SELECT id FROM architecture_decisions WHERE task_id = ? LIMIT 1", [task_id])
   if length(row) > 0 then {
     return { passed: true, message: "ADR exists for task " + task_id }
   }
@@ -245,7 +245,7 @@ pattern GateNoHoldTech(technologies_json: String) -> Dict {
   let i = 0
   while i < length(techs) {
     let tech_name = to_string(get(techs, i))
-    let row = db_execute("SELECT radar_state FROM tech_radar_entries WHERE name = ? LIMIT 1", [tech_name])
+    let row = query("SELECT radar_state FROM tech_radar_entries WHERE name = ? LIMIT 1", [tech_name])
     if length(row) > 0 then {
       let state = to_string(json_get(get(row, 0), "radar_state", ""))
       if state == RADAR_HOLD() then {
@@ -272,7 +272,7 @@ pattern GateCommitHasTest(commit_data: String) -> Dict {
 
 // ── Hard Rule 5: No production deploy without green QA ────────────────
 pattern GateDeployRequiresGreenQA(task_id: String) -> Dict {
-  let row = db_execute("SELECT qa_status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  let row = query("SELECT qa_status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(row) > 0 then {
     let qa_status = to_string(json_get(get(row, 0), "qa_status", ""))
     if qa_status == "green" then {
@@ -301,7 +301,7 @@ pattern GateNoSecretsInRepo(repo_content: String) -> Dict {
 
 // ── Hard Rule 7: Every repo has README, LICENSE, .gitignore, CI/CD ─────
 pattern GateRepoHasRequiredFiles(repo_name: String) -> Dict {
-  let row = db_execute("SELECT has_readme, has_license, has_gitignore, has_ci FROM code_repositories WHERE name = ? LIMIT 1", [repo_name])
+  let row = query("SELECT has_readme, has_license, has_gitignore, has_ci FROM code_repositories WHERE name = ? LIMIT 1", [repo_name])
   if length(row) > 0 then {
     let data = get(row, 0)
     let has_readme = to_string(json_get(data, "has_readme", "false")) == "true"
@@ -324,7 +324,7 @@ pattern GateRepoHasRequiredFiles(repo_name: String) -> Dict {
 
 // ── Hard Rule 8: Every major task → snapshot in Telegram Archive ───────
 pattern GateTaskHasTelegramSnapshot(task_id: String) -> Dict {
-  let row = db_execute("SELECT telegram_snapshot_id FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  let row = query("SELECT telegram_snapshot_id FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(row) > 0 then {
     let snapshot_id = to_string(json_get(get(row, 0), "telegram_snapshot_id", ""))
     if snapshot_id != "" and snapshot_id != "null" then {
@@ -432,7 +432,7 @@ pattern IsValidTransition(from_state: String, to_state: String) -> Bool {
 }
 
 pattern TransitionTask(task_id: String, new_state: String, notes: String) -> Dict {
-  let row = db_execute("SELECT status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  let row = query("SELECT status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(row) == 0 then {
     return { success: false, previous_state: "", new_state: new_state, message: "Task not found: " + task_id }
   }
@@ -480,7 +480,7 @@ pattern AddTechRadarEntry(name: String, category: String, radar_state: String, d
   }
 
   // Check if entry already exists
-  let existing = db_execute("SELECT id, radar_state FROM tech_radar_entries WHERE name = ? LIMIT 1", [name])
+  let existing = query("SELECT id, radar_state FROM tech_radar_entries WHERE name = ? LIMIT 1", [name])
   let mut prev_state = ""
   if length(existing) > 0 then {
     let prev_state = to_string(json_get(get(existing, 0), "radar_state", ""))
@@ -512,15 +512,16 @@ pattern AddTechRadarEntry(name: String, category: String, radar_state: String, d
 }
 
 pattern ShowTechRadar(category: String) -> String {
-  let rows = db_execute("SELECT name, category, radar_state, description FROM tech_radar_entries ORDER BY radar_state, category, name", [])
-  if category != "" then { let rows = db_execute("SELECT name, category, radar_state, description FROM tech_radar_entries WHERE category = ? ORDER BY radar_state, name", [category]) }
+  let rows = query("SELECT name, category, radar_state, description FROM tech_radar_entries ORDER BY radar_state, category, name", [])
+  if category != "" then { let rows = query("SELECT name, category, radar_state, description FROM tech_radar_entries WHERE category = ? ORDER BY radar_state, name", [category]) }
 
   if length(rows) == 0 then {
     return "Tech Radar пуст. Добавьте: /dev-radar-add <name> <category> <adopt|trial|assess|hold>"
   }
 
   let prompt = "Форматируй Tech Radar отдела Разработка. Группируй по состоянию (ADOPT, TRIAL, ASSESS, HOLD). HOLD технологии выделены как запрещённые. JSON данные: " + to_string(rows)
-  let formatted = call_llm(prompt)
+  let formatted = try call_llm(prompt)
+  if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
   return WrapWithDisclaimer(formatted)
 }
 
@@ -580,7 +581,7 @@ pattern CreateArchitectureDecision(task_id: String, title: String, context: Stri
 }
 
 pattern ListArchitectureDecisions(task_id: String) -> String {
-  let rows = db_execute("SELECT id, title, status, created_at FROM architecture_decisions WHERE task_id = ? ORDER BY created_at DESC", [task_id])
+  let rows = query("SELECT id, title, status, created_at FROM architecture_decisions WHERE task_id = ? ORDER BY created_at DESC", [task_id])
   if length(rows) == 0 then {
     return "Нет ADR для задачи " + task_id + ". Создайте: /dev-decide " + task_id
   }
@@ -608,7 +609,8 @@ pattern CreateEstimate(task_id: String, task_description: String, confidence: St
   let prompt = prompt + "Confidence: " + confidence + "\n\n"
   let prompt = prompt + "Формат: JSON с полями low, expected, high (часы), subtasks (array), confidence, rationale."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
 
   let low_hours = to_float(to_string(json_get(parsed, "low", "0")))
@@ -681,7 +683,8 @@ pattern EnforceRepoStandards(repo_name: String, repo_url: String, task_type: Str
   let prompt = prompt + "Тип задачи: " + TaskTypeNameRU(task_type) + "\n\n"
   let prompt = prompt + "Формат: JSON с полями readme, license, gitignore, ci_yml (содержимое файлов)."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
 
   let readme = to_string(json_get(parsed, "readme", ""))
@@ -726,7 +729,8 @@ pattern PlanIterations(task_description: String, estimate_expected: Float) -> Di
   let prompt = prompt + "Оценка: " + substring(to_string(estimate_expected), 0.0, 6.0) + " часов\n\n"
   let prompt = prompt + "Формат: JSON array итераций с полями: name, description, estimated_hours, test_requirements, deliverable."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let iterations = parse_json(llm_result)
   let total = length(iterations)
 
@@ -748,7 +752,8 @@ pattern ImplementIteration(task_id: String, iteration_num: Int, iteration_plan: 
   let prompt = prompt + "План итерации:\n" + iteration_plan + "\n\n"
   let prompt = prompt + "Формат: JSON с полями: code (string), tests (string), test_passed (bool), notes (string)."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
 
   let code = to_string(json_get(parsed, "code", ""))
@@ -771,7 +776,7 @@ pattern ImplementIteration(task_id: String, iteration_num: Int, iteration_plan: 
   }
 
   // Update task status if first iteration
-  let row = db_execute("SELECT status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  let row = query("SELECT status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(row) > 0 then {
     let current = to_string(json_get(get(row, 0), "status", ""))
     if current == STATUS_ARCHITECTING() then {
@@ -814,7 +819,8 @@ pattern NextjsArchitecture(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями architecture (folder structure), recommendations (array), tech_stack (array)."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let arch = to_string(json_get(parsed, "architecture", llm_result))
   let recs = to_string(json_get(parsed, "recommendations", ""))
@@ -836,7 +842,8 @@ pattern DatabaseDesign(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями schema (Prisma schema string), migration_plan (string), indexes (array)."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let schema = to_string(json_get(parsed, "schema", llm_result))
   let migration = to_string(json_get(parsed, "migration_plan", ""))
@@ -858,7 +865,8 @@ pattern ApiDesign(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями endpoints (array), auth_strategy (string), versioning (string), error_shape (string)."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "endpoints", llm_result))
   let ver = to_string(json_get(parsed, "versioning", ""))
@@ -879,7 +887,8 @@ pattern AgentArchitecture(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями agent_spec, tools (array), memory_strategy, error_handling."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "agent_spec", llm_result))
 
@@ -899,7 +908,8 @@ pattern LlmIntegration(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями integration_spec, provider_config, cost_strategy."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "integration_spec", llm_result))
 
@@ -918,7 +928,8 @@ pattern MultiAgentOrchestration(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями orchestration_spec, agents (array), routing, error_strategy."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "orchestration_spec", llm_result))
 
@@ -937,7 +948,8 @@ pattern LocalModelDeployment(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями deployment_spec, hardware_req, model_recommendations."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "deployment_spec", llm_result))
 
@@ -956,7 +968,8 @@ pattern ModelFineTuning(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями tuning_spec, dataset_req, eval_strategy."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "tuning_spec", llm_result))
 
@@ -976,7 +989,8 @@ pattern DevopsDeployment(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями deployment_spec, ci_pipeline, environments, rollback_strategy."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "deployment_spec", llm_result))
 
@@ -995,7 +1009,8 @@ pattern ObservabilitySetup(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями observability_spec, logging, metrics, tracing, alerts."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "observability_spec", llm_result))
 
@@ -1014,7 +1029,8 @@ pattern RefactoringDiscipline(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями refactoring_plan, steps (array), rollback_points."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "refactoring_plan", llm_result))
 
@@ -1033,7 +1049,8 @@ pattern DependencyManagement(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями deps_spec, adopt (array), update_strategy, removal_candidates."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "deps_spec", llm_result))
 
@@ -1097,7 +1114,8 @@ pattern PerformanceOptimization(task_description: String, current_metrics: Strin
   let prompt = prompt + "Текущие метрики: " + current_metrics + "\n\n"
   let prompt = prompt + "Формат: JSON с полями optimization_plan, steps (array), expected_improvement."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "optimization_plan", llm_result))
 
@@ -1116,7 +1134,8 @@ pattern SecurityHardening(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями security_plan, checks (array), critical_actions."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "security_plan", llm_result))
 
@@ -1134,7 +1153,8 @@ pattern LegacySystemModernization(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями modernization_plan, phases (array), risk_mitigation."
 
-  let llm_result = call_llm(prompt)
+  let llm_result = try call_llm(prompt)
+  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
   let spec = to_string(json_get(parsed, "modernization_plan", llm_result))
 
@@ -1243,10 +1263,10 @@ pattern SyncToLocal(task_id: String, task_data: String) -> String {
 
 // ── /dev — Dashboard ───────────────────────────────────────────────────
 pattern DevDashboard(chat_id: String) -> String {
-  let active = db_execute("SELECT COUNT(*) as c FROM dev_tasks WHERE status NOT IN ('archived','abandoned')", [])
-  let total = db_execute("SELECT COUNT(*) as c FROM dev_tasks", [])
-  let radar_count = db_execute("SELECT COUNT(*) as c FROM tech_radar_entries", [])
-  let repos_count = db_execute("SELECT COUNT(*) as c FROM code_repositories", [])
+  let active = query("SELECT COUNT(*) as c FROM dev_tasks WHERE status NOT IN ('archived','abandoned')", [])
+  let total = query("SELECT COUNT(*) as c FROM dev_tasks", [])
+  let radar_count = query("SELECT COUNT(*) as c FROM tech_radar_entries", [])
+  let repos_count = query("SELECT COUNT(*) as c FROM code_repositories", [])
 
   let active_count = to_int(to_string(json_get(get(active, 0), "c", "0")))
   let total_count = to_int(to_string(json_get(get(total, 0), "c", "0")))
@@ -1289,21 +1309,22 @@ pattern DevDashboard(chat_id: String) -> String {
 
 // ── /dev-tasks — List tasks ────────────────────────────────────────────
 pattern ListTasks(status_filter: String, limit: Int) -> String {
-  let rows = db_execute("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status NOT IN ('archived','abandoned') ORDER BY updated_at DESC LIMIT ?", [to_string(limit)])
-  if status_filter != "" then { let rows = db_execute("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status = ? ORDER BY updated_at DESC LIMIT ?", [status_filter, to_string(limit)]) }
+  let rows = query("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status NOT IN ('archived','abandoned') ORDER BY updated_at DESC LIMIT ?", [to_string(limit)])
+  if status_filter != "" then { let rows = query("SELECT id, title, task_type, status, estimate_expected, updated_at FROM dev_tasks WHERE status = ? ORDER BY updated_at DESC LIMIT ?", [status_filter, to_string(limit)]) }
 
   if length(rows) == 0 then {
     return "Нет задач. Создайте через свободный запрос или /dev-implement."
   }
 
   let prompt = "Форматируй список задач отдела Разработка. Показывай статус русскими названиями, тип задач русскими. JSON данные: " + to_string(rows)
-  let formatted = call_llm(prompt)
+  let formatted = try call_llm(prompt)
+  if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
   return WrapWithDisclaimer(formatted)
 }
 
 // ── /dev-task — Show single task ───────────────────────────────────────
 pattern ShowTask(task_id: String) -> String {
-  let row = db_execute("SELECT * FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  let row = query("SELECT * FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(row) == 0 then {
     return "Задача не найдена: " + task_id
   }
@@ -1333,19 +1354,20 @@ pattern ShowTask(task_id: String) -> String {
 
 // ── /dev-repos — List repositories ─────────────────────────────────────
 pattern ListRepos() -> String {
-  let rows = db_execute("SELECT name, url, task_type, has_readme, has_license, has_gitignore, has_ci FROM code_repositories ORDER BY name", [])
+  let rows = query("SELECT name, url, task_type, has_readme, has_license, has_gitignore, has_ci FROM code_repositories ORDER BY name", [])
   if length(rows) == 0 then {
     return "Нет репозиториев. Создайте: /dev-create-repo <name> <task_type>"
   }
 
   let prompt = "Форматируй список репозиториев отдела Разработка. Для каждого показывай наличие обязательных файлов (✅/❌). JSON: " + to_string(rows)
-  let formatted = call_llm(prompt)
+  let formatted = try call_llm(prompt)
+  if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
   return WrapWithDisclaimer(formatted)
 }
 
 // ── /dev-repo — Show single repository ─────────────────────────────────
 pattern ShowRepo(repo_name: String) -> String {
-  let row = db_execute("SELECT * FROM code_repositories WHERE name = ? LIMIT 1", [repo_name])
+  let row = query("SELECT * FROM code_repositories WHERE name = ? LIMIT 1", [repo_name])
   if length(row) == 0 then {
     return "Репозиторий не найден: " + repo_name
   }
@@ -1394,7 +1416,7 @@ pattern DeployTask(task_id: String, chat_id: String) -> String {
   }
 
   // Snapshot to Telegram Archive (hard rule 8)
-  let task_row = db_execute("SELECT * FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
+  let task_row = query("SELECT * FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   let task_data = "{}"
   if length(task_row) > 0 then { let task_data = to_string(get(task_row, 0)) }
   let snapshot = SnapshotToTelegramArchive(task_id, task_data, chat_id)
@@ -1434,7 +1456,7 @@ pattern ArchiveTask(task_id: String, actual_hours: String) -> String {
 // ── /dev-local-sync — Local sync ───────────────────────────────────────
 pattern LocalSync() -> String {
   // Sync pending local items
-  let pending = db_execute("SELECT id, title, status FROM dev_tasks WHERE status NOT IN ('archived','abandoned') ORDER BY updated_at DESC LIMIT 50", [])
+  let pending = query("SELECT id, title, status FROM dev_tasks WHERE status NOT IN ('archived','abandoned') ORDER BY updated_at DESC LIMIT 50", [])
 
   let sync_count = 0
   let i = 0
@@ -1456,7 +1478,7 @@ pattern LocalSync() -> String {
 
 // ── Per-task: estimate vs actual verification ──────────────────────────
 pattern VerifyEstimateAccuracy(task_id: String) -> Dict {
-  let row = db_execute("SELECT estimate_low, estimate_expected, estimate_high, actual_hours FROM dev_estimate_verifications WHERE task_id = ? AND actual_hours IS NOT NULL LIMIT 1", [task_id])
+  let row = query("SELECT estimate_low, estimate_expected, estimate_high, actual_hours FROM dev_estimate_verifications WHERE task_id = ? AND actual_hours IS NOT NULL LIMIT 1", [task_id])
   if length(row) == 0 then {
     return { mape: 0.0, bias: "no_data", message: "Нет данных для верификации estimate по задаче " + task_id }
   }
@@ -1490,7 +1512,7 @@ pattern VerifyEstimateAccuracy(task_id: String) -> Dict {
 // ── Weekly: Wednesday 04:00 — Tech Radar scan ─────────────────────────
 pattern WeeklyTechRadarScan() -> String {
   // Scan for technologies that need radar state review
-  let all_entries = db_execute("SELECT name, category, radar_state, updated_at FROM tech_radar_entries ORDER BY radar_state, name", [])
+  let all_entries = query("SELECT name, category, radar_state, updated_at FROM tech_radar_entries ORDER BY radar_state, name", [])
 
   let prompt = "Еженедельный обзор Tech Radar отдела Разработка.\n\n"
   let prompt = prompt + "ЗАДАЧИ:\n"
@@ -1501,7 +1523,8 @@ pattern WeeklyTechRadarScan() -> String {
   let prompt = prompt + "5. Какие технологии в hold — можно ли убрать (исправлены проблемы)?\n\n"
   let prompt = prompt + "Текущий Tech Radar:\n" + to_string(all_entries)
 
-  let analysis = call_llm(prompt)
+  let analysis = try call_llm(prompt)
+  if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
 
   let _ = AuditLog("dev_radar_scan", DEPT_NAME(), "Weekly Tech Radar scan completed")
   return "═══ Еженедельный Tech Radar Scan ═══\n\n" + analysis
@@ -1509,7 +1532,7 @@ pattern WeeklyTechRadarScan() -> String {
 
 // ── Monthly: 1st 11:00 — Estimate calibration ─────────────────────────
 pattern MonthlyEstimateCalibration() -> String {
-  let verifications = db_execute("SELECT task_id, estimate_expected, actual_hours, mape, bias FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-30 days') AND actual_hours IS NOT NULL", [])
+  let verifications = query("SELECT task_id, estimate_expected, actual_hours, mape, bias FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-30 days') AND actual_hours IS NOT NULL", [])
 
   if length(verifications) == 0 then {
     let _ = AuditLog("dev_monthly_cal", DEPT_NAME(), "No estimate verifications in past 30 days")
@@ -1524,7 +1547,8 @@ pattern MonthlyEstimateCalibration() -> String {
   let prompt = prompt + "4. Рекомендации: как улучшить оценки?\n\n"
   let prompt = prompt + "Данные:\n" + to_string(verifications)
 
-  let analysis = call_llm(prompt)
+  let analysis = try call_llm(prompt)
+  if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
 
   // Store monthly calibration
   let _ = db_execute("INSERT INTO dev_monthly_calibrations (period_start, period_end, verifications_count, analysis, created_at) VALUES (datetime('now', '-30 days'), datetime('now'), ?, ?, datetime('now'))", [to_string(length(verifications)), analysis])
@@ -1545,13 +1569,14 @@ pattern QuarterlyMethodologyReview() -> String {
   let prompt = prompt + "6. Code organization — все репо соответствуют стандартам?\n"
   let prompt = prompt + "7. Психотип: Прагматик + Методист — соблюдается?\n\n"
 
-  let violations = db_execute("SELECT rule_number, COUNT(*) as c FROM dev_rule_violations WHERE created_at >= datetime('now', '-90 days') GROUP BY rule_number ORDER BY c DESC", [])
-  let estimates = db_execute("SELECT AVG(mape) as avg_mape, bias, COUNT(*) as c FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL GROUP BY bias", [])
+  let violations = query("SELECT rule_number, COUNT(*) as c FROM dev_rule_violations WHERE created_at >= datetime('now', '-90 days') GROUP BY rule_number ORDER BY c DESC", [])
+  let estimates = query("SELECT AVG(mape) as avg_mape, bias, COUNT(*) as c FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL GROUP BY bias", [])
 
   let prompt = prompt + "Нарушения правил (90 дней):\n" + to_string(violations) + "\n\n"
   let prompt = prompt + "Калибровка оценок (90 дней):\n" + to_string(estimates)
 
-  let analysis = call_llm(prompt)
+  let analysis = try call_llm(prompt)
+  if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
 
   let _ = AuditLog("dev_quarterly", DEPT_NAME(), "Quarterly methodology review completed")
 
@@ -1585,11 +1610,11 @@ pattern QuarterlyMethodologyReview() -> String {
 
 pattern DevScore() -> String {
   // 90-day metrics
-  let total = db_execute("SELECT COUNT(*) as c FROM dev_tasks WHERE created_at >= datetime('now', '-90 days')", [])
-  let deployed = db_execute("SELECT COUNT(*) as c FROM dev_tasks WHERE status = 'deployed' AND updated_at >= datetime('now', '-90 days')", [])
-  let with_adr = db_execute("SELECT COUNT(*) as c FROM dev_tasks t JOIN architecture_decisions a ON t.id = a.task_id WHERE t.created_at >= datetime('now', '-90 days')", [])
-  let with_range = db_execute("SELECT COUNT(*) as c FROM dev_tasks WHERE estimate_low IS NOT NULL AND estimate_expected IS NOT NULL AND estimate_high IS NOT NULL AND created_at >= datetime('now', '-90 days')", [])
-  let avg_mape = db_execute("SELECT AVG(ABS(mape)) as avg FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL", [])
+  let total = query("SELECT COUNT(*) as c FROM dev_tasks WHERE created_at >= datetime('now', '-90 days')", [])
+  let deployed = query("SELECT COUNT(*) as c FROM dev_tasks WHERE status = 'deployed' AND updated_at >= datetime('now', '-90 days')", [])
+  let with_adr = query("SELECT COUNT(*) as c FROM dev_tasks t JOIN architecture_decisions a ON t.id = a.task_id WHERE t.created_at >= datetime('now', '-90 days')", [])
+  let with_range = query("SELECT COUNT(*) as c FROM dev_tasks WHERE estimate_low IS NOT NULL AND estimate_expected IS NOT NULL AND estimate_high IS NOT NULL AND created_at >= datetime('now', '-90 days')", [])
+  let avg_mape = query("SELECT AVG(ABS(mape)) as avg FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL", [])
 
   let total_count = to_int(to_string(json_get(get(total, 0), "c", "0")))
   let deployed_count = to_int(to_string(json_get(get(deployed, 0), "c", "0")))
@@ -1638,7 +1663,8 @@ pattern FullPipeline(query: String, task_type: String, chat_id: String, explicit
   let adr_prompt = adr_prompt + "Описание: " + query + "\n\n"
   let adr_prompt = adr_prompt + "Формат: JSON с полями title, context, alternatives, decision, consequences."
 
-  let adr_llm = call_llm(adr_prompt)
+  let adr_llm = try call_llm(adr_prompt)
+  if to_string(adr_llm) == "()" then { let adr_llm = "[оценка недоступна — провайдеры модели не ответили]" }
   let adr_parsed = parse_json(adr_llm)
   let adr_title = to_string(json_get(adr_parsed, "title", "ADR for " + task_id))
   let adr_context = to_string(json_get(adr_parsed, "context", query))
@@ -1785,7 +1811,8 @@ pattern DevPlanMode(query: String, task_type: String, chat_id: String) -> String
     let plan_prompt = plan_prompt + "\n\nDesign tokens клиента:\n" + tokens
   }
 
-  let plan = call_llm(plan_prompt)
+  let plan = try call_llm(plan_prompt)
+  if to_string(plan) == "()" then { let plan = "[оценка недоступна — провайдеры модели не ответили]" }
   let doc = "\n\n\n\n\n\n\n\n"
   let doc = doc + "PLAN MODE\n"
   let doc = doc + "\n" + plan
