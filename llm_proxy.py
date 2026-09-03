@@ -4772,20 +4772,23 @@ def scheduler_lz_daily():
                 except Exception:
                     pass
 
-            today_key = f"lz_daily:{datetime.utcnow().isoformat()[:10]}"
+            today_key = f"LZ Daily {datetime.utcnow().isoformat()[:10]}"
             # Check if we already stored today's scan summary
-            existing = memory.recall(today_key, source="lz_daily", limit=1)
-            if not existing:
+            existing = memory.recall_by_source("lz_daily", limit=5)
+            already_today = any(today_key in (e.get("content") or "") for e in existing)
+            if not already_today:
                 memory.remember(
-                    f"LZ Daily {datetime.utcnow().isoformat()[:10]}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
+                    f"{today_key}: {len(all_repos)} repos, {len(all_releases)} releases scanned",
                     "observation", 0.7, "lz_daily"
                 )
             # Save top findings as individual memories (dedup by content prefix)
+            recent_findings = memory.recall_by_source("lz_daily", limit=100)
             for line in analysis.split("\n"):
                 line = line.strip()
                 if line.startswith(("1.", "2.", "3.")) and len(line) > 20:
-                    mem_key = f"lz_find:{line[:60]}"
-                    if not memory.recall(mem_key, source="lz_daily", limit=1):
+                    prefix = line[:60]
+                    already_saved = any(prefix in (e.get("content") or "") for e in recent_findings)
+                    if not already_saved:
                         memory.remember(
                             f"LZ находка: {line[:200]}",
                             "observation", 0.8, "lz_daily"
