@@ -31,15 +31,37 @@
 
 **Не переименовывать 88 паттернов в `app.mlog`.** Это сломает все вызовы из `dept/*` и ничего не даст VM.
 
+Повторить проверку так:
+
+```bash
+# контроль: те же 88 имён vs определения
+grep -cE '^pattern ' app.mlog
+
+./bin/mlog check app.mlog
+./bin/mlog check app.mlog --root app.mlog
+```
+
+Если оба режима печатают одни и те же 88 duplicate — баг чекера подтверждён двумя командами.
+
+---
+
 ## Что реально блокирует VM
 
-TW резолвит имена лениво. VM — при компиляции. Цепочка из аудита: `HandleDev` → `HandleDesign` → `date_now`.
+TW резолвит имена лениво. VM — при компиляции. Цепочка: `HandleDev` → `HandleDesign` → `date_now`.
 
-Это категория 3, не 1.
+Это категория 3, не 1. Шимы лежат в `dept/vm_compat.mlog`.
+Нужен импорт: `import dept/vm_compat` сразу после `import dept/utils`.
 
-Шимы в `app.mlog` этой ветки: `HandleDev`, `HandleDesign`, `date_now`, `date_add_days`, `SendTelegramMessage`.
+`HandleDev`/`HandleDesign` удалить из шимов, когда включат импорты отделов.
 
-Импорты `dept/dev` и `dept/design` не включались.
-SQL_DYNAMIC (7) и arity (47) — следующие наряды.
+## Категория 4 — SQL_DYNAMIC (7)
 
-Полный разбор — ниже в этом файле и в PR.
+`MarketingCampaignsAPI` / `FinanceForecastsAPI`: `q + " AND status = '" + status + "'"`.
+Паттерн замены уже есть в `dept/utils.mlog`: `query("... WHERE dept = ?", [dept])`.
+
+## Дальше
+
+1. Язык: двойная регистрация root-паттернов.
+2. FOSVED: 7 SQL_DYNAMIC.
+3. Остаток undefined + arity.
+4. VM-for-serve только после нуля настоящих ошибок без `--root`.
