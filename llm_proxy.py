@@ -5409,6 +5409,17 @@ def lz_diagnose():
     # 6. Darknet — честно заявлен недоступным в самом коде
     report.append({"source": "Darknet", "ok": None, "detail": "код сам честно возвращает '[unavailable — no anonymous access infrastructure]', не пытается притворяться рабочим"})
 
+    # 7. Свежесть памяти LZ Daily — та самая, что попадает в утренний бриф
+    try:
+        recent = memory.recall_by_source("lz_daily", limit=5)
+        if recent:
+            dates = [e.get("content", "")[:40] for e in recent]
+            report.append({"source": "lz_daily память (последние 5 записей)", "ok": True, "detail": " | ".join(dates)})
+        else:
+            report.append({"source": "lz_daily память", "ok": False, "detail": "записей нет вообще"})
+    except Exception as e:
+        report.append({"source": "lz_daily память", "ok": False, "detail": f"ошибка чтения: {e}"})
+
     ok_count = sum(1 for r in report if r["ok"] is True)
     fail_count = sum(1 for r in report if r["ok"] is False)
     return jsonify({"status": "ok", "working": ok_count, "broken": fail_count, "report": report})
