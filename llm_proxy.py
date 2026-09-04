@@ -4599,6 +4599,15 @@ def _github_releases(repo_full_name):
         return []
 
 
+@app.get("/scheduler/lz-daily-test")
+def scheduler_lz_daily_test():
+    """Безопасная проверка через обычную ссылку в браузере — GET, всегда
+    dry_run=True принудительно, никаких побочных эффектов (не пишет в
+    память, не шлёт в Telegram). Для владельца, у кого нет под рукой
+    терминала/curl, чтобы проверить POST /scheduler/lz-daily напрямую."""
+    return scheduler_lz_daily_core(dry_run=True, owner_id=os.environ.get("OWNER_TELEGRAM_ID", ""))
+
+
 @app.post("/scheduler/lz-daily")
 def scheduler_lz_daily():
     """
@@ -4608,7 +4617,10 @@ def scheduler_lz_daily():
     d = request.get_json(force=True) or {}
     owner_id = d.get("owner_id", os.environ.get("OWNER_TELEGRAM_ID", ""))
     dry_run = d.get("dry_run", False)
+    return scheduler_lz_daily_core(dry_run=dry_run, owner_id=owner_id)
 
+
+def scheduler_lz_daily_core(dry_run, owner_id):
     try:
         # ── Phase 1: GitHub Scan (direct API) ─────────────────
         log.info("LZ Daily: starting GitHub scan")
