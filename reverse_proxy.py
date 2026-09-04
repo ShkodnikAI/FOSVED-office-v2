@@ -23,6 +23,7 @@ LLM_ROUTES_PREFIXES = [
     "/scheduler/lz-daily",        # cron-accessible
     "/scheduler/watch-sweep",     # cron-accessible (OSP watch sweep)
     "/scheduler/indicator-pre-reminders",  # cron-accessible (OSP pre-reminders)
+    "/lz/diagnose",  # безопасная read-only диагностика источников ЛЗ
     "/miniapp/",
     "/miniapp",
     "/miniapp-spa/",
@@ -74,6 +75,11 @@ INTERNAL_ONLY_PREFIXES = [
 
 
 def is_internal_only(path):
+    # /lz/diagnose — безопасный, только чтение (GET), без побочных эффектов
+    # и без платных вызовов. Исключение из общего блока /lz/, чтобы можно
+    # было проверять состояние источников ЛЗ снаружи, не только изнутри.
+    if path == "/lz/diagnose":
+        return False
     return any(path.startswith(p) for p in INTERNAL_ONLY_PREFIXES)
 
 
