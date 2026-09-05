@@ -333,11 +333,34 @@ pattern HandleFinance(query: String, chat_id: String) -> String {
   // ── General free-text query (depth 1, LLM-routed) ──
   let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)
   let disclaimer_top = FinanceDisclaimerTop()
-  let prompt = disclaimer_top + "\n\n" + context + "\n\n=== ЗАПРОС ===\n" + query + "\n\nПравила ответа:\n1. Юрисдикция: " + jurisdiction + ", форма: " + business_form + "\n2. Числа конкретные — никаких «приблизительно»\n3. Если не хватает данных — честно скажи, чего не хватает\n4. Не давай инвестиционных советов\n5. Уточняй любую неоднозначность (валюта, дата, юрисдикция)\n6. Каждое число должно иметь источник или допущение\n7. Если расчёт — назначь verification date"
+  let prompt = disclaimer_top + "\n\n" + context + "\n\n=== ЗАПРОС ===\n" + query + "\n\nПравила ответа:\n1. Юрисдикция: " + jurisdiction + ", форма: " + business_form + "\n2. Числа конкретные — никаких «приблизительно»\n3. Если не хватает данных — честно скажи, чего не хватает\n4. Не давай инвестиционных советов\n5. Уточняй любую неоднозначность (валюта, дата, юрисдикция)\n6. Каждое число должно иметь источник или допущение\n7. Если расчёт — назначь verification date\n8. Если в ответе есть 3-6 сопоставимых числовых величин (суммы, статьи расходов, показатели) — в самом конце ответа добавь отдельным блоком, без комментариев внутри: [CHART_DATA]{\"items\":[{\"label\":\"...\",\"value\":число},...]}[/CHART_DATA]. Если подходящих чисел нет — не добавляй блок вообще."
   let llm_result = try call_llm(prompt, query)
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
+
+  // ── GRAPH-1: extract [CHART_DATA] and build chart ──
+  let chart_svg = ""
+  if contains(reply, "[CHART_DATA]") then {
+    let start_idx = index_of(reply, "[CHART_DATA]") + 12.0
+    let end_tag_idx = index_of(reply, "[/CHART_DATA]")
+    if end_tag_idx > start_idx then {
+      let json_str = substring(reply, start_idx, end_tag_idx)
+      let parsed = try parse_json(json_str)
+      if to_string(parsed) != "()" then {
+        let items = try json_get(parsed, "items", "[]")
+        let item_count = try length(items)
+        if to_string(item_count) != "()" and to_float(item_count) <= 6.0 and to_float(item_count) >= 3.0 then {
+          let style = diagram_style({paper: "#fff", ink: "#000", accent: "#eb6c36", muted: "#4f5d75", rule: "#ccc"})
+          let svg_result = try chart_bar(items, style)
+          if to_string(svg_result) != "()" then { let chart_svg = svg_result }
+        }
+      }
+      // Remove raw [CHART_DATA]...[/CHART_DATA] block from visible text
+      let reply = substring(reply, 0.0, index_of(reply, "[CHART_DATA]")) + substring(reply, end_tag_idx + 13.0, length(reply))
+    }
+  }
+
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
   let reply = reply + "\n\n" + disclaimer_bottom
   let reply = FinanceFinalSafetyCheck(reply)
@@ -350,6 +373,10 @@ pattern HandleFinance(query: String, chat_id: String) -> String {
   }
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "intent=" + intent + " jx=" + jurisdiction + " bf=" + business_form + " model=" + model + " query: " + substring(query, 0, 100))
+  // ── GRAPH-1: embed chart SVG into reply via [[CHART]] marker ──
+  if chart_svg != "" then {
+    let reply = reply + "\n\n[[CHART]]" + chart_svg + "[[/CHART]]"
+  }
   return reply
 }
 

@@ -1725,6 +1725,8 @@ def _miniapp_get_inner(doc_id):
                 disclaimer = '<div class="disclaimer-rich">Не является юридической консультацией. Обратитесь к лицензированному юристу.</div>'
             elif dept == "engineering":
                 disclaimer = '<div class="disclaimer-rich">Требует review лицензированного инженера. Не использовать для строительства без проверки.</div>'
+            # GRAPH-1: replace [[CHART]]/[[/CHART]] markers with styled div
+            enriched_body = enriched_body.replace('[[CHART]]', '<div class="report-chart">').replace('[[/CHART]]', '</div>')
             html = f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>{css}
@@ -1751,6 +1753,8 @@ body {{ font-family:'DM Sans',sans-serif; color:#1e293b; background:#F8F7F4; mar
 <script src="https://telegram.org/js/telegram-web-app.js"></script></head><body>
 <div style="padding:16px;font-family:sans-serif;color:#1e293b;white-space:pre-wrap">{html_lib_escape(raw_fallback)}</div>
 {action_bar}</body></html>'''
+    # GRAPH-1: replace [[CHART]]/[[/CHART]] markers in stored HTML too
+    stored_html = stored_html.replace('[[CHART]]', '<div class="report-chart">').replace('[[/CHART]]', '</div>')
     if "</body>" in stored_html:
         stored_html = stored_html.replace("</body>", f"{action_bar}</body>")
     stored_html = stored_html.replace('{{API_SECRET}}', API_SECRET)
