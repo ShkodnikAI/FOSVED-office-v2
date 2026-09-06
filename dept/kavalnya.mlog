@@ -27,9 +27,9 @@
 //   skill_reviews TEXT DEFAULT '[]',
 //   debrief_notes TEXT,
 //   improvement_plan TEXT,
-//   started_at TIMESTAMP DEFAULT NOW(),
+//   started_at TIMESTAMP DEFAULT datetime('now'),
 //   completed_at TIMESTAMP, ratified_at TIMESTAMP,
-//   created_at TIMESTAMP DEFAULT NOW()
+//   created_at TIMESTAMP DEFAULT datetime('now')
 // );
 // CREATE TABLE skill_reviews (
 //   id SERIAL PRIMARY KEY, skill_name TEXT, dept_name TEXT,
@@ -37,28 +37,28 @@
 //   last_used_at TIMESTAMP, last_reviewed_at TIMESTAMP,
 //   anti_patterns TEXT DEFAULT '[]',
 //   status TEXT DEFAULT 'active', -- active | underused | deprecated | rewrite
-//   created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+//   created_at TIMESTAMP DEFAULT datetime('now'), updated_at TIMESTAMP DEFAULT datetime('now')
 // );
 // CREATE TABLE psychotype_assessments (
 //   id SERIAL PRIMARY KEY, dept_name TEXT, specialist_name TEXT,
 //   primary_type TEXT, secondary_type TEXT,
-//   assessment_notes TEXT, assessed_at TIMESTAMP DEFAULT NOW()
+//   assessment_notes TEXT, assessed_at TIMESTAMP DEFAULT datetime('now')
 // );
 // CREATE TABLE polygon_results (
 //   id SERIAL PRIMARY KEY, session_id INT REFERENCES training_sessions(id),
 //   task_name TEXT, passed BOOLEAN, score FLOAT,
 //   expected_outcome TEXT, actual_outcome TEXT,
-//   created_at TIMESTAMP DEFAULT NOW()
+//   created_at TIMESTAMP DEFAULT datetime('now')
 // );
 // CREATE TABLE arsenal_reviews (
 //   id SERIAL PRIMARY KEY, year_half TEXT,
 //   skills_in_use TEXT DEFAULT '[]', skills_underused TEXT DEFAULT '[]',
 //   skills_obsolete TEXT DEFAULT '[]', skills_to_add TEXT DEFAULT '[]',
-//   review_notes TEXT, created_at TIMESTAMP DEFAULT NOW()
+//   review_notes TEXT, created_at TIMESTAMP DEFAULT datetime('now')
 // );
 // CREATE TABLE methodology_versions (
 //   id SERIAL PRIMARY KEY, version TEXT,
-//   changes TEXT, changed_at TIMESTAMP DEFAULT NOW()
+//   changes TEXT, changed_at TIMESTAMP DEFAULT datetime('now')
 // );
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -162,7 +162,7 @@ pattern KKCompleteSession(session_id: Int) -> String {
   if length(rows) == 0 then { return "ERROR: session not found" }
   let status = to_string(get(get(rows, 0), "status"))
   if status != "in_progress" then { return "ERROR: status is '" + status + "', must be 'in_progress'" }
-  let _ = db_execute("UPDATE training_sessions SET status = 'completed', completed_at = NOW() WHERE id = ?", [to_string(session_id)])
+  let _ = db_execute("UPDATE training_sessions SET status = 'completed', completed_at = datetime('now') WHERE id = ?", [to_string(session_id)])
   let _ = AuditLog("kk_complete", "kavalnya", "session " + to_string(session_id) + " in_progress→completed")
   return "OK: session completed"
 }
@@ -171,13 +171,13 @@ pattern KKRatifySession(session_id: Int) -> String {
   // Must pass polygon gate
   let gate = KKCheckPolygonPassRate(session_id)
   if contains(gate, "FAIL") then { return "BLOCKED: " + gate + " — cannot ratify without polygon pass-rate ≥70%" }
-  let _ = db_execute("UPDATE training_sessions SET status = 'ratified', ratified_at = NOW() WHERE id = ? AND status = 'completed'", [to_string(session_id)])
+  let _ = db_execute("UPDATE training_sessions SET status = 'ratified', ratified_at = datetime('now') WHERE id = ? AND status = 'completed'", [to_string(session_id)])
   let _ = AuditLog("kk_ratify", "kavalnya", "session " + to_string(session_id) + " completed→ratified")
   return "OK: session ratified — specialist deployed"
 }
 
 pattern KKRollbackSession(session_id: Int) -> String {
-  let _ = db_execute("UPDATE training_sessions SET status = 'rolled_back', completed_at = NOW() WHERE id = ? AND status = 'in_progress'", [to_string(session_id)])
+  let _ = db_execute("UPDATE training_sessions SET status = 'rolled_back', completed_at = datetime('now') WHERE id = ? AND status = 'in_progress'", [to_string(session_id)])
   let _ = AuditLog("kk_rollback", "kavalnya", "session " + to_string(session_id) + " in_progress→rolled_back")
   return "OK: session rolled back"
 }
@@ -207,13 +207,13 @@ pattern KKRunPolygonTask(session_id: Int, task_name: String, expected: String, a
 // ═══════════════════════════════════════════════════════════════════════
 pattern KKRegisterSkillReview(skill_name: String, dept_name: String, anti_patterns: String) -> String {
   let ap_gate = KKCheckAntiPatterns(skill_name)
-  let _ = db_execute("INSERT INTO skill_reviews (skill_name, dept_name, anti_patterns, status) VALUES (?, ?, ?, 'active') ON CONFLICT (skill_name) DO UPDATE SET anti_patterns = EXCLUDED.anti_patterns, updated_at = NOW()", [skill_name, dept_name, anti_patterns])
+  let _ = db_execute("INSERT INTO skill_reviews (skill_name, dept_name, anti_patterns, status) VALUES (?, ?, ?, 'active') ON CONFLICT (skill_name) DO UPDATE SET anti_patterns = EXCLUDED.anti_patterns, updated_at = datetime('now')", [skill_name, dept_name, anti_patterns])
   let _ = AuditLog("kk_skill_review", "kavalnya", skill_name + " " + ap_gate)
   return "OK: skill review registered (" + ap_gate + ")"
 }
 
 pattern KKDeprecateSkill(skill_name: String) -> String {
-  let _ = db_execute("UPDATE skill_reviews SET status = 'deprecated', updated_at = NOW() WHERE skill_name = ?", [skill_name])
+  let _ = db_execute("UPDATE skill_reviews SET status = 'deprecated', updated_at = datetime('now') WHERE skill_name = ?", [skill_name])
   let _ = AuditLog("kk_skill_deprecate", "kavalnya", skill_name + " deprecated")
   return "OK: skill '" + skill_name + "' deprecated"
 }
