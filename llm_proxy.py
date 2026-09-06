@@ -1703,10 +1703,22 @@ def _miniapp_get_inner(doc_id):
     action_bar = _build_action_bar(dept, doc_id, notes_html)
     # Rich post-processor: enrich any non-trivial raw_text
     raw = r["raw_text"] or ""
+    # GRAPH-1: вынимаем блок графика ДО auto_enrich — html_lib.escape внутри
+    # него экранирует сырой SVG (< > становятся видимым текстом). Ставим
+    # маркер-заглушку, который переживёт экранирование и обогащение
+    # (буквы/цифры не трогаются), потом вернём настоящий SVG на его место.
+    _chart_placeholder = None
+    if "[[CHART]]" in raw and "[[/CHART]]" in raw:
+        _cs = raw.index("[[CHART]]")
+        _ce = raw.index("[[/CHART]]") + len("[[/CHART]]")
+        _chart_placeholder = raw[_cs:_ce]
+        raw = raw[:_cs] + "GRAPHONECHARTPLACEHOLDER" + raw[_ce:]
     if raw and len(raw) > 100 and _has_enricher:
         accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
         try:
             enriched_body = auto_enrich(raw, dept=dept, accent_color=accent)
+            if _chart_placeholder:
+                enriched_body = enriched_body.replace("GRAPHONECHARTPLACEHOLDER", _chart_placeholder)
         except Exception as e:
             log.warning(f"miniapp enrich failed for {doc_id}: {e}")
             enriched_body = None
