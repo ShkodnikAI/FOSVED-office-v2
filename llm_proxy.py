@@ -4605,11 +4605,14 @@ def _github_releases(repo_full_name):
 
 @app.get("/scheduler/lz-daily-test")
 def scheduler_lz_daily_test():
-    """Безопасная проверка через обычную ссылку в браузере — GET, всегда
-    dry_run=True принудительно, никаких побочных эффектов (не пишет в
-    память, не шлёт в Telegram). Для владельца, у кого нет под рукой
-    терминала/curl, чтобы проверить POST /scheduler/lz-daily напрямую."""
-    return scheduler_lz_daily_core(dry_run=True, owner_id=os.environ.get("OWNER_TELEGRAM_ID", ""))
+    """Безопасная проверка через обычную ссылку в браузере — GET, по умолчанию
+    dry_run=True принудительно, никаких побочных эффектов. Добавь
+    ?really_write=yes_i_mean_it к ссылке, чтобы один раз проверить настоящую
+    запись в память — так же, как это делает реальный cron (dry_run=False),
+    но с основного веб-сервиса, а не с отдельного Cron Job сервиса Render.
+    Так можно отличить 'фикс не сработал' от 'cron-сервис не задеплоил новый код'."""
+    really_write = request.args.get("really_write") == "yes_i_mean_it"
+    return scheduler_lz_daily_core(dry_run=not really_write, owner_id=os.environ.get("OWNER_TELEGRAM_ID", ""))
 
 
 @app.post("/scheduler/lz-daily")
