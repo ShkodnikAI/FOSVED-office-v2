@@ -24,9 +24,9 @@
 //   competing_alternatives TEXT DEFAULT '[]', -- JSON: [{alt_name, approach, viability}]
 //   status TEXT DEFAULT 'tracking', -- tracking|hot|confirmed_disruption|cooled|failed
 //   confirmation_count INT DEFAULT 0, -- must reach 3 before disruption alert
-//   tracked_since TIMESTAMP DEFAULT NOW(),
+//   tracked_since TIMESTAMP DEFAULT datetime('now'),
 //   last_scored_at TIMESTAMP,
-//   created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+//   created_at TIMESTAMP DEFAULT datetime('now'), updated_at TIMESTAMP DEFAULT datetime('now')
 // );
 // CREATE TABLE tracked_technologies (
 //   id SERIAL PRIMARY KEY, artifact_id INT REFERENCES knowledge_artifacts(id),
@@ -37,7 +37,7 @@
 //   talent_flow TEXT DEFAULT '[]', -- JSON: [{researcher, from_org, to_org, date, significance}]
 //   vc_investment TEXT DEFAULT '[]', -- JSON: [{round_date, amount_usd, investors, stage}]
 //   disruption_1y FLOAT, disruption_3y FLOAT, disruption_5y FLOAT, disruption_10y FLOAT,
-//   created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+//   created_at TIMESTAMP DEFAULT datetime('now'), updated_at TIMESTAMP DEFAULT datetime('now')
 // );
 // CREATE TABLE scan_logs (
 //   id SERIAL PRIMARY KEY,
@@ -46,7 +46,7 @@
 //   artifacts_found INT DEFAULT 0,
 //   alerts_generated INT DEFAULT 0,
 //   scan_duration_ms INT,
-//   started_at TIMESTAMP DEFAULT NOW(), completed_at TIMESTAMP
+//   started_at TIMESTAMP DEFAULT datetime('now'), completed_at TIMESTAMP
 // );
 // CREATE TABLE watchlist_entries (
 //   id SERIAL PRIMARY KEY, user_id INT DEFAULT 2044005421,
@@ -54,7 +54,7 @@
 //   threshold_disruption FLOAT DEFAULT 70.0, -- alert when score >= threshold
 //   threshold_inflection BOOLEAN DEFAULT TRUE, -- alert on inflection signals
 //   status TEXT DEFAULT 'active', -- active|paused|expired
-//   created_at TIMESTAMP DEFAULT NOW()
+//   created_at TIMESTAMP DEFAULT datetime('now')
 // );
 // CREATE TABLE disruption_alerts (
 //   id SERIAL PRIMARY KEY, artifact_id INT REFERENCES knowledge_artifacts(id),
@@ -63,7 +63,7 @@
 //   confirmation_count INT DEFAULT 0,
 //   osp_triggered BOOLEAN DEFAULT FALSE, -- auto-triggered OSP if disruption≥70%
 //   message TEXT,
-//   created_at TIMESTAMP DEFAULT NOW(), resolved_at TIMESTAMP
+//   created_at TIMESTAMP DEFAULT datetime('now'), resolved_at TIMESTAMP
 // );
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -345,7 +345,7 @@ pattern LZHypeCycleMap(technology: String, chat_id: String) -> String {
   let result = try call_llm("HYPE CYCLE MAPPING for: " + technology + "\n\nClassify onto Gartner hype cycle:\n1. Innovation Trigger — breakthrough generates attention\n2. Peak of Inflated Expectations — overpromotion\n3. Trough of Disillusionment — expectations correct\n4. Slope of Enlightenment — practical use emerges\n5. Plateau of Productivity — mainstream adoption\n\nProvide: stage, evidence, timeline_to_next_stage, investment_implication (buy/sell/wait)")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // Store result
-  db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = ?, updated_at = NOW() WHERE title ILIKE ?", [result, "%" + technology + "%"])
+  db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = ?, updated_at = datetime('now') WHERE title ILIKE ?", [result, "%" + technology + "%"])
   // Gate 3: Check negative signals at peak
   let neg_check = LZGateNegativeSignals(0)
   // Gate 4: Verify hype vs flows
@@ -358,7 +358,7 @@ pattern LZDisruptionScore(technology: String, chat_id: String) -> String {
   let result = try call_llm("DISRUPTION SCORING for: " + technology + "\n\nEvaluate 5 components (0-100 each):\n1. Performance ratio vs incumbent\n2. Cost trajectory\n3. Patent activity concentration\n4. Talent flow signal\n5. VC investment patterns\n\nCompute weighted disruption probability at horizons: 1y, 3y, 5y, 10y.\nStatus: tracking | hot | confirmed_disruption | cooled | failed")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // Store scores
-  db_execute("UPDATE tracked_technologies SET disruption_1y = ?, disruption_3y = ?, disruption_5y = ?, disruption_10y = ?, updated_at = NOW() WHERE technology_name ILIKE ?", [0.0, 0.0, 0.0, 0.0, "%" + technology + "%"])
+  db_execute("UPDATE tracked_technologies SET disruption_1y = ?, disruption_3y = ?, disruption_5y = ?, disruption_10y = ?, updated_at = datetime('now') WHERE technology_name ILIKE ?", [0.0, 0.0, 0.0, 0.0, "%" + technology + "%"])
   // Gate 7: Check competing alternatives
   let alt_check = LZGateCompetingCheck(technology)
   // Gate 8: Cross-domain potential
@@ -374,7 +374,7 @@ pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
   let check = try call_llm("Is this technology at inflection? Reply YES or NO. Analysis: " + result)
   if to_string(check) == "()" then { let check = "[оценка недоступна — провайдеры модели не ответили]" }
   if check == "YES" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = NOW() WHERE title ILIKE ?", ["hot", "%" + technology + "%"])
+    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE title ILIKE ?", ["hot", "%" + technology + "%"])
     // Auto-trigger OSP if disruption >= 70%
     try http_post("http://127.0.0.1:4000/osp/inflection-alert", json_encode({technology: technology, source: "lz", analysis: result}), "application/json")
   }
@@ -385,7 +385,7 @@ pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
 pattern LZOrderOfBattle(technology: String, chat_id: String) -> String {
   let result = try call_llm("TECHNOLOGY ORDER OF BATTLE for: " + technology + "\n\nCompare competing actors' capabilities:\n1. Compute capacity\n2. Talent concentration\n3. Data access\n4. Capital resources\n5. IP position (patents)\n6. Manufacturing capability\n7. Regulatory environment\n8. Time-to-market\n\nWho has structural advantage? Who can catch up? Who is structurally disadvantaged?")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  db_execute("UPDATE tracked_technologies SET oob_data = ?, updated_at = NOW() WHERE technology_name ILIKE ?", [result, "%" + technology + "%"])
+  db_execute("UPDATE tracked_technologies SET oob_data = ?, updated_at = datetime('now') WHERE technology_name ILIKE ?", [result, "%" + technology + "%"])
   return "⚔️ OOB: " + technology + "\n" + result
 }
 
@@ -404,7 +404,7 @@ pattern LZCrossDomainTransfer(query: String, chat_id: String) -> String {
 pattern LZPatentAnalysis(technology: String) -> String {
   let result = try call_llm("PATENT PROSECUTION ANALYSIS for: " + technology + "\n\nAnalyze patent activity to reveal real R&D priorities:\n1. Recent filings (USPTO/EPO/WIPO/CN)\n2. Assignee concentration\n3. Claim direction analysis\n4. Filing velocity trend\n5. What they protect reveals what they build")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  db_execute("UPDATE tracked_technologies SET patent_activity = ?, updated_at = NOW() WHERE technology_name ILIKE ?", [result, "%" + technology + "%"])
+  db_execute("UPDATE tracked_technologies SET patent_activity = ?, updated_at = datetime('now') WHERE technology_name ILIKE ?", [result, "%" + technology + "%"])
   return "📋 Patents: " + technology + "\n" + result
 }
 
@@ -412,7 +412,7 @@ pattern LZPatentAnalysis(technology: String) -> String {
 pattern LZTalentFlow(technology: String) -> String {
   let result = try call_llm("TALENT FLOW TRACKING for: " + technology + "\n\nTrack migration of top researchers/engineers:\n1. Key researchers in this field\n2. Recent moves (LinkedIn, conferences)\n3. Concentration points (where talent goes)\n4. Exodus signals (where talent leaves)\n5. Implications for capability direction")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  db_execute("UPDATE tracked_technologies SET talent_flow = ?, updated_at = NOW() WHERE technology_name ILIKE ?", [result, "%" + technology + "%"])
+  db_execute("UPDATE tracked_technologies SET talent_flow = ?, updated_at = datetime('now') WHERE technology_name ILIKE ?", [result, "%" + technology + "%"])
   return "👥 Talent Flow: " + technology + "\n" + result
 }
 
@@ -420,7 +420,7 @@ pattern LZTalentFlow(technology: String) -> String {
 pattern LZVCTracking(technology: String) -> String {
   let result = try call_llm("VC TRACKING for: " + technology + "\n\nAnalyze venture capital patterns:\n1. Recent funding rounds (Crunchbase)\n2. Investor quality signal (track record firms)\n3. Capital concentration by subfield\n4. Stage distribution (seed/A/B/C)\n5. Smart money vs dumb money ratio")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  db_execute("UPDATE tracked_technologies SET vc_investment = ?, updated_at = NOW() WHERE technology_name ILIKE ?", [result, "%" + technology + "%"])
+  db_execute("UPDATE tracked_technologies SET vc_investment = ?, updated_at = datetime('now') WHERE technology_name ILIKE ?", [result, "%" + technology + "%"])
   // Cross-dept: notify Finance if significant VC signal
   let sig_check = try call_llm("Is this VC signal significant enough to notify Finance? Reply YES or NO. Analysis: " + result)
   if to_string(sig_check) == "()" then { let sig_check = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -708,27 +708,27 @@ pattern LZLifecycleTransition(artifact_id: Int, new_status: String) -> String {
   let confirmations = to_float(get(get(rows, 0), "confirmation_count"))
   // Valid transitions
   if current == "tracking" and new_status == "hot" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = NOW() WHERE id = ?", ["hot", artifact_id])
+    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["hot", artifact_id])
     return "✅ tracking → hot"
   }
   if current == "tracking" and new_status == "cooled" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = NOW() WHERE id = ?", ["cooled", artifact_id])
+    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["cooled", artifact_id])
     return "✅ tracking → cooled"
   }
   if current == "tracking" and new_status == "failed" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = NOW() WHERE id = ?", ["failed", artifact_id])
+    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["failed", artifact_id])
     return "✅ tracking → failed"
   }
   if current == "hot" and new_status == "confirmed_disruption" then {
     // Gate 1: Need 3+ confirmations
     if confirmations < 3.0 then { return "⛔ Need " + to_string(3.0 - confirmations) + " more confirmations" }
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = NOW() WHERE id = ?", ["confirmed_disruption", artifact_id])
+    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["confirmed_disruption", artifact_id])
     // Auto-trigger OSP analysis
     try http_post("http://127.0.0.1:4000/osp/disruption-confirmed", json_encode({artifact_id: artifact_id, source: "lz"}), "application/json")
     return "✅ hot → confirmed_disruption (OSP notified)"
   }
   if current == "hot" and new_status == "cooled" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = NOW() WHERE id = ?", ["cooled", artifact_id])
+    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["cooled", artifact_id])
     return "✅ hot → cooled"
   }
   return "⛔ Invalid transition: " + current + " → " + new_status

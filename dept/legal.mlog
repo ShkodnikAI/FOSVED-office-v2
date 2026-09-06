@@ -616,7 +616,7 @@ pattern DisputeResolutionStrategy(disputeContext: String, jx: String, chat_id: S
 //   verified-clean / rewrite / dispute → superseded
 
 pattern TransitionLifecycle(assessmentId: String, newStatus: String) -> String {
-  let _ = db_execute("UPDATE legal_assessments SET status = ?, updated_at = NOW() WHERE id = ?", [newStatus, assessmentId])
+  let _ = db_execute("UPDATE legal_assessments SET status = ?, updated_at = datetime('now') WHERE id = ?", [newStatus, assessmentId])
   let _ = AuditLog("legal_lifecycle", DEPT(), "Assessment #" + assessmentId + " → " + newStatus)
   return newStatus
 }
@@ -641,7 +641,7 @@ pattern GetCurrentStatus(assessmentId: String) -> String {
 pattern VerifyLegalResult(assessmentId: String, outcome: String, wasPredictable: String, disputeNature: String, notes: String) -> String {
   // outcome: clean | rewrite | dispute
   let _ = db_execute(
-    "INSERT INTO legal_assessment_verifications (assessment_id, outcome, rewrite_was_predictable, dispute_nature, notes, verified_at) VALUES (?, ?, ?, ?, ?, NOW())",
+    "INSERT INTO legal_assessment_verifications (assessment_id, outcome, rewrite_was_predictable, dispute_nature, notes, verified_at) VALUES (?, ?, ?, ?, ?, datetime('now'))",
     [assessmentId, outcome, wasPredictable, disputeNature, notes]
   )
 
@@ -658,7 +658,7 @@ pattern VerifyLegalResult(assessmentId: String, outcome: String, wasPredictable:
 pattern CheckMethodologyGap(assessmentId: String, wasPredictable: String) -> String {
   if wasPredictable == "true" then {
     let _ = db_execute(
-      "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, predictable_rewrites_count, improvements, created_at) VALUES (NOW(), NOW(), 0, 1, 'Methodology gap: predictable rewrite missed in risk map', NOW())",
+      "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, predictable_rewrites_count, improvements, created_at) VALUES (datetime('now'), datetime('now'), 0, 1, 'Methodology gap: predictable rewrite missed in risk map', datetime('now'))",
       []
     )
     return "METHODOLOGY GAP: predictable rewrite detected — risk map may be incomplete. Updating methodology."
@@ -673,7 +673,7 @@ pattern CheckMethodologyGap(assessmentId: String, wasPredictable: String) -> Str
 pattern GetLegalMetric() -> String {
   // pct-clean-signings = clean / total × 100
   let rows = db_execute(
-    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable FROM legal_assessment_verifications WHERE verified_at >= NOW() - INTERVAL '30 days'",
+    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable FROM legal_assessment_verifications WHERE verified_at >= datetime('now') - INTERVAL '30 days'",
     []
   )
   let data = parse_json(rows)
@@ -730,7 +730,7 @@ pattern RunDailyCheck() -> String {
 // Task 2: Monthly review — compute pct-clean-signings
 pattern RunMonthlyReview() -> String {
   let rows = db_execute(
-    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean_signings, SUM(CASE WHEN outcome = 'rewrite' THEN 1 ELSE 0 END) as rewrites, SUM(CASE WHEN outcome = 'dispute' THEN 1 ELSE 0 END) as disputes, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable_rewrites FROM legal_assessment_verifications WHERE verified_at >= NOW() - INTERVAL '30 days'",
+    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean_signings, SUM(CASE WHEN outcome = 'rewrite' THEN 1 ELSE 0 END) as rewrites, SUM(CASE WHEN outcome = 'dispute' THEN 1 ELSE 0 END) as disputes, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable_rewrites FROM legal_assessment_verifications WHERE verified_at >= datetime('now') - INTERVAL '30 days'",
     []
   )
   let data = parse_json(rows)
@@ -748,7 +748,7 @@ pattern RunMonthlyReview() -> String {
   }
 
   let _ = db_execute(
-    "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, clean_signings, rewrite_count, dispute_count, predictable_rewrites_count, pct_clean_signings, pct_predictable_missed, created_at) VALUES (NOW() - INTERVAL '30 days', NOW(), ?, ?, ?, ?, ?, ?, ?, NOW())",
+    "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, clean_signings, rewrite_count, dispute_count, predictable_rewrites_count, pct_clean_signings, pct_predictable_missed, created_at) VALUES (datetime('now') - INTERVAL '30 days', datetime('now'), ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
     [to_string(total), to_string(cleanSignings), to_string(rewrites), to_string(disputes), to_string(predictableRewrites), pctClean, pctPredictableMissed]
   )
 
@@ -767,7 +767,7 @@ pattern RunMonthlyReview() -> String {
 // Task 3: Quarterly methodology review
 pattern RunQuarterlyMethodologyReview() -> String {
   let rows = db_execute(
-    "SELECT SUM(predictable_rewrites_count) as total_predictable, SUM(total_assessments) as total FROM legal_monthly_reviews WHERE created_at >= NOW() - INTERVAL '90 days'",
+    "SELECT SUM(predictable_rewrites_count) as total_predictable, SUM(total_assessments) as total FROM legal_monthly_reviews WHERE created_at >= datetime('now') - INTERVAL '90 days'",
     []
   )
   let data = parse_json(rows)
@@ -953,7 +953,7 @@ pattern SaveToLegalArchive(shortTitle: String, fullResult: String, docType: Stri
   let resultWithDisclaimer = ApplyDisclaimer(fullResult)
 
   let _ = db_execute(
-    "INSERT INTO legal_assessments (short_title, full_result, document_type, status, jurisdiction, business_form, counterparty_jurisdiction, counterparty_form, risk_level, confidence, created_at, updated_at) VALUES (?, ?, ?, 'published', ?, ?, ?, ?, ?, ?, NOW(), NOW())",
+    "INSERT INTO legal_assessments (short_title, full_result, document_type, status, jurisdiction, business_form, counterparty_jurisdiction, counterparty_form, risk_level, confidence, created_at, updated_at) VALUES (?, ?, ?, 'published', ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
     [shortTitle, resultWithDisclaimer, docType, jx, bf, cpJx, cpBf, riskLevel, confidence]
   )
 
@@ -962,7 +962,7 @@ pattern SaveToLegalArchive(shortTitle: String, fullResult: String, docType: Stri
 
   // Set verification date = 90 days from now
   let _ = db_execute(
-    "UPDATE legal_assessments SET verification_date = CURRENT_DATE + INTERVAL '90 days' WHERE id = ?",
+    "UPDATE legal_assessments SET verification_date = date('now', '+90 days') WHERE id = ?",
     [id]
   )
 
