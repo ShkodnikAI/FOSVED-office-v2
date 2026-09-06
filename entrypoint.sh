@@ -2,6 +2,12 @@
 echo "=== Fosved Office v2 Starting ==="
 export DATABASE_URL="${DATABASE_URL:-sqlite:${DATABASE_PATH:-./data}/fosved.db}"
 
+# GRAPH-1 hotfix: mlog 0.18.0 blocks env() reaching respond() as [SECRET_LEAK]
+# (new Category A check, no allowlist for known-safe vars). /version route now
+# reads this file instead of env("RENDER_GIT_COMMIT") directly.
+echo "${RENDER_GIT_COMMIT:-unknown}" > VERSION
+echo "--- VERSION file updated: $(cat VERSION) ---"
+
 # Log source file checksums
 echo "--- Source checksums ---"
 echo "app.mlog:       $(md5sum app.mlog 2>/dev/null | cut -d' ' -f1)"
