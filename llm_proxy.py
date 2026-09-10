@@ -2524,6 +2524,16 @@ def scheduler_morning_brief():
     if recent and recent[0]["c"] > 0:
         return jsonify({"status": "skipped", "message": "brief already sent within last 10 minutes"}), 200
 
+    # BRIEF-1 доп.: отдельный Render Cron Job 'lz-daily' ненадёжно подхватывает
+    # свежий код (подтверждено — ручной вызов на основном сервисе работает,
+    # плановый cron неделями не создавал новых записей). Раз утренний бриф
+    # уже надёжно срабатывает каждый день на этом же сервисе — используем
+    # его как единственную точку триггера, не полагаясь на отдельный cron.
+    try:
+        scheduler_lz_daily_core(dry_run=False, owner_id=owner_id)
+    except Exception as e:
+        log.warning(f"lz-daily scan inside morning-brief failed (non-fatal): {e}")
+
     try:
         now = datetime.utcnow()
         # Minsk time for display (UTC+3 year-round)
