@@ -5776,6 +5776,193 @@ def cron_consolidate_memory():
     return jsonify({"status": "ok", "totals": totals, "backup": backup_status, "results": results})
 
 
+# ── FO-005: golden-set eval-регрессий по департаментам (issue #65) ───────
+# Ночной прогон: каждый департамент на golden-наборе, скор = формат-правила
+# + llm_verifier; тренд — в dept_metrics и трейсах FO-004; падение — алерт.
+
+_GOLDEN_DIR = Path(__file__).resolve().parent / "tests" / "golden"
+_GOLDEN_MIN_SCORE = float(os.environ.get("GOLDEN_MIN_SCORE", "0.6"))       # абсолютный порог
+_GOLDEN_REGRESSION_DROP = float(os.environ.get("GOLDEN_REGRESSION_DROP", "0.15"))  # падение vs предыдущий прогон
+
+def _golden_load(dept):
+    """Загрузить golden-набор департамента (tests/golden/<dept>.json)."""
+    path = _GOLDEN_DIR / f"{dept}.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data.get("tasks", [])
+
+def _golden_format_score(task, reply):
+    """Доля выполненных формат-правил из expect (0.0-1.0)."""
+    rules = task.get("expect") or {}
+    reply_low = str(reply).lower()
+    total = passed = 0
+    exp = rules.get("contains_any")
+    if exp:
+        total += 1
+        if any(str(x).lower() in reply_low for x in exp):
+            passed += 1
+    rx = rules.get("contains_regex")
+    if rx:
+        total += 1
+        if re.search(rx, str(reply), re.I | re.S):
+            passed += 1
+    ban = rules.get("not_contains")
+    if ban:
+        total += 1
+        if not any(str(x).lower() in reply_low for x in ban):
+            passed += 1
+    mn, mx = rules.get("min_chars"), rules.get("max_chars")
+    if mn or mx:
+        total += 1
+        n = len(str(reply))
+        if (not mn or n >= int(mn)) and (not mx or n <= int(mx)):
+            passed += 1
+    return (passed / total) if total else 1.0
+
+def _golden_run_dept(dept, tasks):
+    """Прогнать golden-набор одного департамента. Возвращает сводку."""
+    results = []
+    for task in tasks:
+        tid, q = task.get("id", "?"), task.get("input", "")
+        llm_failed = False
+        t0 = time.monotonic()
+        try:
+            result = call_llm(dept, [{"role": "user", "content": q}])
+            reply = result.get("reply", "")
+            provider, model = result.get("provider"), result.get("model")
+        except Exception as e:
+            _log_error(f"golden: llm call failed {dept}/{tid}: {e}",
+                       source="golden_evals", dept=dept, kind="external")
+            reply, provider, model, llm_failed = "", None, None, True
+        latency_ms = round((time.monotonic() - t0) * 1000)
+
+        if llm_failed or reply.startswith("[Oshibka]"):
+            fmt_score, ver_score = 0.0, None
+        else:
+            fmt_score = _golden_format_score(task, reply)
+            ver_score = None
+            try:
+                import llm_verifier
+                ver_score = float(llm_verifier.score(
+                    q, reply, task.get("verifier_criteria",
+                                       "Correctness: Does the response solve the problem accurately?")))
+            except Exception as e:
+                _log_error(f"golden: verifier failed {dept}/{tid}: {e}",
+                           source="golden_evals", dept=dept, kind="verifier")
+
+        score = round(fmt_score if ver_score is None else (0.5 * fmt_score + 0.5 * ver_score), 3)
+        results.append({
+            "task": tid, "score": score, "format_score": round(fmt_score, 3),
+            "verifier_score": round(ver_score, 3) if ver_score is not None else None,
+            "latency_ms": latency_ms, "llm_failed": llm_failed,
+        })
+        # FO-004: скор задачи в трейсах (тренд виден в /traces)
+        try:
+            _write_llm_trace({
+                "trace_id": uuid.uuid4().hex[:16],
+                "trace_type": "golden_eval",
+                "time": datetime.utcnow().isoformat(),
+                "dept": dept, "task": tid,
+                "score": score, "format_score": round(fmt_score, 3),
+                "verifier_score": round(ver_score, 3) if ver_score is not None else None,
+                "latency_ms": latency_ms,
+                "provider": provider, "model": model,
+            })
+        except Exception as e:
+            log.debug(f"golden trace write failed (non-fatal): {e}")
+
+    scores = [r["score"] for r in results] or [0.0]
+    return {
+        "dept": dept,
+        "avg_score": round(sum(scores) / len(scores), 3),
+        "min_score": min(scores),
+        "tasks_total": len(results),
+        "failed": sum(1 for r in results if r["llm_failed"]),
+        "results": results,
+    }
+
+def _golden_previous_avg(dept):
+    """Предыдущая средняя оценка департамента (dept_metrics, до сегодня)."""
+    today = datetime.utcnow().isoformat()[:10]
+    rows = _query(
+        "SELECT metric_value FROM dept_metrics WHERE dept=? AND metric_name='golden_eval_avg' "
+        "AND created_at < ? ORDER BY id DESC LIMIT 1", (dept, today), fetch=True)
+    if rows:
+        try:
+            return float(rows[0]["metric_value"])
+        except (ValueError, TypeError):
+            return None
+    return None
+
+@app.post("/scheduler/golden-evals")
+def scheduler_golden_evals():
+    """FO-005: ночной прогон golden-наборов + детекция регрессий.
+
+    Query: ?secret=CRON_SECRET
+    JSON body (опционально): {"depts": ["osp", "lz"]} — по умолчанию все наборы в tests/golden/
+    Регрессия = avg < GOLDEN_MIN_SCORE (0.6) или падение >= 0.15 против предыдущего прогона.
+    Регрессия → audit_log + мгновенный алерт владельцу в Telegram.
+    """
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    d = request.get_json(silent=True) or {}
+    dept_list = d.get("depts") or sorted(p.stem for p in _GOLDEN_DIR.glob("*.json"))
+    if not dept_list:
+        return jsonify({"status": "ok", "message": "no golden sets found", "results": []})
+
+    alerts = []
+    results = []
+    for dept in dept_list:
+        tasks = _golden_load(dept)
+        if not tasks:
+            results.append({"dept": dept, "skipped": "no_golden_set"})
+            continue
+        summary = _golden_run_dept(dept, tasks)
+        prev = _golden_previous_avg(dept)
+        summary["previous_avg"] = prev
+        summary["regression"] = bool(
+            summary["avg_score"] < _GOLDEN_MIN_SCORE
+            or (prev is not None and (prev - summary["avg_score"]) >= _GOLDEN_REGRESSION_DROP))
+        # Тренд: dept_metrics (screen FO-011, morning brief)
+        try:
+            _query("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES (?,?,?,?,?)",
+                   (dept, "golden_eval_avg", str(summary["avg_score"]),
+                    datetime.utcnow().isoformat()[:10], datetime.utcnow().isoformat()))
+        except Exception as e:
+            _log_error(f"golden: dept_metrics insert failed {dept}: {e}",
+                       source="golden_evals", dept=dept, kind="metrics_loss")
+        if summary["regression"]:
+            alerts.append(summary)
+        results.append(summary)
+
+    # Сигнал владельцу: мгновенный алерт по регрессии
+    owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
+    if alerts and owner_id:
+        lines = ["❌ Регрессия качества департаментов (golden evals):"]
+        for s in alerts:
+            prev_txt = f" (было {s['previous_avg']:.2f})" if s.get("previous_avg") is not None else ""
+            lines.append(f"• {s['dept']}: {s['avg_score']:.2f}{prev_txt}, проваленных задач: {s['failed']}")
+            worst = min(s["results"], key=lambda r: r["score"]) if s["results"] else None
+            if worst:
+                lines.append(f"  худшая: {worst['task']} = {worst['score']:.2f}")
+        try:
+            _tg_send_message(owner_id, "\n".join(lines))
+        except Exception as e:
+            _log_error(f"golden: owner alert send failed: {e}", source="golden_evals", kind="external")
+
+    totals = {
+        "depts": len(results),
+        "regressions": len(alerts),
+        "avg_all": round(sum(r["avg_score"] for r in results if "avg_score" in r) /
+                         max(1, sum(1 for r in results if "avg_score" in r)), 3),
+    }
+    _log_audit("golden_evals", {"totals": totals, "alerts": [s["dept"] for s in alerts]}, "quality")
+    return jsonify({"status": "ok", "totals": totals, "thresholds": {
+        "min_score": _GOLDEN_MIN_SCORE, "regression_drop": _GOLDEN_REGRESSION_DROP}, "results": results})
+
+
 # ── Fresh news for mlog BuildContext ──
 @app.route("/news/fresh", methods=["POST"])
 def news_fresh():
