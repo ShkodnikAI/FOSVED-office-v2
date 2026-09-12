@@ -142,6 +142,7 @@ button,input{font-family:inherit;color:inherit;font-size:15px}button{-webkit-tap
 <p class="lead">Тап открывает чат с отделом напрямую.</p>
 <div class="group">
 <button class="srow" type="button" data-go="integrations"><span>Интеграции и ключи</span><span>›</span></button>
+<button class="srow" type="button" data-go="telemetry"><span>Телеметрия офиса</span><span>›</span></button>
 </div>
 <div class="group" id="deptList">
 <button class="srow" type="button" data-dept="yana"><span>Яна · шеф де кабинет</span><span>›</span></button>
@@ -165,6 +166,12 @@ button,input{font-family:inherit;color:inherit;font-size:15px}button{-webkit-tap
 <div class="h1">Интеграции и ключи</div>
 <p class="lead">Модели и сервисы, подключённые к офису. Значение ключа никогда не показывается целиком.</p>
 <div id="integrationsList" style="margin-top:14px"><div class="empty">Загружаю…</div></div>
+</div></section>
+<section class="screen" data-tab="telemetry"><div class="scroll">
+<div class="eyebrow"><button type="button" data-go="more" style="color:var(--stamp);font-family:var(--m);font-size:12px">‹ назад</button></div>
+<div class="h1">Телеметрия</div>
+<p class="lead">Стоимость и качество работы офиса за неделю — без SQL.</p>
+<div id="telemetryBody" style="margin-top:14px"><div class="empty">Загружаю…</div></div>
 </div></section>
 </main>
 <nav class="dock" id="dock">
@@ -221,6 +228,56 @@ document.getElementById("intSheetCancel").addEventListener("click",function(){do
 document.getElementById("intSheetSave").addEventListener("click",async function(){var key=this.getAttribute("data-key");var val=document.getElementById("intSheetInput").value.trim();if(!val){toast("Введи значение");return}this.textContent="Сохраняю…";try{var r=await api("/api/integrations/"+encodeURIComponent(key),{method:"POST",body:{value:val}});if(r&&r.status==="ok"){toast("Сохранено: "+(r.masked||""));document.getElementById("intSheet").classList.remove("on");loaded.integrations=false;loadScreen("integrations")}else{toast((r&&r.message)||"Не удалось сохранить")}}catch(e){toast("Ошибка: "+e.message)}this.textContent="Сохранить"});
 document.getElementById("intSheetDelete").addEventListener("click",async function(){var key=this.getAttribute("data-key");try{await api("/api/integrations/"+encodeURIComponent(key),{method:"DELETE"});toast("Значение убрано");document.getElementById("intSheet").classList.remove("on");loaded.integrations=false;loadScreen("integrations")}catch(e){toast("Ошибка: "+e.message)}});
 async function refresh(){try{await api("/api/dashboard");setLive(true)}catch(e){setLive(false)}}
+function fmtK(n){if(n==null)return "—";if(n>=1e6)return (n/1e6).toFixed(1)+"M";if(n>=1e3)return (n/1e3).toFixed(1)+"K";return String(n)}
+function svgBarsTokenDays(rows){
+var w=320,h=110,p=18,bw=(w-p*2)/Math.max(rows.length,1)*0.62,gap=(w-p*2)/Math.max(rows.length,1);
+var max=Math.max.apply(null,rows.map(function(r){return r.tokens}).concat([1]));
+var s='<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto;display:block">';
+s+='<line x1="'+p+'" y1="'+(h-22)+'" x2="'+(w-p)+'" y2="'+(h-22)+'" stroke="var(--line-strong)" stroke-width="1"/>';
+rows.forEach(function(r,i){
+var bh=Math.max(2,(r.tokens/max)*(h-46)),x=p+i*gap+(gap-bw)/2,y=(h-22)-bh;
+s+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+bh.toFixed(1)+'" rx="1.5" fill="var(--stamp)"/>';
+s+='<text x="'+(x+bw/2).toFixed(1)+'" y="'+(h-10)+'" text-anchor="middle" font-family="IBM Plex Mono" font-size="8" fill="var(--muted)">'+String(r.day||"").slice(8)+'</text>';
+s+='<text x="'+(x+bw/2).toFixed(1)+'" y="'+(y-3).toFixed(1)+'" text-anchor="middle" font-family="IBM Plex Mono" font-size="7.5" fill="var(--muted)">'+fmtK(r.tokens)+'</text>';
+});
+return s+'</svg>'}
+function svgDeptBars(rows){
+var w=320,rowh=22,pad=6,max=Math.max.apply(null,rows.map(function(r){return r.tokens}).concat([1]));
+var s='<svg viewBox="0 0 '+w+' '+(rows.length*rowh+8)+'" style="width:100%;height:auto;display:block">';
+rows.forEach(function(r,i){
+var y=i*rowh+8,bw=Math.max(3,(r.tokens/max)*(w-150));
+s+='<text x="'+pad+'" y="'+(y+9)+'" font-family="IBM Plex Mono" font-size="9" fill="var(--ink)">'+esc(r.dept||"?")+'</text>';
+s+='<rect x="92" y="'+(y+1)+'" width="'+bw.toFixed(1)+'" height="10" rx="1.5" fill="var(--stamp)" opacity="0.85"/>';
+s+='<text x="'+(92+bw+5).toFixed(1)+'" y="'+(y+9)+'" font-family="IBM Plex Mono" font-size="8.5" fill="var(--muted)">'+fmtK(r.tokens)+' · $'+(r.cost||0).toFixed(2)+'</text>';
+});
+return s+'</svg>'}
+function svgGoldenLine(rows){
+if(!rows.length)return "";
+var w=320,h=90,p=20,max=1,min=0;
+rows.forEach(function(r){if(r.avg>max)max=r.avg});
+var step=(w-p*2)/Math.max(rows.length-1,1);
+var pts=rows.map(function(r,i){return (p+i*step).toFixed(1)+","+(h-24-(r.avg/max)*(h-44)).toFixed(1)}).join(" ");
+var s='<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto;display:block">';
+s+='<text x="'+p+'" y="14" font-family="IBM Plex Mono" font-size="9" fill="var(--muted)">golden-тренд, 14 дней (max '+max.toFixed(2)+')</text>';
+s+='<line x1="'+p+'" y1="'+(h-22)+'" x2="'+(w-p)+'" y2="'+(h-22)+'" stroke="var(--line-strong)"/>';
+s+='<polyline points="'+pts+'" fill="none" stroke="var(--ok)" stroke-width="2"/>';
+rows.forEach(function(r,i){s+='<circle cx="'+(p+i*step).toFixed(1)+'" cy="'+(h-24-(r.avg/max)*(h-44)).toFixed(1)+'" r="2.2" fill="var(--ok)"/>';
+s+='<text x="'+(p+i*step).toFixed(1)+'" y="'+(h-8)+'" text-anchor="middle" font-family="IBM Plex Mono" font-size="7.5" fill="var(--muted)">'+String(r.day||"").slice(8)+'</text>'});
+return s+'</svg>'}
+function renderTelemetry(t){
+var b=document.getElementById("telemetryBody");
+var lat=t.latency||{};
+var html='<div class="kpis" style="grid-template-columns:repeat(4,1fr)">'
++'<div class="kpi"><b>'+fmtK(t.totals.tokens)+'</b><span>токенов / 7д</span></div>'
++'<div class="kpi"><b>$'+(t.totals.cost||0).toFixed(2)+'</b><span>расход / 7д</span></div>'
++'<div class="kpi"><b>'+(lat.avg_ms!=null?Math.round(lat.avg_ms/100)/10+"s":"—")+'</b><span>latency avg</span></div>'
++'<div class="kpi"><b>'+(lat.fail_pct!=null?lat.fail_pct+"%":"—")+'</b><span>ошибок провайдера</span></div></div>';
+html+='<div class="sec"><h2>Токены по дням</h2></div><div class="filing" style="padding:8px">'+svgBarsTokenDays(t.tokens_by_day||[])+'</div>';
+html+='<div class="sec"><h2>По департаментам</h2></div><div class="filing" style="padding:8px 10px">'+((t.tokens_by_dept||[]).length?svgDeptBars(t.tokens_by_dept):'<div class="empty">Вызовов за неделю не было.</div>')+'</div>';
+if((t.golden_trend||[]).length){html+='<div class="sec"><h2>Качество ответов</h2></div><div class="filing" style="padding:8px">'+svgGoldenLine(t.golden_trend)+'</div>'}
+if((t.combos||[]).length){html+='<div class="sec"><h2>Цепочки моделей</h2></div><div class="filing">'+t.combos.map(function(c){return '<div class="row"><span>'+esc(c.combo)+'</span><span>'+c.count+'</span></div>'}).join("")+'</div>'}
+html+='<span class="tag">latency p95: '+(lat.p95_ms!=null?Math.round(lat.p95_ms/100)/10+"s":"—")+' · вызовов: '+(lat.calls_total||0)+' · кэш '+t.cache_ttl+'с</span>';
+b.innerHTML=html}
 async function loadScreen(tab){
 if(loaded[tab])return;
 if(tab==="home"){
@@ -237,6 +294,13 @@ if(d.recent_reports&&d.recent_reports.length){rp.innerHTML=d.recent_reports.map(
 else{rp.innerHTML='<div class="empty">Отчётов пока нет.</div>'}
 loaded.home=true;
 }catch(e){document.getElementById("homeSubline").textContent="Нет связи с офисом. Потяни вниз или нажми обновить.";document.getElementById("homeAlerts").innerHTML='<div class="empty">Нет связи с API.</div>';document.getElementById("homeReports").innerHTML='<div class="empty">Нет связи с API.</div>'}
+}
+if(tab==="telemetry"){
+try{
+var t=await api("/api/telemetry");
+renderTelemetry(t);
+loaded.telemetry=true;
+}catch(e){document.getElementById("telemetryBody").innerHTML='<div class="empty">Нет связи с API.</div>'}
 }
 if(tab==="archive"){
 try{
