@@ -16,6 +16,7 @@ os.environ['ZAI_API_KEY'] = 'fake-key'
 os.environ['CRON_SECRET'] = 'cron-test-secret'
 
 import llm_proxy  # noqa: E402
+import proxy.routes_tail as _rt  # noqa: E402 — FO-008: функции живут здесь
 
 
 @pytest.fixture
@@ -81,7 +82,7 @@ class TestConsolidateDeptDay:
             {"op": "DELETE", "target_id": old_id},  # UPDATE уже superseded — DELETE применится поверх
             {"op": "NOOP"},
         ]}
-        monkeypatch.setattr(llm_proxy, "call_llm", lambda d, m: {
+        monkeypatch.setattr(_rt, "call_llm", lambda d, m: {
             "reply": json.dumps(ops, ensure_ascii=False), "provider": "test", "model": "test", "tokens_in": 1, "tokens_out": 1})
 
         res = llm_proxy._consolidate_dept_day(dept, day)
@@ -97,7 +98,7 @@ class TestConsolidateDeptDay:
 
         def boom(d, m):
             raise RuntimeError("network down")
-        monkeypatch.setattr(llm_proxy, "call_llm", boom)
+        monkeypatch.setattr(_rt, "call_llm", boom)
         res = llm_proxy._consolidate_dept_day(dept, day)
         assert res.get("error") == "llm_failed"
 
@@ -105,7 +106,7 @@ class TestConsolidateDeptDay:
         dept = f"qa_{uuid.uuid4().hex[:6]}"
         day = "2026-09-10"
         _seed_dialog(dept, "user", "привет", day)
-        monkeypatch.setattr(llm_proxy, "call_llm", lambda d, m: {
+        monkeypatch.setattr(_rt, "call_llm", lambda d, m: {
             "reply": "мне кажется вы имели в виду...", "provider": "t", "model": "t"})
         res = llm_proxy._consolidate_dept_day(dept, day)
         assert res.get("error") == "unparseable_reply"
@@ -119,7 +120,7 @@ class TestConsolidateDeptDay:
         day = "2026-09-10"
         _seed_dialog(dept, "user", "факт дня", day)
         ops = {"ops": [{"op": "ADD", "content": "атомарный факт", "confidence": 0.9}]}
-        monkeypatch.setattr(llm_proxy, "call_llm", lambda d, m: {
+        monkeypatch.setattr(_rt, "call_llm", lambda d, m: {
             "reply": json.dumps(ops), "provider": "test", "model": "m", "tokens_in": 5, "tokens_out": 7})
         llm_proxy._consolidate_dept_day(dept, day)
         # Трейс FO-004 с trace_type=memory_consolidation записан

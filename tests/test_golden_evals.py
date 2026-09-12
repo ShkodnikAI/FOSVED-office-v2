@@ -16,6 +16,7 @@ os.environ['ZAI_API_KEY'] = 'fake-key'
 os.environ['CRON_SECRET'] = 'cron-test-secret'
 
 import llm_proxy  # noqa: E402
+import proxy.routes_tail as _rt  # noqa: E402 — FO-008: функции живут здесь
 
 
 @pytest.fixture
@@ -76,7 +77,7 @@ class TestFormatScore:
 
 class TestRunDept:
     def _mock_llm(self, monkeypatch, reply):
-        monkeypatch.setattr(llm_proxy, "call_llm", lambda d, m: {
+        monkeypatch.setattr(_rt, "call_llm", lambda d, m: {
             "reply": reply, "provider": "test", "model": "test-m", "tokens_in": 1, "tokens_out": 1})
         # верификатор не дёргаем в юнит-тесте — мокаем score
         import llm_verifier
@@ -93,7 +94,7 @@ class TestRunDept:
     def test_llm_failure_counted(self, monkeypatch):
         def boom(d, m):
             raise RuntimeError("down")
-        monkeypatch.setattr(llm_proxy, "call_llm", boom)
+        monkeypatch.setattr(_rt, "call_llm", boom)
         tasks = [{"id": "t1", "input": "q", "expect": {}}]
         summary = llm_proxy._golden_run_dept("yana", tasks)
         assert summary["failed"] == 1
@@ -115,13 +116,13 @@ class TestRunDept:
 class TestRegression:
     def test_regression_threshold_and_alert(self, client, monkeypatch):
         sent = []
-        monkeypatch.setattr(llm_proxy, "_tg_send_message", lambda cid, text, **kw: sent.append(text) or "ok")
+        monkeypatch.setattr(_rt, "_tg_send_message", lambda cid, text, **kw: sent.append(text) or "ok")
         # Оба департамента мокаем: один низкий скор, один высокий
         def fake_llm(d, m):
             if d == "osp":
                 return {"reply": "короткий", "provider": "t", "model": "m"}
             return {"reply": "x" * 500, "provider": "t", "model": "m"}
-        monkeypatch.setattr(llm_proxy, "call_llm", fake_llm)
+        monkeypatch.setattr(_rt, "call_llm", fake_llm)
         import llm_verifier
         monkeypatch.setattr(llm_verifier, "score", lambda p, c, criteria="": 0.9)
 
@@ -129,9 +130,9 @@ class TestRegression:
         osp_tasks = [{"id": "r1", "input": "q", "expect": {"min_chars": 400}},
                      {"id": "r2", "input": "q", "expect": {"min_chars": 400}}]
         yana_tasks = [{"id": "y1", "input": "q", "expect": {}}]
-        monkeypatch.setattr(llm_proxy, "_golden_load", lambda dept: {
+        monkeypatch.setattr(_rt, "_golden_load", lambda dept: {
             "osp": osp_tasks, "yana": yana_tasks}.get(dept))
-        monkeypatch.setattr(llm_proxy, "_golden_previous_avg", lambda dept: 0.9)
+        monkeypatch.setattr(_rt, "_golden_previous_avg", lambda dept: 0.9)
 
         r = client.post("/scheduler/golden-evals?secret=cron-test-secret", json={"depts": ["osp", "yana"]})
         assert r.status_code == 200
@@ -145,13 +146,13 @@ class TestRegression:
         assert r.status_code == 403
 
     def test_dept_metrics_recorded(self, client, monkeypatch):
-        monkeypatch.setattr(llm_proxy, "call_llm", lambda d, m: {
+        monkeypatch.setattr(_rt, "call_llm", lambda d, m: {
             "reply": "х" * 300, "provider": "t", "model": "m"})
         import llm_verifier
         monkeypatch.setattr(llm_verifier, "score", lambda p, c, criteria="": 0.9)
         dept = f"qa_{uuid.uuid4().hex[:6]}"
         tasks = [{"id": "m1", "input": "q", "expect": {"min_chars": 100}}]
-        monkeypatch.setattr(llm_proxy, "_golden_load", lambda d: tasks if d == dept else None)
+        monkeypatch.setattr(_rt, "_golden_load", lambda d: tasks if d == dept else None)
         r = client.post("/scheduler/golden-evals?secret=cron-test-secret", json={"depts": [dept]})
         assert r.status_code == 200
         rows = llm_proxy._query(
