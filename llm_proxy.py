@@ -126,7 +126,7 @@ API_SECRET = os.environ.get("API_SECRET", "")  # Bearer token for protected endp
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # X-Telegram-Bot-Api-Secret-Token
 
 # ── Auth helpers ──────────────────────────────────────────────
-PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/webhook/miniapp-action')
+PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/webhook/miniapp-action', '/traces')
 
 def _check_bearer():
     """Return True if request bears valid API_SECRET, or if API_SECRET is empty (open mode)."""
@@ -5610,7 +5610,6 @@ def news_stats():
 
 # ── LLM Traces (FO-004) ──────────────────────────────────────
 @app.route("/traces", methods=["GET"])
-@require_telegram
 def traces_endpoint():
     """Query LLM trace JSONL files. Params: dept, from, to, limit, ok."""
     dept = request.args.get("dept", "")
@@ -5661,7 +5660,6 @@ def traces_endpoint():
 
 
 @app.route("/traces-stats", methods=["GET"])
-@require_telegram
 def trace_stats_endpoint():
     """Aggregate stats from traces: calls per provider, avg latency, error rate."""
     from_ts = request.args.get("from", (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()[:10])

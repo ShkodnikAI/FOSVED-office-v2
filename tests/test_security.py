@@ -121,19 +121,18 @@ class TestLLMTraces:
     """FO-004: Per-call LLM trace JSONL files."""
 
     def test_traces_endpoint_auth_required(self, client):
-        """/traces endpoints require auth."""
+        """/traces endpoints require Bearer auth."""
         r = client.get('/traces-stats')
         assert r.status_code == 401
 
     def test_traces_endpoint_with_auth(self, client):
-        """/trace-stats returns data with auth."""
+        """/trace-stats returns data with Bearer auth."""
         r = client.get('/trace-stats', headers={'Authorization': 'Bearer test-secret-123'})
-        # 200 or error json — either way auth passed
         assert r.status_code != 401
 
     def test_traces_query_with_auth(self, client):
-        """/traces returns data with auth."""
-        r = client.get('/traces-stats', headers={'Authorization': 'Bearer test-secret-123'})
+        """/traces returns data with Bearer auth."""
+        r = client.get('/traces', headers={'Authorization': 'Bearer test-secret-123'})
         assert r.status_code != 401
 
     def test_trace_write_function_exists(self, app):
