@@ -31,6 +31,7 @@ from proxy.providers import (
     _IMG_DIR, _ALLOWED_SIZES,
 )
 from proxy.telegram import (
+    tg_status, tg_send_long, tg_split_long,
     _MARKER_EMOJI, _ALL_EMOJI, _escape_mdv2, _tg_send_formatted,
     _tg_send_message, _tg_send_voice, _tg_send_report_with_button,
     _tg_get_file, _tg_download_file, _tg_send_photo, _tg_send_document,
@@ -119,7 +120,23 @@ def ask():
                 log.info(f"FORMAT found at char {idx}, context: ...{sys_text[max(0,idx-50):idx+100]}...")
     if not messages:
         return jsonify({"reply": "[Oshibka] Net soobshenii", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}), 400
-    result = call_llm(dept, messages, model_ov)
+
+    # FO-013 фаза 1: жизнь в чате в первые 2 секунды — typing сразу после
+    # приёма задачи + статус маршрутизации (анти-спам внутри tg_status).
+    chat_id = d.get("chat_id") or d.get("user_id") or ""
+    stop_typing = None
+    if chat_id:
+        try:
+            stop_typing = _send_chat_action_loop(str(chat_id))
+        except Exception as e:
+            _log_error(f"typing loop start failed: {e}", source="ask", kind="external")
+        tg_status(chat_id, f"Маршрутизирую в {DEPT_NAMES.get(dept, dept)}…", dept=dept)
+
+    try:
+        result = call_llm(dept, messages, model_ov)
+    finally:
+        if stop_typing is not None:
+            stop_typing.set()
     if dept == "osp" and "reply" in result:
         import re as _re
         from datetime import datetime as _dt
@@ -445,6 +462,36 @@ def tg_send():
         if mid:
             msg_ids.append(mid)
     return jsonify({"status": "ok", "msg_ids": msg_ids, "parts": len(parts)})
+
+# ── FO-013 фаза 1: промежуточный статус с анти-спамом ──
+@app.post("/tg-status")
+def tg_status_endpoint():
+    """Промежуточный статус в чат («маршрутизирую», «OSP анализирует»).
+
+    Rate-limit: не чаще 1 сообщения в 10с на чат (force=true — вопреки лимиту).
+    """
+    d = request.get_json(force=True)
+    chat_id = d.get("chat_id", "")
+    text = d.get("text", "")
+    if not chat_id or not text:
+        return jsonify({"status": "error", "message": "chat_id and text are required"}), 400
+    sent = tg_status(chat_id, text[:500], dept=d.get("dept"), force=bool(d.get("force")))
+    return jsonify({"status": "ok", "sent": sent})
+
+
+# ── FO-013 фаза 2: длинный ответ кусками по мере готовности ──
+@app.post("/tg-send-long")
+def tg_send_long_endpoint():
+    """Резать длинный текст на смысловые куски и отправлять последовательно."""
+    d = request.get_json(force=True)
+    chat_id = d.get("chat_id", "")
+    text = d.get("text", "")
+    if not chat_id or not text:
+        return jsonify({"status": "error", "message": "chat_id and text are required"}), 400
+    limit = int(d.get("limit", 3800))
+    ids = tg_send_long(chat_id, text, dept=d.get("dept"), limit=limit)
+    return jsonify({"status": "ok", "messages_sent": len(ids), "message_ids": ids})
+
 
 @app.post("/tg-send-report-file")
 def tg_send_report_file():

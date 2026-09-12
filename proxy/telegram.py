@@ -264,3 +264,75 @@ def _tg_send_chat_action(chat_id, action):
         http_requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=10)
     except Exception as e:
         _log_error(f"sendChatAction failed for {chat_id}: {e}", source="typing", dept="system", kind="external")
+
+
+# ═══ FO-013: промежуточные статусы и кусочная отправка (issue #73) ══════════
+_TG_STATUS_MIN_INTERVAL = 10.0   # анти-спам: статус-сообщение не чаще, сек
+_status_last = {}
+_status_lock = threading.Lock()
+
+
+def tg_status(chat_id, text, dept=None, force=False):
+    """Промежуточный статус («маршрутизирую», «OSP анализирует») с анти-спамом.
+
+    Возврат: True — отправлено, False — срезано лимитом частоты.
+    typing-индикатор отдельным лимитом не гнобится — он не пишёт сообщений.
+    """
+    if not chat_id:
+        return False
+    now = time.monotonic()
+    with _status_lock:
+        last = _status_last.get(str(chat_id), 0.0)
+        if not force and (now - last) < _TG_STATUS_MIN_INTERVAL:
+            return False
+        _status_last[str(chat_id)] = now
+    mid = _tg_send_formatted(chat_id, text, dept=dept)
+    return mid is not None
+
+
+def tg_split_long(text, limit=3800):
+    """Резать длинный текст на смысловые куски ≤ limit (по границам абзацев).
+
+    Фаза 2 FO-013: llm_proxy сам владеет Telegram API — длинный ответ уходит
+    кусками по мере готовности. Задел склейки с №275: куски — цельные абзацы.
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return [text]
+    parts, cur = [], ""
+    for block in text.split("\n\n"):
+        candidate = (cur + "\n\n" + block) if cur else block
+        if len(candidate) <= limit:
+            cur = candidate
+            continue
+        if cur:
+            parts.append(cur)
+            cur = ""
+        while len(block) > limit:
+            cut = block.rfind("\n", 0, limit + 1)
+            if cut < limit * 0.5:
+                cut = block.rfind(". ", 0, limit)
+            if cut < limit * 0.5:
+                cut = limit
+                parts.append(block[:cut].rstrip())
+                block = block[cut:].lstrip()
+            else:
+                parts.append(block[:cut + 1].rstrip())
+                block = block[cut + 1:].lstrip()
+        cur = block
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def tg_send_long(chat_id, text, dept=None, limit=3800):
+    """Отправка длинного ответа кусками. Возврат: список message_id."""
+    parts = tg_split_long(text, limit)
+    ids = []
+    for i, part in enumerate(parts):
+        mid = _tg_send_formatted(chat_id, part, dept=dept)
+        if mid is not None:
+            ids.append(mid)
+        if i < len(parts) - 1:
+            time.sleep(0.6)  # анти-флуд Telegram
+    return ids
