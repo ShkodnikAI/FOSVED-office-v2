@@ -100,6 +100,24 @@ try:
 except _departments.DepartmentsConfigError as _dce:
     raise SystemExit(f"ОФИС НЕ ПОДНЯТ — ошибка деклараций департаментов: {_dce}") from _dce
 
+# ── FO-021: Memory-MCP-сервер офиса — память наружу агентам ─────────────────
+from proxy import mcp_server as _mcp_server  # noqa: F401
+from proxy.mcp_server import handle_request as mcp_handle_request, connections_status as mcp_connections_status  # noqa: F401
+from proxy.core import app as _guardian_app
+
+@_guardian_app.post("/mcp")
+def mcp_endpoint():
+    """HTTP-транспорт Memory-MCP (JSON-RPC 2.0). stdio: python3 proxy/mcp_server.py --stdio"""
+    from flask import request, jsonify
+    payload = request.get_json(force=True, silent=True) or {}
+    client_id = request.headers.get("X-MCP-Client", "http-client")
+    return jsonify(mcp_handle_request(payload, client_id=client_id))
+
+@_guardian_app.get("/mcp/health")
+def mcp_health_endpoint():
+    from flask import jsonify
+    return jsonify(mcp_connections_status())
+
 # ── FO-015: Guardian permission-matrix — двойной контур прав департаментов ───
 from proxy.guardian import (  # noqa: F401
     check as guardian_check, enforce as guardian_enforce,
