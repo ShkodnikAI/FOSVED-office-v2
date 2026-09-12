@@ -55,7 +55,8 @@ def kg_history(node_type=None, node_name=None, limit=200):
     return _query(sql, tuple(params), fetch=True) or []
 
 
-def kg_upsert(node_type, node_name, file_path, description, source="python"):
+def kg_upsert(node_type, node_name, file_path, description, source="python",
+              source_part_id=None):
     """Вставить/обновить факт. Возврат: (node_id, action) action ∈ new|updated|noop.
 
     - Активного узла ключа нет → новая версия (new).
@@ -94,9 +95,10 @@ def kg_upsert(node_type, node_name, file_path, description, source="python"):
         closed_ids = [r["id"] for r in active]
 
     _query(
-        "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at, valid_from, valid_to) "
-        "VALUES (?, ?, ?, ?, ?, ?, NULL)",
-        (node_type, node_name, file_path, description, now, now))
+        "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at, valid_from, valid_to, source_part_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+        (node_type, node_name, file_path, description, now, now,
+         str(source_part_id) if source_part_id is not None else None))
     row = _query("SELECT id FROM knowledge_graph WHERE node_type = ? AND node_name = ? AND valid_from = ? ORDER BY id DESC LIMIT 1",
                  (node_type, node_name, now), fetch=True)
     new_id = row[0]["id"] if row else None
