@@ -228,6 +228,36 @@ docker run -p 10000:10000 --env-file .env fosved
 | Контейнер | Docker (ubuntu:24.04) |
 | Интерфейс | Telegram Bot API + WebApp SPA |
 
+## Данные и восстановление
+
+Вся память офиса хранится в двух SQLite базах в `data/`:
+- `fosved.db` — 22 таблицы (dialog_history, knowledge_graph, audit_log, analysis, …)
+- `memory.db` — память Яны и департаментов
+
+### Схема бэкапа (FO-001)
+
+Бэкапы создаются через `VACUUM INTO` (атомарный дамп SQLite) с проверкой целостности (`PRAGMA integrity_check`).
+
+**Когда создаются бэкапы:**
+- При каждом запуске контейнера (entrypoint.sh)
+- По cron: `GET /cron/backup?secret=<CRON_SECRET>` (настраивается в Render cron)
+- Вручную: `python3 scripts/backup_db.py backup`
+
+**Где хранятся:** `data/backups/` (внутри контейнера). Для внешнего хранения установите `BACKUP_UPLOAD_CMD` — shell-команда, получающая `$FILE`.
+
+**Удержание:** `BACKUP_RETENTION=7` — хранятся 7 последних копий каждой БД.
+
+**Восстановление при старте:** entrypoint.sh проверяет `fosved.db` — если файл отсутствует или повреждён, автоматически восстанавливает из последнего бэкапа.
+
+```bash
+# Ручные команды
+python3 scripts/backup_db.py backup          # создать бэкап
+python3 scripts/backup_db.py backup --upload # бэкап + выгрузка
+python3 scripts/backup_db.py restore --latest# восстановить из последнего
+python3 scripts/backup_db.py list            # список бэкапов
+python3 scripts/backup_db.py check           # проверка целостности
+```
+
 ## Качество
 
 Стресс-тест: статический анализ кода по 17 группам.
