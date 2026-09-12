@@ -8,7 +8,7 @@ import sys, json, os, re, sqlite3, subprocess, threading, time, logging, hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import doc_extract
 import html as html_lib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ── FosvedMemory ──────────────────────────────────────────────
@@ -26,6 +26,48 @@ import secrets_crypto
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("llm_proxy")
+
+# ── LLM Trace (FO-004) ───────────────────────────────────────
+_TRACE_DIR = os.path.join(os.environ.get("DATABASE_PATH", "./data"), "traces")
+_TRACE_MAX_BYTES = int(os.environ.get("LLM_TRACE_MAX_BYTES", 10 * 1024 * 1024))  # 10 MB default
+_TRACE_RETENTION = int(os.environ.get("LLM_TRACE_RETENTION", 7))  # days
+_trace_lock = threading.Lock()
+
+
+def _write_llm_trace(record: dict):
+    """Append one JSONL trace record. File rotation by size. Write failure never raises."""
+    try:
+        os.makedirs(_TRACE_DIR, exist_ok=True)
+        ts = record.get("ts", datetime.now(timezone.utc).isoformat())
+        day = ts[:10]  # YYYY-MM-DD
+        trace_file = os.path.join(_TRACE_DIR, f"llm_{day}.jsonl")
+        with _trace_lock:
+            # Rotate if file exceeds max size
+            if os.path.exists(trace_file) and os.path.getsize(trace_file) > _TRACE_MAX_BYTES:
+                seq = 1
+                while os.path.exists(os.path.join(_TRACE_DIR, f"llm_{day}_{seq}.jsonl")):
+                    seq += 1
+                os.rename(trace_file, os.path.join(_TRACE_DIR, f"llm_{day}_{seq}.jsonl"))
+            with open(trace_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        # Prune old trace files beyond retention
+        _prune_old_traces()
+    except Exception as e:
+        log.debug(f"Trace write failed (non-fatal): {e}")
+
+
+def _prune_old_traces():
+    """Remove trace files older than _TRACE_RETENTION days."""
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=_TRACE_RETENTION)).strftime("%Y-%m-%d")
+        for name in os.listdir(_TRACE_DIR):
+            if name.startswith("llm_") and name.endswith(".jsonl"):
+                # Extract date part: llm_YYYY-MM-DD.jsonl or llm_YYYY-MM-DD_N.jsonl
+                date_part = name[4:14]
+                if date_part < cutoff:
+                    os.remove(os.path.join(_TRACE_DIR, name))
+    except Exception:
+        pass
 
 try:
     from auto_enricher import auto_enrich as _auto_enrich_fn
@@ -84,7 +126,7 @@ API_SECRET = os.environ.get("API_SECRET", "")  # Bearer token for protected endp
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # X-Telegram-Bot-Api-Secret-Token
 
 # ── Auth helpers ──────────────────────────────────────────────
-PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/webhook/miniapp-action')
+PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/webhook/miniapp-action', '/traces')
 
 def _check_bearer():
     """Return True if request bears valid API_SECRET, or if API_SECRET is empty (open mode)."""
@@ -484,6 +526,11 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
         log.debug(f"CircuitBreaker: skipping {provider_name} (open)")
         return None
 
+    _trace_start = time.monotonic()
+    _trace_id = uuid.uuid4().hex[:16]
+    _trace_ok = False
+    _trace_err = None
+
     try:
         if prov["format"] == "openai":
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -513,6 +560,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
             t_out = data.get("usage", {}).get("output_tokens", 0)
 
         _breaker.record_success(provider_name)
+        _trace_ok = True
 
         if not is_internal:
             costs = TOKEN_COSTS.get(provider_name, {"input": 1, "output": 1})
@@ -526,10 +574,41 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
             log.info(f"LLM ok: provider={provider_name} model={model} dept={dept} "
                      f"t_in={t_in} t_out={t_out} reply_chars={len(reply)} reply_head={reply[:120]!r}")
 
+        # FO-004: write JSONL trace (OTel GenAI semantic conventions)
+        _write_llm_trace({
+            "trace_id": _trace_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "gen_ai.system": provider_name,
+            "gen_ai.request.model": model,
+            "gen_ai.response.model": data.get("model", model),
+            "gen_ai.usage.input_tokens": t_in,
+            "gen_ai.usage.output_tokens": t_out,
+            "latency_ms": round((time.monotonic() - _trace_start) * 1000),
+            "dept": dept,
+            "ok": True,
+            "is_internal": is_internal,
+            "reply_chars": len(reply) if reply else 0,
+        })
+
         return {"reply": reply, "provider": provider_name, "model": model, "tokens_in": t_in, "tokens_out": t_out}
     except Exception as e:
         _breaker.record_failure(provider_name)
         log.warning(f"LLM fail: provider={provider_name} model={model} err={e}")
+        _trace_err = str(e)[:200]
+        # FO-004: trace the failure too
+        _write_llm_trace({
+            "trace_id": _trace_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "gen_ai.system": provider_name,
+            "gen_ai.request.model": model,
+            "gen_ai.usage.input_tokens": 0,
+            "gen_ai.usage.output_tokens": 0,
+            "latency_ms": round((time.monotonic() - _trace_start) * 1000),
+            "dept": dept,
+            "ok": False,
+            "error": _trace_err,
+            "is_internal": is_internal,
+        })
         return None
 
 # ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
@@ -5527,6 +5606,112 @@ def news_stats():
     return jsonify({"total": total, "last_24h": last_24h,
                     "by_source": {r[0]: r[1] for r in by_source},
                     "by_category": {r[0]: r[1] for r in by_category}})
+
+
+# ── LLM Traces (FO-004) ──────────────────────────────────────
+@app.route("/traces", methods=["GET"])
+def traces_endpoint():
+    """Query LLM trace JSONL files. Params: dept, from, to, limit, ok."""
+    dept = request.args.get("dept", "")
+    from_ts = request.args.get("from", "")
+    to_ts = request.args.get("to", "")
+    limit = min(int(request.args.get("limit", 100)), 1000)
+    ok_filter = request.args.get("ok", "")  # "true" / "false" / "" (all)
+
+    results = []
+    try:
+        if not os.path.isdir(_TRACE_DIR):
+            return jsonify({"traces": [], "count": 0})
+
+        files = sorted(
+            [f for f in os.listdir(_TRACE_DIR) if f.startswith("llm_") and f.endswith(".jsonl")],
+            reverse=True  # newest first
+        )
+        for fname in files:
+            if len(results) >= limit:
+                break
+            date_part = fname[4:14]  # llm_YYYY-MM-DD...
+            if from_ts and date_part < from_ts:
+                continue
+            if to_ts and date_part > to_ts:
+                continue
+            with open(os.path.join(_TRACE_DIR, fname), "r", encoding="utf-8") as f:
+                for line in f:
+                    if len(results) >= limit:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if dept and rec.get("dept") != dept:
+                        continue
+                    if ok_filter == "true" and not rec.get("ok"):
+                        continue
+                    if ok_filter == "false" and rec.get("ok"):
+                        continue
+                    results.append(rec)
+    except Exception as e:
+        log.warning(f"Traces query failed: {e}")
+
+    return jsonify({"traces": results, "count": len(results)})
+
+
+@app.route("/traces-stats", methods=["GET"])
+def trace_stats_endpoint():
+    """Aggregate stats from traces: calls per provider, avg latency, error rate."""
+    from_ts = request.args.get("from", (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()[:10])
+    to_ts = request.args.get("to", "")
+    try:
+        if not os.path.isdir(_TRACE_DIR):
+            return jsonify({"error": "no traces directory"})
+
+        stats = {"by_provider": {}, "by_dept": {}, "total_calls": 0, "total_errors": 0, "avg_latency_ms": 0}
+        latencies = []
+        files = sorted([f for f in os.listdir(_TRACE_DIR) if f.startswith("llm_") and f.endswith(".jsonl")])
+        for fname in files:
+            date_part = fname[4:14]
+            if date_part < from_ts:
+                continue
+            if to_ts and date_part > to_ts:
+                continue
+            with open(os.path.join(_TRACE_DIR, fname), "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    prov = rec.get("gen_ai.system", "unknown")
+                    dept = rec.get("dept", "unknown")
+                    lat = rec.get("latency_ms", 0)
+                    is_ok = rec.get("ok", True)
+
+                    stats["by_provider"].setdefault(prov, {"calls": 0, "errors": 0, "latency_ms": 0})
+                    stats["by_provider"][prov]["calls"] += 1
+                    if not is_ok:
+                        stats["by_provider"][prov]["errors"] += 1
+                        stats["total_errors"] += 1
+                    else:
+                        stats["by_provider"][prov]["latency_ms"] += lat
+                        latencies.append(lat)
+
+                    stats["by_dept"].setdefault(dept, {"calls": 0, "errors": 0})
+                    stats["by_dept"][dept]["calls"] += 1
+                    if not is_ok:
+                        stats["by_dept"][dept]["errors"] += 1
+
+                    stats["total_calls"] += 1
+
+        if latencies:
+            stats["avg_latency_ms"] = round(sum(latencies) / len(latencies))
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 # ══════════════════════════════════════════════════════════════════════
