@@ -11,6 +11,7 @@ echo "--- Source checksums ---"
 echo "app.mlog:       $(md5sum app.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "dept/yana.mlog: $(md5sum dept/yana.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "llm_proxy.py:   $(md5sum llm_proxy.py 2>/dev/null | cut -d' ' -f1)"
+echo "skills-manifest: $(md5sum skills-manifest.json 2>/dev/null | cut -d' ' -f1)"
 echo "miniapp.mlog:   $(md5sum dept/miniapp.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "osp.mlog:       $(md5sum dept/osp.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "expert.mlog:    $(md5sum dept/expert.mlog 2>/dev/null | cut -d' ' -f1)"
@@ -20,6 +21,10 @@ if grep -q "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА" dept/yana.mlog
 else
   echo "dept/yana.mlog: clean (no anti-format)"
 fi
+
+# ── Skills bootstrap (FO-012) ────────────────────────────────────────────────
+# Скиллы не лежат в git — восстанавливаем из релиз-артефакта (skills-manifest.json).
+bash scripts/bootstrap_skills.sh 2>&1 | sed 's/^/[entrypoint] /'
 
 # ── DB Restore check (FO-001) ──────────────────────────────────────────────
 # If main DB is missing or corrupt, try to restore from latest backup.
