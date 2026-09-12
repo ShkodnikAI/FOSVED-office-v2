@@ -1,0 +1,155 @@
+name: FOSVED CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ── Job 1: Python tests (pytest) ─────────────────────────────────────
+  pytest:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Run pytest
+        env:
+          API_SECRET: ci-test-secret
+          TELEGRAM_WEBHOOK_SECRET: ci-wh-secret
+          OWNER_TELEGRAM_ID: "99999"
+          DATABASE_PATH: /tmp/fosved-ci-test-db
+          ZAI_API_KEY: ci-fake-key
+        run: pytest tests/ -v --tb=short
+
+      - name: Run SEC-3 webhook secret test
+        env:
+          TELEGRAM_WEBHOOK_SECRET: test-secret-123
+        run: python3 scripts/test_sec3.py
+
+  # ── Job 2: Metalogos check (mlog check) ──────────────────────────────
+  mlog-check:
+    name: Metalogos syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make mlog executable
+        run: chmod +x bin/mlog
+
+      - name: Verify mlog works and print version
+        run: |
+          VERSION=$(./bin/mlog --version | head -1 | awk '{print $3}')
+          echo "mlog version: $VERSION"
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: could not determine mlog version"
+            exit 1
+          fi
+
+      - name: Check app.mlog for parse errors
+        run: |
+          set +e
+          OUTPUT=$(./bin/mlog check app.mlog 2>&1)
+          RC=$?
+          set -e
+          echo "$OUTPUT"
+          if [ $RC -ne 0 ] && ! echo "$OUTPUT" | grep -q "parse error"; then
+            echo "WARN: mlog check exited with $RC but no parse errors found (may be warnings only)"
+          fi
+          if echo "$OUTPUT" | grep -q "parse error"; then
+            echo "FAIL: parse errors found in app.mlog"
+            exit 1
+          fi
+          echo "OK: no parse errors (exit code: $RC)"
+
+      - name: Check dept/*.mlog for parse errors
+        run: |
+          FAIL=0
+          for f in dept/*.mlog; do
+            echo "Checking $f..."
+            set +e
+            OUTPUT=$(./bin/mlog check "$f" 2>&1)
+            set -e
+            if echo "$OUTPUT" | grep -q "parse error"; then
+              echo "FAIL: parse errors in $f"
+              echo "$OUTPUT"
+              FAIL=1
+            fi
+          done
+          exit $FAIL
+
+  # ── Job 3: Version consistency ────────────────────────────────────────
+  version-check:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make mlog executable
+        run: chmod +x bin/mlog
+
+      - name: Check Dockerfile version matches binary
+        run: |
+          BINARY_VER=$(./bin/mlog --version | head -1 | awk '{print $3}')
+          DOCKERFILE_VER=$(grep -oP 'Metalogos v\K[0-9]+\.[0-9]+\.[0-9]+' Dockerfile)
+          echo "Binary: $BINARY_VER  Dockerfile: $DOCKERFILE_VER"
+          if [ -z "$DOCKERFILE_VER" ]; then
+            echo "WARN: no Metalogos version found in Dockerfile"
+            exit 0
+          fi
+          if [ "$BINARY_VER" != "$DOCKERFILE_VER" ]; then
+            echo "FAIL: Dockerfile says $DOCKERFILE_VER but binary is $BINARY_VER"
+            exit 1
+          fi
+
+      - name: Check README version matches binary
+        run: |
+          BINARY_VER=$(./bin/mlog --version | head -1 | awk '{print $3}')
+          README_VER=$(grep -oP 'Metalogos v\K[0-9]+\.[0-9]+\.[0-9]+' README.md | head -1)
+          echo "Binary: $BINARY_VER  README: $README_VER"
+          if [ -z "$README_VER" ]; then
+            echo "WARN: no Metalogos version found in README"
+            exit 0
+          fi
+          if [ "$BINARY_VER" != "$README_VER" ]; then
+            echo "FAIL: README says $README_VER but binary is $BINARY_VER"
+            exit 1
+          fi
+
+      - name: No old backup binaries
+        run: |
+          if ls bin/mlog_old_* 2>/dev/null; then
+            echo "FAIL: old backup binaries found in bin/"
+            exit 1
+          fi
+          echo "OK: no old backup binaries"
+
+  # ── Job 4: Docker build ──────────────────────────────────────────────
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t fosved-office-ci .
+
+      - name: Verify mlog works in container
+        run: |
+          VER=$(docker run --rm fosved-office-ci /usr/local/bin/mlog --version | head -1)
+          echo "Container mlog: $VER"
+          if [ -z "$VER" ]; then
+            echo "ERROR: mlog --version returned nothing in container"
+            exit 1
+          fi
