@@ -682,6 +682,14 @@ _ANALYTICAL_DEPTS = {"expert"}
 
 def get_dept_prompt(dept, combo=None):
     fmt = FORMAT_INSTRUCTION if dept in _ANALYTICAL_DEPTS else ""
+    # FO-018: декларация departments/<dept>.md — высший приоритет (последний wins)
+    try:
+        from proxy.departments import prompt_for
+        decl_prompt = prompt_for(dept)
+        if decl_prompt is not None:
+            return decl_prompt + fmt
+    except Exception as e:
+        log.warning(f"[config] dept declaration read failed for {dept}: {e}")
     if combo and 'free' in combo:
         return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + fmt
     try:

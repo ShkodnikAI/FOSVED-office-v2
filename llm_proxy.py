@@ -80,6 +80,26 @@ from proxy.review import (
     notify_queue_overflow_if_needed, REVIEW_SOURCES, REVIEW_DECISIONS,
 )
 
+# ── FO-018: декларативные департаменты (agent-as-markdown) ──────────────────
+# Валидация всех departments/*.md при старте: неизвестное поле/действие роняет офис
+# с понятной ошибкой (требование наряда #84). Permission → Guardian-overlay (#81).
+from proxy import departments as _departments  # noqa: F401
+from proxy.departments import (  # noqa: F401
+    load_declaration, load_all as departments_load_all,
+    get_declaration as get_dept_declaration, prompt_for as dept_prompt_from_declaration,
+    temperature_for as dept_temperature_from_declaration, model_for as dept_model_from_declaration,
+    apply_guardian_overlays as departments_apply_guardian_overlays,
+    DepartmentsConfigError,
+)
+try:
+    _departments.load_all()
+    _n_overlays = _departments.apply_guardian_overlays()
+    if _n_overlays:
+        import logging
+        logging.getLogger(__name__).info(f"[departments] Guardian overlays applied: {_n_overlays}")
+except _departments.DepartmentsConfigError as _dce:
+    raise SystemExit(f"ОФИС НЕ ПОДНЯТ — ошибка деклараций департаментов: {_dce}") from _dce
+
 # ── FO-015: Guardian permission-matrix — двойной контур прав департаментов ───
 from proxy.guardian import (  # noqa: F401
     check as guardian_check, enforce as guardian_enforce,
