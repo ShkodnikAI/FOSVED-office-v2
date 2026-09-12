@@ -454,6 +454,13 @@ def compact_context(messages, dept, chain=None, provider=None, summarize_fn=None
                 _query("INSERT INTO dialog_history (chat_id, role, dept, content) "
                        "VALUES (?, 'system', ?, ?)",
                        (str(chat_id), dept, json.dumps(rec, ensure_ascii=False)))
+                # FO-017: та же компакция — типизированный CompactionPart
+                # в Dialog v2 (session_message лента); отказ не критичен
+                try:
+                    from proxy.dialog import record_compaction
+                    record_compaction(str(chat_id), rec, dept=dept)
+                except Exception as e:
+                    log.warning(f"compaction: dialog v2 part failed (non-fatal): {e}")
             except Exception as e:
                 log.warning(f"compaction: dialog_history record failed (non-fatal): {e}")
         log.info(f"Compaction dept={dept} strategy={stats['strategy']} "

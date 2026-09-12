@@ -60,6 +60,14 @@ from proxy.compaction import (
     estimate_tokens,
 )
 
+# ── FO-017: Dialog v2 — Part-модель + event-log с per-session seq ────────────
+from proxy.dialog import (
+    ensure_dialog_schema, save_message, add_part, add_tool_call,
+    add_tool_result, record_compaction, replay_session, get_session_events,
+    get_session_messages, get_part, migrate_dialog_history, rollback_migration,
+    PART_TYPES, EVENT_TYPES,
+)
+
 
 
 

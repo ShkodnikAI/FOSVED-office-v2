@@ -39,6 +39,16 @@ from proxy.providers import (
     _estimate_tokens, _compress_messages, _combo_for_task,
     cleanup_tool_output_files,  # FO-016: ретеншн offload-хранилища
 )
+from proxy.dialog import (  # FO-017: Dialog v2 — Parts + event-log
+    save_message as dialog_save_message,
+    add_tool_call as dialog_add_tool_call,
+    add_tool_result as dialog_add_tool_result,
+    get_session_events as dialog_get_session_events,
+    get_session_messages as dialog_get_session_messages,
+    get_part as dialog_get_part,
+    migrate_dialog_history as dialog_migrate_dialog_history,
+    rollback_migration as dialog_rollback_migration,
+)
 from proxy.telegram import (
     _MARKER_EMOJI, _ALL_EMOJI, _escape_mdv2, _tg_send_formatted,
     _tg_send_message, _tg_send_voice, _tg_send_report_with_button,
@@ -313,6 +323,86 @@ def cron_cleanup_tool_output():
     removed = cleanup_tool_output_files()
     _log_audit("tool_output_cleanup", {"removed": removed}, "system")
     return jsonify({"ok": True, "removed": removed})
+
+
+# ── FO-017: Dialog v2 — Part-модель + event-log с per-session seq ────────
+# Эндпоинты для mlog/админов: запись реплик с Parts, тулз-события,
+# лента/восстановление, идемпотентная миграция dialog_history (обратимая).
+@app.route("/dialog/message", methods=["POST"])
+def dialog_message_endpoint():
+    d = request.get_json(force=True) or {}
+    sid = d.get("session_id")
+    if not sid:
+        return jsonify({"error": "session_id required"}), 400
+    try:
+        res = dialog_save_message(
+            str(sid), d.get("role", "user"),
+            content=d.get("content", ""), dept=d.get("dept", ""),
+            parts=d.get("parts"), source=d.get("source", "api"),
+            source_id=d.get("source_id"), meta=d.get("meta"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if res is None:
+        return jsonify({"error": "save failed"}), 500
+    return jsonify(res)
+
+
+@app.route("/dialog/tool-call", methods=["POST"])
+def dialog_tool_call_endpoint():
+    d = request.get_json(force=True) or {}
+    sid = d.get("session_id")
+    if not sid:
+        return jsonify({"error": "session_id required"}), 400
+    call_part = dialog_add_tool_call(
+        str(sid), d.get("message_id"), d.get("tool", ""),
+        arguments=d.get("arguments"))
+    if call_part is None:
+        return jsonify({"error": "tool_call part failed"}), 500
+    result_part = None
+    if "result" in d or d.get("error"):
+        result_part = dialog_add_tool_result(
+            str(sid), call_part, result=d.get("result"),
+            ok=bool(d.get("ok", True)), error=d.get("error"))
+    return jsonify({"tool_call_part": call_part, "tool_result_part": result_part})
+
+
+@app.route("/dialog/session/<session_id>", methods=["GET"])
+def dialog_session_endpoint(session_id):
+    """Лента и реплики с Parts. ?events=1 — сырая лента (from_seq/limit);
+    по умолчанию — messages с вложенными Parts (типы для miniapp: tool_call
+    сворачивается клиентом)."""
+    if request.args.get("events") == "1":
+        events = dialog_get_session_events(
+            session_id,
+            from_seq=int(request.args.get("from_seq", 0)),
+            limit=min(int(request.args.get("limit", 1000)), 10000))
+        return jsonify({"session_id": session_id, "events": events,
+                        "count": len(events)})
+    msgs = dialog_get_session_messages(session_id,
+                                       limit=min(int(request.args.get("limit", 200)), 1000))
+    return jsonify({"session_id": session_id, "messages": msgs, "count": len(msgs)})
+
+
+@app.route("/dialog/part/<int:part_id>", methods=["GET"])
+def dialog_part_endpoint(part_id):
+    p = dialog_get_part(part_id)
+    if p is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(p)
+
+
+@app.route("/dialog/migrate", methods=["POST"])
+def dialog_migrate_endpoint():
+    """Миграция dialog_history → Dialog v2. {batch, dry_run, rollback}."""
+    d = request.get_json(force=True) or {}
+    if d.get("rollback"):
+        res = dialog_rollback_migration()
+        _log_audit("dialog_v2_rollback", res, "system")
+        return jsonify(res)
+    res = dialog_migrate_dialog_history(batch=int(d.get("batch", 500)),
+                                        dry_run=bool(d.get("dry_run")))
+    _log_audit("dialog_v2_migration", res, "system")
+    return jsonify(res)
 
 
 # ── FO-006: ночная консолидация памяти (mem0-паттерн, issue #66) ─────────

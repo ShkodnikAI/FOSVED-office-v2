@@ -95,9 +95,11 @@ def auth_middleware():
     # Protect API, admin, memory, miniapp-action endpoints
     if any(path.startswith(p) for p in PROTECTED_PREFIXES):
         # Internal requests from mlog (localhost) are allowed to /memory/
-        # without Bearer — mlog http_post() has no custom-header support.
-        # External traffic is blocked by reverse_proxy (SEC-1) and firewall.
-        if path.startswith("/memory/") and request.remote_addr in ("127.0.0.1", "::1"):
+        # and /dialog/ without Bearer — mlog http_post() has no custom-header
+        # support. External traffic is blocked by reverse_proxy (SEC-1) and
+        # firewall.
+        if (path.startswith("/memory/") or path.startswith("/dialog/")) and \
+                request.remote_addr in ("127.0.0.1", "::1"):
             return None
         if not _check_bearer():
             return jsonify({"error": "unauthorized"}), 401
@@ -112,7 +114,9 @@ BASE_DIR = Path(__file__).parent
 LIB_DIR = BASE_DIR / "library"
 CFG_DIR = BASE_DIR / "config"
 
-db_lock = threading.Lock()
+# FO-017: RLock вместо Lock — init_db() вызывает ensure_dialog_schema()
+# под уже взятым лоном (реентерабельность того же потока).
+db_lock = threading.RLock()
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_ARCHIVE_CHANNEL_ID = os.environ.get("TELEGRAM_ARCHIVE_CHANNEL_ID", "")
@@ -122,7 +126,7 @@ API_SECRET = os.environ.get("API_SECRET", "")  # Bearer token for protected endp
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # X-Telegram-Bot-Api-Secret-Token
 
 # ── Auth helpers ──────────────────────────────────────────────
-PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/webhook/miniapp-action', '/traces')
+PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/dialog/', '/webhook/miniapp-action', '/traces')
 
 def _check_bearer():
     """Return True if request bears valid API_SECRET, or if API_SECRET is empty (open mode)."""
@@ -397,6 +401,8 @@ def init_db():
             ("ALTER TABLE knowledge_graph ADD COLUMN valid_from TEXT", "valid_from"),
             ("ALTER TABLE knowledge_graph ADD COLUMN valid_to TEXT", "valid_to"),
             ("ALTER TABLE knowledge_graph ADD COLUMN superseded_by INTEGER", "superseded_by"),
+            # FO-017: связь узла графа с Part-репликой (прослеживаемость факта)
+            ("ALTER TABLE knowledge_graph ADD COLUMN source_part_id TEXT", "source_part_id"),
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
             ("ALTER TABLE token_usage ADD COLUMN combo TEXT DEFAULT ''", "combo"),
             ("ALTER TABLE miniapp_responses ADD COLUMN archived INTEGER DEFAULT 0", "archived"),
@@ -410,6 +416,13 @@ def init_db():
         # (created_at в legacy-схеме нет; updated_at — момент фиксации узла)
         c.execute("UPDATE knowledge_graph SET valid_from = updated_at WHERE valid_from IS NULL")
         c.commit(); c.close()
+        # FO-017: схема Dialog v2 (dialog_message/dialog_part/session_message).
+        # Ленивый импорт внутри функции — чтобы не зациклить core ↔ dialog.
+        try:
+            from proxy.dialog import ensure_dialog_schema
+            ensure_dialog_schema()
+        except Exception as e:
+            log.warning(f"[init] dialog v2 schema skipped (non-fatal): {e}")
 
 init_db()
 
