@@ -835,6 +835,8 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   let consensus = ReadConsensus()
   // IDEA-2: Recall past learnings for this dept+query
   let learnings = RecallLearnings(dept, query)
+  // FO-019: Owner Profile — static/dynamic/buckets одним вызовом
+  let owner_profile = GetOwnerProfile(dept)
   // IDEA-5: Expert Persona Injection
   let mut persona = ""
   if dept != "yana" then { let persona = GetExpertPersona(dept) }
@@ -880,6 +882,8 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   if s_consensus == "()" then { let s_consensus = "" }
   let s_learnings = to_string(learnings)
   if s_learnings == "()" then { let s_learnings = "" }
+  let s_owner_profile = to_string(owner_profile)
+  if s_owner_profile == "()" then { let s_owner_profile = "" }
   let s_sub_agent = to_string(sub_agent)
   if s_sub_agent == "()" then { let s_sub_agent = "" }
   let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Cross-dept Context ===" + s_injected + "\n\n=== Steering ===" + s_steer + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
@@ -892,6 +896,8 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   // IDEA-1/2: Append consensus and learnings
   if s_consensus != "" then { let context = context + "\n\n=== Cross-Session Consensus (baton) ===\n" + s_consensus }
   if s_learnings != "" then { let context = context + "\n\n" + s_learnings }
+  // FO-019: профиль владельца одним вызовом (вместо ad-hoc сборки)
+  if s_owner_profile != "" then { let context = context + "\n\n" + s_owner_profile }
 
   // Append fresh news if available
   if news != "" then {
@@ -920,6 +926,18 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   }
 
   return context
+}
+
+// ── FO-019: Owner Profile (static/dynamic/buckets, один вызов) ──
+// Метафильтр dept: питон-сайд приоритизирует buckets по интересам департамента.
+// Best-effort: отказ/таймаут прокси → пустая строка, диалог не блокируется.
+pattern GetOwnerProfile(dept: String) -> String {
+  let body = json_encode({dept: dept})
+  let resp = try http_post("http://127.0.0.1:4000/profile/owner", body, "application/json", 3.0)
+  if to_string(resp) == "()" then { return "" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "" }
+  return to_string(json_get(parsed, "profile", ""))
 }
 
 pattern ReadDeptProfile(dept: String) -> String {

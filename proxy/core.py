@@ -98,7 +98,8 @@ def auth_middleware():
         # and /dialog/ without Bearer — mlog http_post() has no custom-header
         # support. External traffic is blocked by reverse_proxy (SEC-1) and
         # firewall.
-        if (path.startswith("/memory/") or path.startswith("/dialog/")) and \
+        if (path.startswith("/memory/") or path.startswith("/dialog/")
+                or path.startswith("/profile/")) and \
                 request.remote_addr in ("127.0.0.1", "::1"):
             return None
         if not _check_bearer():
@@ -126,7 +127,7 @@ API_SECRET = os.environ.get("API_SECRET", "")  # Bearer token for protected endp
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # X-Telegram-Bot-Api-Secret-Token
 
 # ── Auth helpers ──────────────────────────────────────────────
-PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/dialog/', '/webhook/miniapp-action', '/traces')
+PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/dialog/', '/profile/', '/webhook/miniapp-action', '/traces')
 
 def _check_bearer():
     """Return True if request bears valid API_SECRET, or if API_SECRET is empty (open mode)."""
@@ -423,8 +424,13 @@ def init_db():
             ensure_dialog_schema()
         except Exception as e:
             log.warning(f"[init] dialog v2 schema skipped (non-fatal): {e}")
+        # FO-019: таблица профиля владельца (static/dynamic/buckets)
+        try:
+            from proxy.owner_profile import ensure_profile_schema
+            ensure_profile_schema()
+        except Exception as e:
+            log.warning(f"[init] owner profile schema skipped (non-fatal): {e}")
 
-init_db()
 
 def _query(sql, params=(), fetch=False):
     with db_lock:
@@ -735,3 +741,9 @@ def _memorize(dept, topic, content):
     entry = f"[MEMORY] {topic}: {content}"
     _query("INSERT INTO dialog_history (dept, chat_id, role, content, created_at) VALUES (?, '0', 'system', ?, ?)",
            (dept, entry, now))
+
+
+# Вызов init_db в КОНЦЕ модуля: все имена (включая _query) уже определены,
+# поэтому ленивые импорты схем FO-017/FO-019 не падают на частичной
+# инициализации core (см. комментарий в proxy/owner_profile.py).
+init_db()

@@ -68,6 +68,12 @@ from proxy.dialog import (
     PART_TYPES, EVENT_TYPES,
 )
 
+# ── FO-019: профиль владельца — static/dynamic/buckets одним вызовом ─────────
+from proxy.owner_profile import (
+    get_owner_profile, rebuild_owner_profile, invalidate_owner_profile,
+    ensure_profile_schema, current_version as profile_current_version,
+)
+
 
 
 
