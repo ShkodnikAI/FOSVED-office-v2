@@ -8,11 +8,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Env must be set before llm_proxy import (same contract as test_security.py)
-os.environ.setdefault('API_SECRET', 'test-secret-123')
-os.environ.setdefault('TELEGRAM_WEBHOOK_SECRET', 'tg-wh-secret')
-os.environ.setdefault('OWNER_TELEGRAM_ID', '12345')
-os.environ.setdefault('DATABASE_PATH', '/tmp/fosved-test-db')
-os.environ.setdefault('ZAI_API_KEY', 'fake-key')
+os.environ['API_SECRET'] = 'test-secret-123'
+os.environ['TELEGRAM_WEBHOOK_SECRET'] = 'tg-wh-secret'
+os.environ['OWNER_TELEGRAM_ID'] = '12345'
+os.environ['DATABASE_PATH'] = '/tmp/fosved-test-db'
+os.environ['ZAI_API_KEY'] = 'fake-key'
 
 import llm_proxy  # noqa: E402
 
