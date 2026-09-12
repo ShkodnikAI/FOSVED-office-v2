@@ -107,6 +107,7 @@ from proxy.lz_github import (
     scheduler_admin_daily as scheduler_admin_daily,
     _parse_github_repo as _parse_github_repo, github_push_file as github_push_file,
     lz_osint as lz_osint, news_fresh as news_fresh, lz_github_scan as lz_github_scan,
+    lz_api_scan_endpoint as lz_api_scan_endpoint,
     lz_diagnose as lz_diagnose, lz_news as lz_news, news_stats as news_stats,
 )
 from proxy.core import (
