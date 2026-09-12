@@ -24,6 +24,19 @@ from proxy.core import (
     DEPT_NAMES,
 )
 
+# FO-016 (#82): полный конвейер компакции — budget + prune + summarize +
+# offload — в proxy/compaction.py. Импорт односторонний: compaction НЕ
+# импортирует providers (разрыв цикла — summarize_fn передаётся параметром).
+from proxy.compaction import (  # noqa: F401
+    compact_context,
+    get_context_budget,
+    PROVIDER_CONTEXT_LIMITS,
+    TOOL_OUTPUT_DIR,
+    restore_tool_output,
+    cleanup_tool_output_files,
+    estimate_tokens as _estimate_tokens,
+)
+
 # ──────────────────────────── PROVIDERS ────────────────────────────
 PROVIDERS = {
     "zai": {"url": "https://api.z.ai/api/paas/v4/chat/completions", "env_key": "ZAI_API_KEY", "format": "openai", "timeout": 120},
@@ -177,60 +190,31 @@ _COMPRESSION_MAX_TOKENS = 64000  # ~128K chars (conservative estimate: 1 token ~
 _COMPRESSION_KEEP_SYSTEM = True
 
 
-def _estimate_tokens(messages):
-    """Rough token estimate: ~2 chars per token for mixed Russian/English."""
-    total = 0
-    for m in messages:
-        total += len(m.get("content", "")) // 2
-    return total
+def _compaction_summarize(summary_prompt):
+    """Дешёвая модель для summarize-компакции (race-пул: groq → cerebras).
+    Передаётся в compact_context как summarize_fn (разрыв цикла импортов)."""
+    try:
+        res = _call_single_provider("groq", "openai/gpt-oss-20b", summary_prompt,
+                                    dept="system", max_tokens=1024, is_internal=True)
+        if res and res.get("reply"):
+            return res
+    except Exception as e:
+        log.warning(f"compaction: groq summarize failed: {e}")
+    try:
+        return _call_single_provider("cerebras", "gpt-oss-120b", summary_prompt,
+                                     dept="system", max_tokens=1024, is_internal=True)
+    except Exception as e:
+        log.warning(f"compaction: cerebras summarize failed: {e}")
+        return None
 
 
 def _compress_messages(messages, dept='yana'):
-    """Rolling summary compression: if messages exceed threshold,
-    summarize older messages into a single system-context message.
+    """DEPRECATED (FO-016): совместимость для старых импортов.
+    Раньше — rolling summary по порогу 64k; теперь полный конвейер
+    compact_context (budget + offload + prune + summarize).
     Returns (compressed_messages, tokens_saved_estimate)."""
-    est = _estimate_tokens(messages)
-    if est <= _COMPRESSION_MAX_TOKENS:
-        return messages, 0
-
-    # Separate system prompts from conversation
-    system_msgs = [m for m in messages if m.get("role") == "system"]
-    convo = [m for m in messages if m.get("role") != "system"]
-
-    if len(convo) <= 4:
-        return messages, 0  # Too few messages to compress meaningfully
-
-    # Keep last 6 messages, compress the rest
-    keep_count = 6
-    to_compress = convo[:-keep_count]
-    to_keep = convo[-keep_count:]
-
-    # Build a summary request using a cheap model
-    compress_text = "\n".join(
-        f"{'User' if m['role']=='user' else 'Assistant'}: {m['content'][:500]}"
-        for m in to_compress[-20:]  # Last 20 of old messages, truncated
-    )
-    if not compress_text.strip():
-        return messages, 0
-
-    summary_prompt = [
-        {"role": "system", "content": "Summarize the following conversation history into a concise context paragraph (max 300 words). Preserve key facts, decisions, names, numbers. Output ONLY the summary, nothing else."},
-        {"role": "user", "content": compress_text}
-    ]
-
-    try:
-        # Use cheap provider for compression
-        summary_result = _call_single_provider("groq", "openai/gpt-oss-20b", summary_prompt, dept="system", max_tokens=1024, is_internal=True)
-        if summary_result and summary_result.get("reply"):
-            summary_msg = {"role": "system", "content": f"[Earlier conversation summary]: {summary_result['reply'][:2000]}"}
-            compressed = system_msgs + [summary_msg] + to_keep
-            saved = est - _estimate_tokens(compressed)
-            log.info(f"Token compression: {est} -> {_estimate_tokens(compressed)} (saved ~{saved} tokens, {len(to_compress)} messages compressed)")
-            return compressed, saved
-    except Exception as e:
-        log.warning(f"Token compression failed, sending uncompressed: {e}")
-
-    return messages, 0
+    msgs, stats = compact_context(messages, dept, summarize_fn=_compaction_summarize)
+    return msgs, max(stats["tokens_before"] - stats["tokens_after"], 0)
 
 
 def _call_single_provider(provider_name, model, messages, dept='yana', max_tokens=4096, is_internal=False):
@@ -351,18 +335,25 @@ def _load_cfg():
 
 _load_cfg()
 
-def call_llm(dept, messages, model_override=None, combo=None, command='', depth=2):
-    """Call LLM via native combo chain with circuit breaker and token compression.
+def call_llm(dept, messages, model_override=None, combo=None, command='', depth=2, chat_id=None):
+    """Call LLM via native combo chain with circuit breaker and context compaction.
     
     Flow:
-    1. Apply token compression if messages are too long
+    1. FO-016: compact context if over budget (offload → prune → summarize)
     2. Select combo chain (or use model_override for direct single-provider call)
     3. Walk the chain: for each (provider, [models]), try each model until one works
     4. Circuit breaker skips providers with recent consecutive failures
     5. If combo chain exhausted, fall back to legacy priority-provider ordering
     """
-    # 1. Token compression
-    messages, compression_saved = _compress_messages(messages, dept)
+    # 1. FO-016: компакция контекста (наряд #82) — offload → prune → summarize.
+    # Бюджет = флор окон провайдеров combo-цепи − резерв ответа (compaction.py);
+    # полные метрики конвейера — в трейсах FO-004 (event=compaction).
+    combo_pre = combo if combo is not None else _combo_for_task(dept, command=command, depth=depth)
+    chain_pre = COMBO_CHAINS.get(combo_pre, COMBO_CHAINS["fosved-standard"])
+    messages, comp_stats = compact_context(messages, dept, chain=chain_pre,
+                                           summarize_fn=_compaction_summarize,
+                                           chat_id=chat_id)
+    compression_saved = max(comp_stats["tokens_before"] - comp_stats["tokens_after"], 0)
 
     # 2. If model_override is set, do direct single-provider call
     if model_override:
