@@ -49,6 +49,10 @@ from proxy.dialog import (  # FO-017: Dialog v2 — Parts + event-log
     migrate_dialog_history as dialog_migrate_dialog_history,
     rollback_migration as dialog_rollback_migration,
 )
+from proxy.owner_profile import (  # FO-019: профиль владельца static/dynamic/buckets
+    get_owner_profile as profile_get_owner_profile,
+    rebuild_owner_profile as profile_rebuild_owner_profile,
+)
 from proxy.telegram import (
     _MARKER_EMOJI, _ALL_EMOJI, _escape_mdv2, _tg_send_formatted,
     _tg_send_message, _tg_send_voice, _tg_send_report_with_button,
@@ -405,6 +409,32 @@ def dialog_migrate_endpoint():
     return jsonify(res)
 
 
+# ── FO-019: профиль владельца — static/dynamic/buckets одним вызовом ─────
+@app.route("/profile/owner", methods=["GET", "POST"])
+def profile_owner_endpoint():
+    """Один вызов для всех департаментов. Метафильтры: dept/topic/section.
+    mlog: POST {"dept": "finance"}; браузер/миниапп: GET ?dept=…&topic=…"""
+    if request.method == "POST":
+        d = request.get_json(silent=True) or {}
+    else:
+        d = request.args
+    res = profile_get_owner_profile(
+        dept=d.get("dept"), topic=d.get("topic"),
+        section=d.get("section"),
+        max_chars=int(d.get("max_chars", 4000) or 4000))
+    return jsonify(res)
+
+
+@app.route("/profile/rebuild", methods=["POST"])
+def profile_rebuild_endpoint():
+    """Пересборка профиля из активных фактов (после консолидации — вручную
+    или из крона). {dept?: "…"}"""
+    d = request.get_json(silent=True) or {}
+    res = profile_rebuild_owner_profile(dept_filter=d.get("dept"), source="api")
+    _log_audit("owner_profile_rebuild", res, "memory")
+    return jsonify(res)
+
+
 # ── FO-006: ночная консолидация памяти (mem0-паттерн, issue #66) ─────────
 # dialog_history остаётся append-only журналом; факты живут в facts и
 # становятся первичным источником утреннего контекста.
@@ -633,7 +663,19 @@ def cron_consolidate_memory():
         "errors": sum(1 for r in results if r.get("error")),
     }
     _log_audit("memory_consolidation", {"totals": totals, "days": days, "backfill": backfill, "dept": dept_filter}, "memory")
-    return jsonify({"status": "ok", "totals": totals, "backup": backup_status, "results": results})
+
+    # FO-019: после консолидации обновляем профиль владельца (генератор).
+    # Сбой профиля не роняет консолидацию — фиксируется в ответе и error_log.
+    profile_status = None
+    if not backfill:  # backfill — разовая операция, профиль rebuild'ится один раз в конце обычного прогона
+        try:
+            profile_status = profile_rebuild_owner_profile(source="nightly")
+        except Exception as e:
+            _log_error(f"owner_profile nightly rebuild failed: {e}",
+                       source="owner_profile", kind="run")
+            profile_status = {"status": "error", "error": str(e)[:200]}
+    return jsonify({"status": "ok", "totals": totals, "backup": backup_status,
+                    "results": results, "owner_profile": profile_status})
 
 
 # ── FO-005: golden-set eval-регрессий по департаментам (issue #65) ───────
