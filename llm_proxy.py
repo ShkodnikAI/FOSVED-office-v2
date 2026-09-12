@@ -66,8 +66,8 @@ def _prune_old_traces():
                 date_part = name[4:14]
                 if date_part < cutoff:
                     os.remove(os.path.join(_TRACE_DIR, name))
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug(f"Trace prune failed (non-fatal): {e}")
 
 try:
     from auto_enricher import auto_enrich as _auto_enrich_fn
@@ -569,8 +569,8 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
             try:
                 _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
                        (provider_name, model, t_in, t_out, round(cost, 6), dept, now))
-            except Exception:
-                pass
+            except Exception as e:
+                _log_error(f"token_usage insert failed: {e}", dept=dept, kind="metrics_loss")
             log.info(f"LLM ok: provider={provider_name} model={model} dept={dept} "
                      f"t_in={t_in} t_out={t_out} reply_chars={len(reply)} reply_head={reply[:120]!r}")
 
@@ -903,8 +903,8 @@ def get_dept_prompt(dept, combo=None):
         f = LIB_DIR / f"{dept}.md"
         if f.exists():
             return f.read_text(encoding="utf-8") + fmt
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning(f"[config] dept prompt file read failed for {dept}: {e}")
     return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + fmt
 
 # ──────────────────────────── CONFIG LOADING ────────────────────────────
@@ -914,16 +914,16 @@ def _load_cfg():
     try:
         p = CFG_DIR / "priority_provider.txt"
         if p.exists(): _cfg_cache["priority_provider"] = p.read_text().strip().split()[0]
-    except Exception: pass
+    except Exception as e: log.warning(f"[config] priority_provider read failed: {e}")
     try:
         p = CFG_DIR / "priority_model.txt"
         if p.exists(): _cfg_cache["priority_model"] = p.read_text().strip()
-    except Exception: pass
+    except Exception as e: log.warning(f"[config] priority_model read failed: {e}")
     for dept in DEPT_NAMES:
         try:
             p = CFG_DIR / f"override_{dept}.txt"
             if p.exists(): _cfg_cache["overrides"][dept] = p.read_text().strip()
-        except Exception: pass
+        except Exception as e: log.warning(f"[config] override_{dept} read failed: {e}")
 
 _load_cfg()
 
@@ -950,6 +950,10 @@ def init_db():
         CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, period TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, provider TEXT, model TEXT, input_tokens TEXT, output_tokens TEXT, cost_usd TEXT, request_type TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT);
+        -- FO-007: trace_log — отладочные чекпоинты (раньше сваливались в audit_log)
+        CREATE TABLE IF NOT EXISTS trace_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT);
+        -- FO-007: error_log — структурированные ошибки (внешние вызовы, потери данных)
+        CREATE TABLE IF NOT EXISTS error_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT (datetime('now')), source TEXT, dept TEXT, kind TEXT, detail TEXT);
         CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original_query TEXT, original_response TEXT, correction TEXT, corr_type TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')));
@@ -974,8 +978,9 @@ def init_db():
         ]:
             try:
                 c.execute(col_sql)
-            except Exception:
-                pass
+            except Exception as e:
+                # ожидаемый сбой при повторном добавлении существующей колонки
+                log.debug(f"[migration] column add skipped (expected if exists): {e}")
         c.commit(); c.close()
 
 init_db()
@@ -1006,6 +1011,69 @@ def _get_setting(key, default=""):
 def _log_audit(action, details_dict, dept="system"):
     _query("INSERT INTO audit_log (action,actor,dept,details,status) VALUES (?,'proxy',?,?,'ok')",
            (action, dept, json.dumps(details_dict, ensure_ascii=False)))
+
+# ── FO-007: error_log и гигиена журналов (issue #67) ────────────────────
+# Политика: молчаливый except запрещён (CI-проверка: scripts/check_silent_excepts.py).
+# Ошибки внешних вызовов и потери данных → error_log (через _log_error);
+# audit_log остаётся журналом действий; отладочные чекпоинты — в trace_log.
+_LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "90"))              # audit_log, error_log
+_TRACE_LOG_RETENTION_DAYS = int(os.environ.get("TRACE_LOG_RETENTION_DAYS", "14"))  # trace_log (debug)
+_ERROR_DEDUP_SECONDS = 60
+_error_dedup = {}
+_error_dedup_lock = threading.Lock()
+
+def _log_error(detail, source="llm_proxy", dept="system", kind="error"):
+    """Единая точка фиксации ошибки: log.warning с тегом + строка в error_log.
+
+    Дедуп 60с по (source, dept, kind, detail) — циклические сбои (typing-индикатор,
+    внешние API) не заливают таблицу. Сбой самой записи в error_log не ломает
+    основной поток — внутри только log.debug.
+    """
+    detail = str(detail)[:500]
+    log.warning(f"[error:{source}/{dept}/{kind}] {detail}")
+    key = (source, dept, kind, detail[:200])
+    now = time.monotonic()
+    with _error_dedup_lock:
+        last = _error_dedup.get(key)
+        if last is not None and (now - last) < _ERROR_DEDUP_SECONDS:
+            return
+        if len(_error_dedup) > 2000:
+            _error_dedup.clear()
+        _error_dedup[key] = now
+    try:
+        _query("INSERT INTO error_log (source, dept, kind, detail) VALUES (?,?,?,?)",
+               (source, dept, kind, detail))
+    except Exception as e:
+        log.debug(f"error_log insert failed (non-fatal): {e}")
+
+def _rotate_service_logs():
+    """Ротация журналов: строки старше retention архивируются в JSONL и удаляются.
+
+    audit_log/error_log — LOG_RETENTION_DAYS (90), trace_log (отладка) — 14 дней.
+    Вызывается на старте и из /cron/backup (каждые 6ч).
+    """
+    archive_dir = Path(DB_PATH) / "archive"
+    jobs = [
+        ("audit_log", "timestamp", _LOG_RETENTION_DAYS),
+        ("error_log", "ts", _LOG_RETENTION_DAYS),
+        ("trace_log", "timestamp", _TRACE_LOG_RETENTION_DAYS),
+    ]
+    for table, ts_col, days in jobs:
+        try:
+            rows = _query(f"SELECT * FROM {table} WHERE {ts_col} < datetime('now', ?)",
+                          (f"-{days} days",), fetch=True)
+            if not rows:
+                continue
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            with open(archive_dir / f"{table}.jsonl", "a", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(dict(r), ensure_ascii=False) + "\n")
+            _query(f"DELETE FROM {table} WHERE {ts_col} < datetime('now', ?)", (f"-{days} days",))
+            log.info(f"[rotation] {table}: archived+deleted {len(rows)} rows older than {days}d")
+        except Exception as e:
+            log.warning(f"[rotation] {table} failed (non-fatal): {e}")
+
+_rotate_service_logs()
 
 # ──────────────────────────── OSINT (Aliens Eye) ────────────────────────────
 OSINT_DISCLAIMER = "⚠ OSINT-данные собраны из открытых источников. Результаты не гарантируют принадлежность аккаунтов конкретному лицу. Используйте для легитимных целей в рамках законодательства."
@@ -2113,8 +2181,8 @@ def tg_send_report_file():
         msg_id = _tg_send_document(chat_id, fpath, caption)
         try:
             os.remove(fpath)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"[cleanup] temp document remove failed: {e}")
         if not msg_id:
             # Attachment failed: fall back to plain text so the owner is not left with silence
             fallback_text = caption or f"Отчёт готов: {title or doc_id}"
@@ -2270,8 +2338,8 @@ def tts_endpoint():
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"[cleanup] temp file remove failed: {e}")
 
 # ══════════════════════════════════════════════════════════════════════
 #  MEGA-3: STT (WHISPER) ENDPOINT
@@ -2389,8 +2457,8 @@ def extract_document():
         if tmp:
             try:
                 os.remove(tmp)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"[cleanup] temp file remove failed: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2455,8 +2523,8 @@ def archive_publish():
             finally:
                 try:
                     os.remove(fpath)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning(f"[cleanup] temp report remove failed: {e}")
 
         # Fallback: no HTML stored, or document upload failed
         if not msg_id:
@@ -2640,8 +2708,8 @@ def scheduler_morning_brief():
             weather_ext_resp = http_requests.get("https://wttr.in/Minsk?format=3&lang=ru", timeout=10)
             if weather_ext_resp.ok:
                 weather_ext = weather_ext_resp.text.strip()
-        except Exception:
-            pass
+        except Exception as e:
+            _log_error(f"weather fetch failed: {e}", source="morning_brief", dept="yana", kind="external")
 
         # ── 2. Office metrics ──
         yesterday = (now - timedelta(days=1)).isoformat()[:10] + "T00:00:00"
@@ -2665,14 +2733,32 @@ def scheduler_morning_brief():
         corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
         corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
 
+        # FO-007: повторяющиеся ошибки департаментов за сутки — в дайджест
+        errors_digest = ""
+        try:
+            err_rows = _query(
+                "SELECT dept, kind, COUNT(*) as c FROM error_log "
+                "WHERE ts > datetime('now', '-1 day') AND kind != 'external' "
+                "GROUP BY dept, kind HAVING c >= 3 ORDER BY c DESC LIMIT 5", fetch=True)
+            ext_rows = _query(
+                "SELECT COUNT(*) as c FROM error_log "
+                "WHERE ts > datetime('now', '-1 day') AND kind = 'external'", fetch=True)
+            if err_rows:
+                errors_digest = "\n".join(
+                    [f"  - {r['dept']}/{r['kind']}: {r['c']} раз(а) за сутки" for r in err_rows])
+                if ext_rows and ext_rows[0]["c"]:
+                    errors_digest += f"\n  - внешние сбои (api/сеть): {ext_rows[0]['c']} раз(а) за сутки"
+        except Exception as e:
+            log.warning(f"[morning_brief] error digest query failed: {e}")
+
         # ── 3. LZ daily findings (from memory) ──
         lz_findings = ""
         try:
             lz_mem = memory.recall("LZ Daily", type_filter="observation", limit=3)
             if lz_mem:
                 lz_findings = "\n".join([f"  - {f['content'][:120]}" for f in lz_mem])
-        except Exception:
-            pass
+        except Exception as e:
+            _log_error(f"LZ memory recall failed: {e}", source="morning_brief", dept="yana", kind="memory")
 
         # ── 4. Night news (with explicit empty marker) ──
         night_news = get_night_news_digest()
@@ -2697,6 +2783,9 @@ def scheduler_morning_brief():
 Коррекций за сутки: {corrections_24h}
 {metrics_text}
 
+=== ПОВТОРЯЮЩИЕСЯ ОШИБКИ ОФИСА ЗА СУТКИ ===
+{errors_digest if errors_digest else 'Нет'}
+
 === НАХОДКИ ЛАБОРАТОРИИ ЗНАНИЙ ===
 {lz_findings if lz_findings else 'За последние сутки нет новых находок'}
 
@@ -2709,7 +2798,7 @@ def scheduler_morning_brief():
 3. 🏢 Статус офиса — кратко, что происходит
 4. 🌍 Важные мировые события — ТОЛЬКО из раздела «Топ события за ночь» ниже, если он есть. Если раздела нет или он пуст — напиши буквально «За ночь значимых событий не зафиксировано» и не добавляй ничего от себя. ЗАПРЕЩЕНО придумывать события, даже правдоподобные.
 5. 🔍 Ключевые находки ЛЗ (если есть)
-6. ⚡ Что требует внимания хозяина
+6. ⚡ Что требует внимания хозяина (включая повторяющиеся ошибки офиса, если раздел непуст)
 
 ФОРМАТИРОВАНИЕ (Telegram MarkdownV2):
 ▸ Заголовки секций: *Жирный текст*
@@ -2775,8 +2864,8 @@ def scheduler_admin_morning_reply():
             lz_mem = memory.recall("LZ Daily", type_filter="observation", limit=5)
             if lz_mem:
                 lz_context = "\n".join([f"  - {f['content'][:200]}" for f in lz_mem])
-        except Exception:
-            pass
+        except Exception as e:
+            _log_error(f"LZ memory recall failed: {e}", source="admin_brief", dept="admin", kind="memory")
 
         # ── 4. Get pending issues ──
         issues_context = ""
@@ -2784,8 +2873,8 @@ def scheduler_admin_morning_reply():
             narad_rows = _query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", fetch=True)
             if narad_rows:
                 issues_context = f"Нерешённых нарядов: {narad_rows[0]['cnt']}"
-        except Exception:
-            pass
+        except Exception as e:
+            _log_error(f"narads count query failed: {e}", source="admin_brief", dept="admin", kind="db_read")
 
         # ── 5. Build admin prompt ──
         messages = [
@@ -3368,8 +3457,8 @@ def _send_chat_action_loop(chat_id, action="typing", interval=5):
         while not stop.is_set():
             try:
                 _tg_send_chat_action(chat_id, action)
-            except Exception:
-                pass
+            except Exception as e:
+                _log_error(f"chat_action send failed for {chat_id}: {e}", source="typing", dept="system", kind="external")
             stop.wait(interval)
 
     t = threading.Thread(target=_loop, daemon=True)
@@ -3383,8 +3472,8 @@ def _tg_send_chat_action(chat_id, action):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
     try:
         http_requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=10)
-    except Exception:
-        pass
+    except Exception as e:
+        _log_error(f"sendChatAction failed for {chat_id}: {e}", source="typing", dept="system", kind="external")
 
 @app.post("/lz/deep-research")
 def lz_deep_research():
@@ -4177,8 +4266,8 @@ def admin_ua_graph():
                                 "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
                                 (rel, pname, 'calls', rel, now_ts))
                             edges_saved += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log_error(f"knowledge_edges insert failed: {e}", source="kg_rebuild", dept="lz", kind="data_loss")
 
     conn.commit()
     conn.close()
@@ -4424,8 +4513,8 @@ def admin_ua_night_cycle():
                             c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
                                       (rel, pname, 'calls', rel, now_ts))
                             edges_saved += 1
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _log_error(f"knowledge_edges insert failed: {e}", source="kg_rebuild", dept="lz", kind="data_loss")
 
         conn.commit()
         conn.close()
@@ -4889,8 +4978,8 @@ def scheduler_lz_daily_core(dry_run, owner_id):
                         "INSERT OR IGNORE INTO lz_telegram_posts (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, datetime('now'))",
                         (f"gh:repo:{r.get('name','')}", "github", r.get('lang',''), r.get('desc','')[:300])
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log_error(f"lz_telegram_posts insert failed: {e}", source="lz_github", dept="lz", kind="data_loss")
 
             today_key = f"LZ Daily {datetime.utcnow().isoformat()[:10]}"
             # Check if we already stored today's scan summary
@@ -5278,8 +5367,8 @@ def github_push_file():
         check = http_requests.get(api_url, headers=_GITHUB_HEADERS, params={'ref': branch}, timeout=15)
         if check.status_code == 200:
             sha = check.json().get('sha')
-    except Exception:
-        pass
+    except Exception as e:
+        _log_error(f"github pre-check for branch {branch} failed: {e}", source="lz_push", dept="lz", kind="external")
     # Create/update file
     import base64
     payload = {
@@ -5339,8 +5428,8 @@ def lz_osint():
     # Typing indicator
     try:
         _tg_send_message(chat_id, f"🔍 Сканирую {username} по 840+ платформам... (30-120 сек)")
-    except Exception:
-        pass
+    except Exception as e:
+        _log_error(f"osint notice send failed: {e}", source="osint", dept="system", kind="external")
 
     # Scan
     result = scan_osint(username, level=level, tor=tor, sites=sites)
@@ -5433,6 +5522,7 @@ def cron_backup():
     secret = request.args.get("secret", "")
     if secret != os.environ.get("CRON_SECRET", ""):
         return "Forbidden", 403
+    _rotate_service_logs()  # FO-007: ротация журналов перед бэкапом
     import subprocess
     upload = request.args.get("upload", "0") == "1"
     cmd = [sys.executable, "scripts/backup_db.py", "backup"]
@@ -5784,8 +5874,8 @@ def collect_tavily():
                         VALUES (?,?,?,?,?,?,?,?)""",
                         (f"Tavily", title, summary, url, cat, "en", None, content_hash))
                     collected += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log_error(f"tavily news insert failed: {e}", source="collector", dept="news", kind="data_loss")
         except Exception as e:
             _log_audit("tavily_error", {"dept": dept, "error": str(e)[:100]}, "collector")
     if collected:
@@ -5811,13 +5901,13 @@ def enrich_news_with_fulltext(limit=5):
                     f.write(resp.text)
                 text = doc_extract.extract_text(tmp, url)
                 try: os.remove(tmp)
-                except Exception: pass
+                except Exception as e: log.warning(f"[cleanup] news tmp remove failed: {e}")
                 if text and len(text) > 50:
                     summary = text[:800]
                     _query("UPDATE news_cache SET summary = ? WHERE id = ?", (summary, row_id))
                     enriched += 1
-        except Exception:
-            pass
+        except Exception as e:
+            _log_error(f"news enrich failed: {e}", source="collector", dept="news", kind="external")
     if enriched:
         _log_audit("news_enriched", {"enriched": enriched}, "collector")
     return enriched
@@ -5844,16 +5934,16 @@ def collect_rss():
                 if published:
                     try:
                         pub_date = datetime(*published[:6]).isoformat()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.warning(f"[collector] bad published date {published}: {e}")
                 try:
                     _query("""INSERT OR IGNORE INTO news_cache
                         (source,title,summary,url,category,language,published,hash)
                         VALUES (?,?,?,?,?,?,?,?)""",
                         (fc["name"], title, summary, url, fc["category"], fc["language"], pub_date, content_hash))
                     collected += 1
-                except Exception:
-                    pass
+                except Exception as e2:
+                    _log_error(f"feedparser news insert failed: {e2}", source="collector", dept="news", kind="data_loss")
         except Exception as e:
             errors += 1
             _log_audit("rss_error", {"feed": feed_id, "error": str(e)[:100]}, "collector")
@@ -5903,8 +5993,8 @@ def collect_gdelt(query=None, language="russian", max_items=25):
                     (f"GDELT/{source}", title, f"Tone: {float(tone):.1f}", url, cat,
                      language[:2], seendate, abs(float(tone)), content_hash))
                 collected += 1
-            except Exception:
-                pass
+            except Exception as e:
+                _log_error(f"gdelt news insert failed: {e}", source="collector", dept="news", kind="data_loss")
         _log_audit("gdelt_collected", {"collected": collected}, "collector")
         return collected
     except Exception as e:
