@@ -236,9 +236,15 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     _trace_err = None
 
     try:
+        # FO-018: температура департамента из departments/<dept>.md (дефолт 0.7 — прежний хардкод)
+        try:
+            from proxy.departments import temperature_for
+            _dept_temp = temperature_for(dept)
+        except Exception:
+            _dept_temp = 0.7
         if prov["format"] == "openai":
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            body = {"model": model, "messages": messages, "temperature": 0.7, "max_tokens": max_tokens}
+            body = {"model": model, "messages": messages, "temperature": _dept_temp, "max_tokens": max_tokens}
         else:  # anthropic
             sys_msg = ""
             user_msgs = []
@@ -354,6 +360,14 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
                                            summarize_fn=_compaction_summarize,
                                            chat_id=chat_id)
     compression_saved = max(comp_stats["tokens_before"] - comp_stats["tokens_after"], 0)
+
+    # FO-018: модель департамента из departments/<dept>.md (если не задан явный override)
+    if model_override is None:
+        try:
+            from proxy.departments import model_for
+            model_override = model_for(dept)
+        except Exception:
+            pass
 
     # 2. If model_override is set, do direct single-provider call
     if model_override:
