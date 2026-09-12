@@ -276,19 +276,12 @@ def remove_rule(rule_id):
 
 
 def seed_from_base():
-    """Идемпотентный перенос базовых deny-классов в overlay при первом старте (аудируемо)."""
+    """Совместимость: базовая политика читается из guardian_base.json на каждой оценке
+    (живой источник; аудит изменения = коммит файла, условие SG-F3). В DB-оверлей
+    правила базы НЕ копируются — оверлей только для per-dept правил (API/frontmatter),
+    иначе оверлей навсегда перебивал бы правки базового конфига."""
     ensure_guardian_schema()
-    n = _query("SELECT COUNT(*) AS c FROM guardian_rules", fetch=True)
-    if n and n[0]["c"] > 0:
-        return 0
-    base_rules, _ = _load_base_rules()
-    for r in base_rules:
-        if r.get("action") == "deny":
-            with _db() as conn:
-                conn.execute("INSERT INTO guardian_rules (dept, permission, action, source) VALUES (?,?,?,?)",
-                             [r.get("dept", "*"), r["permission"], "deny", "seed"])
-    _log_audit("guardian_seeded", {"rules": len(base_rules)}, "guardian")
-    return len(base_rules)
+    return 0
 
 
 # ── HTTP API ─────────────────────────────────────────────────────────────
