@@ -656,3 +656,50 @@ def get_dept_prompt(dept, combo=None):
     except Exception as e:
         log.warning(f"[config] dept prompt file read failed for {dept}: {e}")
     return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + fmt
+
+
+# ═══ FO-008 шаг 4c: метрики периодов (из фасада; нужны scheduler-модулям) ═══
+def _collect_metrics_for_period(start_iso, end_iso=None):
+    """Collect metrics for a given time period."""
+    conditions = "created_at >= ?"
+    params = [start_iso]
+    if end_iso:
+        conditions += " AND created_at < ?"
+        params.append(end_iso)
+
+    tasks = _query(f"SELECT dept, COUNT(*) as c FROM dialog_history WHERE {conditions} AND role='user' GROUP BY dept", params, fetch=True)
+    reports = _query(f"SELECT dept, COUNT(*) as c FROM miniapp_responses WHERE {conditions} GROUP BY dept", params, fetch=True)
+    corrections = _query(f"SELECT dept, COUNT(*) as c FROM adapt_corrections WHERE {conditions} GROUP BY dept", params, fetch=True)
+    ratings = _query(f"SELECT dept, COALESCE(AVG(CAST(metric_value AS REAL)),0) as avg_r, COUNT(*) as c FROM dept_metrics WHERE {conditions} GROUP BY dept", params, fetch=True)
+    tokens = _query(f"SELECT dept, COALESCE(SUM(input_tokens),0) as ti, COALESCE(SUM(output_tokens),0) as to2, COALESCE(SUM(cost_usd),0) as cost FROM token_usage WHERE {conditions} GROUP BY dept", params, fetch=True)
+
+    return {
+        "tasks": {r["dept"]: r["c"] for r in tasks},
+        "reports": {r["dept"]: r["c"] for r in reports},
+        "corrections": {r["dept"]: r["c"] for r in corrections},
+        "ratings": {r["dept"]: {"avg": r["avg_r"], "count": r["c"]} for r in ratings},
+        "tokens": {r["dept"]: {"in": r["ti"], "out": r["to2"], "cost": r["cost"]} for r in tokens},
+    }
+
+def _format_metrics_text(metrics):
+    """Format metrics dict as readable text for LLM prompt."""
+    lines = []
+    lines.append("METRICS:")
+    all_depts = set(list(metrics["tasks"].keys()) + list(metrics["reports"].keys()) + list(metrics["corrections"].keys()) + list(metrics["ratings"].keys()))
+    for dept in sorted(all_depts):
+        name = DEPT_NAMES.get(dept, dept)
+        parts = [f"{name}:"]
+        if dept in metrics["tasks"]:
+            parts.append(f"tasks={metrics['tasks'][dept]}")
+        if dept in metrics["reports"]:
+            parts.append(f"reports={metrics['reports'][dept]}")
+        if dept in metrics["corrections"]:
+            parts.append(f"corrections={metrics['corrections'][dept]}")
+        if dept in metrics["ratings"]:
+            r = metrics["ratings"][dept]
+            parts.append(f"avg_rating={r['avg']:.1f} (n={r['count']})")
+        if dept in metrics["tokens"]:
+            t = metrics["tokens"][dept]
+            parts.append(f"tokens={t['in']+t['out']} cost=${t['cost']:.2f}")
+        lines.append("  " + " ".join(parts))
+    return "\n".join(lines)
