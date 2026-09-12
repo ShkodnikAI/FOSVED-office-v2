@@ -72,14 +72,15 @@ class TestRotation:
 
 
 class TestPolicy:
-    """Политика FO-007: ни одного молчаливого except в llm_proxy.py."""
+    """Политика FO-007/FO-008: ни одного молчаливого except в llm_proxy.py и proxy/."""
 
     def test_no_silent_excepts(self):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
         import check_silent_excepts
-        src = open(check_silent_excepts.Path(check_silent_excepts.__file__).parent.parent / "llm_proxy.py",
-                   encoding="utf-8").read()
-        assert check_silent_excepts.find_silent_excepts(src) == []
+        root = check_silent_excepts.Path(check_silent_excepts.__file__).parent.parent
+        for target in check_silent_excepts.TARGETS:
+            src = (root / target).read_text(encoding="utf-8")
+            assert check_silent_excepts.find_silent_excepts(src) == [], target
 
     def test_trace_log_table_exists(self):
         # trace_log создан и принимает чекпоинты (раньше сваливались в audit_log)
