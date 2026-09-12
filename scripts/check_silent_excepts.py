@@ -11,7 +11,25 @@ import re
 import sys
 from pathlib import Path
 
+# FO-008: политика распространяется на фасад и весь пакет proxy/ (стренглер)
 TARGETS = ["llm_proxy.py"]
+
+
+def _discover_targets():
+    """llm_proxy.py + все модули пакета proxy/ (если пакет уже создан)."""
+    root = Path(__file__).resolve().parent.parent
+    targets = ["llm_proxy.py"]
+    proxy_pkg = root / "proxy"
+    if proxy_pkg.is_dir():
+        targets += [
+            str(p.relative_to(root))
+            for p in sorted(proxy_pkg.rglob("*.py"))
+            if p.name != "__init__.py"
+        ]
+    return targets
+
+
+TARGETS = _discover_targets()
 
 # Допустимые «тихие» варианты: глушение конкретных, заведомо безобидных
 # исключений ЗАПРЕЩЕНО по умолчанию. Исключения перечисляются здесь явно

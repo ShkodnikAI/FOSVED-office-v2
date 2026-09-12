@@ -145,8 +145,11 @@ class TestLLMTraces:
         """Writing a trace record creates a JSONL file."""
         import importlib
         os.environ['DATABASE_PATH'] = str(tmp_path)
-        # Re-import to pick up new _TRACE_DIR
+        # Re-import to pick up new _TRACE_DIR.
+        # FO-008: trace-утилиты живут в proxy.core — перезагружаем и его.
         import llm_proxy
+        import proxy.core
+        importlib.reload(proxy.core)
         importlib.reload(llm_proxy)
         llm_proxy._write_llm_trace({"trace_id": "test123", "dept": "osp", "ok": True})
         trace_dir = os.path.join(str(tmp_path), "traces")
