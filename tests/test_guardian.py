@@ -170,12 +170,13 @@ class TestShellParsing:
 
 
 class TestSeedAndSchema:
-    def test_seed_idempotent(self):
+    def test_base_is_live_source_not_seeded(self):
+        """base.json читается на каждой оценке: deny работает без копий в БД; seed не создаёт строк."""
+        llm_proxy._query("DELETE FROM guardian_rules", fetch=False)
         guardian.seed_from_base()
-        n1 = len(llm_proxy._query("SELECT id FROM guardian_rules", fetch=True))
-        guardian.seed_from_base()
-        n2 = len(llm_proxy._query("SELECT id FROM guardian_rules", fetch=True))
-        assert n1 == n2 and n1 > 0  # повторный seed ничего не добавляет
+        n = len(llm_proxy._query("SELECT id FROM guardian_rules", fetch=True))
+        assert n == 0
+        assert check("dev", "http_post", _ask=False)["verdict"] == "deny"  # инвариант живой базы
 
     def test_base_config_versioned_in_repo(self):
         assert guardian._base_config_path().exists()
