@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
 
 from flask import Flask, request, jsonify, Response
 import requests as http_requests
@@ -493,3 +494,165 @@ def _rotate_service_logs():
             log.warning(f"[rotation] {table} failed (non-fatal): {e}")
 
 _rotate_service_logs()
+
+
+# ═══ FO-008 шаг 4a: dept-детекция/промпты и авто-обогащение (из фасада) ═══
+try:
+    from auto_enricher import auto_enrich as _auto_enrich_fn
+    _has_enricher = True
+except Exception as _e:
+    log.warning(f"auto_enricher import failed, rich post-processor disabled: {_e}")
+    _auto_enrich_fn = None
+    _has_enricher = False
+
+
+def auto_enrich(text, dept='yana', accent_color='#6366f1'):
+    """Safe wrapper — returns raw text if enricher unavailable."""
+    if _auto_enrich_fn is None:
+        return text or ''
+    try:
+        return _auto_enrich_fn(text, dept=dept, accent_color=accent_color)
+    except Exception as e:
+        log.warning(f"auto_enrich error: {e}")
+        return text or ''
+
+# ──────────────────────────── DEPT DETECTION ────────────────────────────
+COMMAND_DEPT = {
+    '/yana': 'yana', '/osp': 'osp', '/lz': 'lz', '/expert': 'expert',
+    '/marketing': 'marketing', '/finance': 'finance', '/legal': 'legal',
+    '/dev': 'dev', '/design': 'design', '/design-image': 'design-image', '/qa': 'qa', '/visual': 'visual', '/visual-image': 'visual-image',
+    '/engineering': 'engineering', '/forge': 'kavalnya',
+    '/analyze': 'osp', '/scan': 'lz', '/deep': 'osp',
+    '/quickanalyze': 'osp', '/wargame': 'osp',
+    '/market-research': 'marketing', '/segment': 'marketing',
+    '/competitors': 'marketing', '/campaign': 'marketing',
+    '/calc': 'engineering', '/simulate': 'engineering',
+    '/admin': 'admin',
+    '/project': 'project',
+}
+
+RUSSIAN_KEYWORDS = {
+    'osp': ['проанализируй', 'прогноз', 'стратегия', 'анализ', 'сценари', 'вероятност', 'деconstruct', 'деконстру', 'тополог', 'силовой потенциал', 'препарирован'],
+    'lz': ['технолог', 'монитор', 'тренд', 'прорыв', 'наука', 'исследован', 'обзор', 'что такое', 'как работает', 'лаборатори',
+           'политик', 'экономик', 'геополитик', 'санкци', 'макро', 'режим', 'нарратив', 'событие', 'кризис',
+           'конфликт', 'выбор', 'инфляци', 'рецесси', 'ставк', 'ценн', 'войн', 'мирн', 'дипломат',
+           'cantillon', 'нарратив vs', 'narrative', 'регим', 'цикл', 'kondratieff', 'хайп', 'инфлекци',
+           'осинт', 'osint', 'разведк', 'мониторинг', 'свеж', 'новост', 'событи', 'в мире', 'в рф'],
+    'expert': ['встреч', 'брифинг', 'подготов к', 'эксперт', 'подготовь', 'вопросы для', 'комбат-вопрос', 'подготов',
+              'переговор', 'byd', 'geely', 'chery', 'zeekr', 'lixiang', 'nio', 'xpeng', 'vinfast',
+              'авто', 'автомобиль', 'автопром', 'конкурент', 'соперник',
+              'toyota', 'bmw', 'mercedes', 'vw ', 'volkswagen', 'honda', 'hyundai', 'kia',
+              'платформ', 'ev ', 'электромобиль', 'завод', 'производств', 'сборк', 'локализац',
+              'cto', 'ceo', 'cfo', 'директор', 'руководств', 'встреча с', 'митинг', 'переговоры'],
+    'marketing': ['реклам', 'аудитори', 'конверси', 'маркетинг', 'позицио', 'воронк', 'smm', 'бренд', 'контент', 'сегмент'],
+    'finance': ['бюджет', 'cashflow', 'налог', 'финанс', 'расход', 'доход', 'инвестиц', 'кредит', 'курс валют', 'кассовый разрыв'],
+    'legal': ['договор', 'иск', 'gdpr', 'юридическ', 'nda', 'право', 'суд', 'комплаенс', 'контракт', 'закон'],
+    'dev': ['код', 'архитектур', 'api', 'программ', 'деплой', 'сервер', 'git', 'баг', 'рефактор', 'бэкенд', 'фронтенд'],
+    'design': ['дизайн', 'wireframe', 'макет', 'ui', 'ux', 'интерфейс', 'прототип', 'фиго', 'компонент'],
+    'qa': ['тест', 'баг', 'качеств', 'проверк', 'регресси', 'автотест', 'e2e', 'покрыти'],
+    'visual': ['инфографик', 'визуализац', 'график', 'презентац', 'диаграмм', 'иллюстрац', 'дашборд'],
+    'engineering': ['расчёт', 'нагрузк', 'конструкц', 'инженер', 'снип', 'гидравлик', 'прочност', 'сварк', 'фундамент'],
+    'kavalnya': ['новый отдел', 'полигон', 'методолог', 'создать отдел', 'наряд', 'дефектив', 'assess', 'debrief'],
+    'admin': ['оптимизир', 'почини', 'рефакторинг', 'deploy', 'админ', 'инфраструктур', 'здравствуй', 'перезагруз', 'конфиг'],
+}
+
+# ── Keyword weights for scoring: higher = more specific/less generic ──
+# 'анализ' is generic (weight 1) while 'встреч' is specific (weight 4), 'byd' is very specific (weight 5)
+KEYWORD_WEIGHTS = {
+    'osp': {'проанализируй': 3, 'прогноз': 2, 'стратегия': 2, 'анализ': 1, 'сценари': 2, 'вероятност': 2, 'деconstruct': 3, 'деконстру': 3, 'тополог': 3, 'силовой потенциал': 3, 'препарирован': 2},
+    'lz': {'политик': 3, 'экономик': 3, 'геополитик': 4, 'санкци': 4, 'макро': 3, 'режим': 3, 'нарратив': 3, 'событие': 2, 'кризис': 3,
+           'конфликт': 3, 'инфляци': 3, 'рецесси': 3, 'ставк': 2, 'войн': 3, 'дипломат': 3,
+           'cantillon': 4, 'осинт': 3, 'osint': 3, 'разведк': 3, 'мониторинг': 2, 'свеж': 2, 'новост': 2, 'в мире': 2, 'в рф': 3},
+    'expert': {'встреч': 4, 'встреча с': 5, 'брифинг': 4, 'подготов к': 3, 'эксперт': 3, 'подготовь': 3, 'вопросы для': 3, 'комбат-вопрос': 4, 'подготов': 2,
+              'переговор': 4, 'переговоры': 4, 'byd': 5, 'geely': 5, 'chery': 5, 'zeekr': 5, 'lixiang': 5, 'nio': 5, 'xpeng': 5, 'vinfast': 5,
+              'cto': 4, 'ceo': 4, 'cfo': 4, 'директор': 3, 'авто': 3, 'автомобиль': 3, 'автопром': 4, 'конкурент': 3, 'платформ': 3, 'ev ': 4,
+              'электромобиль': 4, 'завод': 2, 'производств': 2, 'сборк': 2, 'локализац': 3},
+}
+
+def detect_dept(text):
+    text_lower = text.lower().strip()
+    # Phase 1: Explicit command prefix (exact match, no scoring needed)
+    for cmd, dept in sorted(COMMAND_DEPT.items(), key=lambda x: -len(x[0])):
+        if text_lower.startswith(cmd) and (len(text_lower) == len(cmd) or text_lower[len(cmd)] in ' \n/'):
+            return dept
+
+    # Phase 2: Weighted keyword scoring across ALL departments
+    # Each dept scores points for matching keywords; highest score wins.
+    # This fixes the OSP-before-Expert ordering bug where 'анализ' (weight 1)
+    # hijacked queries containing 'встреч' (weight 4) or 'byd' (weight 5).
+    scores = {}
+    for dept, kws in RUSSIAN_KEYWORDS.items():
+        score = 0
+        matched = []
+        weights = KEYWORD_WEIGHTS.get(dept, {})
+        for kw in kws:
+            if kw in text_lower:
+                w = weights.get(kw, 1)  # default weight = 1 for unweighted keywords
+                score += w
+                matched.append(kw)
+        if score > 0:
+            scores[dept] = (score, matched)
+
+    if scores:
+        # Sort by score descending; on tie, prefer expert > osp > others
+        _PRIORITY = {'expert': 0, 'osp': 1, 'lz': 2, 'finance': 3, 'marketing': 4, 'legal': 5,
+                     'dev': 6, 'engineering': 7, 'design': 8, 'qa': 9, 'visual': 10, 'kavalnya': 11, 'admin': 12}
+        best = sorted(scores.items(), key=lambda x: (-x[1][0], _PRIORITY.get(x[0], 99)))[0]
+        best_dept = best[0]
+        best_score = best[1][0]
+        best_keywords = best[1][1]
+        log.info(f"[detect_dept] scored: { {d: s[0] for d, s in scores.items()} } → {best_dept} (score={best_score}, kw={best_keywords})")
+        return best_dept
+
+    return 'yana'
+
+# ──────────────────────────── CONDENSED PROMPTS ────────────────────────────
+CONDENSED_PROMPTS = {
+    'yana': "You are Yana, Chief of Cabinet. Route tasks to departments. Be empathetic, concise. Default language: Russian.",
+    'osp': "You are OSP, Strategic Analysis Dept. Use 5-level topology (Leaves/Branches/Stem/Roots/Fruits). Mark claims [FACT]/[INTERPRETATION]/[SPECULATION]. Sherman Kent scale. Language: Russian.",
+    'lz': "You are LZ, World Intelligence Lab. Monitor tech + politics + economics + geopolitics + events. Structure: Signal->Impact->Opportunity. Cantillon, narrative-vs-flows, macro regime. Cite sources. Language: Russian.",
+    'expert': "You are Expert, Meeting & Negotiation Preparator. Prepare briefings for meetings/interviews/negotiations. Profile counterparty, combat questions, leverage points, BATNA, red flags, decision points. Mark: [ФАКТ] confirmed, [ОЦЕНКА] expert assessment, [РИСК] potential problem. Language: Russian.",
+    'marketing': "You are Marketing. Audience analysis, positioning, campaigns, conversion. Segment personas, A/B logic. ROI-focused. Language: Russian.",
+    'finance': "You are Finance. Budgets, cashflow, taxes, P&L. Precise numbers, scenarios, risk buffers. Tables preferred. Language: Russian.",
+    'legal': "You are Legal. Contracts, compliance, GDPR, NDA, IP. Flag risks, cite articles. Practical actionable advice. Language: Russian.",
+    'dev': "You are Dev. Architecture, APIs, deployment, code review. Modern stack, clean code principles. Code blocks with explanations. Language: Russian.",
+    'design': "You are Design. UI/UX, wireframes, design systems, user flows. Accessibility, mobile-first, consistency. Language: Russian.",
+    'qa': "You are QA. Testing strategies, bug triage, quality metrics. Test cases, regression plans, coverage. Language: Russian.",
+    'visual': "You are Visual. Infographics, data visualization, charts, presentations. Color theory, layout, clarity. Language: Russian.",
+    'engineering': "You are Engineering. Structural calculations, load analysis, SNiP compliance. Safety factors, materials, drawings. Language: Russian.",
+    'kavalnya': "You are Kavalnya. Methodology, department creation, polygon exercises. Frameworks, KPIs, org design. Language: Russian.",
+    'admin': "You are Admin, System Agent. Health checks, config management, system diagnostics. Technical, precise, actionable. Language: Russian.",
+}
+
+FORMAT_INSTRUCTION = """
+
+## ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)
+
+Отвечай РАЗВЁРНУТО (минимум 1000 символов). Структура:
+
+1. Используй секции: "Слой 1 — ...", "Слой 2 — ..." и т.д. (минимум 3 слоя)
+2. Маркируй каждое утверждение значками:
+   - ✓ — подтверждённые данные, цифры, даты (факты)
+   - ◈ — твой анализ и интерпретация на основе фактов
+   - ⚡ — гипотезы, предположения, спекуляция
+3. Завершай секцией "Вердикт" с ключевыми выводами
+4. Если применимо — добавь "Индикаторы для наблюдения"
+5. Язык: русский
+6. Не будь кратким. Препарируй тему глубоко.
+"""
+
+# FORMAT_INSTRUCTION (layered analysis with ✓/◈/⚡) only for expert dept
+# OSP format now comes from deconstruct skill (always loaded via LoadOspSkills in app.mlog)
+_ANALYTICAL_DEPTS = {"expert"}
+
+def get_dept_prompt(dept, combo=None):
+    fmt = FORMAT_INSTRUCTION if dept in _ANALYTICAL_DEPTS else ""
+    if combo and 'free' in combo:
+        return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + fmt
+    try:
+        f = LIB_DIR / f"{dept}.md"
+        if f.exists():
+            return f.read_text(encoding="utf-8") + fmt
+    except Exception as e:
+        log.warning(f"[config] dept prompt file read failed for {dept}: {e}")
+    return CONDENSED_PROMPTS.get(dept, CONDENSED_PROMPTS['yana']) + fmt

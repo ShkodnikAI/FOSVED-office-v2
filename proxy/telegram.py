@@ -4,13 +4,14 @@
 """
 import os
 import re
+import threading
 import json
 import time
 import uuid
 
 import requests as http_requests
 
-from proxy.core import log, TELEGRAM_BOT_TOKEN, http_requests
+from proxy.core import log, _log_error, TELEGRAM_BOT_TOKEN, http_requests
 
 # ── Text formatting helpers for Telegram ────────────────────────────
 
@@ -236,3 +237,30 @@ def _safe_filename_part(s, maxlen=40):
     cleaned = " ".join("".join(out).split())
     cleaned = cleaned.replace(" ", "_")
     return cleaned[:maxlen] or "report"
+
+
+def _send_chat_action_loop(chat_id, action="typing", interval=5):
+    """Send typing/action indicator to Telegram in a loop. Returns a stop event."""
+    stop = threading.Event()
+
+    def _loop():
+        while not stop.is_set():
+            try:
+                _tg_send_chat_action(chat_id, action)
+            except Exception as e:
+                _log_error(f"chat_action send failed for {chat_id}: {e}", source="typing", dept="system", kind="external")
+            stop.wait(interval)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    return stop
+
+def _tg_send_chat_action(chat_id, action):
+    """Send a chat action to Telegram (typing, upload_photo, etc.)."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+    try:
+        http_requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=10)
+    except Exception as e:
+        _log_error(f"sendChatAction failed for {chat_id}: {e}", source="typing", dept="system", kind="external")
