@@ -30,6 +30,7 @@ from proxy.telegram import (
     _safe_filename_part, _send_chat_action_loop,
 )
 from proxy.reports import _evidence_badges_css, html_lib_escape
+from proxy.lz_sources import arxiv_search, hn_search, github_repo_search, lz_api_scan
 from proxy.news import (
     collect_tavily, collect_rss, collect_gdelt, get_fresh_news,
     get_night_news_digest,
@@ -731,6 +732,26 @@ def lz_github_scan():
     repos = _github_search(query, per_page=limit)
     text = "\n".join([f"- {r['name']} ({r['stars']}★, {r['lang']}) — {r['desc']}\n  {r['url']}" for r in repos])
     return jsonify({"repos": repos, "total": len(repos), "text": text})
+
+
+# ── FO-010: /lz/api-scan — детерминированные arXiv/HN/GitHub источники ──
+@app.route("/lz/api-scan", methods=["POST"])
+def lz_api_scan_endpoint():
+    """Детерминированный скан источников (без LLM). LLM — только синтез сверху.
+
+    Body: {"topics": ["solid state batteries", ...], "max_per_source": 6}
+    Метрика скана пишется в FO-004 трейсы (trace_type=lz_api_scan).
+    """
+    d = request.get_json(force=True)
+    topics = d.get("topics") or ([d.get("query", "")] if d.get("query") else [])
+    max_per_source = int(d.get("max_per_source", 6))
+    if not topics or not [t for t in topics if str(t).strip()]:
+        return jsonify({"error": "topics required"}), 400
+    res = lz_api_scan([str(t).strip() for t in topics if str(t).strip()],
+                      max_per_source=max_per_source, dept=d.get("dept", "lz"))
+    return jsonify({"items": res["items"], "text": res["text"], "counts": res["counts"],
+                    "latency_ms": res["latency_ms"], "est_tokens_saved": res["est_tokens_saved"],
+                    "trace_id": res["trace_id"], "total": len(res["items"])})
 
 
 # ── /lz news endpoint ──

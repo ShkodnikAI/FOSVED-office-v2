@@ -562,6 +562,17 @@ pattern ScanGitHub(query: String) -> String {
   return to_string(parsed)
 }
 
+// FO-010: arXiv + HN Algolia + GitHub Search — детерминированные API-источники.
+// Метаданные собираются без LLM; в промпт попадает только компактная выдача.
+pattern ScanApiSources(query: String) -> String {
+  let body = json_encode({query: query, max_per_source: 6})
+  let resp = try http_post("http://127.0.0.1:4000/lz/api-scan", body, "application/json")
+  if to_string(resp) == "()" then { return "[api scan: proxy unavailable]" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "[api scan: parse error]" }
+  return to_string(json_get(parsed, "text", "no results"))
+}
+
 // YouTube: via web search with site:youtube.com
 pattern ScanYouTube(query: String) -> String {
   let yq = query + " site:youtube.com"
@@ -626,7 +637,7 @@ pattern LZDeepScan(query: String, chat_id: String) -> String {
   let skills = LoadLZSkills(query, domain)
   // Parallel multi-source scan
   let web = ScanWeb(query)
-  let science = ScanScience(query)
+  let science = ScanApiSources(query)
   let github = ScanGitHub(query)
   let yt = ScanYouTube(query)
   // Synthesize
@@ -641,13 +652,13 @@ pattern LZAllScan(query: String, chat_id: String) -> String {
   let web = ScanWeb(query)
   let yt = ScanYouTube(query)
   let reddit = ScanReddit(query)
-  let science = ScanScience(query)
+  let science = ScanApiSources(query)
   let github = ScanGitHub(query)
   let social = ScanSocial(query)
   let tg = ScanTelegram(query)
   let result = try call_llm("ALL-SOURCE synthesis for: " + query + "\n\nWeb: " + web + "\nYouTube: " + yt + "\nReddit: " + reddit + "\nScience: " + science + "\nGitHub: " + github + "\nSocial: " + social + "\nTelegram: " + tg + "\n\nComprehensive multi-source intelligence assessment.")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["all", "web,youtube,reddit,science,github,social,telegram"])
+  db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["all", "web,youtube,reddit,arxiv+hn+github-api,github,social,telegram"])
   return result
 }
 
