@@ -138,7 +138,7 @@ Web, YouTube, Reddit, Science, GitHub, Social, Telegram, Darknet, Academic — �
 ```
 .
 ├── app.mlog                  # Главный роутер (2575 строк, 68 команд)
-├── bin/mlog                  # Metalogos v0.12.0 бинарник (x86-64, Rust)
+├── bin/mlog                  # Metalogos v0.19.0 бинарник (x86-64, Rust)
 ├── llm_proxy.py              # LLM-прокси + API + SPA-сервер (5456 строк)
 ├── reverse_proxy.py          # Маршрутизатор запросов (151 строк)
 ├── entrypoint.sh             # Docker-запуск (3 процесса)
@@ -219,7 +219,7 @@ docker run -p 10000:10000 --env-file .env fosved
 
 | Компонент | Технология |
 |---|---|
-| Ядро | Metalogos v0.12.0 (Rust DSL, 246 встроенных функций, PDF, typed memory) |
+| Ядро | Metalogos v0.19.0 (Rust DSL, встроенные функции, PDF, typed memory, reflex, mlogpkg) |
 | Прокси-слой | Python 3.12 + Flask |
 | База данных | SQLite |
 | Голос STT | Whisper (Groq/OpenAI) |
@@ -257,6 +257,21 @@ python3 scripts/backup_db.py restore --latest# восстановить из п�
 python3 scripts/backup_db.py list            # список бэкапов
 python3 scripts/backup_db.py check           # проверка целостности
 ```
+
+## Версии компонентов
+
+| Компонент | Версия | Источник истины |
+|---|---|---|
+| Metalogos (bin/mlog) | 0.19.0 | `bin/mlog --version` |
+| Metalogos grammar rev | 1 | `bin/mlog --version` |
+| Python | 3.12 | Dockerfile `python3` |
+| Flask | ≥3.0 | `requirements.txt` |
+| SQLite | системная | ubuntu:24.04 |
+| Docker base | ubuntu:24.04 | Dockerfile `FROM` |
+| Node.js | системная | ubuntu:24.04 `npm` |
+| edge-tts | ≥6.1 | `requirements.txt` |
+
+> **Правило**: версия в Dockerfile-комменте и README всегда равна `bin/mlog --version`. CI-чек (FO-002) не даёт дрейфу вернуться.
 
 ## Качество
 
