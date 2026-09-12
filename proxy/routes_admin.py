@@ -1092,6 +1092,106 @@ def admin_ua_tour():
 
 MINIAPP_DIR = BASE_DIR / "miniapp"
 
+# ═══ FO-011: телеметрия офиса для Mini App (issue #71) ═══════════════════
+_TELEMETRY_CACHE = {"ts": 0.0, "data": None}
+_TELEMETRY_TTL = 60  # секунд — кэш по наряду
+
+
+def _telemetry_traces_stats(days=7):
+    """Агрегаты FO-004-трейсов: latency и доля ошибок провайдеров."""
+    traces_dir = Path(DB_PATH) / "traces"
+    latencies, ok_cnt, fail_cnt = [], 0, 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    try:
+        if traces_dir.is_dir():
+            for f in sorted(traces_dir.glob("llm_*.jsonl")):
+                day = f.name[4:14]
+                if day < cutoff:
+                    continue
+                with open(f, encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        if rec.get("is_internal"):
+                            continue
+                        lat = rec.get("latency_ms")
+                        if isinstance(lat, (int, float)):
+                            latencies.append(lat)
+                        if rec.get("ok") is True:
+                            ok_cnt += 1
+                        elif rec.get("ok") is False:
+                            fail_cnt += 1
+    except Exception as e:
+        _log_error(f"telemetry trace read failed: {e}", source="telemetry", kind="data_loss")
+    latencies.sort()
+    def _pct(p):
+        if not latencies:
+            return None
+        i = min(len(latencies) - 1, int(round(p / 100 * (len(latencies) - 1))))
+        return round(latencies[i])
+    total = ok_cnt + fail_cnt
+    return {
+        "avg_ms": round(sum(latencies) / len(latencies)) if latencies else None,
+        "p50_ms": _pct(50), "p95_ms": _pct(95),
+        "ok_calls": ok_cnt, "failed_calls": fail_cnt,
+        "fail_pct": round(fail_cnt * 100.0 / total, 1) if total else None,
+        "calls_total": total,
+    }
+
+
+@app.get("/api/telemetry")
+def api_telemetry():
+    """Телеметрия офиса: token economics, latency, fallback, golden-тренд.
+
+    Кэш 60 секунд (по наряду). Рендер — на клиенте (inline SVG, без CDN).
+    """
+    import time as _time
+    now_ts = _time.monotonic()
+    if _TELEMETRY_CACHE["data"] and now_ts - _TELEMETRY_CACHE["ts"] < _TELEMETRY_TTL:
+        return jsonify(_TELEMETRY_CACHE["data"])
+
+    days = 7
+    by_day = _query(
+        "SELECT date(created_at) AS d, SUM(CAST(input_tokens AS INTEGER)) AS tin, "
+        "SUM(CAST(output_tokens AS INTEGER)) AS tout, SUM(CAST(cost_usd AS REAL)) AS cost "
+        "FROM token_usage WHERE created_at >= datetime('now', ?) "
+        "GROUP BY d ORDER BY d", (f"-{days} days",), fetch=True) or []
+    by_dept = _query(
+        "SELECT dept, SUM(CAST(input_tokens AS INTEGER) + CAST(output_tokens AS INTEGER)) AS tokens, "
+        "SUM(CAST(cost_usd AS REAL)) AS cost, COUNT(*) AS calls "
+        "FROM token_usage WHERE created_at >= datetime('now', ?) "
+        "GROUP BY dept ORDER BY tokens DESC LIMIT 10", (f"-{days} days",), fetch=True) or []
+    combos = _query(
+        "SELECT COALESCE(NULLIF(combo, ''), 'direct') AS combo, COUNT(*) AS c "
+        "FROM token_usage WHERE created_at >= datetime('now', ?) GROUP BY combo ORDER BY c DESC",
+        (f"-{days} days",), fetch=True) or []
+    golden = _query(
+        "SELECT date(created_at) AS d, ROUND(AVG(CAST(metric_value AS REAL)), 3) AS avg_score "
+        "FROM dept_metrics WHERE metric_name = 'golden_eval_avg' "
+        "AND created_at >= datetime('now', '-14 days') GROUP BY d ORDER BY d", fetch=True) or []
+
+    total_tokens = sum((r["tokens"] or 0) for r in by_dept)
+    total_cost = sum((r["cost"] or 0.0) for r in by_dept)
+    data = {
+        "window_days": days,
+        "tokens_by_day": [{"day": r["d"], "tokens": (r["tin"] or 0) + (r["tout"] or 0),
+                           "input": r["tin"] or 0, "output": r["tout"] or 0,
+                           "cost": round(r["cost"] or 0, 4)} for r in by_day],
+        "tokens_by_dept": [{"dept": r["dept"], "tokens": r["tokens"] or 0,
+                            "cost": round(r["cost"] or 0, 4), "calls": r["calls"] or 0} for r in by_dept],
+        "combos": [{"combo": r["combo"], "count": r["c"]} for r in combos],
+        "latency": _telemetry_traces_stats(days),
+        "golden_trend": [{"day": r["d"], "avg": r["avg_score"]} for r in golden],
+        "totals": {"tokens": total_tokens, "cost": round(total_cost, 4)},
+        "cache_ttl": _TELEMETRY_TTL,
+    }
+    _TELEMETRY_CACHE["ts"] = now_ts
+    _TELEMETRY_CACHE["data"] = data
+    return jsonify(data)
+
+
 @app.get("/miniapp")
 @require_telegram
 def miniapp_redirect():
