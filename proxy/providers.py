@@ -366,8 +366,8 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
         try:
             from proxy.departments import model_for
             model_override = model_for(dept)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"[departments] model_for({dept}) failed, combo as usual: {e}")
 
     # 2. If model_override is set, do direct single-provider call
     if model_override:

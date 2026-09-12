@@ -51,10 +51,10 @@ def _parse_scalar(raw):
         return [v.strip().strip("'\"") for v in inner.split(",")] if inner else []
     if raw.lower() in ("true", "false"):
         return raw.lower() == "true"
-    try:
-        return float(raw) if "." in raw else int(raw)
-    except ValueError:
-        pass
+    if re.fullmatch(r"-?\d+\.\d+", raw):
+        return float(raw)
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
     return raw.strip("'\"")
 
 
