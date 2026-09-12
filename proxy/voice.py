@@ -3,6 +3,7 @@
 Вырезано из llm_proxy.py вербатим (стренглер, шаг 2; наряд #68, стоп-гейт SG-F2).
 """
 import os
+import re
 import json
 import time
 import uuid
@@ -20,7 +21,8 @@ from proxy.core import (
     WHISPER_API_KEY,
     WHISPER_PROVIDER,
 )
-from proxy.telegram import _tg_send_voice, _tg_get_file, _tg_download_file
+from proxy.providers import call_llm
+from proxy.telegram import _tg_send_voice, _tg_get_file, _tg_download_file, _ALL_EMOJI
 
 def _clean_text_for_tts(text):
     """Strip emoji, Markdown syntax, special chars for clean edge-tts voice output.
@@ -53,11 +55,15 @@ def tts_endpoint():
     text = d.get("text", "")
     voice = d.get("voice", "ru-RU-SvetlanaNeural")
     chat_id = d.get("chat_id", "")
+    speech = bool(d.get("speech", False))  # FO-0111/013 фаза 3: voice-render
 
     if not text:
         return jsonify({"status": "error", "message": "text is required"}), 400
     if not chat_id:
         return jsonify({"status": "error", "message": "chat_id is required"}), 400
+
+    if speech:
+        text = voice_render(text)
 
     timestamp = int(time.time())
     tmp_path = f"/tmp/tts_{timestamp}_{uuid.uuid4().hex[:6]}.mp3"
@@ -180,3 +186,29 @@ def stt_endpoint():
 
         _log_audit("stt_error", {"error": str(e)[:500], "file_id": file_id})
         return jsonify({"status": "error", "message": str(e)}), 500
+
+def voice_render(text):
+    """FO-013 фаза 3 (Astra-паттерн): переписать отчёт в устную речь лёгким LLM-вызовом.
+
+    Паттерн astra_analysis.md: не вычитание символов (clean), а пересказ устной
+    формой отдельным дешёвым вызовом. Провал LLM → деградация к чистому тексту.
+    """
+    base = _clean_text_for_tts(text)
+    try:
+        result = call_llm(
+            "yana",
+            [{"role": "system",
+              "content": "Ты готовишь текст для озвучки. Перескажи его устной речью: "
+                         "короткие фразы, без markdown, без эмодзи, без маркеров (✓/◈/⚡), "
+                         "числа словами-цифрами как в дикторе. Сохрани все факты и цифры. "
+                         "Только сам текст озвучки."},
+             {"role": "user", "content": text[:6000]}],
+            command="voice_confirm",
+        )
+        reply = (result or {}).get("reply") or ""
+        if reply and "[Oshibka]" not in reply and len(reply) >= 80:
+            return _clean_text_for_tts(reply)[:3500]
+        log.warning(f"voice_render weak reply (len={len(reply)}) — fallback to clean text")
+    except Exception as e:
+        log.warning(f"voice_render failed — fallback to clean text: {e}")
+    return base
