@@ -80,6 +80,16 @@ from proxy.review import (
     notify_queue_overflow_if_needed, REVIEW_SOURCES, REVIEW_DECISIONS,
 )
 
+# ── FO-015: Guardian permission-matrix — двойной контур прав департаментов ───
+from proxy.guardian import (  # noqa: F401
+    check as guardian_check, enforce as guardian_enforce,
+    visible_tools as guardian_visible_tools, GuardianDenied,
+    add_rule as guardian_add_rule, remove_rule as guardian_remove_rule,
+    approve_session as guardian_approve_session, reset_session as guardian_reset_session,
+    shell_permission as guardian_shell_permission,
+    ensure_guardian_schema, seed_from_base as guardian_seed_from_base,
+)
+
 
 
 
