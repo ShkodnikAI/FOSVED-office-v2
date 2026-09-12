@@ -51,6 +51,25 @@ class FosvedMemory:
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self._ensure_tables()
+        self._migrate_review_columns()
+
+    def _migrate_review_columns(self):
+        """FO-020: inference-review колонки для уже существующих БД.
+        Новые БД получают их в CREATE; старые — ALTER (expected-if-exists)."""
+        for col_sql in (
+            'ALTER TABLE typed_memories ADD COLUMN inference INTEGER DEFAULT 0',
+            "ALTER TABLE typed_memories ADD COLUMN review_status TEXT DEFAULT 'approved'",
+            'ALTER TABLE typed_memories ADD COLUMN parent_count INTEGER DEFAULT 1',
+        ):
+            try:
+                self.db.execute(col_sql)
+                self.db.commit()
+            except sqlite3.OperationalError:
+                pass  # колонка уже существует — ожидаемо
+
+    # FO-020: вес выдачи по статусу ревью. Невыверенное (pending) — 0.5,
+    # одобренное/legacy — 1.0; declined исключается на уровне SQL.
+    REVIEW_WEIGHTS = {'approved': 1.0, 'pending': 0.5, 'declined': 0.0}
 
     def _ensure_tables(self):
         """Create tables if they don't exist."""
@@ -156,6 +175,9 @@ class FosvedMemory:
         if not include_superseded:
             sql += ' AND superseded_by IS NULL'
 
+        # FO-020: declined — soft-delete, из выдачи исключается
+        sql += " AND (review_status IS NULL OR review_status != 'declined')"
+
         if type_filter:
             sql += ' AND type = ?'
             params.append(type_filter)
@@ -174,6 +196,9 @@ class FosvedMemory:
         now = time.time()
         for m in results:
             m['relevance'] = self._relevance_score(m, query, now)
+            # FO-020: невыверенное (pending) понижено в весе выдачи
+            rs = m.get('review_status') or 'approved'
+            m['relevance'] *= self.REVIEW_WEIGHTS.get(rs, 1.0)
 
         # Sort by relevance descending
         results.sort(key=lambda x: x['relevance'], reverse=True)

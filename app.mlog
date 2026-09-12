@@ -332,6 +332,53 @@ pattern SendTyping(chat_id: String) -> String {
   return result
 }
 
+// ── FO-020: карточка review-очереди (inference review, наряд #86) ──
+// /review → топ-8 невыверенного (parent_count DESC) с кнопками
+// approve/decline/undo; решения через /review/decide, всё в audit_log.
+pattern JsonEscapeText(s: String) -> String {
+  let r = replace(s, "\\", "/")
+  let r = replace(r, "\"", "'")
+  let r = replace(r, "\n", "\\n")
+  return r
+}
+
+pattern ReviewQueueCard(chat_id: String) -> String {
+  let body = json_encode({limit: 8.0})
+  let resp = try http_post("http://127.0.0.1:4000/review/queue", body, "application/json", 5.0)
+  if to_string(resp) == "()" then {
+    let _ = SendTelegramReply(chat_id, "Review-очередь недоступна (proxy не отвечает).")
+    return ""
+  }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then {
+    let _ = SendTelegramReply(chat_id, "Review-очередь: ошибка разбора ответа.")
+    return ""
+  }
+  let depth = to_string(json_get(parsed, "depth", "0"))
+  let items = json_get(parsed, "items", "[]")
+  let count = to_float(json_get(parsed, "count", "0"))
+  if count == 0.0 then {
+    let _ = SendTelegramReply(chat_id, "🔍 Review-очередь пуста — всё выведенное подтверждено (глубина: " + depth + ").")
+    return "ok"
+  }
+  let mut text = "🔍 Review-очередь (" + depth + " невыверенных, топ по числу источников):\n\n"
+  let mut kb = ""
+  each it in items {
+    let sid = to_string(json_get(it, "source", ""))
+    let iid = to_string(json_get(it, "id", ""))
+    let pc = to_string(json_get(it, "parent_count", "1"))
+    let content = to_string(json_get(it, "content", ""))
+    let text = text + "• [" + sid + "#" + iid + " x" + pc + "] " + substring(content, 0.0, 140.0) + "\n"
+    let kb = kb + "[{text: \"ОК\", callback_data: \"rv_approve_" + sid + "_" + iid + "\"},{text: \"NO\", callback_data: \"rv_decline_" + sid + "_" + iid + "\"},{text: \"UNDO\", callback_data: \"rv_undo_" + sid + "_" + iid + "\"}],"
+  }
+  if length(kb) > 0.0 then { let kb = substring(kb, 0.0, length(kb) - 1.0) }
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let text_esc = JsonEscapeText(text)
+  let body2 = "{\"chat_id\": " + to_string(to_float(chat_id)) + ", \"text\": \"" + text_esc + "\", \"reply_markup\": {\"inline_keyboard\": [" + kb + "]}}"
+  let _ = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body2, "application/json")
+  return "ok"
+}
+
 pattern CallLLMProxy(dept: String, messages: String) -> String {
   let body = json_encode({dept: dept, messages: parse_json(messages)})
   let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
@@ -2460,6 +2507,39 @@ mlogserver {
         let _ = AuditLog("naryad_done", "admin", "completed naryad: " + narad_id)
         let _ = SendTelegramReply(cb_chat_id, "Наряд " + narad_id + " выполнен.")
       }
+      // FO-020: review-очередь выведенного (approve/decline/undo)
+      // callback_data: rv_<decision>_<source>_<id>, напр. rv_approve_fact_12
+      if starts_with(cb_data, "rv_approve_") or starts_with(cb_data, "rv_decline_") or starts_with(cb_data, "rv_undo_") then {
+        let mut decision = "approve"
+        if starts_with(cb_data, "rv_decline_") then { let decision = "decline" }
+        if starts_with(cb_data, "rv_undo_") then { let decision = "undo" }
+        let mut target = ""
+        if starts_with(cb_data, "rv_approve_") then { let target = substring(cb_data, 11.0, length(cb_data)) }
+        if starts_with(cb_data, "rv_decline_") then { let target = substring(cb_data, 11.0, length(cb_data)) }
+        if starts_with(cb_data, "rv_undo_") then { let target = substring(cb_data, 8.0, length(cb_data)) }
+        let uscore = index_of(target, "_")
+        if uscore > 0.0 then {
+          let src = substring(target, 0.0, uscore)
+          let iid = substring(target, uscore + 1.0, length(target))
+          let body = json_encode({item_id: to_float(iid), source: src, decision: decision})
+          let resp = try http_post("http://127.0.0.1:4000/review/decide", body, "application/json")
+          let _ = AuditLog("review_" + decision, "owner", "review " + target)
+          if to_string(resp) == "()" then {
+            let _ = SendTelegramReply(cb_chat_id, "Ревью не применено — proxy недоступен.")
+          } else {
+            if decision == "approve" then {
+              let _ = SendTelegramReply(cb_chat_id, "✅ Вывод " + target + " одобрен — полный вес в выдаче.")
+            }
+            if decision == "decline" then {
+              let _ = SendTelegramReply(cb_chat_id, "❌ Вывод " + target + " отклонён (soft-delete, из выдачи убран).")
+            }
+            if decision == "undo" then {
+              let _ = SendTelegramReply(cb_chat_id, "↩️ Вывод " + target + " возвращён в очередь.")
+            }
+          }
+        }
+        return respond("200 ok")
+      }
       // Handle cost-dept callback
       if starts_with(cb_data, "cost_") then {
         let cost_dept = substring(cb_data, 5.0, length(cb_data))
@@ -2715,12 +2795,8 @@ mlogserver {
 
     // /review
     if text == "/review" then {
-      let result = try WeeklyDigest()
-      if to_string(result) == "()" then {
-        let _ = SendTelegramReply(chat_id, "Weekly digest error — check logs.")
-      } else {
-        let _ = SendTelegramReply(chat_id, "Weekly review sent.")
-      }
+      // FO-020: review-очередь выведенного — approve/decline/undo кнопками
+      let _ = ReviewQueueCard(chat_id)
       return respond("200 ok")
     }
 

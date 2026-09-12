@@ -53,6 +53,13 @@ from proxy.owner_profile import (  # FO-019: профиль владельца s
     get_owner_profile as profile_get_owner_profile,
     rebuild_owner_profile as profile_rebuild_owner_profile,
 )
+from proxy.review import (  # FO-020: review-очередь выведенного
+    get_review_queue as review_get_queue,
+    decide_review as review_decide,
+    queue_depth as review_queue_depth,
+    notify_queue_overflow_if_needed as review_notify_overflow,
+    REVIEW_SOURCES, REVIEW_DECISIONS,
+)
 from proxy.telegram import (
     _MARKER_EMOJI, _ALL_EMOJI, _escape_mdv2, _tg_send_formatted,
     _tg_send_message, _tg_send_voice, _tg_send_report_with_button,
@@ -435,6 +442,37 @@ def profile_rebuild_endpoint():
     return jsonify(res)
 
 
+# ── FO-020: review-очередь выведенного (inference review, issue #86) ──────
+@app.route("/review/queue", methods=["GET", "POST"])
+def review_queue_endpoint():
+    """Очередь невыверенного: parent_count DESC (сильнейший сигнал сверху).
+    mlog: POST {} → карточки для /review."""
+    if request.method == "POST":
+        d = request.get_json(silent=True) or {}
+    else:
+        d = request.args
+    src = d.get("source") or None
+    if src and src not in REVIEW_SOURCES:
+        return jsonify({"error": f"unknown source: {src}"}), 400
+    items = review_get_queue(limit=int(d.get("limit", 50) or 50), source=src)
+    return jsonify({"items": items, "count": len(items), "depth": review_queue_depth()})
+
+
+@app.route("/review/decide", methods=["POST"])
+def review_decide_endpoint():
+    """Решение ревью: approve | decline (+reason) | undo."""
+    d = request.get_json(force=True) or {}
+    try:
+        res = review_decide(d.get("item_id"), d.get("source"),
+                            d.get("decision"), reason=d.get("reason"),
+                            actor=d.get("actor", "owner"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except LookupError as e:
+        return jsonify({"error": str(e)}), 404
+    return jsonify(res)
+
+
 # ── FO-006: ночная консолидация памяти (mem0-паттерн, issue #66) ─────────
 # dialog_history остаётся append-only журналом; факты живут в facts и
 # становятся первичным источником утреннего контекста.
@@ -537,12 +575,15 @@ def _consolidate_dept_day(dept, day):
     created = updated = deleted = noop = 0
     source_ids = json.dumps([r["id"] for r in rows])
     now = datetime.utcnow().isoformat()
+    # FO-020: консолидация — выведенное знание: inference, pending,
+    # parent_count = число диалогов-источников
+    parent_count = len(json.loads(source_ids))
 
     def _insert_fact(content, confidence):
         _query(
-            "INSERT INTO facts (dept, chat_id, content, status, source_dialog_ids, confidence, created_at, updated_at) "
-            "VALUES (?, '0', ?, 'active', ?, ?, ?, ?)",
-            (dept, str(content)[:500], source_ids, max(0.0, min(1.0, float(confidence))), now, now))
+            "INSERT INTO facts (dept, chat_id, content, status, source_dialog_ids, confidence, created_at, updated_at, inference, review_status, parent_count) "
+            "VALUES (?, '0', ?, 'active', ?, ?, ?, ?, 1, 'pending', ?)",
+            (dept, str(content)[:500], source_ids, max(0.0, min(1.0, float(confidence))), now, now, parent_count))
 
     for op in parsed["ops"][:_FACTS_MAX_OPS]:
         if not isinstance(op, dict):
@@ -674,8 +715,15 @@ def cron_consolidate_memory():
             _log_error(f"owner_profile nightly rebuild failed: {e}",
                        source="owner_profile", kind="run")
             profile_status = {"status": "error", "error": str(e)[:200]}
+    # FO-020: очередь ревью выросла? — уведомление владельцу (после консолидации)
+    review_overflow = None
+    try:
+        review_overflow = review_notify_overflow()
+    except Exception as e:
+        _log_error(f"review overflow notify failed: {e}", source="review", kind="run")
     return jsonify({"status": "ok", "totals": totals, "backup": backup_status,
-                    "results": results, "owner_profile": profile_status})
+                    "results": results, "owner_profile": profile_status,
+                    "review_overflow": review_overflow})
 
 
 # ── FO-005: golden-set eval-регрессий по департаментам (issue #65) ───────

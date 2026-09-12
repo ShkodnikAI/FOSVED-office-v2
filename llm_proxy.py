@@ -74,6 +74,12 @@ from proxy.owner_profile import (
     ensure_profile_schema, current_version as profile_current_version,
 )
 
+# ── FO-020: review-очередь выведенного — approve/decline/undo ────────────────
+from proxy.review import (
+    get_review_queue, decide_review, queue_depth as review_queue_depth,
+    notify_queue_overflow_if_needed, REVIEW_SOURCES, REVIEW_DECISIONS,
+)
+
 
 
 
