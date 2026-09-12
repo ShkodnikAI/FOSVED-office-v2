@@ -2,9 +2,7 @@
 echo "=== Fosved Office v2 Starting ==="
 export DATABASE_URL="${DATABASE_URL:-sqlite:${DATABASE_PATH:-./data}/fosved.db}"
 
-# GRAPH-1 hotfix: mlog 0.18.0 blocks env() reaching respond() as [SECRET_LEAK]
-# (new Category A check, no allowlist for known-safe vars). /version route now
-# reads this file instead of env("RENDER_GIT_COMMIT") directly.
+# Metalogos 0.19.0: VERSION file written from RENDER_GIT_COMMIT for /version route.
 echo "${RENDER_GIT_COMMIT:-unknown}" > VERSION
 echo "--- VERSION file updated: $(cat VERSION) ---"
 
@@ -23,12 +21,30 @@ else
   echo "dept/yana.mlog: clean (no anti-format)"
 fi
 
-if [ ! -f data/memory.db ]; then
-  echo "--- Seeding FosvedMemory ---"
-  python3 scripts/seed_memory.py data/memory.db
+# ── DB Restore check (FO-001) ──────────────────────────────────────────────
+# If main DB is missing or corrupt, try to restore from latest backup.
+DB_DIR="${DATABASE_PATH:-./data}"
+DB_FILE="${DB_DIR}/fosved.db"
+if [ ! -f "$DB_FILE" ] || ! python3 -c "import sqlite3; c=sqlite3.connect('$DB_FILE'); c.execute('PRAGMA integrity_check').fetchone(); c.close()" 2>/dev/null; then
+  echo "--- DB missing or corrupt — attempting restore from backup ---"
+  if [ -d "${DB_DIR}/backups" ]; then
+    python3 scripts/backup_db.py restore --latest 2>&1
+  else
+    echo "WARNING: No backup directory found. Starting with empty DB."
+  fi
 fi
 
-python3 scripts/migrate_schema.py "${DATABASE_PATH:-./data}/fosved.db"
+if [ ! -f data/memory.db ]; then
+  echo "--- Seeding FosvedMemory ---"
+  python3 scripts/seed_memory.py data/memory.db 2>/dev/null || echo "seed_memory.py not found — memory.db will be created on first use"
+fi
+
+python3 scripts/migrate_schema.py "${DATABASE_PATH:-./data}/fosved.db" 2>/dev/null || echo "migrate_schema.py not found — skipping schema migration"
+
+# ── Startup backup (FO-001) ─────────────────────────────────────────────────
+# Create a backup at startup so we always have a recent snapshot.
+echo "--- Startup backup ---"
+python3 scripts/backup_db.py backup 2>&1 | tail -5
 
 # 0. Prisma migrate deploy (PostgreSQL OSP schema)
 if echo "$DATABASE_URL" | grep -q "^postgres"; then

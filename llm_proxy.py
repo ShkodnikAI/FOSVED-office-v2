@@ -5347,6 +5347,29 @@ def cron_collect_news():
     return jsonify({"rss": rss_count, "gdelt": gdelt_count, "tavily": tavily_count, "enriched": enrich_count, "total": rss_count + gdelt_count + tavily_count})
 
 
+# ── FO-001: Nightly DB backup ──
+@app.route("/cron/backup", methods=["GET"])
+def cron_backup():
+    """Nightly backup cron: VACUUM INTO + integrity check + retention."""
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    import subprocess
+    upload = request.args.get("upload", "0") == "1"
+    cmd = [sys.executable, "scripts/backup_db.py", "backup"]
+    if upload:
+        cmd.append("--upload")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                                env={**os.environ, "DATABASE_PATH": os.environ.get("DATABASE_PATH", "./data")})
+        ok = result.returncode == 0
+        _log_audit("db_backup", {"ok": ok, "output": result.stdout[-500:] if result.stdout else ""}, "system")
+        return jsonify({"ok": ok, "output": result.stdout[-500:] if result.stdout else result.stderr[-500:]})
+    except Exception as e:
+        _log_audit("db_backup_error", {"error": str(e)[:500]}, "system")
+        return jsonify({"ok": False, "error": str(e)[:500]}), 500
+
+
 # ── Fresh news for mlog BuildContext ──
 @app.route("/news/fresh", methods=["POST"])
 def news_fresh():
