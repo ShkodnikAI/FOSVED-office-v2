@@ -13,6 +13,20 @@ from datetime import datetime, timezone
 from proxy.core import _query, _log_error
 
 
+def parent_count_for(node):
+    """FO-020: число различных file_path в истории узла — сколько источников
+    поддерживают вывод. Используется kg_scan_rebuild при вставке."""
+    try:
+        rows = _query(
+            "SELECT COUNT(DISTINCT file_path) AS n FROM knowledge_graph "
+            "WHERE node_type = ? AND node_name = ?",
+            (node.get("node_type"), node.get("node_name")), fetch=True)
+        return max(int(rows[0]["n"]) if rows else 1, 1)
+    except Exception as e:
+        _log_error(f"kg parent_count failed: {e}", source="kg", kind="db_read")
+        return 1
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -56,7 +70,8 @@ def kg_history(node_type=None, node_name=None, limit=200):
 
 
 def kg_upsert(node_type, node_name, file_path, description, source="python",
-              source_part_id=None):
+              source_part_id=None, inference=0, review_status="approved",
+              parent_count=1):
     """Вставить/обновить факт. Возврат: (node_id, action) action ∈ new|updated|noop.
 
     - Активного узла ключа нет → новая версия (new).
@@ -95,10 +110,11 @@ def kg_upsert(node_type, node_name, file_path, description, source="python",
         closed_ids = [r["id"] for r in active]
 
     _query(
-        "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at, valid_from, valid_to, source_part_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+        "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at, valid_from, valid_to, source_part_id, inference, review_status, parent_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)",
         (node_type, node_name, file_path, description, now, now,
-         str(source_part_id) if source_part_id is not None else None))
+         str(source_part_id) if source_part_id is not None else None,
+         int(inference), review_status, int(parent_count)))
     row = _query("SELECT id FROM knowledge_graph WHERE node_type = ? AND node_name = ? AND valid_from = ? ORDER BY id DESC LIMIT 1",
                  (node_type, node_name, now), fetch=True)
     new_id = row[0]["id"] if row else None
@@ -135,7 +151,9 @@ def kg_scan_rebuild(nodes, source="scan"):
             noop += 1
             continue
         node_id, action = kg_upsert(n.get("node_type"), n.get("node_name"),
-                                    n.get("file_path"), n.get("description"), source=source)
+                                    n.get("file_path"), n.get("description"), source=source,
+                                    inference=1, review_status="pending",
+                                    parent_count=parent_count_for(n))
         if action == "new":
             inserted += 1
         elif action == "updated":

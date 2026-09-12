@@ -404,6 +404,14 @@ def init_db():
             ("ALTER TABLE knowledge_graph ADD COLUMN superseded_by INTEGER", "superseded_by"),
             # FO-017: связь узла графа с Part-репликой (прослеживаемость факта)
             ("ALTER TABLE knowledge_graph ADD COLUMN source_part_id TEXT", "source_part_id"),
+            # FO-020: inference-review — выведенное понижено в весе до ревью
+            ("ALTER TABLE facts ADD COLUMN inference INTEGER DEFAULT 0", "inference"),
+            ("ALTER TABLE facts ADD COLUMN review_status TEXT DEFAULT 'approved'", "review_status"),
+            ("ALTER TABLE facts ADD COLUMN parent_count INTEGER DEFAULT 1", "parent_count"),
+            ("ALTER TABLE facts ADD COLUMN decline_reason TEXT", "decline_reason"),
+            ("ALTER TABLE knowledge_graph ADD COLUMN inference INTEGER DEFAULT 0", "inference"),
+            ("ALTER TABLE knowledge_graph ADD COLUMN review_status TEXT DEFAULT 'approved'", "review_status"),
+            ("ALTER TABLE knowledge_graph ADD COLUMN parent_count INTEGER DEFAULT 1", "parent_count"),
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
             ("ALTER TABLE token_usage ADD COLUMN combo TEXT DEFAULT ''", "combo"),
             ("ALTER TABLE miniapp_responses ADD COLUMN archived INTEGER DEFAULT 0", "archived"),
