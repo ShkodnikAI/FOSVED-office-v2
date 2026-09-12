@@ -98,8 +98,8 @@ def _tg_send_formatted(chat_id, text, dept=None):
     return _tg_send_message(chat_id, text)
 
 # ──────────────────────────── TELEGRAM HELPERS ────────────────────────────
-def _tg_send_message(chat_id, text, parse_mode=None):
-    """Send a text message via Telegram Bot API."""
+def _tg_send_message(chat_id, text, parse_mode=None, reply_markup=None):
+    """Send a text message via Telegram Bot API. FO-015: reply_markup для inline-кнопок Guardian."""
     if not TELEGRAM_BOT_TOKEN:
         log.warning("TELEGRAM_BOT_TOKEN not set, cannot send message")
         return None
@@ -107,6 +107,8 @@ def _tg_send_message(chat_id, text, parse_mode=None):
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         resp = http_requests.post(url, json=payload, timeout=30)
         resp.raise_for_status()

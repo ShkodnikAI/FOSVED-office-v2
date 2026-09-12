@@ -1283,14 +1283,30 @@ CALL_PYTHON_ALLOWED = {
 @app.post("/call-python")
 def call_python_endpoint():
     """Universal Python bridge for mlog. Executes module.function(args) with strict whitelist.
-    Body: {"module": "statistics", "function": "mean", "args": [[1,2,3,4,5]], "kwargs": {}}
+    Body: {"module": "statistics", "function": "mean", "args": [[1,2,3,4,5]], "kwargs": {}, "dept": "dev"}
     Returns: {"result": <value>, "type": <python type name>}
+    FO-015 Guardian: второй контур — право py_<module>_<function> проверяется матрицей
+    до исполнения (deny/ask гасят вызов независимо от whitelist-уровня).
     """
     d = request.get_json(force=True) or {}
     module_name = d.get('module', '')
     func_name = d.get('function', '')
     args = d.get('args', [])
     kwargs = d.get('kwargs', {})
+    dept = d.get('dept', 'system')
+
+    # FO-015: Guardian permission-matrix (второй контур)
+    try:
+        from proxy.guardian import enforce, GuardianDenied, shell_permission
+        permission = f"py_{module_name}_{func_name}"
+        if module_name == "os" and func_name == "system":
+            permission = shell_permission(str(args[0]) if args else "shell_empty")
+        enforce(dept, permission, chat_id=d.get('chat_id'))
+    except GuardianDenied as gd:
+        _log_audit("call_python_guardian_denied", {"module": module_name, "function": func_name, "dept": dept, "reason": str(gd)[:200]}, dept)
+        return jsonify({"error": str(gd)}), 403
+    except Exception as e:
+        log.warning(f"[guardian] check failed, fail-open per default_action: {e}")
 
     # Security: whitelist check
     if module_name not in CALL_PYTHON_ALLOWED:
