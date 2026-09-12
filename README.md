@@ -228,6 +228,15 @@ docker run -p 10000:10000 --env-file .env fosved
 | Контейнер | Docker (ubuntu:24.04) |
 | Интерфейс | Telegram Bot API + WebApp SPA |
 
+## Скиллы (FO-012)
+
+Скиллы (248 каталогов, ~1100 файлов) **не хранятся в git** — каноничный снапшот живёт в GitHub Releases этого репозитория, манифест `skills-manifest.json` фиксирует тег, sha256 архива и список скиллов.
+
+- При старте контейнера `entrypoint.sh` автоматически разворачивает `skills/` через `scripts/bootstrap_skills.sh` (нужен GitHub-токен в env: `GITHUB_TOKEN_SKILLS`, либо `GITHUB_TOKEN_METALOGOS`/`GITHUB_TOKEN`/`GH_TOKEN` с read-доступом к репо).
+- Локальная разработка: распакуйте архив из последнего снапшота в корень репо или запустите `bash scripts/bootstrap_skills.sh`.
+- Обновление снапшота после правки скиллов: `python3 scripts/skills_snapshot.py` → создать Release → залить ассет → закоммитить `skills-manifest.json`.
+- Подробности: [docs/repo-hygiene.md](docs/repo-hygiene.md).
+
 ## Данные и восстановление
 
 Вся память офиса хранится в двух SQLite базах в `data/`:
