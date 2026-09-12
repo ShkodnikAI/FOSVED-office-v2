@@ -37,6 +37,7 @@ from proxy.providers import (
     _breaker, _cfg_cache, call_llm, _call_single_provider,
     _generate_image, _IMG_DIR, _ALLOWED_SIZES, _zai_headers, _load_zai_config,
     _estimate_tokens, _compress_messages, _combo_for_task,
+    cleanup_tool_output_files,  # FO-016: ретеншн offload-хранилища
 )
 from proxy.telegram import (
     _MARKER_EMOJI, _ALL_EMOJI, _escape_mdv2, _tg_send_formatted,
@@ -300,6 +301,18 @@ def cron_backup():
     except Exception as e:
         _log_audit("db_backup_error", {"error": str(e)[:500]}, "system")
         return jsonify({"ok": False, "error": str(e)[:500]}), 500
+
+
+# ── FO-016: чистка offload-хранилища tool-выводов (issue #82) ────────────
+# data/tool_output/ с ретеншном 7 дней (env FOSVED_TOOL_OUTPUT_RETENTION_DAYS).
+@app.route("/cron/cleanup-tool-output", methods=["GET"])
+def cron_cleanup_tool_output():
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    removed = cleanup_tool_output_files()
+    _log_audit("tool_output_cleanup", {"removed": removed}, "system")
+    return jsonify({"ok": True, "removed": removed})
 
 
 # ── FO-006: ночная консолидация памяти (mem0-паттерн, issue #66) ─────────

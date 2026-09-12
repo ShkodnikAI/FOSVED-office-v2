@@ -47,9 +47,17 @@ from proxy.providers import (
     _TASK_COMBO_MAP, _FREE_DEPTS, CircuitBreaker, _breaker, _combo_for_task,
     _COMPRESSION_MAX_TOKENS, _COMPRESSION_KEEP_SYSTEM,
     _estimate_tokens, _compress_messages, _call_single_provider, call_llm,
+    _compaction_summarize,
     _cfg_cache, _load_cfg,
     _ZAI_CONFIG_PATHS, _ZAI_CONFIG, _load_zai_config, _zai_headers,
     _generate_image, _IMG_DIR, _ALLOWED_SIZES,
+)
+
+# ── FO-016: компакция контекста (budget + prune + summarize + offload) ───────
+from proxy.compaction import (
+    compact_context, get_context_budget, PROVIDER_CONTEXT_LIMITS,
+    TOOL_OUTPUT_DIR, restore_tool_output, cleanup_tool_output_files,
+    estimate_tokens,
 )
 
 

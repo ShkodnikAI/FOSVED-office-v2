@@ -133,7 +133,9 @@ def ask():
         tg_status(chat_id, f"Маршрутизирую в {DEPT_NAMES.get(dept, dept)}…", dept=dept)
 
     try:
-        result = call_llm(dept, messages, model_ov)
+        # FO-016: chat_id пробрасывается — компакция пишет запись-заготовку
+        # Part #83 ({"part_type":"compaction"}) в dialog_history
+        result = call_llm(dept, messages, model_ov, chat_id=chat_id)
     finally:
         if stop_typing is not None:
             stop_typing.set()
