@@ -24,7 +24,7 @@ TABLES = [
     "CREATE TABLE IF NOT EXISTS admin_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, content TEXT, duration_sec TEXT, created_at TEXT DEFAULT (datetime('now')))",
     "CREATE TABLE IF NOT EXISTS admin_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, severity TEXT, file_path TEXT, issue TEXT, fix_suggestion TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')))",
     "CREATE TABLE IF NOT EXISTS admin_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, status TEXT, narad_id TEXT, created_at TEXT DEFAULT (datetime('now')))",
-    "CREATE TABLE IF NOT EXISTS knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT, file_path TEXT, line_start TEXT, line_end TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')))",
+    "CREATE TABLE IF NOT EXISTS knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT, file_path TEXT, line_start TEXT, line_end TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')), valid_from TEXT, valid_to TEXT, superseded_by INTEGER)",
     "CREATE TABLE IF NOT EXISTS knowledge_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT, edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))",
     "CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')))",
     "CREATE TABLE IF NOT EXISTS factory_orders (id TEXT PRIMARY KEY, client_name TEXT, status TEXT, requirements TEXT, departments TEXT, branding TEXT, llm_config TEXT, repo_url TEXT, render_url TEXT, created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)",
