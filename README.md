@@ -278,6 +278,24 @@ python3 scripts/backup_db.py check           # проверка целостно
 Стресс-тест: статический анализ кода по 17 группам.
 Проверка синхронности зависимостей: `python3 scripts/audit_deps.py`
 
+### LLM-трейсы (FO-004)
+
+Каждый вызов LLM логируется в JSONL-файл (`data/traces/llm_YYYY-MM-DD.jsonl`) со схемой OTel GenAI:
+
+| Поле | Описание |
+|---|---|
+| `trace_id` | Уникальный ID вызова |
+| `gen_ai.system` | Провайдер (zai, deepseek, groq…) |
+| `gen_ai.request.model` | Запрошенная модель |
+| `gen_ai.usage.input_tokens` / `output_tokens` | Токены |
+| `latency_ms` | Задержка от запроса до ответа |
+| `dept` | Департамент-инициатор |
+| `ok` | Успех/ошибка |
+
+Ротация: файл > 10 МБ → `llm_YYYY-MM-DD_N.jsonl`. Хранение 7 дней. Сбой записи не ломает ответ.
+
+API: `GET /traces?dept=&from=&to=&limit=&ok=` и `GET /trace-stats?from=&to=` (требуют Bearer).
+
 ## Лицензия
 
 MIT

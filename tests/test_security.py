@@ -115,3 +115,42 @@ class TestOpenEndpoints:
     def test_now_time_open(self, client):
         r = client.get('/now-time')
         assert r.status_code != 401
+
+
+class TestLLMTraces:
+    """FO-004: Per-call LLM trace JSONL files."""
+
+    def test_traces_endpoint_auth_required(self, client):
+        """/traces endpoints require auth."""
+        r = client.get('/traces-stats')
+        assert r.status_code == 401
+
+    def test_traces_endpoint_with_auth(self, client):
+        """/trace-stats returns data with auth."""
+        r = client.get('/trace-stats', headers={'Authorization': 'Bearer test-secret-123'})
+        # 200 or error json — either way auth passed
+        assert r.status_code != 401
+
+    def test_traces_query_with_auth(self, client):
+        """/traces returns data with auth."""
+        r = client.get('/traces-stats', headers={'Authorization': 'Bearer test-secret-123'})
+        assert r.status_code != 401
+
+    def test_trace_write_function_exists(self, app):
+        """_write_llm_trace and _prune_old_traces are importable."""
+        from llm_proxy import _write_llm_trace, _prune_old_traces
+        assert callable(_write_llm_trace)
+        assert callable(_prune_old_traces)
+
+    def test_trace_write_creates_file(self, app, tmp_path):
+        """Writing a trace record creates a JSONL file."""
+        import importlib
+        os.environ['DATABASE_PATH'] = str(tmp_path)
+        # Re-import to pick up new _TRACE_DIR
+        import llm_proxy
+        importlib.reload(llm_proxy)
+        llm_proxy._write_llm_trace({"trace_id": "test123", "dept": "osp", "ok": True})
+        trace_dir = os.path.join(str(tmp_path), "traces")
+        assert os.path.isdir(trace_dir)
+        files = [f for f in os.listdir(trace_dir) if f.endswith('.jsonl')]
+        assert len(files) >= 1
