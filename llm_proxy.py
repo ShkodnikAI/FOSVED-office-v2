@@ -954,6 +954,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS trace_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT);
         -- FO-007: error_log — структурированные ошибки (внешние вызовы, потери данных)
         CREATE TABLE IF NOT EXISTS error_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT (datetime('now')), source TEXT, dept TEXT, kind TEXT, detail TEXT);
+        -- FO-006: консолидированные факты (ночная консолидация dialog_history, mem0-паттерн)
+        CREATE TABLE IF NOT EXISTS facts (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, chat_id TEXT DEFAULT '0', content TEXT NOT NULL, status TEXT DEFAULT 'active', source_dialog_ids TEXT DEFAULT '[]', confidence REAL DEFAULT 0.8, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+        CREATE INDEX IF NOT EXISTS idx_facts_dept ON facts(dept, status);
         CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original_query TEXT, original_response TEXT, correction TEXT, corr_type TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')));
@@ -1729,8 +1732,11 @@ def context_cmd():
     dept, chat_id = d.get("dept", "yana"), d.get("chat_id", "0")
     rows = _query("SELECT role,content,created_at FROM dialog_history WHERE dept=? AND chat_id=? ORDER BY id DESC LIMIT 20", (dept, chat_id), fetch=True)
     corrs = _query("SELECT original_query,correction,created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 10", (dept,), fetch=True)
+    # FO-006: консолидированные факты — первичный источник памяти (журнал — для связности диалога)
+    fact_rows = _query("SELECT content, confidence, updated_at FROM facts WHERE dept=? AND status='active' ORDER BY updated_at DESC LIMIT 15", (dept,), fetch=True)
     ctx = {"dialog": [{"role": r["role"], "content": r["content"], "ts": r["created_at"]} for r in reversed(rows)]}
     ctx["corrections"] = [{"original": r["original_query"], "corrected": r["correction"], "ts": r["created_at"]} for r in corrs]
+    ctx["facts"] = [{"content": r["content"], "confidence": r["confidence"], "ts": r["updated_at"]} for r in fact_rows]
     return jsonify(ctx)
 
 @app.post("/voice-set")
@@ -5537,6 +5543,237 @@ def cron_backup():
     except Exception as e:
         _log_audit("db_backup_error", {"error": str(e)[:500]}, "system")
         return jsonify({"ok": False, "error": str(e)[:500]}), 500
+
+
+# ── FO-006: ночная консолидация памяти (mem0-паттерн, issue #66) ─────────
+# dialog_history остаётся append-only журналом; факты живут в facts и
+# становятся первичным источником утреннего контекста.
+
+_FACTS_MAX_OPS = 20          # максимум операций за один LLM-вызов
+_FACTS_DIALOG_ROWS = 120     # максимум реплик дня на входе консолидации
+_FACTS_BACKFILL_DAYS = 90    # безопасный предел backfill
+
+def _extract_json_block(text):
+    """Достаёт первый JSON-объект из ответа LLM (терпим к ```-заборам и мусору)."""
+    text = str(text).strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```$", "", text).strip()
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except Exception as e:
+        log.debug(f"consolidation: direct json parse failed: {e}")
+    if isinstance(parsed, dict):
+        return parsed
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+        except Exception as e:
+            log.debug(f"consolidation: regex json parse failed: {e}")
+    return parsed if isinstance(parsed, dict) else None
+
+def _consolidate_dept_day(dept, day):
+    """Консолидация одного дня одного департамента: диалог → ops → facts.
+
+    Возвращает словарь счётчиков. Любой сбой (LLM, парсинг, БД) не роняет
+    процесс: ошибка фиксируется через _log_error и возвращается в статусе.
+    """
+    day_start, day_end = f"{day} 00:00:00", f"{day} 23:59:59"
+    try:
+        rows = _query(
+            "SELECT id, role, content FROM dialog_history "
+            "WHERE dept=? AND role IN ('user','assistant') AND created_at BETWEEN ? AND ? "
+            "ORDER BY id ASC LIMIT ?",
+            (dept, day_start, day_end, _FACTS_DIALOG_ROWS), fetch=True)
+    except Exception as e:
+        _log_error(f"consolidation: dialog read failed {dept}/{day}: {e}",
+                   source="memory_consolidation", dept=dept, kind="db_read")
+        return {"dept": dept, "day": day, "error": "dialog_read_failed"}
+    if not rows:
+        return {"dept": dept, "day": day, "skipped": "no_dialogs"}
+
+    dialog_text = "\n".join(f"[{r['id']}] {r['role']}: {str(r['content'])[:400]}" for r in rows)
+    try:
+        existing = _query(
+            "SELECT id, content FROM facts WHERE dept=? AND status='active' "
+            "ORDER BY updated_at DESC LIMIT 60", (dept,), fetch=True)
+    except Exception as e:
+        _log_error(f"consolidation: facts read failed {dept}: {e}",
+                   source="memory_consolidation", dept=dept, kind="db_read")
+        return {"dept": dept, "day": day, "error": "facts_read_failed"}
+    facts_text = "\n".join(f"[{r['id']}] {r['content']}" for r in existing) or "(пусто)"
+
+    prompt = (
+        "Ты — модуль консолидации памяти офиса FOSVED (паттерн mem0).\n"
+        f"Ниже — диалоги департамента «{dept}» за {day} и текущие консолидированные факты.\n\n"
+        "Задача: извлечь из диалогов атомарные факты (одно предложение — один проверяемый факт) "
+        "и синхронизировать их со списком текущих фактов.\n\n"
+        "Операции:\n"
+        "- ADD — новый факт, которого нет в списке\n"
+        "- UPDATE — уточнение/изменение существующего факта (укажи target_id и новую формулировку)\n"
+        "- DELETE — факт больше не верен (укажи target_id)\n\n"
+        "Правила:\n"
+        "- Только конкретные проверяемые утверждения: решения, настройки, события, предпочтения, результаты. Не выдумывай.\n"
+        "- Близкие дубликаты существующего факта — не ADD, а NOOP (просто не включай в ответ).\n"
+        f"- Максимум {_FACTS_MAX_OPS} операций за вызов.\n"
+        "- Ответ — ТОЛЬКО JSON без пояснений:\n"
+        '{"ops":[{"op":"ADD","content":"...","confidence":0.9},'
+        '{"op":"UPDATE","target_id":123,"content":"новая формулировка","confidence":0.9},'
+        '{"op":"DELETE","target_id":123,"reason":"..."}]}\n\n'
+        f"=== ТЕКУЩИЕ ФАКТЫ ===\n{facts_text}\n\n"
+        f"=== ДИАЛОГИ ЗА {day} ===\n{dialog_text}"
+    )
+
+    try:
+        result = call_llm("admin", [{"role": "user", "content": prompt}])
+    except Exception as e:
+        _log_error(f"consolidation: LLM call failed {dept}/{day}: {e}",
+                   source="memory_consolidation", dept=dept, kind="external")
+        return {"dept": dept, "day": day, "error": "llm_failed"}
+    reply = result.get("reply", "")
+    if reply.startswith("[Oshibka]"):
+        _log_error(f"consolidation: LLM unavailable {dept}/{day}: {reply[:150]}",
+                   source="memory_consolidation", dept=dept, kind="external")
+        return {"dept": dept, "day": day, "error": "llm_unavailable"}
+
+    parsed = _extract_json_block(reply)
+    if parsed is None or not isinstance(parsed.get("ops"), list):
+        _log_error(f"consolidation: unparseable LLM reply {dept}/{day}: {str(reply)[:200]}",
+                   source="memory_consolidation", dept=dept, kind="parse")
+        return {"dept": dept, "day": day, "error": "unparseable_reply"}
+
+    created = updated = deleted = noop = 0
+    source_ids = json.dumps([r["id"] for r in rows])
+    now = datetime.utcnow().isoformat()
+
+    def _insert_fact(content, confidence):
+        _query(
+            "INSERT INTO facts (dept, chat_id, content, status, source_dialog_ids, confidence, created_at, updated_at) "
+            "VALUES (?, '0', ?, 'active', ?, ?, ?, ?)",
+            (dept, str(content)[:500], source_ids, max(0.0, min(1.0, float(confidence))), now, now))
+
+    for op in parsed["ops"][:_FACTS_MAX_OPS]:
+        if not isinstance(op, dict):
+            noop += 1
+            continue
+        action = str(op.get("op", "NOOP")).upper()
+        try:
+            if action == "ADD" and op.get("content"):
+                _insert_fact(op["content"], op.get("confidence", 0.8))
+                created += 1
+            elif action == "UPDATE" and op.get("content") and op.get("target_id"):
+                _query("UPDATE facts SET status='superseded', updated_at=? WHERE id=? AND dept=?",
+                       (now, int(op["target_id"]), dept))
+                _insert_fact(op["content"], op.get("confidence", 0.8))
+                updated += 1
+            elif action == "DELETE" and op.get("target_id"):
+                _query("UPDATE facts SET status='deleted', updated_at=? WHERE id=? AND dept=?",
+                       (now, int(op["target_id"]), dept))
+                deleted += 1
+            else:
+                noop += 1
+        except Exception as e:
+            _log_error(f"consolidation: fact op apply failed {dept}/{day}: {str(op)[:120]}: {e}",
+                       source="memory_consolidation", dept=dept, kind="db_write")
+
+    counters = {
+        "dept": dept, "day": day, "source_rows": len(rows),
+        "created": created, "updated": updated, "deleted": deleted, "noop": noop,
+    }
+    # FO-004: счётчик консолидации в трейсах (отдельный trace_type)
+    try:
+        _write_llm_trace({
+            "trace_id": uuid.uuid4().hex[:16],
+            "trace_type": "memory_consolidation",
+            "time": now,
+            "dept": dept, "date": day,
+            "facts_created": created, "facts_updated": updated,
+            "facts_deleted": deleted, "facts_noop": noop,
+            "source_rows": len(rows),
+            "provider": result.get("provider"), "model": result.get("model"),
+            "tokens_in": result.get("tokens_in"), "tokens_out": result.get("tokens_out"),
+        })
+    except Exception as e:
+        log.debug(f"consolidation trace write failed (non-fatal): {e}")
+    return counters
+
+def _consolidate_memory(days=1, dept_filter=None, backfill=False):
+    """Прогон консолидации: последний день (по умолчанию) или backfill N дней.
+
+    Возвращает список счётчиков по (департамент, день). Порядок дней — от старых
+    к свежим (обновления фактов доносятся в хронологическом порядке).
+    """
+    days = max(1, min(int(days), _FACTS_BACKFILL_DAYS))
+    if backfill:
+        day_list = [(datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%d")
+                    for i in range(days, 0, -1)]
+    else:
+        day_list = [(datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")]
+
+    results = []
+    for day in day_list:
+        if dept_filter:
+            depts = [dept_filter]
+        else:
+            day_start, day_end = f"{day} 00:00:00", f"{day} 23:59:59"
+            rows = _query("SELECT DISTINCT dept FROM dialog_history WHERE created_at BETWEEN ? AND ?",
+                          (day_start, day_end), fetch=True)
+            depts = [r["dept"] for r in rows if r["dept"]]
+        for dept in depts:
+            counters = _consolidate_dept_day(dept, day)
+            results.append(counters)
+    return results
+
+@app.post("/cron/consolidate-memory")
+def cron_consolidate_memory():
+    """FO-006: ночная консолидация dialog_history → facts.
+
+    Query: ?secret=CRON_SECRET
+    JSON body (всё опционально): {"days": 1, "dept": "osp", "backfill": false, "backup": false}
+    - default: вчерашний день, все департаменты с активностью
+    - backfill=true + days=N: одноразовый прогон последних N дней (порциями день×департамент)
+    - backup=true: сначала scripts/backup_db.py (бэкап FO-001) — обязателен для backfill
+    """
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    d = request.get_json(silent=True) or {}
+    days = int(d.get("days", 1))
+    dept_filter = d.get("dept")
+    backfill = bool(d.get("backfill", False))
+    do_backup = bool(d.get("backup", False))
+
+    backup_status = None
+    if do_backup:
+        try:
+            import subprocess
+            result = subprocess.run([sys.executable, "scripts/backup_db.py", "backup"],
+                                    capture_output=True, text=True, timeout=120,
+                                    env={**os.environ, "DATABASE_PATH": os.environ.get("DATABASE_PATH", "./data")})
+            backup_status = {"ok": result.returncode == 0,
+                             "output": (result.stdout or result.stderr)[-300:]}
+        except Exception as e:
+            backup_status = {"ok": False, "error": str(e)[:300]}
+            _log_error(f"consolidation pre-backup failed: {e}", source="memory_consolidation", kind="backup")
+            return jsonify({"status": "aborted", "reason": "backup_failed", "backup": backup_status}), 500
+
+    try:
+        results = _consolidate_memory(days=days, dept_filter=dept_filter, backfill=backfill)
+    except Exception as e:
+        _log_error(f"consolidation run failed: {e}", source="memory_consolidation", kind="run")
+        return jsonify({"status": "error", "message": str(e)[:300]}), 500
+
+    totals = {
+        "created": sum(r.get("created", 0) for r in results),
+        "updated": sum(r.get("updated", 0) for r in results),
+        "deleted": sum(r.get("deleted", 0) for r in results),
+        "noop": sum(r.get("noop", 0) for r in results),
+        "errors": sum(1 for r in results if r.get("error")),
+    }
+    _log_audit("memory_consolidation", {"totals": totals, "days": days, "backfill": backfill, "dept": dept_filter}, "memory")
+    return jsonify({"status": "ok", "totals": totals, "backup": backup_status, "results": results})
 
 
 # ── Fresh news for mlog BuildContext ──
