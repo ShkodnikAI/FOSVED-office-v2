@@ -8,12 +8,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-os.environ.setdefault('API_SECRET', 'test-secret-123')
-os.environ.setdefault('TELEGRAM_WEBHOOK_SECRET', 'tg-wh-secret')
-os.environ.setdefault('OWNER_TELEGRAM_ID', '12345')
-os.environ.setdefault('DATABASE_PATH', '/tmp/fosved-test-db')
-os.environ.setdefault('ZAI_API_KEY', 'fake-key')
-os.environ.setdefault('CRON_SECRET', 'cron-test-secret')
+os.environ['API_SECRET'] = 'test-secret-123'
+os.environ['TELEGRAM_WEBHOOK_SECRET'] = 'tg-wh-secret'
+os.environ['OWNER_TELEGRAM_ID'] = '12345'
+os.environ['DATABASE_PATH'] = '/tmp/fosved-test-db'
+os.environ['ZAI_API_KEY'] = 'fake-key'
+os.environ['CRON_SECRET'] = 'cron-test-secret'
 
 import llm_proxy  # noqa: E402
 
