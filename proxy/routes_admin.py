@@ -17,6 +17,7 @@ import requests as http_requests
 
 from flask import request, jsonify, Response, send_file
 
+from proxy.kg import kg_scan_rebuild, kg_active
 from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting, _db, db_lock,
@@ -120,7 +121,7 @@ def api_dashboard():
             })
 
         # Admin status
-        kg_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph", fetch=True)
+        kg_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph WHERE valid_to IS NULL", fetch=True)
         kg_edges = _query("SELECT COUNT(*) as c FROM knowledge_edges", fetch=True)
         issues = _query("SELECT COUNT(*) as c FROM admin_findings WHERE status='open'", fetch=True)
         proposals = _query("SELECT COUNT(*) as c FROM admin_proposals WHERE status='pending'", fetch=True)
@@ -354,7 +355,7 @@ def api_archive():
 def api_admin_status():
     """Admin stats: graph, issues, proposals."""
     try:
-        kg_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph", fetch=True)
+        kg_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph WHERE valid_to IS NULL", fetch=True)
         kg_edges = _query("SELECT COUNT(*) as c FROM knowledge_edges", fetch=True)
         issues = _query("SELECT id, severity, file_path, issue, status FROM admin_findings WHERE status='open' ORDER BY id DESC LIMIT 10", fetch=True)
         proposals = _query("SELECT id, content, status FROM admin_proposals WHERE status='pending' ORDER BY id DESC LIMIT 10", fetch=True)
@@ -634,9 +635,10 @@ def admin_ua_graph():
         (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT,
          edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
 
-    # Clear old graph
-    c.execute("DELETE FROM knowledge_graph")
+    # FO-009: узлы больше не стираются — история сохраняется (kg_scan_rebuild).
+    # Рёбра (knowledge_edges) вне скоупа наряда — перестраиваются как раньше.
     c.execute("DELETE FROM knowledge_edges")
+    nodes_list = []
 
     # Run analyzer internally (not via Flask)
     analysis = _ua_analyze_internal()
@@ -648,9 +650,8 @@ def admin_ua_graph():
     for fa in analysis:
         rel = fa['path']
         # Node: file
-        c.execute(
-            "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?, ?, ?, ?, ?)",
-            ('file', rel, rel, f"{len(fa.get('patterns', []))} patterns, {len(fa.get('routes', []))} routes", now_ts))
+        nodes_list.append({'node_type': 'file', 'node_name': rel, 'file_path': rel,
+                           'description': f"{len(fa.get('patterns', []))} patterns, {len(fa.get('routes', []))} routes"})
         nodes_saved += 1
 
         # Nodes + edges: patterns
@@ -658,9 +659,8 @@ def admin_ua_graph():
             pname = p.get('name', '')
             if not pname:
                 continue
-            c.execute(
-                "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?, ?, ?, ?, ?)",
-                ('pattern', pname, rel, f"args={p.get('args', '')} returns={p.get('returns', '')}", now_ts))
+            nodes_list.append({'node_type': 'pattern', 'node_name': pname, 'file_path': rel,
+                               'description': f"args={p.get('args', '')} returns={p.get('returns', '')}"})
             nodes_saved += 1
             c.execute(
                 "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -672,9 +672,8 @@ def admin_ua_graph():
             rname = r.get('path', '')
             if not rname:
                 continue
-            c.execute(
-                "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?, ?, ?, ?, ?)",
-                ('route', rname, rel, r.get('method', ''), now_ts))
+            nodes_list.append({'node_type': 'route', 'node_name': rname, 'file_path': rel,
+                               'description': r.get('method', '')})
             nodes_saved += 1
             c.execute(
                 "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -683,9 +682,8 @@ def admin_ua_graph():
 
         # Nodes + edges: tables
         for t in fa.get('tables', []):
-            c.execute(
-                "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?, ?, ?, ?, ?)",
-                ('table', t, rel, 'CREATE TABLE', now_ts))
+            nodes_list.append({'node_type': 'table', 'node_name': t, 'file_path': rel,
+                               'description': 'CREATE TABLE'})
             nodes_saved += 1
             c.execute(
                 "INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -732,12 +730,17 @@ def admin_ua_graph():
                 except Exception as e:
                     _log_error(f"knowledge_edges insert failed: {e}", source="kg_rebuild", dept="lz", kind="data_loss")
 
+    # FO-009: темпоральная фиксация узлов (close/insert/noop вместо wipe)
+    kg_res = kg_scan_rebuild(nodes_list, source='admin_ua_graph')
+
     conn.commit()
     conn.close()
 
     summary = (f"GRAPH COMPLETE\n  Nodes: {nodes_saved} | Edges: {edges_saved}\n  "
-               f"Files analyzed: {len(analysis)}")
-    return jsonify({'summary': summary, 'nodes': nodes_saved, 'edges': edges_saved})
+               f"Files analyzed: {len(analysis)}\n"
+               f"  KG temporal: +{kg_res['inserted']} new, ~{kg_res['updated']} updated, "
+               f"={kg_res['noop']} unchanged, -{kg_res['closed_missing']} closed")
+    return jsonify({'summary': summary, 'nodes': nodes_saved, 'edges': edges_saved, 'kg': kg_res})
 
 
 @app.get("/admin-ua/review")
@@ -925,8 +928,9 @@ def admin_ua_night_cycle():
         c.execute("""CREATE TABLE IF NOT EXISTS knowledge_edges
             (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT,
              edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
-        c.execute("DELETE FROM knowledge_graph")
+        # FO-009: узлы не стираются — история сохраняется; рёбра перестраиваются
         c.execute("DELETE FROM knowledge_edges")
+        nodes_list = []
 
         nodes_saved = 0
         edges_saved = 0
@@ -934,14 +938,13 @@ def admin_ua_night_cycle():
 
         for fa in analysis:
             rel = fa['path']
-            c.execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?,?,?,?,?)",
-                      ('file', rel, rel, f"{len(fa.get('patterns', []))}p {len(fa.get('routes', []))}r", now_ts))
+            nodes_list.append({'node_type': 'file', 'node_name': rel, 'file_path': rel,
+                               'description': f"{len(fa.get('patterns', []))}p {len(fa.get('routes', []))}r"})
             nodes_saved += 1
             for p in fa.get('patterns', []):
                 pname = p.get('name', '')
                 if not pname: continue
-                c.execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?,?,?,?,?)",
-                          ('pattern', pname, rel, '', now_ts))
+                nodes_list.append({'node_type': 'pattern', 'node_name': pname, 'file_path': rel, 'description': ''})
                 nodes_saved += 1
                 c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
                           (rel, pname, 'defines', rel, now_ts))
@@ -949,8 +952,8 @@ def admin_ua_night_cycle():
             for r in fa.get('routes', []):
                 rname = r.get('path', '')
                 if not rname: continue
-                c.execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES (?,?,?,?,?)",
-                          ('route', rname, rel, r.get('method', ''), now_ts))
+                nodes_list.append({'node_type': 'route', 'node_name': rname, 'file_path': rel,
+                                   'description': r.get('method', '')})
                 nodes_saved += 1
                 c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
                           (rel, rname, 'exposes', rel, now_ts))
@@ -978,6 +981,11 @@ def admin_ua_night_cycle():
                             edges_saved += 1
                     except Exception as e:
                         _log_error(f"knowledge_edges insert failed: {e}", source="kg_rebuild", dept="lz", kind="data_loss")
+
+        # FO-009: темпоральная фиксация узлов скана
+        kg_res_nc = kg_scan_rebuild(nodes_list, source='admin_ua_night_cycle')
+        log.info(f"UA Night Cycle: KG temporal +{kg_res_nc['inserted']} new, ~{kg_res_nc['updated']} updated, "
+                 f"={kg_res_nc['noop']} unchanged, -{kg_res_nc['closed_missing']} closed")
 
         conn.commit()
         conn.close()
@@ -1040,7 +1048,7 @@ def admin_ua_tour():
     # Use internal functions, not Flask self-calls
     scan_data = _ua_scan_internal()
     review_data = _ua_review_internal()
-    g_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph", fetch=True)
+    g_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph WHERE valid_to IS NULL", fetch=True)
     g_edges = _query("SELECT COUNT(*) as c FROM knowledge_edges", fetch=True)
     kg_nodes = g_nodes[0]['c'] if g_nodes else 0
     kg_edges = g_edges[0]['c'] if g_edges else 0

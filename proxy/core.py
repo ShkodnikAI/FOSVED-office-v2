@@ -379,7 +379,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')));
-        CREATE TABLE IF NOT EXISTS knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT, file_path TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')));
+        -- FO-009: темпоральный KG — valid_to NULL = актуально; superseded_by → новая версия
+        CREATE TABLE IF NOT EXISTS knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT, file_path TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')), valid_from TEXT, valid_to TEXT, superseded_by INTEGER);
         CREATE TABLE IF NOT EXISTS knowledge_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT, edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS admin_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, severity TEXT, category TEXT, file TEXT, issue TEXT, fix TEXT, status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS admin_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, status TEXT DEFAULT 'pending', narad_id TEXT, created_at TEXT DEFAULT (datetime('now')));
@@ -392,6 +393,10 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_news_hash ON news_cache (hash);
         """)
         for col_sql, col_name in [
+            # FO-009: темпоральные колонки knowledge_graph
+            ("ALTER TABLE knowledge_graph ADD COLUMN valid_from TEXT", "valid_from"),
+            ("ALTER TABLE knowledge_graph ADD COLUMN valid_to TEXT", "valid_to"),
+            ("ALTER TABLE knowledge_graph ADD COLUMN superseded_by INTEGER", "superseded_by"),
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
             ("ALTER TABLE token_usage ADD COLUMN combo TEXT DEFAULT ''", "combo"),
             ("ALTER TABLE miniapp_responses ADD COLUMN archived INTEGER DEFAULT 0", "archived"),
@@ -401,6 +406,9 @@ def init_db():
             except Exception as e:
                 # ожидаемый сбой при повторном добавлении существующей колонки
                 log.debug(f"[migration] column add skipped (expected if exists): {e}")
+        # FO-009: миграция существующих узлов — valid_from = updated_at
+        # (created_at в legacy-схеме нет; updated_at — момент фиксации узла)
+        c.execute("UPDATE knowledge_graph SET valid_from = updated_at WHERE valid_from IS NULL")
         c.commit(); c.close()
 
 init_db()

@@ -16,7 +16,10 @@
 //   line_start INTEGER,
 //   line_end INTEGER,
 //   description TEXT,
-//   updated_at REAL
+//   updated_at REAL,
+//   valid_from TEXT,           -- FO-009: начало действия версии
+//   valid_to TEXT,             -- FO-009: NULL = узел актуален
+//   superseded_by INTEGER      -- FO-009: id новой версии
 // )
 // CREATE TABLE IF NOT EXISTS knowledge_edges (
 //   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,7 +234,7 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
   let mut edges_saved = 0.0
 
   // Save file node
-  db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES ('file', ?1, ?1, 'Department dispatcher', datetime('now'))", [file_path])
+  db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at, valid_from) VALUES ('file', ?1, ?1, 'Department dispatcher', datetime('now'), datetime('now'))", [file_path])
   let mut nodes_saved = nodes_saved + 1.0
 
   // Look for pattern definitions
@@ -245,7 +248,7 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
       if p_end > p_start then {
         let pattern_name = substring(trimmed, p_start, p_end)
         if length(pattern_name) > 2.0 then {
-          db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at) VALUES ('pattern', ?1, ?2, 'Function', datetime('now'))", [pattern_name, file_path])
+          db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at, valid_from) VALUES ('pattern', ?1, ?2, 'Function', datetime('now'), datetime('now'))", [pattern_name, file_path])
           db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?1, ?2, 'calls', ?1, datetime('now'))", [file_path, pattern_name])
           let nodes_saved = nodes_saved + 1.0
           let edges_saved = edges_saved + 1.0
@@ -276,8 +279,8 @@ pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
 pattern BuildKnowledgeGraph() -> String {
   let _ = AuditLog("graph_build_start", "admin", "knowledge graph rebuild started")
 
-  // Clear old graph
-  db_execute("DELETE FROM knowledge_graph")
+  // FO-009: узлы не стираются — закрываются (история графа сохраняется)
+  db_execute("UPDATE knowledge_graph SET valid_to = datetime('now') WHERE valid_to IS NULL")
   db_execute("DELETE FROM knowledge_edges")
 
   let admin_profile = read_file("library/admin.md")
@@ -305,7 +308,7 @@ pattern BuildKnowledgeGraph() -> String {
   }
 
   // Count results
-  let node_rows = query("SELECT COUNT(*) as cnt FROM knowledge_graph", [])
+  let node_rows = query("SELECT COUNT(*) as cnt FROM knowledge_graph WHERE valid_to IS NULL", [])
   let edge_rows = query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
   let node_count = to_string(try json_get(node_rows[0], "cnt", "0"))
   let edge_count = to_string(try json_get(edge_rows[0], "cnt", "0"))
@@ -345,9 +348,9 @@ pattern ImpactAnalysis(file_path: String) -> String {
 // Find Orphans (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
 pattern FindOrphans() -> String {
-  let all_files = query("SELECT DISTINCT node_name FROM knowledge_graph WHERE node_type = 'file'", [])
+  let all_files = query("SELECT DISTINCT node_name FROM knowledge_graph WHERE valid_to IS NULL AND node_type = 'file'", [])
   let imported = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE edge_type = 'imports'", [])
-  let all_patterns = query("SELECT DISTINCT node_name FROM knowledge_graph WHERE node_type = 'pattern'", [])
+  let all_patterns = query("SELECT DISTINCT node_name FROM knowledge_graph WHERE valid_to IS NULL AND node_type = 'pattern'", [])
   let called = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE edge_type = 'calls'", [])
 
   let admin_profile = read_file("library/admin.md")
@@ -563,7 +566,7 @@ pattern AdminStatus() -> String {
   let narads_pending = try query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", [])
   let autofixes_today = try query("SELECT COUNT(*) as cnt FROM audit_log WHERE action = 'autofix_planned' AND created_at > datetime('now', '-24 hours')", [])
   let last_night = try query("SELECT created_at FROM admin_reports WHERE type = 'night_cycle' ORDER BY created_at DESC LIMIT 1", [])
-  let graph_nodes = try query("SELECT COUNT(*) as cnt FROM knowledge_graph", [])
+  let graph_nodes = try query("SELECT COUNT(*) as cnt FROM knowledge_graph WHERE valid_to IS NULL", [])
   let graph_edges = try query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
   let findings_high = try query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status = 'open' AND severity = 'high'", [])
 
