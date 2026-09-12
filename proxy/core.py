@@ -703,3 +703,14 @@ def _format_metrics_text(metrics):
             parts.append(f"tokens={t['in']+t['out']} cost=${t['cost']:.2f}")
         lines.append("  " + " ".join(parts))
     return "\n".join(lines)
+
+
+# ═══ FO-008 шаг 4d: _memorize и RENDER_URL (из фасада) ═══
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("RENDER_URL", "https://fosved-office-v2.onrender.com"))
+
+def _memorize(dept, topic, content):
+    """Save a finding to dialog_history as a system memorization entry."""
+    now = datetime.utcnow().isoformat()
+    entry = f"[MEMORY] {topic}: {content}"
+    _query("INSERT INTO dialog_history (dept, chat_id, role, content, created_at) VALUES (?, '0', 'system', ?, ?)",
+           (dept, entry, now))
