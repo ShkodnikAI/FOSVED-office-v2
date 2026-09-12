@@ -9,7 +9,7 @@
 // Architecture:
 //   HandleDev(query, chat_id)
 //     → ParseDevQuery(query)              ← NLP task type + command detection
-//     → RouteByCommand(cmd, ...)           ← 14 bot commands + free-text dispatch
+//     → DevRouteByCommand(cmd, ...)           ← 14 bot commands + free-text dispatch
 //       → cmd=/dev         → DevDashboard
 //       → cmd=/dev-estimate→ CreateEstimate
 //       → cmd=/dev-decide  → CreateArchitectureDecision
@@ -24,8 +24,8 @@
 //       → cmd=/dev-deploy  → DeployTask
 //       → cmd=/dev-archive → ArchiveTask
 //       → cmd=/dev-local-sync → LocalSync
-//       → free-text       → FullPipeline
-//     → FullPipeline (for free-text queries):
+//       → free-text       → DevFullPipeline
+//     → DevFullPipeline (for free-text queries):
 //       → DetectTaskType                  ← web_app|site|ai_office|local_ai|infrastructure|refactor|hotfix
 //       → LoadSkillTiers                  ← Tier1 always + Tier2 by type + Tier3 explicit
 //       → GateHardRules                   ← 10 hard rules as native gates
@@ -35,7 +35,7 @@
 //       → ImplementIteratively            ← Tier 1: iterative-implementation
 //       → VerifyCodeOrganization          ← Tier 1: code-organization-standards
 //       → DeployWithGuards                ← Tier 2: devops-deployment
-//       → WrapWithDisclaimer              ← Tier 1: hard rule enforcement
+//       → DevWrapWithDisclaimer              ← Tier 1: hard rule enforcement
 //     → RecordAssistantMessage
 //
 // Skill tiers:
@@ -52,8 +52,8 @@
 // Depends on BUILTINS only (no Python, no CallLLMProxy):
 //   call_llm, db_execute, kv_get, kv_set, json_encode, json_get, parse_json,
 //   to_string, to_float, to_int, length, contains, lower, substring,
-//   join, split, now, format_date, hash, AuditLog,
-//   RecordAssistantMessage, BuildContext, SendTelegramMessage
+//   join, split, now, format_date, sha256, AuditLog,
+//   RecordAssistantMessage, BuildContext, send_message
 //
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -61,13 +61,13 @@
 // SECTION 0: CONSTANTS & DISCLAIMER
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern DISCLAIMER_TOP() -> String { return "⚠️ Код генерируется проектным ассистентом. Все решения подлежат проверке владельцем перед production deploy." }
+pattern DevDisclaimerTop() -> String { return "⚠️ Код генерируется проектным ассистентом. Все решения подлежат проверке владельцем перед production deploy." }
 
-pattern DISCLAIMER_BOTTOM() -> String { return "⚠️ Данный результат — работа проектного ассистента отдела Разработка. Ответственность за production решение несёт владелец после проверки." }
+pattern DevDisclaimerBottom() -> String { return "⚠️ Данный результат — работа проектного ассистента отдела Разработка. Ответственность за production решение несёт владелец после проверки." }
 
-pattern DEPT_NAME() -> String { return "dev" }
-pattern DEPT_NAME_RU() -> String { return "Разработка" }
-pattern PSYCHOTYPE() -> String { return "Прагматик + Методист (accuracy > speed, repeatable procedures)" }
+pattern DevDeptName() -> String { return "dev" }
+pattern DevDeptNameRu() -> String { return "Разработка" }
+pattern DevPsychotype() -> String { return "Прагматик + Методист (accuracy > speed, repeatable procedures)" }
 
 // Task types
 pattern TASK_TYPE_WEB_APP() -> String { return "web_app" }
@@ -79,14 +79,14 @@ pattern TASK_TYPE_REFACTOR() -> String { return "refactor" }
 pattern TASK_TYPE_HOTFIX() -> String { return "hotfix" }
 
 // Lifecycle states
-pattern STATUS_DRAFTED() -> String { return "drafted" }
+pattern DevStatusDrafted() -> String { return "drafted" }
 pattern STATUS_ESTIMATED() -> String { return "estimated" }
 pattern STATUS_ARCHITECTING() -> String { return "architecting" }
 pattern STATUS_IMPLEMENTING() -> String { return "implementing" }
 pattern STATUS_TESTING() -> String { return "testing" }
 pattern STATUS_REVIEW() -> String { return "review" }
 pattern STATUS_DEPLOYED() -> String { return "deployed" }
-pattern STATUS_ARCHIVED() -> String { return "archived" }
+pattern DevStatusArchived() -> String { return "archived" }
 pattern STATUS_ABANDONED() -> String { return "abandoned" }
 
 // Tech Radar states
@@ -96,7 +96,7 @@ pattern RADAR_ASSESS() -> String { return "assess" }
 pattern RADAR_HOLD() -> String { return "hold" }
 
 // Valid lifecycle transitions
-pattern VALID_TRANSITIONS() -> String { return "drafted→estimated,drafted→abandoned,estimated→architecting,estimated→abandoned,architecting→implementing,architecting→abandoned,implementing→testing,implementing→abandoned,testing→review,testing→implementing,review→deployed,review→implementing,deployed→archived,deployed→abandoned" }
+pattern DevValidTransitions() -> String { return "drafted→estimated,drafted→abandoned,estimated→architecting,estimated→abandoned,architecting→implementing,architecting→abandoned,implementing→testing,implementing→abandoned,testing→review,testing→implementing,review→deployed,review→implementing,deployed→archived,deployed→abandoned" }
 
 // Triple storage targets
 pattern STORAGE_GITHUB() -> String { return "github" }
@@ -140,15 +140,15 @@ pattern DetectTaskType(query: String) -> String {
   return TASK_TYPE_WEB_APP()
 }
 
-pattern DetectCommand(query: String) -> String {
+pattern DevDetectCommand(query: String) -> String {
   let q = lower(query)
   if contains(q, "/dev-estimate") then { return "dev-estimate" }
   if contains(q, "/dev-decide") then { return "dev-decide" }
   if contains(q, "/dev-implement") then { return "dev-implement" }
-  if contains(q, "/dev-task") andcontains(q, "/dev-tasks") == false then { return "dev-task" }
+  if contains(q, "/dev-task") and contains(q, "/dev-tasks") == false then { return "dev-task" }
   if contains(q, "/dev-tasks") then { return "dev-tasks" }
   if contains(q, "/dev-repos") then { return "dev-repos" }
-  if contains(q, "/dev-repo") andcontains(q, "/dev-repos") == false andcontains(q, "/dev-create-repo") == false then { return "dev-repo" }
+  if contains(q, "/dev-repo") and contains(q, "/dev-repos") == false and contains(q, "/dev-create-repo") == false then { return "dev-repo" }
   if contains(q, "/dev-create-repo") then { return "dev-create-repo" }
   if contains(q, "/dev-radar-add") then { return "dev-radar-add" }
   if contains(q, "/dev-radar") then { return "dev-radar" }
@@ -162,7 +162,7 @@ pattern DetectCommand(query: String) -> String {
 }
 
 pattern ParseDevQuery(query: String) -> Dict {
-  let command = DetectCommand(query)
+  let command = DevDetectCommand(query)
   let task_type = DetectTaskType(query)
 
   // Out-of-scope detection
@@ -200,15 +200,15 @@ pattern ParseDevQuery(query: String) -> Dict {
 // Hard rule: disclaimer at top and bottom of every output
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern WrapWithDisclaimer(content: String) -> String {
-  return DISCLAIMER_TOP() + "\n\n" + content + "\n\n" + DISCLAIMER_BOTTOM()
+pattern DevWrapWithDisclaimer(content: String) -> String {
+  return DevDisclaimerTop() + "\n\n" + content + "\n\n" + DevDisclaimerBottom()
 }
 
-pattern DeclineOutOfScope(query: String) -> String {
+pattern DevDeclineOutOfScope(query: String) -> String {
   let msg = "Запрос отклонён: задача выходит за рамки отдела Разработка.\n\n"
   let msg = msg + "Отдел Разработка покрывает: web-приложения, сайты, AI-офисы, локальные AI, инфраструктуру, рефакторинг, hotfix.\n\n"
   let msg = msg + "Аппаратные схемы, PCB layout и подобное — вне компетенции отдела."
-  return WrapWithDisclaimer(msg)
+  return DevWrapWithDisclaimer(msg)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -358,7 +358,7 @@ pattern GateNoCriticalVulns(dependencies_json: String) -> Dict {
 // ── Hard Rule 10: No API contract break without major version bump ─────
 pattern GateAPIContractBreak(contract_change: String, version_bump: String) -> Dict {
   let is_breaking = contains(lower(contract_change), "breaking") or contains(lower(contract_change), "removed") or contains(lower(contract_change), "deleted field")
-  ifis_breaking == false then {
+  if is_breaking == false then {
     return { passed: true, message: "No breaking API contract change detected" }
   }
   let is_major_bump = contains(version_bump, "major") or contains(lower(version_bump), "x.0.0") or contains(lower(version_bump), "v2") or contains(lower(version_bump), "v3")
@@ -428,7 +428,7 @@ pattern CheckAllHardRules(task_id: String, estimate_json: String, technologies_j
 
 pattern IsValidTransition(from_state: String, to_state: String) -> Bool {
   let transition = from_state + "→" + to_state
-  return contains(VALID_TRANSITIONS(), transition)
+  return contains(DevValidTransitions(), transition)
 }
 
 pattern TransitionTask(task_id: String, new_state: String, notes: String) -> Dict {
@@ -437,23 +437,23 @@ pattern TransitionTask(task_id: String, new_state: String, notes: String) -> Dic
     return { success: false, previous_state: "", new_state: new_state, message: "Task not found: " + task_id }
   }
   let current_state = to_string(json_get(get(row, 0), "status", ""))
-  ifIsValidTransition(current_state, new_state) == false then {
+  if IsValidTransition(current_state, new_state) == false then {
     return { success: false, previous_state: current_state, new_state: new_state, message: "Invalid transition: " + current_state + " → " + new_state + ". Allowed transitions: drafted→estimated, estimated→architecting, architecting→implementing, implementing→testing, testing→review, review→deployed, deployed→archived" }
   }
   let _ = db_execute("UPDATE dev_tasks SET status = ?, updated_at = datetime('now') WHERE id = ?", [new_state, task_id])
-  let _ = AuditLog("dev_lifecycle", DEPT_NAME(), "task=" + task_id + " " + current_state + "→" + new_state)
+  let _ = AuditLog("dev_lifecycle", DevDeptName(), "task=" + task_id + " " + current_state + "→" + new_state)
   return { success: true, previous_state: current_state, new_state: new_state, message: "Task " + task_id + ": " + current_state + " → " + new_state }
 }
 
 pattern StateNameRU(state: String) -> String {
-  if state == STATUS_DRAFTED() then { return "Черновик" }
+  if state == DevStatusDrafted() then { return "Черновик" }
   if state == STATUS_ESTIMATED() then { return "Оценена" }
   if state == STATUS_ARCHITECTING() then { return "Архитектура" }
   if state == STATUS_IMPLEMENTING() then { return "Реализация" }
   if state == STATUS_TESTING() then { return "Тестирование" }
   if state == STATUS_REVIEW() then { return "Ревью" }
   if state == STATUS_DEPLOYED() then { return "Развёрнута" }
-  if state == STATUS_ARCHIVED() then { return "Архив" }
+  if state == DevStatusArchived() then { return "Архив" }
   if state == STATUS_ABANDONED() then { return "Отменена" }
   return state
 }
@@ -489,7 +489,7 @@ pattern AddTechRadarEntry(name: String, category: String, radar_state: String, d
     let _ = db_execute("INSERT INTO tech_radar_entries (name, category, radar_state, description, rationale, created_at, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))", [name, category, radar_state, description, rationale])
   }
 
-  let _ = AuditLog("dev_radar", DEPT_NAME(), name + ": " + prev_state + " → " + radar_state)
+  let _ = AuditLog("dev_radar", DevDeptName(), name + ": " + prev_state + " → " + radar_state)
 
   let state_label = ""
   if radar_state == RADAR_ADOPT() then { let state_label = "✅ ADOPT — используем в production" }
@@ -522,7 +522,7 @@ pattern ShowTechRadar(category: String) -> String {
   let prompt = "Форматируй Tech Radar отдела Разработка. Группируй по состоянию (ADOPT, TRIAL, ASSESS, HOLD). HOLD технологии выделены как запрещённые. JSON данные: " + to_string(rows)
   let formatted = try call_llm(prompt)
   if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
-  return WrapWithDisclaimer(formatted)
+  return DevWrapWithDisclaimer(formatted)
 }
 
 pattern GetTaskTechStack(task_type: String) -> String {
@@ -562,10 +562,10 @@ pattern CreateArchitectureDecision(task_id: String, title: String, context: Stri
     return "❌ ЖЁСТКОЕ ПРАВИЛО 1: ADR без контекста — не ADR. Укажите контекст (минимум 2-3 предложения)."
   }
 
-  let adr_id = "adr_" + to_string(hash(title + to_string(now())))
+  let adr_id = "adr_" + to_string(sha256(title + to_string(now())))
   let _ = db_execute("INSERT INTO architecture_decisions (id, task_id, title, context, alternatives, decision, consequences, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', datetime('now'))", [adr_id, task_id, title, context, alternatives, decision, consequences])
 
-  let _ = AuditLog("dev_adr", DEPT_NAME(), "adr_id=" + adr_id + " task=" + task_id + " title=" + substring(title, 0.0, 80.0))
+  let _ = AuditLog("dev_adr", DevDeptName(), "adr_id=" + adr_id + " task=" + task_id + " title=" + substring(title, 0.0, 80.0))
 
   let msg = "═══ Architecture Decision Record ═══\n"
   let msg = msg + "ID: " + adr_id + "\n"
@@ -577,7 +577,7 @@ pattern CreateArchitectureDecision(task_id: String, title: String, context: Stri
   let msg = msg + "── CONSEQUENCES ──\n" + consequences + "\n\n"
   let msg = msg + "Status: proposed\n"
   let msg = msg + "Жёсткое правило 1: код может быть написан только после ADR."
-  return WrapWithDisclaimer(msg)
+  return DevWrapWithDisclaimer(msg)
 }
 
 pattern ListArchitectureDecisions(task_id: String) -> String {
@@ -646,7 +646,7 @@ pattern CreateEstimate(task_id: String, task_description: String, confidence: St
   if gate.passed then { let gate_str = "✅ диапазон предоставлен" }
   let msg = msg + "Жёсткое правило 2: " +gate_str
 
-  let _ = AuditLog("dev_estimate", DEPT_NAME(), "task=" + task_id + " expected=" + to_string(expected_hours) + "h range=" + to_string(low_hours) + "-" + to_string(high_hours))
+  let _ = AuditLog("dev_estimate", DevDeptName(), "task=" + task_id + " expected=" + to_string(expected_hours) + "h range=" + to_string(low_hours) + "-" + to_string(high_hours))
 
   return {
     low_hours: low_hours,
@@ -765,7 +765,7 @@ pattern ImplementIteration(task_id: String, iteration_num: Int, iteration_plan: 
   let commit_data = code + " " + tests
   let gate = GateCommitHasTest(commit_data)
 
-  ifgate.passed == false then {
+  if gate.passed == false then {
     return {
       success: false,
       code: code,
@@ -1239,13 +1239,13 @@ pattern SnapshotToTelegramArchive(task_id: String, task_data: String, chat_id: S
   let snapshot_msg = snapshot_msg + "Data: " + substring(task_data, 0.0, 3000.0) + "\n\n"
   let snapshot_msg = snapshot_msg + "Timestamp: " + format_date(now(), "yyyy-MM-dd HH:mm")
 
-  let result = SendTelegramMessage(chat_id, snapshot_msg)
-  let snapshot_id = "snap_" + to_string(hash(task_id + to_string(now())))
+  let result = send_message(chat_id, snapshot_msg)
+  let snapshot_id = "snap_" + to_string(sha256(task_id + to_string(now())))
 
   // Update task with snapshot reference
   let _ = db_execute("UPDATE dev_tasks SET telegram_snapshot_id = ? WHERE id = ?", [snapshot_id, task_id])
 
-  let _ = AuditLog("dev_snapshot", DEPT_NAME(), "task=" + task_id + " snapshot=" + snapshot_id + " target=telegram_archive")
+  let _ = AuditLog("dev_snapshot", DevDeptName(), "task=" + task_id + " snapshot=" + snapshot_id + " target=telegram_archive")
   return "Telegram snapshot создан: " + snapshot_id
 }
 
@@ -1253,7 +1253,7 @@ pattern SyncToLocal(task_id: String, task_data: String) -> String {
   // Deferred sync to local storage
   let sync_key = "dev_local_sync_" + task_id
   let _ = kv_set(sync_key, task_data)
-  let _ = AuditLog("dev_local_sync", DEPT_NAME(), "task=" + task_id + " target=local_deferred")
+  let _ = AuditLog("dev_local_sync", DevDeptName(), "task=" + task_id + " target=local_deferred")
   return "Local sync запланирован для task " + task_id
 }
 
@@ -1274,7 +1274,7 @@ pattern DevDashboard(chat_id: String) -> String {
   let repos_total = to_int(to_string(json_get(get(repos_count, 0), "c", "0")))
 
   let msg = "═══ ОТДЕЛ РАЗРАБОТКА ═══\n"
-  let msg = msg + "Психотип: " + PSYCHOTYPE() + "\n\n"
+  let msg = msg + "Психотип: " + DevPsychotype() + "\n\n"
   let msg = msg + "── СТАТИСТИКА ──\n"
   let msg = msg + "Активных задач: " + to_string(active_count) + " / " + to_string(total_count) + "\n"
   let msg = msg + "Tech Radar записей: " + to_string(radar_total) + "\n"
@@ -1304,7 +1304,7 @@ pattern DevDashboard(chat_id: String) -> String {
   let msg = msg + "8. Каждая задача → Telegram snapshot\n"
   let msg = msg + "9. Нет зависимостей с critical vulns\n"
   let msg = msg + "10. Нет API break без major version bump"
-  return WrapWithDisclaimer(msg)
+  return DevWrapWithDisclaimer(msg)
 }
 
 // ── /dev-tasks — List tasks ────────────────────────────────────────────
@@ -1319,7 +1319,7 @@ pattern ListTasks(status_filter: String, limit: Int) -> String {
   let prompt = "Форматируй список задач отдела Разработка. Показывай статус русскими названиями, тип задач русскими. JSON данные: " + to_string(rows)
   let formatted = try call_llm(prompt)
   if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
-  return WrapWithDisclaimer(formatted)
+  return DevWrapWithDisclaimer(formatted)
 }
 
 // ── /dev-task — Show single task ───────────────────────────────────────
@@ -1349,7 +1349,7 @@ pattern ShowTask(task_id: String) -> String {
   let msg = msg + "Telegram snapshot: " + snap + "\n\n"
   let msg = msg + "Полные данные:\n" + to_string(data)
 
-  return WrapWithDisclaimer(msg)
+  return DevWrapWithDisclaimer(msg)
 }
 
 // ── /dev-repos — List repositories ─────────────────────────────────────
@@ -1362,7 +1362,7 @@ pattern ListRepos() -> String {
   let prompt = "Форматируй список репозиториев отдела Разработка. Для каждого показывай наличие обязательных файлов (✅/❌). JSON: " + to_string(rows)
   let formatted = try call_llm(prompt)
   if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
-  return WrapWithDisclaimer(formatted)
+  return DevWrapWithDisclaimer(formatted)
 }
 
 // ── /dev-repo — Show single repository ─────────────────────────────────
@@ -1380,7 +1380,7 @@ pattern ShowRepo(repo_name: String) -> String {
   let msg = msg + "── Соответствие стандартам ──\n"
   let msg = msg + compliance.message
 
-  return WrapWithDisclaimer(msg)
+  return DevWrapWithDisclaimer(msg)
 }
 
 // ── /dev-create-repo — Create repository ───────────────────────────────
@@ -1391,27 +1391,27 @@ pattern CreateRepo(name: String, task_type: String, url: String) -> String {
   // Generate required files
   let standards = EnforceRepoStandards(name, url, task_type)
 
-  let _ = AuditLog("dev_create_repo", DEPT_NAME(), "repo=" + name + " type=" + task_type)
+  let _ = AuditLog("dev_create_repo", DevDeptName(), "repo=" + name + " type=" + task_type)
 
   let msg = "Репозиторий создан: " + name + "\n"
   let msg = msg + "Тип: " + TaskTypeNameRU(task_type) + "\n"
   let msg = msg + "URL: " + url + "\n"
   let msg = msg + "Primary storage: GitHub\n\n"
   let msg = msg + "── Стандартные файлы ──\n" + standards
-  return WrapWithDisclaimer(msg)
+  return DevWrapWithDisclaimer(msg)
 }
 
 // ── /dev-deploy — Deploy task ──────────────────────────────────────────
 pattern DeployTask(task_id: String, chat_id: String) -> String {
   // Hard rule 5: no production deploy without green QA
   let qa_gate = GateDeployRequiresGreenQA(task_id)
-  ifqa_gate.passed == false then {
+  if qa_gate.passed == false then {
     return qa_gate.message
   }
 
   // Transition to deployed
   let transition = TransitionTask(task_id, STATUS_DEPLOYED(), "Production deploy via /dev-deploy")
-  iftransition.success == false then {
+  if transition.success == false then {
     return "Deploy не удался: " + transition.message
   }
 
@@ -1424,7 +1424,7 @@ pattern DeployTask(task_id: String, chat_id: String) -> String {
   // Sync to local
   let local_sync = SyncToLocal(task_id, task_data)
 
-  let _ = AuditLog("dev_deploy", DEPT_NAME(), "task=" + task_id + " → deployed")
+  let _ = AuditLog("dev_deploy", DevDeptName(), "task=" + task_id + " → deployed")
 
   let msg = "═══ DEPLOY ═══\n"
   let msg = msg + "Task: " + task_id + "\n"
@@ -1432,7 +1432,7 @@ pattern DeployTask(task_id: String, chat_id: String) -> String {
   let msg = msg + "QA Gate: ✅ passed\n"
   let msg = msg + "Telegram snapshot: " + snapshot + "\n"
   let msg = msg + "Local sync: " + local_sync
-  return WrapWithDisclaimer(msg)
+  return DevWrapWithDisclaimer(msg)
 }
 
 // ── /dev-archive — Archive task ────────────────────────────────────────
@@ -1443,12 +1443,12 @@ pattern ArchiveTask(task_id: String, actual_hours: String) -> String {
   // Learning loop: update estimate verification
   let _ = db_execute("UPDATE dev_estimate_verifications SET actual_hours = ?, verified_at = datetime('now') WHERE task_id = ?", [actual_hours, task_id])
 
-  let transition = TransitionTask(task_id, STATUS_ARCHIVED(), "Task completed, actual=" + actual_hours + "h")
-  iftransition.success == false then {
+  let transition = TransitionTask(task_id, DevStatusArchived(), "Task completed, actual=" + actual_hours + "h")
+  if transition.success == false then {
     return "Archive не удался: " + transition.message
   }
 
-  let _ = AuditLog("dev_archive", DEPT_NAME(), "task=" + task_id + " actual_hours=" + actual_hours)
+  let _ = AuditLog("dev_archive", DevDeptName(), "task=" + task_id + " actual_hours=" + actual_hours)
 
   return "Задача " + task_id + " архивирована. Фактические часы: " + actual_hours + ". Данные добавлены в цикл обучения (estimate vs actual)."
 }
@@ -1468,7 +1468,7 @@ pattern LocalSync() -> String {
     let i = i + 1
   }
 
-  let _ = AuditLog("dev_local_sync", DEPT_NAME(), "synced=" + to_string(sync_count) + " tasks to local storage")
+  let _ = AuditLog("dev_local_sync", DevDeptName(), "synced=" + to_string(sync_count) + " tasks to local storage")
   return "Local sync завершён: " + to_string(sync_count) + " задач синхронизировано в KV store."
 }
 
@@ -1526,7 +1526,7 @@ pattern WeeklyTechRadarScan() -> String {
   let analysis = try call_llm(prompt)
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
 
-  let _ = AuditLog("dev_radar_scan", DEPT_NAME(), "Weekly Tech Radar scan completed")
+  let _ = AuditLog("dev_radar_scan", DevDeptName(), "Weekly Tech Radar scan completed")
   return "═══ Еженедельный Tech Radar Scan ═══\n\n" + analysis
 }
 
@@ -1535,7 +1535,7 @@ pattern MonthlyEstimateCalibration() -> String {
   let verifications = query("SELECT task_id, estimate_expected, actual_hours, mape, bias FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-30 days') AND actual_hours IS NOT NULL", [])
 
   if length(verifications) == 0 then {
-    let _ = AuditLog("dev_monthly_cal", DEPT_NAME(), "No estimate verifications in past 30 days")
+    let _ = AuditLog("dev_monthly_cal", DevDeptName(), "No estimate verifications in past 30 days")
     return "Нет верифицированных оценок за последние 30 дней."
   }
 
@@ -1553,13 +1553,13 @@ pattern MonthlyEstimateCalibration() -> String {
   // Store monthly calibration
   let _ = db_execute("INSERT INTO dev_monthly_calibrations (period_start, period_end, verifications_count, analysis, created_at) VALUES (datetime('now', '-30 days'), datetime('now'), ?, ?, datetime('now'))", [to_string(length(verifications)), analysis])
 
-  let _ = AuditLog("dev_monthly_cal", DEPT_NAME(), "Monthly estimate calibration: " + to_string(length(verifications)) + " verifications")
+  let _ = AuditLog("dev_monthly_cal", DevDeptName(), "Monthly estimate calibration: " + to_string(length(verifications)) + " verifications")
 
   return "═══ Месячная калибровка оценок ═══\n\n" + analysis
 }
 
 // ── Quarterly: Jan/Apr/Jul/Oct — Methodology review ───────────────────
-pattern QuarterlyMethodologyReview() -> String {
+pattern DevQuarterlyMethodologyReview() -> String {
   let prompt = "Квартальный обзор методологии отдела Разработка.\n\n"
   let prompt = prompt + "1. Соблюдаются ли жёсткие правила? (статистика нарушений)\n"
   let prompt = prompt + "2. Точность оценок — улучшается ли?\n"
@@ -1578,7 +1578,7 @@ pattern QuarterlyMethodologyReview() -> String {
   let analysis = try call_llm(prompt)
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
 
-  let _ = AuditLog("dev_quarterly", DEPT_NAME(), "Quarterly methodology review completed")
+  let _ = AuditLog("dev_quarterly", DevDeptName(), "Quarterly methodology review completed")
 
   return "═══ Квартальный обзор методологии ═══\n\n" + analysis
 }
@@ -1648,10 +1648,10 @@ pattern DevScore() -> String {
 // SECTION 18: FULL PIPELINE (for free-text dev queries)
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern FullPipeline(query: String, task_type: String, chat_id: String, explicit_tier3: String) -> String {
+pattern DevFullPipeline(query: String, task_type: String, chat_id: String, explicit_tier3: String) -> String {
   // Step 0: Create task in DB
-  let task_id = "dev_" + to_string(hash(query + to_string(now())))
-  let _ = db_execute("INSERT INTO dev_tasks (id, title, task_type, status, qa_status, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))", [task_id, substring(query, 0.0, 200.0), task_type, STATUS_DRAFTED()])
+  let task_id = "dev_" + to_string(sha256(query + to_string(now())))
+  let _ = db_execute("INSERT INTO dev_tasks (id, title, task_type, status, qa_status, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))", [task_id, substring(query, 0.0, 200.0), task_type, DevStatusDrafted()])
 
   // Step 1: Load skill tiers
   let skills = LoadSkillTiers(task_type, explicit_tier3)
@@ -1717,7 +1717,7 @@ pattern FullPipeline(query: String, task_type: String, chat_id: String, explicit
   let doc = doc + "═══════════════════════════════════════\n\n"
 
   // Disclaimer at top
-  let doc = doc + DISCLAIMER_TOP() + "\n\n"
+  let doc = doc + DevDisclaimerTop() + "\n\n"
 
   // Task info
   let doc = doc + "── ЗАДАЧА ──\n"
@@ -1772,11 +1772,11 @@ pattern FullPipeline(query: String, task_type: String, chat_id: String, explicit
   let doc = doc + "Local: deferred sync\n\n"
 
   // Disclaimer at bottom
-  let doc = doc + DISCLAIMER_BOTTOM()
+  let doc = doc + DevDisclaimerBottom()
 
   // Update task status
-  let _ = RecordAssistantMessage(chat_id, DEPT_NAME(), substring(doc, 0.0, 4000.0))
-  let _ = AuditLog("dev_pipeline", DEPT_NAME(), "task=" + task_id + " type=" + task_type + " estimate=" + substring(to_string(estimate.expected_hours), 0.0, 6.0) + "h rules=" + to_string(rules.passed_count) + "/" + to_string(rules.total_count))
+  let _ = RecordAssistantMessage(chat_id, DevDeptName(), substring(doc, 0.0, 4000.0))
+  let _ = AuditLog("dev_pipeline", DevDeptName(), "task=" + task_id + " type=" + task_type + " estimate=" + substring(to_string(estimate.expected_hours), 0.0, 6.0) + "h rules=" + to_string(rules.passed_count) + "/" + to_string(rules.total_count))
 
   return doc
 }
@@ -1816,8 +1816,8 @@ pattern DevPlanMode(query: String, task_type: String, chat_id: String) -> String
   let doc = "\n\n\n\n\n\n\n\n"
   let doc = doc + "PLAN MODE\n"
   let doc = doc + "\n" + plan
-  let doc = doc + "\n\nДля реализации плана: отправь задачу текстом (запустит FullPipeline) или используй /dev-implement\n"
-  let doc = doc + DISCLAIMER_BOTTOM()
+  let doc = doc + "\n\nДля реализации плана: отправь задачу текстом (запустит DevFullPipeline) или используй /dev-implement\n"
+  let doc = doc + DevDisclaimerBottom()
   return doc
 }
 
@@ -1859,10 +1859,10 @@ pattern ListDesignTokens() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 19: COMMAND ROUTER
 // ═══════════════════════════════════════════════════════════════════════
-pattern RouteByCommand(parsed: Dict, chat_id: String) -> String {
+pattern DevRouteByCommand(parsed: Dict, chat_id: String) -> String {
   // Out-of-scope gate
   if parsed.is_out_of_scope then {
-    return DeclineOutOfScope(parsed.task_description)
+    return DevDeclineOutOfScope(parsed.task_description)
   }
 
   let cmd = parsed.command
@@ -1890,7 +1890,7 @@ pattern RouteByCommand(parsed: Dict, chat_id: String) -> String {
     if parsed.task_id == "" then { return "Укажите ID задачи: /dev-decide <task_id> <title>" }
     let parts = split(parsed.task_description, " ")
     let title = "ADR for " + parsed.task_id
-    if length(parts) > 2 then { let title = join(parts, " ", 2) }
+    if length(parts) > 2 then { let title = join(slice(parts, 2.0, length(parts)), " ") }
     return CreateArchitectureDecision(parsed.task_id, title, parsed.task_description, "See context", "See alternatives", "See decision")
   }
 
@@ -1956,7 +1956,7 @@ pattern RouteByCommand(parsed: Dict, chat_id: String) -> String {
     let category = to_string(get(parts, 2))
     let state = to_string(get(parts, 3))
     let desc = "Added via /dev-radar-add"
-    if length(parts) > 4 then { let desc = join(parts, " ", 4) }
+    if length(parts) > 4 then { let desc = join(slice(parts, 4.0, length(parts)), " ") }
     return AddTechRadarEntry(name, category, state, desc, "User decision")
   }
 
@@ -2019,7 +2019,7 @@ pattern RouteByCommand(parsed: Dict, chat_id: String) -> String {
   if dtokens != "" then {
     let enriched_query = enriched_query + "\n\n[Design tokens]\n" + dtokens
   }
-  return FullPipeline(enriched_query, parsed.task_type, chat_id, "")
+  return DevFullPipeline(enriched_query, parsed.task_type, chat_id, "")
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2028,18 +2028,18 @@ pattern RouteByCommand(parsed: Dict, chat_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 
 pattern HandleDev(query: String, chat_id: String) -> String {
-  let dept = DEPT_NAME()
+  let dept = DevDeptName()
   let _ = AuditLog("dept_entry", dept, "query: " + substring(query, 0, 100))
 
   // Parse query → task type + command
   let parsed = ParseDevQuery(query)
 
   // Route to command handler or full pipeline
-  let result = RouteByCommand(parsed, chat_id)
+  let result = DevRouteByCommand(parsed, chat_id)
 
   // Final safety: ensure disclaimer is present
   let has_disclaimer = contains(result, "Код генерируется проектным ассистентом") or contains(result, "проектного ассистента")
-  let output = WrapWithDisclaimer(result)
+  let output = DevWrapWithDisclaimer(result)
   if has_disclaimer then { let output = result }
 
   // ── LLM-Verifier: code/architecture quality ──
