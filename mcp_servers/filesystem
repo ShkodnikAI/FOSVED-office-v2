@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""FOSVED office MCP server: filesystem (FO-014, ADR-0132 v1).
+
+Office-owned stdio MCP server — работа с документами в песочнице офиса.
+Диалект: legacy MCP (newline-delimited JSON-RPC 2.0 over stdio), контракт
+зеркалит tests/fixtures/mcp_echo_server.py из Metalogos (№268).
+
+Песочница (вне git — требование наряда):
+  корень = env FOSVED_MCP_FS_ROOT (default <repo>/data/documents);
+  абсолютные пути и '..' разрешаются ТОЛЬКО внутрь корня (realpath-
+  сравнение); выход за корень — громкий отказ isError=true.
+  Read/write размеры ограничены (2 МБ / 2 МБ).
+
+Тулзы v1:
+  read_file(path)            — текст файла (utf-8)
+  write_file(path, content)  — записать (mkdir parents)
+  list_dir(path?)            — список имён с типами
+  mkdir(path)                — создать директорию
+
+Весь вывод — недоверенные данные (taint UserInput, №268): mlog-сторона
+прогоняет через redact() до попадания в промпты. Stdout — ТОЛЬКО JSON-RPC.
+Инцидент-политика: тулзы не бросают — отказ возвращается как
+{"ok": false, "error": ...} (mlog-try не сохраняет текст ошибки).
+"""
+import json
+import os
+import sys
+
+SERVER_NAME = "fosved-filesystem"
+SERVER_VERSION = "1.0.0"
+MAX_BYTES = 2 * 1024 * 1024  # 2 МБ на чтение и запись
+
+TOOLS = [
+    {"name": "read_file", "description": "Прочитать файл в песочнице: path (относительно корня)",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}},
+                     "required": ["path"]}},
+    {"name": "write_file", "description": "Записать файл: path, content",
+     "inputSchema": {"type": "object", "properties": {
+         "path": {"type": "string"}, "content": {"type": "string"}},
+         "required": ["path", "content"]}},
+    {"name": "list_dir", "description": "Список директории: path (опц., '' = корень)",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}},
+    {"name": "mkdir", "description": "Создать директорию: path",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}},
+                     "required": ["path"]}},
+]
+
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def respond(msg_id, result):
+    send({"jsonrpc": "2.0", "id": msg_id, "result": result})
+
+
+def respond_error(msg_id, code, message):
+    send({"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}})
+
+
+def sandbox_root():
+    default = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "data", "documents")
+    return os.path.realpath(os.environ.get("FOSVED_MCP_FS_ROOT", default))
+
+
+def resolve(path):
+    """Путь внутри песочницы или громкий отказ. '' и '.' = корень."""
+    root = sandbox_root()
+    raw = str(path or "").strip()
+    candidate = os.path.realpath(os.path.join(root, raw))
+    if candidate != root and not candidate.startswith(root + os.sep):
+        raise RuntimeError(
+            f"выход за песочницу запрещён: '{raw}' вне {root}")
+    return candidate
+
+
+def tool_read_file(args):
+    try:
+        p = resolve(args.get("path"))
+        if not os.path.isfile(p):
+            raise RuntimeError(f"файл не найден: {args.get('path')}")
+        size = os.path.getsize(p)
+        if size > MAX_BYTES:
+            raise RuntimeError(f"файл слишком большой: {size} > {MAX_BYTES}")
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(MAX_BYTES)
+        return {"ok": True, "path": str(args.get("path")), "bytes": size,
+                "content": content}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_write_file(args):
+    try:
+        p = resolve(args.get("path"))
+        content = str(args.get("content", ""))
+        if len(content.encode("utf-8")) > MAX_BYTES:
+            raise RuntimeError(f"content слишком большой (> {MAX_BYTES} байт)")
+        os.makedirs(os.path.dirname(p) or sandbox_root(), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"ok": True, "path": str(args.get("path")),
+                "bytes": len(content.encode("utf-8")), "written": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_list_dir(args):
+    try:
+        p = resolve(args.get("path", ""))
+        if not os.path.isdir(p):
+            raise RuntimeError(f"директория не найдена: {args.get('path', '')}")
+        items = []
+        for name in sorted(os.listdir(p)):
+            full = os.path.join(p, name)
+            items.append({"name": name, "type": "dir" if os.path.isdir(full) else "file",
+                          "bytes": os.path.getsize(full) if os.path.isfile(full) else None})
+        return {"ok": True, "path": str(args.get("path", "")), "root": sandbox_root(),
+                "count": len(items), "items": items}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_mkdir(args):
+    try:
+        p = resolve(args.get("path"))
+        os.makedirs(p, exist_ok=True)
+        return {"ok": True, "path": str(args.get("path")), "created": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+TOOL_FUNCS = {
+    "read_file": tool_read_file,
+    "write_file": tool_write_file,
+    "list_dir": tool_list_dir,
+    "mkdir": tool_mkdir,
+}
+
+
+def main():
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        method = msg.get("method")
+        msg_id = msg.get("id")
+        params = msg.get("params") or {}
+
+        if method == "initialize":
+            respond(msg_id, {
+                "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            })
+        elif method == "notifications/initialized":
+            pass
+        elif method == "tools/list":
+            respond(msg_id, {"tools": TOOLS})
+        elif method == "tools/call":
+            name = params.get("name", "")
+            args = params.get("arguments") or {}
+            func = TOOL_FUNCS.get(name)
+            if not func:
+                respond_error(msg_id, -32602, f"Unknown tool: {name}")
+                continue
+            try:
+                result = func(args)
+                text = json.dumps(result, ensure_ascii=False)
+                respond(msg_id, {"content": [{"type": "text", "text": text}],
+                                 "isError": False})
+            except Exception as e:
+                respond(msg_id, {"content": [{"type": "text", "text": str(e)}],
+                                 "isError": True})
+        elif method == "ping":
+            respond(msg_id, {})
+        elif msg_id is not None:
+            respond_error(msg_id, -32601, f"Method not found: {method}")
+
+
+if __name__ == "__main__":
+    main()

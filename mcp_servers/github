@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""FOSVED office MCP server: github (FO-014, ADR-0132 v1).
+
+Office-owned stdio MCP server — GitHub-инструменты для dev-департамента.
+Диалект: legacy MCP (newline-delimited JSON-RPC 2.0 over stdio), контракт
+зеркалит tests/fixtures/mcp_echo_server.py из Metalogos (№268):
+  initialize                  -> result(protocolVersion, capabilities, serverInfo)
+  notifications/initialized   -> notification, без ответа
+  tools/list                  -> result.tools
+  tools/call                  -> result.content=[{type:text}] / isError=true
+  shutdown                    -> закрытие stdin
+
+Тулзы v1 (наряд FO-014: /issue + чтение CI-статуса):
+  create_issue(repo, title, body?)   — открыть issue в репо
+  get_issue(repo, number)            — прочитать issue
+  list_issues(repo, state?)          — список issues
+  list_check_runs(repo, ref)         — CI-статус по ref
+
+Безопасность:
+  - токен берётся из env GITHUB_TOKEN (fallback GH_TOKEN) — НЕ из кода;
+  - GITHUB_API_BASE переопределяется только в тестах;
+  - весь вывод инструмента — недоверенные данные (taint UserInput, №268):
+    mlog-сторона обязана прогонять его через redact() до попадания в промпты;
+  - инцидент-политика: тулзы НИКОГДА не бросают — отказ REST возвращается
+    как {"ok": false, "error": ...} в тексте (isError=false), потому что
+    mlog-try не сохраняет текст ошибки ([MCP_TOOL_ERROR] теряет детали);
+    так департамент получает диагностику и уходит в fallback «руками».
+
+Stdout — ТОЛЬКО JSON-RPC; stderr — диагностика; shutdown — stdin close.
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+SERVER_NAME = "fosved-github"
+SERVER_VERSION = "1.0.0"
+DEFAULT_API_BASE = "https://api.github.com"
+MAX_BODY = 200_000  # символов в теле issue — верхняя граница честности
+
+TOOLS = [
+    {"name": "create_issue", "description": "Создать issue: repo='owner/name', title, body (опц.)",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string"}, "title": {"type": "string"},
+         "body": {"type": "string"}},
+         "required": ["repo", "title"]}},
+    {"name": "get_issue", "description": "Прочитать issue: repo, number",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string"}, "number": {"type": "integer"}},
+         "required": ["repo", "number"]}},
+    {"name": "list_issues", "description": "Список issues: repo, state (open|closed|all, опц.)",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string"}, "state": {"type": "string"}},
+         "required": ["repo"]}},
+    {"name": "list_check_runs", "description": "CI-статус по ref: repo, ref (ветка/sha)",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string"}, "ref": {"type": "string"}},
+         "required": ["repo", "ref"]}},
+]
+
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def respond(msg_id, result):
+    send({"jsonrpc": "2.0", "id": msg_id, "result": result})
+
+
+def respond_error(msg_id, code, message):
+    send({"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}})
+
+
+def api_base():
+    return os.environ.get("GITHUB_API_BASE", DEFAULT_API_BASE).rstrip("/")
+
+
+def gh_token():
+    # Порядок: GITHUB_TOKEN → GH_TOKEN → GITHUB_TOKEN_METALOGOS
+    # (последний уже заведён в env-группе fosved-secrets — переиспользуем).
+    return (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+            or os.environ.get("GITHUB_TOKEN_METALOGOS") or "")
+
+
+def gh_request(path, method="GET", payload=None):
+    """GitHub REST с громкой диагностикой. Возвращает JSON ответа."""
+    token = gh_token()
+    if not token:
+        raise RuntimeError("GITHUB_TOKEN не установлен — GitHub-MCP без креденшалов")
+    url = api_base() + path
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "fosved-office-mcp",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            raw = r.read().decode()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode()[:500]
+        except Exception:
+            pass
+        raise RuntimeError(f"GitHub HTTP {e.code} на {path}: {detail or e.reason}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"GitHub недоступен ({path}): {e.reason}")
+
+
+def check_repo(repo):
+    if not repo or "/" not in repo or repo.count("/") != 1:
+        raise RuntimeError("repo должен быть в формате 'owner/name'")
+    return repo
+
+
+# ── Тулзы (всегда структурированный ответ: ok=true/false, отказ не бросается) ──
+def tool_create_issue(args):
+    try:
+        repo = check_repo(str(args.get("repo", "")))
+        title = str(args.get("title", "")).strip()
+        if not title:
+            raise RuntimeError("title пуст")
+        body = str(args.get("body", ""))
+        if len(body) > MAX_BODY:
+            raise RuntimeError(f"body слишком длинный ({len(body)} > {MAX_BODY})")
+        payload = {"title": title, "body": body}
+        out = gh_request(f"/repos/{repo}/issues", method="POST", payload=payload)
+        return {"ok": True, "number": out.get("number"), "url": out.get("html_url"),
+                "state": out.get("state"), "title": out.get("title")}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "fallback": "открыть руками: github.com/<repo>/issues/new"}
+
+
+def tool_get_issue(args):
+    try:
+        repo = check_repo(str(args.get("repo", "")))
+        number = int(args.get("number", 0))
+        if number <= 0:
+            raise RuntimeError("number должен быть положительным")
+        out = gh_request(f"/repos/{repo}/issues/{number}")
+        return {"ok": True, "number": out.get("number"), "title": out.get("title"),
+                "state": out.get("state"), "url": out.get("html_url"),
+                "body": (out.get("body") or "")[:4000]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_list_issues(args):
+    try:
+        repo = check_repo(str(args.get("repo", "")))
+        state = str(args.get("state", "open"))
+        if state not in ("open", "closed", "all"):
+            raise RuntimeError("state: open|closed|all")
+        out = gh_request(f"/repos/{repo}/issues?state={state}&per_page=20")
+        items = [{"number": i.get("number"), "title": i.get("title"),
+                  "state": i.get("state"), "url": i.get("html_url")} for i in out]
+        return {"ok": True, "count": len(items), "issues": items}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_list_check_runs(args):
+    try:
+        repo = check_repo(str(args.get("repo", "")))
+        ref = str(args.get("ref", "")).strip()
+        if not ref:
+            raise RuntimeError("ref пуст (ветка или sha)")
+        out = gh_request(f"/repos/{repo}/commits/{ref}/check-runs?per_page=50")
+        runs = out.get("check_runs", [])
+        items = [{"name": r.get("name"), "status": r.get("status"),
+                  "conclusion": r.get("conclusion")} for r in runs]
+        summary = ", ".join(
+            f"{i['name']}={i['status']}/{i['conclusion']}" for i in items) or "(нет check-runs)"
+        return {"ok": True, "ref": ref, "count": len(items), "runs": items,
+                "summary": summary}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+TOOL_FUNCS = {
+    "create_issue": tool_create_issue,
+    "get_issue": tool_get_issue,
+    "list_issues": tool_list_issues,
+    "list_check_runs": tool_list_check_runs,
+}
+
+
+def main():
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue  # спека: сервер молчит на мусоре во входе
+        method = msg.get("method")
+        msg_id = msg.get("id")
+        params = msg.get("params") or {}
+
+        if method == "initialize":
+            respond(msg_id, {
+                "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            })
+        elif method == "notifications/initialized":
+            pass  # notification: никогда не отвечаем
+        elif method == "tools/list":
+            respond(msg_id, {"tools": TOOLS})
+        elif method == "tools/call":
+            name = params.get("name", "")
+            args = params.get("arguments") or {}
+            func = TOOL_FUNCS.get(name)
+            if not func:
+                respond_error(msg_id, -32602, f"Unknown tool: {name}")
+                continue
+            try:
+                result = func(args)
+                text = json.dumps(result, ensure_ascii=False)
+                respond(msg_id, {"content": [{"type": "text", "text": text}],
+                                 "isError": False})
+            except Exception as e:  # громкая диагностика, не падение сервера
+                respond(msg_id, {"content": [{"type": "text", "text": str(e)}],
+                                 "isError": True})
+        elif method == "ping":
+            respond(msg_id, {})
+        elif msg_id is not None:
+            respond_error(msg_id, -32601, f"Method not found: {method}")
+
+
+if __name__ == "__main__":
+    main()

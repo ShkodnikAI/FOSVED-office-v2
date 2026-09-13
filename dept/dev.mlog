@@ -142,6 +142,10 @@ pattern DetectTaskType(query: String) -> String {
 
 pattern DevDetectCommand(query: String) -> String {
   let q = lower(query)
+  // FO-014: MCP-команды (/issue, /ci, /docs) — до fallback "/dev"
+  if starts_with(q, "/issue") then { return "mcp-issue" }
+  if starts_with(q, "/ci") and contains(q, "/city") == false then { return "mcp-ci" }
+  if starts_with(q, "/docs") then { return "mcp-docs" }
   if contains(q, "/dev-estimate") then { return "dev-estimate" }
   if contains(q, "/dev-decide") then { return "dev-decide" }
   if contains(q, "/dev-implement") then { return "dev-implement" }
@@ -1870,6 +1874,21 @@ pattern DevRouteByCommand(parsed: Dict, chat_id: String) -> String {
   let mut name = ""
   let mut category = ""
 
+  // /issue — Create GitHub issue via MCP (FO-014)
+  if cmd == "mcp-issue" then {
+    return McpHandleIssue(parsed.task_description, chat_id)
+  }
+
+  // /ci — CI status via GitHub MCP (FO-014)
+  if cmd == "mcp-ci" then {
+    return McpHandleCI(parsed.task_description, chat_id)
+  }
+
+  // /docs — Documents sandbox via filesystem MCP (FO-014)
+  if cmd == "mcp-docs" then {
+    return McpHandleDocs(parsed.task_description, chat_id)
+  }
+
   // /dev — Dashboard
   if cmd == "dev" then {
     return DevDashboard(chat_id)
@@ -2054,4 +2073,200 @@ pattern HandleDev(query: String, chat_id: String) -> String {
   let _ = RecordAssistantMessage(chat_id, dept, substring(output, 0.0, 4000.0))
 
   return output
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SECTION 20: MCP TOOLS — github + filesystem (FO-014, ADR-0132 v1)
+// ═══════════════════════════════════════════════════════════════════════
+// Вход: bin/mlog содержит mcp_call/mcp_list_tools (Metalogos №268).
+// Гейты ядра: METALOGOS_SERVE_ALLOW_EXEC=1 (exec-гейт тел роутов) +
+// METALOGOS_MCP_ALLOWLIST="mcp_servers/github,mcp_servers/filesystem"
+// (конфиг, не код; изменение — отдельный коммит). Каждый spawn ядра —
+// в METALOGOS_AUDIT_LOG_PATH; каждый вызов офиса — в audit_log.
+// Taint: вывод тулз — недоверенные данные (UserInput из №268); наружу
+// (промпты/ответы) — только после redact(). reflex_train с taint-входом
+// отвергается статикой ядра.
+// Инцидент-политика: try mcp_call → () при любом сбое ядра (spawn/таймаут/
+// протокол) → департамент НЕ падает, диагностика + fallback «руками».
+// Отказы самих тулз приходят как {"ok": false, "error": ...} (тулзы не
+// бросают — детали диагностики не теряются в try).
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern McpGithubServerCmd() -> String {
+  return "mcp_servers/github"
+}
+
+pattern McpFsServerCmd() -> String {
+  return "mcp_servers/filesystem"
+}
+
+// Журнал mcp_call: dept, сервер, тулза, цель (требование наряда —
+// офисный лог поверх subprocess-лога ядра).
+pattern McpAudit(server: String, tool: String, purpose: String, status: String) -> String {
+  let _ = db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('mcp_call', 'dev', 'dev', ?, ?)", ["server=" + server + " tool=" + tool + " purpose=" + purpose, status])
+  return "ok"
+}
+
+// Единый вызов GitHub-MCP: гейты ядра + audit + redact. Всегда Dict:
+// { ok: true|false, body: <redact-ed текст сервера>, note: <диагностика> }
+pattern McpGithubCall(tool: String, args_json: String, purpose: String) -> Dict {
+  let _ = McpAudit("github", tool, purpose, "attempt")
+  let out = try mcp_call(McpGithubServerCmd(), [], tool, args_json)
+  if to_string(out) == "()" then {
+    let _ = McpAudit("github", tool, purpose, "error")
+    return { ok: false, body: "", note: "MCP-сервер github недоступен (гейт ядра/сбой/таймаут). Fallback: сделать руками. Детали: METALOGOS_AUDIT_LOG_PATH." }
+  }
+  let parsed = try parse_json(to_string(out))
+  if to_string(parsed) == "()" then {
+    let _ = McpAudit("github", tool, purpose, "error")
+    return { ok: false, body: redact(to_string(out), "secrets"), note: "ответ сервера не JSON" }
+  }
+  if to_string(json_get(parsed, "ok", "false")) == "true" then {
+    let _ = McpAudit("github", tool, purpose, "ok")
+    return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
+  }
+  let _ = McpAudit("github", tool, purpose, "refused")
+  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе" }
+}
+
+// Единый вызов filesystem-MCP (песочница data/documents, вне git).
+pattern McpFsCall(tool: String, args_json: String, purpose: String) -> Dict {
+  let _ = McpAudit("filesystem", tool, purpose, "attempt")
+  let out = try mcp_call(McpFsServerCmd(), [], tool, args_json)
+  if to_string(out) == "()" then {
+    let _ = McpAudit("filesystem", tool, purpose, "error")
+    return { ok: false, body: "", note: "MCP-сервер filesystem недоступен (гейт ядра/сбой/таймаут). Fallback: сделать руками." }
+  }
+  let parsed = try parse_json(to_string(out))
+  if to_string(parsed) == "()" then {
+    let _ = McpAudit("filesystem", tool, purpose, "error")
+    return { ok: false, body: redact(to_string(out), "secrets"), note: "ответ сервера не JSON" }
+  }
+  if to_string(json_get(parsed, "ok", "false")) == "true" then {
+    let _ = McpAudit("filesystem", tool, purpose, "ok")
+    return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
+  }
+  let _ = McpAudit("filesystem", tool, purpose, "refused")
+  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе (вне песочницы?)" }
+}
+
+// ── /issue <owner/repo> <заголовок и текст> — открыть issue через MCP ──
+pattern McpHandleIssue(query: String, chat_id: String) -> String {
+  let parts = split(query, " ")
+  if length(parts) < 3 then {
+    return "Формат: /issue <owner/repo> <заголовок и текст>\nПример: /issue ShkodnikAI/FOSVED-office-v2 Баг: тестовый наряд"
+  }
+  let repo = to_string(get(parts, 1))
+  if contains(repo, "/") == false then {
+    return "repo должен быть в формате owner/repo (например ShkodnikAI/FOSVED-office-v2)"
+  }
+  let text = join(slice(parts, 2.0, length(parts)), " ")
+  let mut title = text
+  if length(text) > 80.0 then { let title = substring(text, 0.0, 80.0) + "…" }
+  let body = text + "\n\n---\nСоздано dev-департаментом офиса через MCP (FO-014)."
+  let res = McpGithubCall("create_issue", json_encode({repo: repo, title: title, body: body}), "/issue")
+  if res.ok == false then {
+    let msg = "Issue не создан: " + res.body + "\n" + res.note
+    let _ = SendTelegramReply(chat_id, substring(msg, 0.0, 3500.0))
+    return msg
+  }
+  let data = try parse_json(res.body)
+  let number = to_string(json_get(data, "number", "?"))
+  let url = to_string(json_get(data, "url", ""))
+  let msg = "Issue открыт через MCP: #" + number + " " + repo + "\n" + url + "\n\nTaint-контур: вывод тулзы прошёл redact(), вызов — в audit_log."
+  let _ = SendTelegramReply(chat_id, msg)
+  return msg
+}
+
+// ── /ci <owner/repo> [branch] — CI-статус через MCP ─────────────────────
+pattern McpHandleCI(query: String, chat_id: String) -> String {
+  let parts = split(query, " ")
+  if length(parts) < 2 then {
+    return "Формат: /ci <owner/repo> [branch]\nПример: /ci ShkodnikAI/FOSVED-office-v2 main"
+  }
+  let repo = to_string(get(parts, 1))
+  let mut refv = "main"
+  if length(parts) > 2 then { let refv = to_string(get(parts, 2)) }
+  let res = McpGithubCall("list_check_runs", json_encode({repo: repo, ref: refv}), "/ci")
+  if res.ok == false then {
+    let msg = "CI-статус недоступен: " + res.body + "\n" + res.note
+    let _ = SendTelegramReply(chat_id, substring(msg, 0.0, 3500.0))
+    return msg
+  }
+  let data = try parse_json(res.body)
+  let summary = to_string(json_get(data, "summary", "(нет check-runs)"))
+  let count = to_string(json_get(data, "count", "?"))
+  let msg = "CI " + repo + "@" + refv + " — " + count + " проверок:\n" + redact(summary, "secrets")
+  let _ = SendTelegramReply(chat_id, substring(msg, 0.0, 3500.0))
+  return msg
+}
+
+// ── /docs list | /docs read <path> | /docs write <path> <текст> ────────
+// Документы — filesystem-MCP в песочнице data/documents (вне git).
+pattern McpHandleDocs(query: String, chat_id: String) -> String {
+  let parts = split(query, " ")
+  if length(parts) < 2 then {
+    return "Формат: /docs list [path] | /docs read <path> | /docs write <path> <текст>"
+  }
+  let sub = to_string(get(parts, 1))
+
+  if sub == "list" then {
+    let mut path = ""
+    if length(parts) > 2 then { let path = to_string(get(parts, 2)) }
+    let res = McpFsCall("list_dir", json_encode({path: path}), "/docs list")
+    if res.ok == false then {
+      let msg = "Список недоступен: " + res.body + "\n" + res.note
+      let _ = SendTelegramReply(chat_id, substring(msg, 0.0, 3500.0))
+      return msg
+    }
+    let data = try parse_json(res.body)
+    let items = try json_get(data, "items", "[]")
+    let mut out = "Документы (песочница data/documents):\n"
+    let rows = try items
+    if to_string(rows) != "()" then {
+      each row in rows {
+        let nm = to_string(json_get(row, "name", ""))
+        let tp = to_string(json_get(row, "type", "file"))
+        if tp == "dir" then { let out = out + "  " + nm + "/\n" } else { let out = out + "  " + nm + "\n" }
+      }
+    }
+    let _ = SendTelegramReply(chat_id, substring(out, 0.0, 3500.0))
+    return out
+  }
+
+  if sub == "read" then {
+    if length(parts) < 3 then { return "Формат: /docs read <path>" }
+    let path = to_string(get(parts, 2))
+    let res = McpFsCall("read_file", json_encode({path: path}), "/docs read")
+    if res.ok == false then {
+      let msg = "Чтение не удалось: " + res.body + "\n" + res.note
+      let _ = SendTelegramReply(chat_id, substring(msg, 0.0, 3500.0))
+      return msg
+    }
+    let data = try parse_json(res.body)
+    let content = to_string(json_get(data, "content", ""))
+    let mut out = "── " + path + " ──\n" + redact(content, "secrets")
+    if length(out) > 3500.0 then { let out = substring(out, 0.0, 3500.0) + "\n…(обрезано)" }
+    let _ = SendTelegramReply(chat_id, out)
+    return out
+  }
+
+  if sub == "write" then {
+    if length(parts) < 4 then { return "Формат: /docs write <path> <текст>" }
+    let path = to_string(get(parts, 2))
+    let content = join(slice(parts, 3.0, length(parts)), " ")
+    let res = McpFsCall("write_file", json_encode({path: path, content: content}), "/docs write")
+    if res.ok == false then {
+      let msg = "Запись не удалась: " + res.body + "\n" + res.note
+      let _ = SendTelegramReply(chat_id, substring(msg, 0.0, 3500.0))
+      return msg
+    }
+    let msg = "Записано через MCP: " + path + " (песочница data/documents, вне git)"
+    let _ = SendTelegramReply(chat_id, msg)
+    return msg
+  }
+
+  return "Неизвестная подкоманда: " + sub + "\nФормат: /docs list | /docs read <path> | /docs write <path> <текст>"
 }

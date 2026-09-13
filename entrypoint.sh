@@ -75,6 +75,8 @@ for i in {1..10}; do
 done
 
 # 2. Metalogos
+# FO-014: песочница документов filesystem-MCP + каталог subprocess-аудита ядра
+mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs"
 if ./bin/mlog check app.mlog 2>&1 | grep -q "parse error"; then
   echo "WARNING: mlog check found parse errors (mlog serve may still work — interpreter is more lenient)"
   ./bin/mlog check app.mlog 2>&1 | head -5
