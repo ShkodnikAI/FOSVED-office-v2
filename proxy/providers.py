@@ -344,14 +344,42 @@ def _load_cfg():
 
 _load_cfg()
 
-def call_llm(dept, messages, model_override=None, combo=None, command='', depth=2, chat_id=None):
-    """Call LLM via native combo chain with circuit breaker and context compaction.
-    
+def _provider_for_model(model):
+    """FO-025: детекция провайдера по алиасу модели (единая точка —
+    используется прямым вызовом call_llm и shadow-зеркалом)."""
+    provider = _cfg_cache["priority_provider"]
+    for prov_name in PROVIDERS:
+        if model.startswith("claude"):
+            provider = "anthropic"; break
+        elif model.startswith("deepseek"):
+            provider = "deepseek"; break
+        elif model.startswith("grok"):
+            provider = "grok"; break
+        elif model.startswith("gpt"):
+            provider = "openai"; break
+        elif model.startswith("glm"):
+            provider = "zai"; break
+        elif model.startswith("llama") or model.startswith("mixtral") or model.startswith("gemma"):
+            provider = "groq"; break
+        elif model.startswith("apodex"):
+            provider = "apodex"; break
+        elif model.startswith("nvidia/"):
+            provider = "nvidia"; break
+        elif model.startswith("gpt-oss") or model.startswith("zai-glm"):
+            provider = "cerebras"; break
+    return provider
+
+
+def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', depth=2, chat_id=None):
+    """Тело call_llm (FO-025: вынесено, чтобы зеркало вешалось снаружи).
+
+    Call LLM via native combo chain with circuit breaker and context compaction.
+
     Flow:
     0. FO-024: budget enforcement (soft 80% alert / hard 100% econom / stop 120%)
     1. FO-016: compact context if over budget (offload → prune → summarize)
     2. Select combo chain (or use model_override for direct single-provider call)
-    3. Walk the chain: for each (provider, [models]), try each model until one works
+    3. Walk the chain: for each (provider, odels]), try each model until one works
     4. Circuit breaker skips providers with recent consecutive failures
     5. If combo chain exhausted, fall back to legacy priority-provider ordering
     """
@@ -396,27 +424,8 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
 
     # 2. If model_override is set, do direct single-provider call
     if model_override:
-        # Determine provider from model name
-        provider = _cfg_cache["priority_provider"]
-        for prov_name in PROVIDERS:
-            if model_override.startswith("claude"):
-                provider = "anthropic"; break
-            elif model_override.startswith("deepseek"):
-                provider = "deepseek"; break
-            elif model_override.startswith("grok"):
-                provider = "grok"; break
-            elif model_override.startswith("gpt"):
-                provider = "openai"; break
-            elif model_override.startswith("glm"):
-                provider = "zai"; break
-            elif model_override.startswith("llama") or model_override.startswith("mixtral") or model_override.startswith("gemma"):
-                provider = "groq"; break
-            elif model_override.startswith("apodex"):
-                provider = "apodex"; break
-            elif model_override.startswith("nvidia/"):
-                provider = "nvidia"; break
-            elif model_override.startswith("gpt-oss") or model_override.startswith("zai-glm"):
-                provider = "cerebras"; break
+        # Единая детекция провайдера (FO-025: helper переиспользует shadow)
+        provider = _provider_for_model(model_override)
         result = _call_single_provider(provider, model_override, messages, dept=dept)
         if result and result.get("reply"):
             if compression_saved > 0:
@@ -517,6 +526,24 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
         last_err = f"{prov_name}/{use_model}"
 
     return {"reply": f"[Oshibka] Vse providery nedostupny (combo={combo}): {last_err}", "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0}
+
+
+def call_llm(dept, messages, model_override=None, combo=None, command='', depth=2, chat_id=None):
+    """FO-025: публичная точка вызова LLM — после основного вызова дублирует
+    трафик shadow-кандидату (если настроен shadow_<dept>), НЕ меняя ответ.
+    Ответ кандидата никому не уходит; метрики — парные trace-записи."""
+    started = time.monotonic()
+    result = _call_llm_impl(dept, messages, model_override=model_override,
+                            combo=combo, command=command, depth=depth,
+                            chat_id=chat_id)
+    try:
+        from proxy.shadow import maybe_shadow
+        latency_ms = (time.monotonic() - started) * 1000
+        maybe_shadow(dept, messages, result, main_latency_ms=latency_ms)
+    except Exception as e:
+        # гард-рейл наряда: shadow не может повлиять на основной ответ
+        _log_error(f"shadow hook failed: {e}", dept=dept, kind="shadow_error")
+    return result
 
 # ──────────────────────────── IMAGE GENERATION ─────────────────────────────
 

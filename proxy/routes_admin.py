@@ -278,11 +278,17 @@ def api_economics():
         prov_costs = _query("SELECT provider, COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=? GROUP BY provider ORDER BY t DESC", (month_ago,), fetch=True)
         by_provider = [{"provider": r["provider"], "cost": round(r["t"], 2)} for r in prov_costs]
 
+        # FO-025: by_model — срез по моделям с меткой shadow (канарейка видна отдельно)
+        model_rows = _query("SELECT model, request_type, COUNT(*) as n, COALESCE(SUM(cost_usd),0) as t FROM token_usage WHERE created_at>=? GROUP BY model, request_type ORDER BY t DESC LIMIT 30", (month_ago,), fetch=True)
+        by_model = [{"model": r["model"], "requests": r["n"],
+                     "cost": round(r["t"], 4),
+                     "shadow": str(r["request_type"] or "").startswith("shadow")} for r in model_rows]
+
         # Budget
         budget_rows = _query("SELECT value FROM system_settings WHERE key='daily_budget'", fetch=True)
         budget = budget_rows[0]["value"] if budget_rows else "10"
 
-        return jsonify({"status": "ok", "periods": periods, "by_dept": by_dept, "by_provider": by_provider, "budget": budget})
+        return jsonify({"status": "ok", "periods": periods, "by_dept": by_dept, "by_provider": by_provider, "by_model": by_model, "budget": budget})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
