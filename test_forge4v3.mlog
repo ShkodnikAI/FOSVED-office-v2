@@ -1,0 +1,131 @@
+// test_forge4v3.mlog — FO-038 D.1–D.6: гейты (варианты/дедуп/последствия),
+// замечания fix/rescope, история решений, непрерывность, бриф-раздел.
+// Запуск: mkdir -p /tmp/forge-test4 forge-tmp && METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test4 ./bin/mlog run test_forge4v3.mlog
+
+db { url: "sqlite:/tmp/forge-test4/forge.db" }
+import dept/utils
+import dept/dev
+import dept/forge
+import dept/forge_model
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, seq INTEGER, title TEXT, description TEXT, needs_owner_gate TEXT DEFAULT 'false', status TEXT DEFAULT 'pending', commit_tag TEXT, commit_sha TEXT, failed_runs INTEGER DEFAULT 0, started_at TEXT, finished_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_briefs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, version INTEGER DEFAULT 1, content TEXT, approved TEXT DEFAULT 'false', approved_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, repo_name TEXT, stage_id TEXT, command TEXT, exit_code TEXT, output TEXT, duration_ms TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, kind TEXT, question TEXT, context TEXT, options_json TEXT, decision TEXT, decided_by TEXT, decided_at TEXT, telegram_message_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_remarks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, commit_sha TEXT, text TEXT, file_hint TEXT, attachment_ref TEXT, kind TEXT, status TEXT DEFAULT 'open', resolved_by_commit TEXT, gate_id TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)")
+  return "ok"
+}
+
+pattern Check(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name }
+  return "FAIL " + name + " — " + substring(detail, 0.0, 200.0)
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut checks = ""
+  let _ = ForgeCreateProject("forge4-test", "Forge4 Test", "тест FO-038", "гейты и замечания", "site", "landing", "Владелец", "minimal", "fosved-standard", "dev")
+  let _ = ForgeCreateRepo("forge4-repo", "forge4-test", "репо гейтов", "dev")
+  let _ = ForgeTaskCreate("forge4-test", "Задача с гейтами", "описание", "normal", "owner", "owner")
+
+  // ═══ D.1: гейт plan — варианты, решение кнопкой, дедуп ═══
+  let plan = "[{\"title\":\"Этап 1\",\"description\":\"д\",\"needs_owner_gate\":\"false\"}]"
+  let g1 = ForgeGateCreate("1", "0", "plan", "Задание и план к задаче 1 — утвердить?", "")
+  let msg1 = ForgeGateMessage(g1)
+  let checks = checks + Check("gate-message-formatted", contains(msg1, "ГЕЙТ") and contains(msg1, "Утвердить") and contains(msg1, "→"), msg1) + "\n"
+  let dec1 = ForgeGateDecide(g1, "0", "owner")
+  let checks = checks + Check("gate-decide-approve", contains(dec1, "Утвердить"), dec1) + "\n"
+  // повторное нажатие другой кнопки после решения — вежливый отказ (дедуп)
+  let dedup = ForgeGateDecide(g1, "2", "owner")
+  let checks = checks + Check("gate-decide-dedup", starts_with(dedup, "ОТКАЗ") and contains(dedup, "уже решён"), dedup) + "\n"
+  // задача продолжается
+  let st = ForgeTaskGetStatus("1")
+  let checks = checks + Check("task-continued-queued", st == "queued", st) + "\n"
+
+  // ═══ A.4/D.6: закрытие гейта без правки → находки declined ═══
+  let g2 = ForgeGateCreate("1", "0", "stage", "Этап готов — продолжить?", "")
+  let _ = ForgeGateDecide(g2, "2", "owner")  // «Стоп» — без правки
+  // находка раунда записывается declined при закрытии без правки (механика A.4
+  // вызывается владельцем через ForgeFindingsDecline — проверяем цепочку)
+  let _ = ForgeFindingsDecline("1", "0", "stage", "[\"вынести стили в отдельный файл\"]")
+  let ctx = ForgeDeclinedContext("1")
+  let checks = checks + Check("declined-not-raised-again", contains(ctx, "вынести стили") and contains(ctx, "не предлагай"), ctx) + "\n"
+
+  // ═══ D.2: замечание fix — привязка к этапу/коммиту, метка stage-N-fix-<k> ═══
+  let _ = ForgeWriteFiles("forge4-repo", "[{\"path\":\"page.html\",\"content\":\"<p>v1</p>\\n\"}]", "feat: v1", "dev")
+  let log1 = ForgeCommits("forge4-repo", "1")
+  let caps1 = regex_captures("([0-9a-f]{7,12})", log1)
+  let sha1 = to_string(get(caps1, 1))
+  let _ = db_execute("INSERT INTO forge_stages (task_id, seq, title, description, needs_owner_gate, status) VALUES (1, 1, 'Этап 1', 'д', 'false', 'in_progress')", [])
+  let _ = db_execute("UPDATE forge_stages SET status = 'done', commit_tag = 'stage-1', commit_sha = ? WHERE id = 1", [sha1])
+  let _ = ForgeTag("forge4-repo", "stage-1", sha1)
+  // владелец отвечает fix на сообщение (телеграм-части — интеграционная);
+  // здесь проверяем сущность замечания и механику fix
+  let rid = ForgeRemarkCreate("1", "1", sha1, "fix: увеличьте заголовок", "page.html", "fix", "", "0")
+  let checks = checks + Check("remark-fix-created", rid != "0", rid) + "\n"
+  // правка: коммит v2 → fix-метка
+  let w2 = ForgeWriteFiles("forge4-repo", "[{\"path\":\"page.html\",\"content\":\"<p>v2</p>\\n\"}]", "fix: заголовок", "dev")
+  let checks = checks + Check("fix-write", starts_with(w2, "Записано"), w2) + "\n"
+  let log2 = ForgeCommits("forge4-repo", "1")
+  let sha2 = to_string(get(regex_captures("([0-9a-f]{7,12})", log2), 1))
+  let fix_res = ForgeRemarkResolveFix(rid, "forge4-repo", sha2)
+  let checks = checks + Check("fix-tag-stage-1-fix-1", contains(fix_res, "stage-1-fix-1"), fix_res) + "\n"
+  // старая метка stage-1 жива, откат возможен
+  let rb = ForgeRollback("forge4-repo", "stage-1")
+  let checks = checks + Check("old-tag-alive-rollback", starts_with(rb, "Откат"), rb) + "\n"
+  // непрерывность: remark привязан к sha1, HEAD теперь sha2 → расхождение видно
+  let _ = ForgeWriteFiles("forge4-repo", "[{\"path\":\"page.html\",\"content\":\"<p>v3</p>\\n\"}]", "fix: ещё правка", "dev")
+  let cont = ForgeRemarkContinuity("forge4-repo", rid)
+  let checks = checks + Check("continuity-mismatch-shown", starts_with(cont, "ОТКАЗ") and contains(cont, "разошёлся"), cont) + "\n"
+
+  // ═══ D.3: замечание rescope → возврат к гейту №1 ═══
+  let rid2 = ForgeRemarkCreate("1", "1", "", "меняем замысел: теперь SPA", "", "rescope", "", "0")
+  let rs = ForgeRemarkResolveRescope(rid2)
+  let checks = checks + Check("rescope-to-gate1", contains(rs, "awaiting_plan"), rs) + "\n"
+  let st2 = ForgeTaskGetStatus("1")
+  let checks = checks + Check("rescope-task-status", st2 == "awaiting_plan", st2) + "\n"
+
+  // ═══ D.4: сомнение fix/rescope → гейт remark владельцу ═══
+  let rid3 = ForgeRemarkCreate("1", "1", "", "не уверен: правка заголовка или смена концепции?", "", "", "", "0")
+  let remark_check = ForgeRemarkFromReply("0", "не уверен: правка заголовка?", "")
+  // ForgeRemarkCreate с пустым kind + ForgeGateCreate remark
+  let gid3 = ForgeGateCreate("1", "1", "remark", "Замечание: «не уверен...» — это fix или rescope?", "")
+  let opts3 = ForgeGateMessage(gid3)
+  let checks = checks + Check("remark-gate-asked", contains(opts3, "fix или rescope"), opts3) + "\n"
+  let dec3 = ForgeGateDecide(gid3, "0", "owner")
+  let checks = checks + Check("remark-gate-fix-choice", contains(dec3, "Правка внутри этапа запланирована"), dec3) + "\n"
+
+  // ═══ D.6: история сломана → предупреждение, контур жив ═══
+  let _ = db_execute("DROP TABLE forge_finding_decisions", [])
+  let broken = ForgeDeclinedContext("1")
+  let checks = checks + Check("broken-history-no-stop", broken == "", broken) + "\n"
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))", [])
+
+  // ═══ C.3: раздел «требует внимания» ═══
+  let g4 = ForgeGateCreate("1", "0", "delivery", "Передача заказчику готова?", "")
+  let attention = ForgeAttention()
+  let checks = checks + Check("attention-pending-gates", contains(attention, "pending_gates") and contains(attention, "1") , attention) + "\n"
+  // delivery решение
+  let dec4 = ForgeGateDecide(g4, "0", "owner")
+  let checks = checks + Check("delivery-transfer-note", contains(dec4, "Transfer GitHub"), dec4) + "\n"
+
+  // Итог
+  let fails = split(checks, "FAIL")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(checks, "PASS")) - 1.0) + " проверок)\n" + checks }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + "\n" + checks
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
