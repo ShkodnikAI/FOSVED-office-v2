@@ -28,6 +28,10 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
 WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "120"))
+# SMOKE_LOCAL=1 — режим доступности для CI: офис поднят локально (llm_proxy.py
+# с тестовыми env), реальные LLM-сценарии и cron новостей невозможны —
+# проверяются только живость фасада и SEC-4 защита журнала.
+SMOKE_LOCAL = os.environ.get("SMOKE_LOCAL", "") == "1"
 
 results = []
 
@@ -115,6 +119,61 @@ def wait_for(predicate, seconds, since_id):
     return None
 
 
+def check_sec4_no_data_without_signature():
+    """SEC-4 инвариант: без валидной подписи данные журнала не отдаются.
+
+    Фасад отвечает либо 403 (подпись есть, но невалидна), либо 200 с
+    bootstrap-страницей (подписи нет вообще, SEC-4 отдаёт JS-заглушку).
+    Инвариант один: в ответе НЕТ записей аудита.
+    """
+    code, body = http("GET", "/audit/recent?limit=1")
+    leaked = '"entries"' in body
+    ok = (code == 403 or (code == 200 and not leaked))
+    record("журнал закрыт без подписи", ok and not leaked,
+           f"код {code}" + (", данные НЕ утекли" if not leaked else ", УТЕЧКА данных"))
+
+    code, body = http("GET", "/audit/recent?limit=1",
+                      headers={"X-Telegram-Init-Data": "hash=deadbeef&auth_date=123"})
+    record("журнал закрыт битой подписью", code == 403,
+           f"код {code} (ожидался 403)")
+
+
+def main_local():
+    """Режим доступности для CI: офис поднят локально без реальных LLM/бота."""
+    if not OWNER or not BOT_TOKEN:
+        print("ОШИБКА: нужны OWNER_ID и BOT_TOKEN (совпадают с env фасада)")
+        return 2
+
+    print(f"Офис: {BASE} (локальный подъём, режим доступности)")
+    print(f"Подпись initData: {'собрана' if INIT_DATA else 'НЕТ'}\n")
+
+    print("Доступность:")
+    code, _ = http("GET", "/health")
+    record("/health отвечает", code == 200, f"код {code}")
+
+    code, body = http("GET", "/audit/recent?limit=5", signed=True)
+    entries_ok = code == 200 and '"entries"' in body
+    record("журнал читается с подписью", entries_ok,
+           f"код {code}" + ("" if entries_ok else ", JSON без entries"))
+
+    check_sec4_no_data_without_signature()
+
+    code, _ = http("GET", "/news/stats", signed=True)
+    record("/news/stats отвечает", code == 200, f"код {code}")
+
+    passed = sum(1 for _, ok, _ in results if ok)
+    total = len(results)
+    print("\n" + "=" * 60)
+    print(f"ИТОГ: {passed} из {total} проверок пройдено")
+    if passed < total:
+        print("\nНе пройдено:")
+        for name, ok, detail in results:
+            if not ok:
+                print(f"  - {name}: {detail}")
+    print("=" * 60)
+    return 0 if passed == total else 1
+
+
 def scenario(title, text, stamp, suffix, base_id):
     print(f"\n{title}:")
     code, _ = send_message(text, stamp * 10 + suffix)
@@ -126,6 +185,9 @@ def scenario(title, text, stamp, suffix, base_id):
 
 
 def main():
+    if SMOKE_LOCAL:
+        return main_local()
+
     if not OWNER or not BOT_TOKEN:
         print("ОШИБКА: нужны OWNER_ID и BOT_TOKEN")
         return 2
@@ -145,8 +207,9 @@ def main():
         print("Проверь OWNER_ID и BOT_TOKEN — они должны совпадать с настройками офиса.")
         return 1
 
-    code, _ = http("GET", "/audit/recent?limit=1")
-    record("журнал закрыт без подписи", code == 403, f"код {code} (ожидался 403)")
+    # SEC-4: без подписи фасад отдаёт bootstrap-страницу (200), с битой — 403;
+    # инвариант безопасности один: данные журнала не отдаются.
+    check_sec4_no_data_without_signature()
 
     code, _ = http("GET", "/news/stats", signed=True)
     record("/news/stats отвечает", code == 200, f"код {code}")

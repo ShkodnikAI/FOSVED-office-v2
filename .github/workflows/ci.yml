@@ -167,3 +167,56 @@ jobs:
             echo "ERROR: mlog --version returned nothing in container"
             exit 1
           fi
+
+  # ── Job 5: Smoke against local lift (FO-002) ─────────────────────────
+  # Фасад поднимается с тестовыми env, smoke.py в режиме доступности
+  # (SMOKE_LOCAL=1) проверяет живость и SEC-4 защиту журнала.
+  # Реальные LLM-сценарии остаются production-режимом (scripts/SMOKE.md).
+  smoke:
+    name: Smoke test (local lift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start office facade (llm_proxy)
+        env:
+          API_SECRET: ci-test-secret
+          TELEGRAM_WEBHOOK_SECRET: ci-wh-secret
+          TELEGRAM_BOT_TOKEN: ci-fake-bot-token
+          OWNER_TELEGRAM_ID: "99999"
+          DATABASE_PATH: /tmp/fosved-ci-smoke-db
+          ZAI_API_KEY: ci-fake-key
+        run: |
+          python3 llm_proxy.py > /tmp/facade.log 2>&1 &
+          echo $! > /tmp/facade.pid
+          OK=0
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4000/health > /dev/null 2>&1; then OK=1; break; fi
+            sleep 2
+          done
+          if [ "$OK" != "1" ]; then
+            echo "FAIL: facade did not come up on :4000"
+            tail -40 /tmp/facade.log
+            exit 1
+          fi
+          echo "Facade is up: $(curl -s http://127.0.0.1:4000/health)"
+
+      - name: Run smoke (availability mode)
+        env:
+          BASE_URL: http://127.0.0.1:4000
+          OWNER_ID: "99999"
+          BOT_TOKEN: ci-fake-bot-token
+          WEBHOOK_SECRET: ci-wh-secret
+          SMOKE_LOCAL: "1"
+        run: python3 scripts/smoke.py
+
+      - name: Facade log (on failure)
+        if: failure()
+        run: tail -60 /tmp/facade.log
