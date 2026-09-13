@@ -324,6 +324,39 @@ def cron_backup():
         return jsonify({"ok": False, "error": str(e)[:500]}), 500
 
 
+# ── FO-042: FORGE bundle backup (наряд #149) ─────────────────────────────
+# git bundle bare-репозиториев — второй рубеж резерва. Отдельный эндпоинт
+# для ручного прогона и внешнего крона; штатный ежедневный запуск — из
+# /scheduler/morning-brief (надёжный триггер BRIEF-1).
+@app.route("/cron/backup-forge", methods=["GET"])
+def cron_backup_forge():
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    from proxy.forge_backup import run_forge_backup, store_backup_summary
+    result = run_forge_backup(force_smoke=request.args.get("smoke", "0") == "1")
+    store_backup_summary(result)
+    return jsonify({"ok": result["ok"], "rc": result["rc"], "line": result["line"],
+                    "summary": result["summary"]})
+
+
+# ── FO-042 B: выгрузка состояния FORGE (наряд #149) ──────────────────────
+# Выборка forge_projects / открытых задач / гейтов без решения / открытых
+# замечаний → JSON-файл на постоянном диске → документом владельцу.
+# ВЫЗЫВАЕТСЯ ТОЛЬКО ИЗНУТРИ (mlog на 127.0.0.1:4000, команда /forge-export):
+# в reverse_proxy LLM_ROUTES_PREFIXES не добавлен — публично недостижим.
+# Защита: CRON_SECRET в query (читается mlog из env).
+@app.route("/forge/export-state", methods=["POST"])
+def forge_export_state():
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    d = request.get_json(force=True, silent=True) or {}
+    from proxy.forge_backup import export_forge_state
+    result = export_forge_state(str(d.get("chat_id", "")).strip())
+    return jsonify(result)
+
+
 # ── FO-016: чистка offload-хранилища tool-выводов (issue #82) ────────────
 # data/tool_output/ с ретеншном 7 дней (env FOSVED_TOOL_OUTPUT_RETENTION_DAYS).
 @app.route("/cron/cleanup-tool-output", methods=["GET"])

@@ -132,6 +132,7 @@ Web, YouTube, Reddit, Science, GitHub, Social, Telegram, Darknet, Academic — �
 | `/lockdown on/off` | Экстренная блокировка |
 | `/remember key=value` | Постоянная память |
 | `/memory` | Статус памяти (Металогос + FosvedMemory) |
+| `/forge-export` | Выгрузка состояния FORGE документом (проекты, задачи, гейты, замечания) |
 
 ## Структура проекта
 
@@ -265,6 +266,29 @@ python3 scripts/backup_db.py backup --upload # бэкап + выгрузка
 python3 scripts/backup_db.py restore --latest# восстановить из последнего
 python3 scripts/backup_db.py list            # список бэкапов
 python3 scripts/backup_db.py check           # проверка целостности
+```
+
+### Резерв FORGE — git bundle (FO-042)
+
+Bare-репозитории `<mountPath>/forge/repos/*.git` ежедневно бандлятся во
+второй рубеж `<mountPath>/forge/backups/<name>-<дата>.bundle` (первый рубеж —
+зеркало GitHub). Штатный триггер — утренний бриф (BRIEF-1, надёжный);
+ручной — `GET /cron/backup-forge?secret=<CRON_SECRET>` (параметр `smoke=1`
+форсирует smoke-восстановление). Retention: последние 7 бандлов на
+репозиторий (env `FORGE_BUNDLE_RETENTION`). Раз в неделю — smoke-проверка:
+`git clone` свежайшего бандла, HEAD читается, log не пуст; провал — громко,
+строкой в брифе. Итог (создано N / упало M / размер) пишется в
+`system_settings` (key `forge_backup_summary`) и одной строкой в бриф.
+
+Выгрузка состояния FORGE (§10): проекты, открытые задачи, гейты без решения,
+открытые замечания → JSON-файл (`<mountPath>/forge/exports/`, retention 7) →
+документом владельцу ежедневно с брифом; по требованию — `/forge-export`.
+
+```bash
+# Ручные команды
+python3 scripts/backup_forge_repos.py backup          # бандлы + retention (+ smoke, если пора)
+python3 scripts/backup_forge_repos.py backup --smoke  # форсировать smoke-восстановление
+python3 scripts/backup_forge_repos.py list            # список бандлов
 ```
 
 ## Версии компонентов

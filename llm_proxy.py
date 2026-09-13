@@ -246,6 +246,7 @@ from proxy.routes_tail import (
     scheduler_reminder_check as scheduler_reminder_check,
     generate_image_endpoint as generate_image_endpoint,
     cron_collect_news as cron_collect_news, cron_backup as cron_backup,
+    cron_backup_forge as cron_backup_forge,
     _FACTS_MAX_OPS as _FACTS_MAX_OPS, _FACTS_DIALOG_ROWS as _FACTS_DIALOG_ROWS,
     _FACTS_BACKFILL_DAYS as _FACTS_BACKFILL_DAYS,
     _extract_json_block as _extract_json_block,

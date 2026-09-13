@@ -3755,6 +3755,30 @@ mlogserver {
       return respond("200 ok")
     }
 
+    // /forge-export — FO-042 B.2 (наряд #149): выгрузка состояния FORGE
+    // (проекты, открытые задачи, гейты без решения, открытые замечания)
+    // JSON-файлом документом. Та же выкладка, что идёт с утренним брифом.
+    if starts_with(text, "/forge-export") then {
+      let _ = RecordUserMessage(chat_id, "dev", text)
+      let resp_x = try http_post("http://127.0.0.1:4000/forge/export-state?secret=" + env("CRON_SECRET"), json_encode({chat_id: chat_id}), "application/json")
+      if to_string(resp_x) == "()" then {
+        let _ = SendTelegramReply(chat_id, "ОТКАЗ: export-плоскость недоступна (llm_proxy не отвечает).")
+      } else {
+        let parsed_x = try parse_json(resp_x)
+        if to_string(parsed_x) == "()" then {
+          let _ = SendTelegramReply(chat_id, "ОТКАЗ: export-плоскость вернула нечитаемый ответ.")
+        } else {
+          if to_string(json_get(parsed_x, "ok", "")) == "True" or to_string(json_get(parsed_x, "ok", "")) == "true" then {
+            let c = json_get(parsed_x, "counts", "")
+            let _ = SendTelegramReply(chat_id, "Выгрузка FORGE отправлена документом: проектов " + to_string(json_get(c, "projects", "?")) + ", открытых задач " + to_string(json_get(c, "tasks_open", "?")) + ", гейтов без решения " + to_string(json_get(c, "gates_pending", "?")) + ", открытых замечаний " + to_string(json_get(c, "remarks_open", "?")) + ".")
+          } else {
+            let _ = SendTelegramReply(chat_id, "ОТКАЗ: выгрузка не сработала: " + to_string(json_get(parsed_x, "error", "нет деталей")))
+          }
+        }
+      }
+      return respond("200 ok")
+    }
+
     // /chain continue — FO-027: возобновление цепочки с последней ok-степы
     if starts_with(text, "/chain continue ") then {
       let rest_c = substring(text, 16.0, length(text))
