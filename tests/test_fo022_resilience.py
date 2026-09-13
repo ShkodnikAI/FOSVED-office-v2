@@ -29,7 +29,7 @@ os.environ['DEEPSEEK_API_KEY'] = 'ds-fake-key-123456'
 
 import llm_proxy  # noqa: E402,F401
 from proxy import resilience as res  # noqa: E402
-from proxy.core import _write_llm_trace  # noqa: E402
+from proxy.core import _TRACE_DIR, _write_llm_trace  # noqa: E402
 from proxy.providers import _call_single_provider  # noqa: E402
 from proxy.redact import (  # noqa: E402
     invalidate_values_cache, known_secret_values, redact_obj, redact_values_in_text,
@@ -269,12 +269,13 @@ class TestEmptyReply:
 
 @pytest.fixture
 def _clean_traces():
-    """Чистая трейс-директория: без хвостов прошлых прогонов."""
+    """Чистая трейс-директория (фактический _TRACE_DIR ядра — он заморожен
+    при первом импорте llm_proxy и может не совпадать с DATABASE_PATH файла)."""
     import glob
-    for fp in glob.glob('/tmp/fosved-fo22-test/traces/llm_*.jsonl'):
+    for fp in glob.glob(os.path.join(_TRACE_DIR, 'llm_*.jsonl')):
         os.remove(fp)
     yield
-    for fp in glob.glob('/tmp/fosved-fo22-test/traces/llm_*.jsonl'):
+    for fp in glob.glob(os.path.join(_TRACE_DIR, 'llm_*.jsonl')):
         os.remove(fp)
 
 

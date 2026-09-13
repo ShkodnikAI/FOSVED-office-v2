@@ -271,6 +271,20 @@ def scheduler_morning_brief():
         # Recent corrections
         corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
         corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
+        # FO-036 (наряд #134): задачи FORGE от агентов — только proposed,
+        # владелец подтверждает пачкой по утреннему брифу (A.5)
+        forge_proposed = ""
+        fp_count = 0
+        try:
+            fp_rows = _query(
+                "SELECT id, title, project_slug, priority FROM forge_tasks "
+                "WHERE status = 'proposed' ORDER BY id LIMIT 8", fetch=True)
+            if fp_rows:
+                fp_count = len(fp_rows)
+                forge_proposed = "\n".join(
+                    [f"  - #{r['id']} [{r['priority']}] {r['project_slug']}: {r['title']}" for r in fp_rows])
+        except Exception as e:
+            log.warning(f"[morning_brief] forge proposed query failed: {e}")
 
         # FO-007: повторяющиеся ошибки департаментов за сутки — в дайджест
         errors_digest = ""
@@ -321,6 +335,9 @@ def scheduler_morning_brief():
 Нерешённых нарядов: {narads_pending}
 Коррекций за сутки: {corrections_24h}
 {metrics_text}
+
+=== FORGE: ЗАДАЧИ ОТ АГЕНТОВ, ЖДУЩИЕ ПОДТВЕРЖДЕНИЯ (proposed) ===
+{forge_proposed if forge_proposed else 'Нет предложенных задач'}
 
 === ПОВТОРЯЮЩИЕСЯ ОШИБКИ ОФИСА ЗА СУТКИ ===
 {errors_digest if errors_digest else 'Нет'}

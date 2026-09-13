@@ -1,0 +1,302 @@
+// Fosved Office v2 — dept/forge_model.mlog — FO-036 D: протокол ответа модели (§5.7 ТЗ v3)
+// Источник паттернов: Fosved-coder core/response_parser.py (RE_FILE_TAG, RE_MKDIR_TAG,
+// RE_READ_TAG, RE_DIFF_BLOCK, _safe_resolve, _patch_lines).
+//
+// Распознаются 5 форм: <file path="...">, <mkdir path="..."/>, <read file="..."/>,
+// ```lang:path, ```diff path="...". Теги <command> и <git> НЕ берём — исполнение
+// только через ForgeRun (FO-037), git только через ForgeWriteFiles.
+//
+// Безопасность: ModelSafePath (только [a-zA-Z0-9._/-], без "/", "..", "$", "`" и
+// пр.) ДО любой файловой операции. Читающий цикл: ≤5 файлов и ≤100 КБ за запрос.
+// Diff: контекст не совпал — отказ, не угадывание (файл устарел → перечитать).
+// Содержимое тегов уходит в ForgeWriteFiles — рубеж ForgeCheckPipeline применяется
+// автоматически, обходного пути нет (D.5).
+//
+// Builtins (проверено исполнением): regex_captures(pattern, string) → [full, g1, ..]
+// первого совпадения (не анкерирован, [\s\S] и *? работают); split(s, sep) —
+// режет по первому вхождению sep для итерации; escape_json — для payload.
+
+import dept/forge
+
+// ── D.2: _safe_resolve-эквивалент (путь внутри рабочей зоны) ────────────
+pattern ModelSafePath(path: String) -> String {
+  let trimmed = trim(to_string(path))
+  if length(trimmed) < 1.0 or length(trimmed) > 400.0 then { return "" }
+  if starts_with(trimmed, "/") then { return "" }          // абсолютный — отказ
+  if contains(trimmed, "..") then { return "" }            // эскейп — отказ
+  if contains(trimmed, "\\") or contains(trimmed, "`") or contains(trimmed, "$") then { return "" }
+  if contains(trimmed, "\"") or contains(trimmed, " ") then { return "" }
+  // regex_match(PATTERN, string) — полный матч (проверено раном)
+  if regex_match("[a-zA-Z0-9._/-]+", trimmed) == false then { return "" }
+  return trimmed
+}
+
+
+// ── D.1: <file path="...">...</file> → JSON-массив [{path, content}] ────
+pattern ModelParseFiles(response: String) -> String {
+  let mut files = "["
+  let mut first = true
+  let mut rest = response
+  let mut guard = 0.0
+  let mut caps = regex_captures("<file path=\"([^\"]+)\">([\\s\\S]*?)</file>", rest)
+  while length(caps) >= 3.0 and guard < 50.0 {
+    let path = ModelSafePath(to_string(get(caps, 1)))
+    if path == "" then { return "ОТКАЗ: путь <file> вне рабочей зоны: " + to_string(get(caps, 1)) }
+    let content = to_string(get(caps, 2))
+    let files = _Comma(files, first) + "{\"path\":\"" + escape_json(path) + "\",\"content\":\"" + escape_json(content) + "\"}"
+    let first = false
+    let parts = split(rest, to_string(get(caps, 0)))
+    if length(parts) < 2.0 then { let guard = 50.0 } else { let rest = to_string(get(parts, 1)) }
+    let guard = guard + 1.0
+    let caps = regex_captures("<file path=\"([^\"]+)\">([\\s\\S]*?)</file>", rest)
+  }
+  if guard >= 50.0 and length(caps) >= 3.0 then { return "ОТКАЗ: слишком много <file>-тегов (>50)" }
+  let files = files + "]"
+  return files
+}
+
+// ── D.1: ```lang:path fenced blocks — то же, что <file> ─────────────────
+// Форма: ```python:src/main.py\n...тело...\n``` (путь до перевода строки).
+pattern ModelParseFenced(response: String) -> String {
+  let mut files = "["
+  let mut first = true
+  let mut rest = response
+  let mut guard = 0.0
+  let mut caps = regex_captures("```[a-zA-Z0-9_+.#-]*:([^\\n]+)\\n([\\s\\S]*?)```", rest)
+  while length(caps) >= 3.0 and guard < 50.0 {
+    let raw = trim(to_string(get(caps, 1)))
+    let path = ModelSafePath(raw)
+    if path == "" then { return "ОТКАЗ: путь fenced-блока вне рабочей зоны: " + raw }
+    let content = to_string(get(caps, 2))
+    let files = _Comma(files, first) + "{\"path\":\"" + escape_json(path) + "\",\"content\":\"" + escape_json(content) + "\"}"
+    let first = false
+    let parts = split(rest, to_string(get(caps, 0)))
+    if length(parts) < 2.0 then { let guard = 50.0 } else { let rest = to_string(get(parts, 1)) }
+    let guard = guard + 1.0
+    let caps = regex_captures("```[a-zA-Z0-9_+.#-]*:([^\\n]+)\\n([\\s\\S]*?)```", rest)
+  }
+  if guard >= 50.0 and length(caps) >= 3.0 then { return "ОТКАЗ: слишком много fenced-блоков (>50)" }
+  let files = files + "]"
+  return files
+}
+
+// ── D.1: <mkdir path="..."/> — объявление каталогов (валидация) ─────────
+pattern ModelParseMkdirs(response: String) -> String {
+  let mut dirs = "["
+  let mut first = true
+  let mut rest = response
+  let mut guard = 0.0
+  let mut caps = regex_captures("<mkdir path=\"([^\"]+)\"\\s*/>", rest)
+  while length(caps) >= 2.0 and guard < 50.0 {
+    let d = ModelSafePath(to_string(get(caps, 1)))
+    if d == "" then { return "ОТКАЗ: путь <mkdir> вне рабочей зоны: " + to_string(get(caps, 1)) }
+    let dirs = _Comma(dirs, first) + "\"" + escape_json(d) + "\""
+    let first = false
+    let parts = split(rest, to_string(get(caps, 0)))
+    if length(parts) < 2.0 then { let guard = 50.0 } else { let rest = to_string(get(parts, 1)) }
+    let guard = guard + 1.0
+    let caps = regex_captures("<mkdir path=\"([^\"]+)\"\\s*/>", rest)
+  }
+  let dirs = dirs + "]"
+  return dirs
+}
+
+// ── D.3: <read file="..."/> — запросы на чтение ─────────────────────────
+pattern ModelParseReads(response: String) -> String {
+  let mut reads = "["
+  let mut first = true
+  let mut rest = response
+  let mut guard = 0.0
+  let mut caps = regex_captures("<read file=\"([^\"]+)\"\\s*/>", rest)
+  while length(caps) >= 2.0 and guard < 50.0 {
+    let f = ModelSafePath(to_string(get(caps, 1)))
+    if f == "" then { return "ОТКАЗ: путь <read> вне рабочей зоны: " + to_string(get(caps, 1)) }
+    let reads = _Comma(reads, first) + "\"" + escape_json(f) + "\""
+    let first = false
+    let parts = split(rest, to_string(get(caps, 0)))
+    if length(parts) < 2.0 then { let guard = 50.0 } else { let rest = to_string(get(parts, 1)) }
+    let guard = guard + 1.0
+    let caps = regex_captures("<read file=\"([^\"]+)\"\\s*/>", rest)
+  }
+  let reads = reads + "]"
+  return reads
+}
+
+// ── D.3: читающий цикл — ≤5 файлов и ≤100 КБ суммарно за запрос ─────────
+// Модель отвечает <read>-тегами → отдел читает через ForgeReadFile (с лимитом
+// размера) → возвращает содержимое в следующем запросе → модель отвечает правками.
+pattern ModelServeReads(repo_name: String, refv: String, reads_json: String) -> String {
+  let paths = parse_json(reads_json)
+  if to_string(paths) == "()" then { return "ОТКАЗ: reads не разбираются" }
+  let n = length(paths)
+  if n > 5.0 then { return "ОТКАЗ: запрошено " + to_string(n) + " файлов за запрос — лимит 5 (защита контекста)" }
+  let mut out = "{"
+  let mut first = true
+  let mut total = 0.0
+  each p in paths {
+    let content = ForgeReadFile(repo_name, refv, to_string(p))
+    if starts_with(content, "ОТКАЗ") then { return content }
+    let total = total + to_float(length(content))
+    let out = _Comma(out, first) + "\"" + escape_json(to_string(p)) + "\":\"" + escape_json(substring(content, 0.0, 20000.0)) + "\""
+    let first = false
+  }
+  if total > 100000.0 then { return "ОТКАЗ: суммарно " + to_string(total) + " байт — лимит 100 КБ за запрос" }
+  return out + "}"
+}
+
+// ── D.4: ```diff path="..." — точечная правка по строкам ────────────────
+// Внутри fence: строки "- X" (удалить) и "+ Y" (добавить). Удалённые строки
+// ДОЛЖНЫ совпасть подряд в файле; контекст не совпал — ОТКАЗ, не угадывание
+// (файл устарел → модель перечитывает через <read>). Возвращает JSON-массив
+// файлов [{path, content}] — как ModelParseFiles.
+pattern ModelParseDiffs(response: String) -> String {
+  let mut files = "["
+  let mut first = true
+  let mut rest = response
+  let mut guard = 0.0
+  let mut caps = regex_captures("```diff[ \\t]+path=\"([^\"]+)\"\\n([\\s\\S]*?)```", rest)
+  while length(caps) >= 3.0 and guard < 50.0 {
+    let path = ModelSafePath(to_string(get(caps, 1)))
+    if path == "" then { return "ОТКАЗ: путь diff вне рабочей зоны: " + to_string(get(caps, 1)) }
+    let body = to_string(get(caps, 2))
+    let lines = split(body, "\n")
+    let mut removed = "["
+    let mut added = "["
+    let mut fr = true
+    let mut fa = true
+    each line in lines {
+      let l = to_string(line)
+      // формы «- X» и «-X» (и +) внутри ```diff fence; остальное — контекст/шум
+      if starts_with(l, "-") and length(l) >= 2.0 then {
+        if fr == false then { let removed = removed + "," }
+        let removed = removed + "\"" + escape_json(trim(substring(l, 1.0, length(l)))) + "\""
+        let fr = false
+      }
+      if starts_with(l, "+") and length(l) >= 2.0 then {
+        if fa == false then { let added = added + "," }
+        let added = added + "\"" + escape_json(trim(substring(l, 1.0, length(l)))) + "\""
+        let fa = false
+      }
+    }
+    let removed = removed + "]"
+    let added = added + "]"
+    if fr == true and fa == true then { return "ОТКАЗ: пустой diff-блок в " + path }
+    // Точечное применение выполнит вызывающий через ModelApplyDiff (нужен ref)
+    // removed/added — СТРОКИ, склеенные \n (json_get отдаёт Value, не List —
+    // конкатенация/срезы списков напрямую недоступны)
+    let rem_list = parse_json(removed)
+    let add_list = parse_json(added)
+    let files = _Comma(files, first) + "{\"path\":\"" + escape_json(path) + "\",\"removed\":\"" + escape_json(join(rem_list, "\n")) + "\",\"added\":\"" + escape_json(join(add_list, "\n")) + "\"}"
+    let first = false
+    let parts = split(rest, to_string(get(caps, 0)))
+    if length(parts) < 2.0 then { let guard = 50.0 } else { let rest = to_string(get(parts, 1)) }
+    let guard = guard + 1.0
+    let caps = regex_captures("```diff[ \\t]+path=\"([^\"]+)\"\\n([\\s\\S]*?)```", rest)
+  }
+  let files = files + "]"
+  return files
+}
+
+// ── D.4: _patch_lines-эквивалент: один diff → содержимое файла ──────────
+// diff_json: {"path", "removed": "строка1\nстрока2", "added": "..."} —
+// удалённые строки должны совпасть ПОДРЯД; не совпали — отказ.
+pattern ModelApplyDiff(current_content: String, diff_json: String) -> String {
+  let d = parse_json(diff_json)
+  if to_string(d) == "()" then { return "ОТКАЗ: diff не разбирается" }
+  let path = to_string(json_get(d, "path", ""))
+  // removed/added — СТРОКИ, склеенные \n (json_get отдаёт Value, не List)
+  let rem_str = to_string(json_get(d, "removed", ""))
+  let add_str = to_string(json_get(d, "added", ""))
+  if rem_str == "" and add_str == "" then { return "ОТКАЗ: removed/added пусты" }
+  let removed = split(rem_str, "\n")
+  let added = split(add_str, "\n")
+  let lines = split(current_content, "\n")
+  let n_removed = length(removed)
+  let mut found_at = -1.0
+  let mut i = 0.0
+  each line in lines {
+    if found_at < 0.0 and i + n_removed <= length(lines) then {
+      let window = slice(lines, i, i + n_removed)
+      if join(window, "\n") == join(removed, "\n") then { let found_at = i }
+    }
+    let i = i + 1.0
+  }
+  if found_at < 0.0 then {
+    return "ОТКАЗ: контекст diff не совпал — файл устарел, перечитайте через <read>"
+  }
+  // Списки в mlog не конкатенируются через + — собираем head/middle/tail через join
+  let head = join(slice(lines, 0.0, found_at), "\n")
+  let tail = join(slice(lines, found_at + n_removed, length(lines)), "\n")
+  let middle = join(added, "\n")
+  let mut out = head
+  if head != "" then { let out = out + "\n" }
+  let out = out + middle
+  if tail != "" then { let out = out + "\n" + tail }
+  if ends_with(current_content, "\n") then { let out = out + "\n" }
+  return out
+}
+
+// ── D.5: исполнение ответа модели: reads → diffs+files → ForgeWriteFiles ─
+// Приоритет: <read>-запросы (если есть и нет правок) → "READS:{...}".
+// Иначе: diff-блоки применяются к текущему содержимому (через ForgeReadFile),
+// соединяются с <file>/fenced-блоками и уходят ОДНИМ вызовом ForgeWriteFiles —
+// рубеж ForgeCheckPipeline применяется автоматически.
+pattern ForgeModelStageWrite(repo_name: String, refv: String, response: String, message: String, author_dept: String) -> String {
+  // 1. Запросы на чтение — читающий цикл (обязателен для правок)
+  let reads = ModelParseReads(response)
+  if starts_with(reads, "ОТКАЗ") then { return reads }
+  let reads_list = parse_json(reads)
+  let n_reads = length(reads_list)
+
+  // 2. Diff-запросы: читаем каждый файл, применяем патч по строкам
+  let diffs = ModelParseDiffs(response)
+  if starts_with(diffs, "ОТКАЗ") then { return diffs }
+  let diffs_list = parse_json(diffs)
+  let mut combined = "["
+  let mut first = true
+  each d in diffs_list {
+    let path = to_string(json_get(d, "path", ""))
+    if path == "" then { return "ОТКАЗ: diff без path" }
+    let current = ForgeReadFile(repo_name, refv, path)
+    if starts_with(current, "ОТКАЗ") then { return "ОТКАЗ: diff для отсутствующего/нечитаемого файла " + path }
+    let applied = ModelApplyDiff(current, json_encode(d))
+    if starts_with(applied, "ОТКАЗ") then { return applied }
+    let combined = _Comma(combined, first) + "{\"path\":\"" + escape_json(path) + "\",\"content\":\"" + escape_json(applied) + "\"}"
+    let first = false
+  }
+
+  // 3. Прямые файлы: <file> + fenced-блоки
+  let direct = ModelParseFiles(response)
+  if starts_with(direct, "ОТКАЗ") then { return direct }
+  let fenced = ModelParseFenced(response)
+  if starts_with(fenced, "ОТКАЗ") then { return fenced }
+  each lst in [direct, fenced] {
+    let items = parse_json(to_string(lst))
+    if to_string(items) != "()" then {
+      each f in items {
+        let combined = _Comma(combined, first) + "{\"path\":\"" + escape_json(to_string(json_get(f, "path", ""))) + "\",\"content\":\"" + escape_json(to_string(json_get(f, "content", ""))) + "\"}"
+        let first = false
+      }
+    }
+  }
+  let combined = combined + "]"
+
+  // 4. Ничего содержательного? <mkdir> валидируем, но сами по себе записи не создают
+  let mkdirs = ModelParseMkdirs(response)
+  if starts_with(mkdirs, "ОТКАЗ") then { return mkdirs }
+
+  let n_items = length(parse_json(combined))
+  if n_items == 0.0 {
+    if n_reads > 0.0 then {
+      return "READS:" + ModelServeReads(repo_name, refv, reads)
+    }
+    return "ОТКАЗ: в ответе модели нет файлов, diff-блоков или <read>-запросов"
+  }
+  if n_reads > 0.0 then {
+    // Файлы и <read> в одном ответе: сначала отдаём чтение (модель могла
+    // запросить контекст для следующей правки), правки не теряются —
+    // возвращаем оба маркера: READS приоритетен, caller сохранит ответ.
+    return "READS:" + ModelServeReads(repo_name, refv, reads) + "\nFILES_PENDING:" + combined
+  }
+  return ForgeWriteFiles(repo_name, combined, message, author_dept)
+}

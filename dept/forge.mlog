@@ -217,26 +217,7 @@ pattern ForgeDiff(name: String, from_ref: String, to_ref: String) -> String {
   return "── diff --stat ──\n" + stat.output + "\n── patch (unified=3) ──\n" + substring(patch.output, 0.0, 12000.0)
 }
 
-// ── B.9: ForgeCheckPipeline — РУБЕЖ ПРОВЕРОК (шов §5.8 ТЗ v3) ───────────
-// Единственная точка проверок содержимого на границе записи и публикации.
-// В этом наряде: шаг «Секреты» (GateNoSecretsInRepo, dept/dev.mlog).
-// FO-036 подключает полный конвейер ПРАВКОЙ ТОЛЬКО ЭТОГО ПАТТЕРНА.
-pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
-  let files = parse_json(files_json)
-  if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
-  let mut all_content = ""
-  each f in files {
-    let all_content = all_content + "\n" + to_string(json_get(f, "content", ""))
-  }
-  // Шаг «Секреты»
-  let gate = GateNoSecretsInRepo(all_content)
-  if gate.passed == false then {
-    let _ = AuditLog("forge_pipeline_reject", "dev", "repo=" + name + " step=Секреты")
-    return "ОТКАЗ рубежа ForgeCheckPipeline (шаг «Секреты»): " + gate.message
-  }
-  return "ok"
-}
-
+// ── B.9: ForgeCheckPipeline — РУБЕЖ ПРОВЕРОК — FO-036: реализация ниже, в блоке C ──
 // Каталог файла = всё до последнего "/" (рекурсивно не нужен: mkdir -p).
 // write_file ядра НЕ создаёт отсутствующие вложенные каталоги (SANDBOX
 // "cannot resolve path" до create_dir_all) — проверено исполнением, в отчёт.
@@ -260,6 +241,14 @@ pattern ForgeWriteFiles(name: String, files_json: String, message: String, autho
   // 1. РУБЕЖ ПРОВЕРОК — до коммита, без права обхода (git-история вечная)
   let gate = ForgeCheckPipeline(name, files_json)
   if starts_with(gate, "ОТКАЗ") then { return gate }
+  // FO-036: автоправка шага (docs/lint autopilot) — mutated files возвращаются
+  // конвейером с префиксом FILES:; запись продолжает уже с ними (состав шагов
+  // живёт в конвейере, ForgeWriteFiles знает только контракт шва)
+  if starts_with(gate, "FILES:") then {
+    let files_json = substring(gate, 6.0, length(gate))
+    let files = parse_json(files_json)
+    if to_string(files) == "()" then { return "ОТКАЗ: mutated files_json не разбирается" }
+  }
 
   // 2. Клон bare в scratch (уникальный против коллизии в одну секунду)
   let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
@@ -402,4 +391,539 @@ pattern ForgeShortFormStep(chat_id: String, answer: String) -> String {
     return "done:" + slug
   }
   return next_q
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// FO-036 (наряд #134): FORGE-2v3 — очередь, этапы, задание, конвейер проверок.
+// Цикл §6 ТЗ v3: задача → задание+план (гейт №1, одним сообщением) → этапы
+// с метками → показ → замечания (FO-038). Задача, ждущая владельца, не
+// блокирует очередь (решение 9). Потолок §7: ≤2 задач in_progress, только
+// в разных репозиториях.
+// ══════════════════════════════════════════════════════════════════════
+
+
+// ── Хелперы FO-036: безопасная сборка JSON-массивов/меток в циклах ──────
+// (правило: if-без-else внутри each НЕ переприсваивает внешнюю переменную
+// надёжно — проверено исполнением; условные значения только через паттерны)
+pattern _Comma(acc: String, first: Bool) -> String {
+  if first == false then { return acc + "," }
+  return acc
+}
+
+pattern _GateMark(flag: String) -> String {
+  if flag == "true" then { return "требует взгляда владельца" }
+  return "рутинный"
+}
+
+pattern _NeMark(a: String, b: String) -> String {
+  if a != b then { return "1" }
+  return "0"
+}
+
+pattern _LintTail(content: String, fixed: String) -> String {
+  // пересборка добавляет "\n" после каждой строки, включая пустой хвост
+  // split; срезаем ровно один — исходная завершённость сохраняется
+  if length(fixed) > 0.0 then { return substring(fixed, 0.0, length(fixed) - 1.0) }
+  return fixed
+}
+
+pattern _ProjectPolicy(task_id: String) -> String {
+  let rows = query("SELECT p.gate_policy AS gp FROM forge_projects p JOIN forge_tasks t ON t.project_slug = p.slug WHERE t.id = ? LIMIT 1", [task_id])
+  if length(rows) > 0.0 then { return to_string(json_get(get(rows, 0), "gp", "key_stages")) }
+  return "key_stages"
+}
+
+// ── A.2: валидные переходы статуса ─────────────────────────────────────
+pattern ForgeTaskTransitionAllowed(from_s: String, to_s: String) -> Bool {
+  // proposed → queued (подтверждение владельца); queued → planning/in_progress
+  if from_s == "proposed" and to_s == "queued" then { return true }
+  if from_s == "queued" and to_s == "planning" then { return true }
+  if from_s == "queued" and to_s == "in_progress" then { return true }
+  if from_s == "planning" and to_s == "awaiting_plan" then { return true }
+  if from_s == "planning" and to_s == "queued" then { return true }
+  if from_s == "awaiting_plan" and to_s == "queued" then { return true }
+  if from_s == "awaiting_plan" and to_s == "archived" then { return true }
+  if from_s == "in_progress" and to_s == "awaiting_owner" then { return true }
+  if from_s == "in_progress" and to_s == "done" then { return true }
+  if from_s == "in_progress" and to_s == "failed" then { return true }
+  if from_s == "in_progress" and to_s == "queued" then { return true }
+  if from_s == "awaiting_owner" and to_s == "queued" then { return true }
+  if from_s == "awaiting_owner" and to_s == "in_progress" then { return true }
+  if from_s == "awaiting_owner" and to_s == "done" then { return true }
+  if from_s == "awaiting_owner" and to_s == "archived" then { return true }
+  if from_s == "failed" and to_s == "queued" then { return true }
+  if to_s == "archived" then { return true }
+  return false
+}
+
+pattern ForgeTaskGetStatus(task_id: String) -> String {
+  let rows = query("SELECT status FROM forge_tasks WHERE id = ? LIMIT 1", [task_id])
+  if length(rows) < 1.0 then { return "" }
+  return to_string(json_get(get(rows, 0), "status", ""))
+}
+
+pattern ForgeTaskSetStatus(task_id: String, to_s: String) -> String {
+  let from_s = ForgeTaskGetStatus(task_id)
+  if from_s == "" then { return "ОТКАЗ: задача " + task_id + " не найдена" }
+  if ForgeTaskTransitionAllowed(from_s, to_s) == false then {
+    return "ОТКАЗ: недопустимый переход " + from_s + " → " + to_s
+  }
+  let _ = db_execute("UPDATE forge_tasks SET status = ?, updated_at = datetime('now') WHERE id = ?", [to_s, task_id])
+  let _ = AuditLog("forge_task_status", "forge", "task=" + task_id + " " + from_s + "→" + to_s)
+  return "ok"
+}
+
+// ── A.1: создание задачи ────────────────────────────────────────────────
+// source=owner → сразу queued (в очереди); source=agent → только proposed
+// (не попадает в очередь до подтверждения владельца, A.5).
+pattern ForgeTaskCreate(project_slug: String, title: String, description: String, priority: String, created_by: String, source: String) -> String {
+  let v = ForgeValidSlug(project_slug)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  if length(trim(title)) < 3.0 then { return "ОТКАЗ: заголовок слишком короткий" }
+  if priority != "low" and priority != "normal" and priority != "high" and priority != "critical" then {
+    return "ОТКАЗ: priority ∈ {low, normal, high, critical}"
+  }
+  let proj = query("SELECT slug FROM forge_projects WHERE slug = ? LIMIT 1", [project_slug])
+  if length(proj) < 1.0 then { return "ОТКАЗ: проект " + project_slug + " не найден" }
+  let status = "queued"
+  if source == "agent" then { let status = "proposed" }
+  if source != "agent" and source != "owner" then { return "ОТКАЗ: source ∈ {owner, agent}" }
+  let _ = db_execute("INSERT INTO forge_tasks (project_slug, title, description, status, priority, created_by) VALUES (?, ?, ?, ?, ?, ?)", [project_slug, trim(title), description, status, priority, created_by])
+  let id_rows = query("SELECT id FROM forge_tasks WHERE project_slug = ? AND title = ? ORDER BY id DESC LIMIT 1", [project_slug, trim(title)])
+  let new_id = to_string(json_get(get(id_rows, 0), "id", "0"))
+  let _ = AuditLog("forge_task_create", created_by, "task=" + new_id + " status=" + status)
+  return "Задача " + new_id + " создана (" + status + "): " + trim(title)
+}
+
+// ── A.5: подтверждение владельцем предложенного агентом ─────────────────
+pattern ForgeTaskOwnerApprove(task_id: String) -> String {
+  let st = ForgeTaskGetStatus(task_id)
+  if st != "proposed" then { return "ОТКАЗ: задача не в proposed (" + st + ")" }
+  let r = ForgeTaskSetStatus(task_id, "queued")
+  if r != "ok" then { return r }
+  return "Задача " + task_id + " подтверждена владельцем → queued"
+}
+
+// ── A.3: брошенный захват (30 минут) + A.4 потолок ──────────────────────
+pattern ForgeStaleClaims() -> String {
+  let cutoff = to_string(now() - 1800.0)
+  let stale = query("SELECT id FROM forge_tasks WHERE status = 'in_progress' AND claimed_at IS NOT NULL AND CAST(claimed_at AS REAL) > 0 AND CAST(claimed_at AS REAL) < ?", [cutoff])
+  let mut freed = ""
+  each t in stale {
+    let tid = to_string(json_get(t, "id", ""))
+    let _ = db_execute("UPDATE forge_tasks SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = datetime('now') WHERE id = ?", [tid])
+    let _ = AuditLog("forge_task_stale_release", "forge", "task=" + tid + " (30 мин без обновления)")
+    let freed = freed + " " + tid
+  }
+  if freed == "" then { return "ok: нет брошенных" }
+  return "освобождены:" + freed
+}
+
+pattern ForgeTaskClaim(task_id: String, dept: String) -> String {
+  let _ = ForgeStaleClaims()
+  let rows = query("SELECT id, project_slug, status, blocked_by, title FROM forge_tasks WHERE id = ? LIMIT 1", [task_id])
+  if length(rows) < 1.0 then { return "ОТКАЗ: задача " + task_id + " не найдена" }
+  let t = get(rows, 0)
+  let st = to_string(json_get(t, "status", ""))
+  if st != "queued" then { return "ОТКАЗ: задача не queued (" + st + ")" }
+  let slug = to_string(json_get(t, "project_slug", ""))
+  // blocked_by: задача блокируется только зависимостью, не ожиданием владельца
+  let blocker = to_string(json_get(t, "blocked_by", ""))
+  if blocker != "" then {
+    let bstat = ForgeTaskGetStatus(blocker)
+    if bstat != "done" then { return "ОТКАЗ: задача заблокирована зависимостью task=" + blocker + " (статус " + bstat + ")" }
+  }
+  // Потолок §7: не более 2 in_progress, только в разных репозиториях
+  let active = query("SELECT project_slug, id FROM forge_tasks WHERE status = 'in_progress'", [])
+  if length(active) >= 2.0 then {
+    let mut listing = ""
+    each a in active {
+      let listing = listing + " task=" + to_string(json_get(a, "id", "")) + "(" + to_string(json_get(a, "project_slug", "")) + ")"
+    }
+    return "ОТКАЗ: достигнут потолок 2 задач in_progress, активны:" + listing
+  }
+  each a in active {
+    if to_string(json_get(a, "project_slug", "")) == slug then {
+      return "ОТКАЗ: проект " + slug + " уже исполняется задачей task=" + to_string(json_get(a, "id", "")) + " (один репозиторий — один цикл)"
+    }
+  }
+  let _ = db_execute("UPDATE forge_tasks SET status = 'in_progress', claimed_by = ?, claimed_at = ?, updated_at = datetime('now') WHERE id = ?", [dept, to_string(now()), task_id])
+  let _ = AuditLog("forge_task_claim", dept, "task=" + task_id + " project=" + slug)
+  return "Задача " + task_id + " захвачена (" + dept + ") — " + to_string(json_get(t, "title", ""))
+}
+
+// ── B.1: черновик задания из формы проекта и шаблона типа ───────────────
+pattern ForgeBriefDraftTemplate(project_type: String) -> String {
+  if project_type == "site" then { return "Тип: сайт. Стек: по форме проекта (frontend-фреймворк, хостинг). Ограничения: адаптивность, доступность базовая, деплой без ручных шагов." }
+  if project_type == "android" then { return "Тип: Android. Стек: WebView/Capacitor-обёртка веб-версии. Ограничения: минимальные нативные права, оффлайн-поведение экранов входа." }
+  if project_type == "ai_office" then { return "Тип: AI-контур офиса. Стек: Metalogos mlog + llm_proxy. Ограничения: без обхода гейтов, секреты только через secrets_store." }
+  return "Тип: не определён — уточнить у владельца."
+}
+
+pattern ForgeBriefDraft(task_id: String) -> String {
+  let rows = query("SELECT t.title, t.description, p.name, p.goal, p.project_type, p.customer_name, p.model_combo, p.departments FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
+  if length(rows) < 1.0 then { return "ОТКАЗ: задача/проект не найдены" }
+  let r = get(rows, 0)
+  let tmpl = ForgeBriefDraftTemplate(to_string(json_get(r, "project_type", "")))
+  let brief = "== ЗАДАНИЕ (черновик) ==\nЗадача: " + to_string(json_get(r, "title", "")) +
+    "\nПроект: " + to_string(json_get(r, "name", "")) +
+    "\nЦель: " + to_string(json_get(r, "goal", "")) +
+    "\nЗаказчик: " + to_string(json_get(r, "customer_name", "")) +
+    "\nОписание: " + to_string(json_get(r, "description", "")) +
+    "\n" + tmpl +
+    "\nКритерии готовности: перечислить проверяемые условия приёмки." +
+    "\nНЕ входит в работу: зафиксировать явно, чтобы отдел не расширял объём."
+  return brief
+}
+
+// ── B.2: гейт №1 — задание + план этапов ОДНИМ сообщением ───────────────
+// Доставка в этом наряде — минимальная: текст владельцу, ожидание решения;
+// полноценные гейты с кнопками — FO-038.
+pattern ForgeGate1Submit(task_id: String, stages_plan_json: String) -> String {
+  let st = ForgeTaskGetStatus(task_id)
+  if st != "queued" and st != "planning" then { return "ОТКАЗ: гейт №1 доступен из queued/planning (сейчас " + st + ")" }
+  let brief = ForgeBriefDraft(task_id)
+  if starts_with(brief, "ОТКАЗ") then { return brief }
+  let plan = parse_json(stages_plan_json)
+  if to_string(plan) == "()" then { return "ОТКАЗ: stages_plan_json не разбирается" }
+  let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_plan', updated_at = datetime('now') WHERE id = ?", [task_id])
+  let _ = AuditLog("forge_gate1_submit", "forge", "task=" + task_id + " stages=" + to_string(length(plan)))
+  let mut msg = brief + "\n\n== ПЛАН ЭТАПОВ (гейт №1, решение владельца) ==\n"
+  let mut seq = 0.0
+  each s in plan {
+    let seq = seq + 1.0
+    let gate_mark = _GateMark(to_string(json_get(s, "needs_owner_gate", "false")))
+    let msg = msg + to_string(seq) + ". " + to_string(json_get(s, "title", "")) + " [" + gate_mark + "] — " + to_string(json_get(s, "description", "")) + "\n"
+  }
+  let msg = msg + "\nОтветьте: «утверждаю» / «правка: ...» (решение 17: одним сообщением)."
+  return msg
+}
+
+// ── B.3: утверждение → forge_briefs approved=1; этапы создаются ─────────
+pattern ForgeGate1Approve(task_id: String, brief_text: String, stages_plan_json: String) -> String {
+  let st = ForgeTaskGetStatus(task_id)
+  if st != "awaiting_plan" then { return "ОТКАЗ: задача не в awaiting_plan (" + st + ")" }
+  let plan = parse_json(stages_plan_json)
+  if to_string(plan) == "()" then { return "ОТКАЗ: stages_plan_json не разбирается" }
+  let ver_rows = query("SELECT COALESCE(MAX(version),0) as v FROM forge_briefs WHERE task_id = ?", [task_id])
+  let ver = to_float(json_get(get(ver_rows, 0), "v", "0")) + 1.0
+  let _ = db_execute("INSERT INTO forge_briefs (task_id, version, content, approved, approved_at) VALUES (?, ?, ?, 'true', datetime('now'))", [task_id, to_string(ver), brief_text])
+  let mut seq = 0.0
+  each s in plan {
+    let seq = seq + 1.0
+    let _ = db_execute("INSERT INTO forge_stages (task_id, seq, title, description, needs_owner_gate, status) VALUES (?, ?, ?, ?, ?, 'pending')", [task_id, to_string(seq), to_string(json_get(s, "title", "")), to_string(json_get(s, "description", "")), to_string(json_get(s, "needs_owner_gate", "false"))])
+  }
+  let r = ForgeTaskSetStatus(task_id, "queued")
+  if r != "ok" then { return r }
+  let _ = AuditLog("forge_gate1_approve", "owner", "task=" + task_id + " brief_v=" + to_string(ver) + " stages=" + to_string(length(plan)))
+  return "Задание v" + to_string(ver) + " утверждено, этапов: " + to_string(length(plan)) + ". Задача → queued."
+}
+
+// ── C.8: закрытие гейта без правки находки → forge_finding_decisions ────
+pattern ForgeFindingsDecline(task_id: String, stage_id: String, step: String, findings_json: String) -> String {
+  let findings = parse_json(findings_json)
+  if to_string(findings) == "()" then { return "ОТКАЗ: findings_json не разбирается" }
+  let mut n = 0.0
+  each f in findings {
+    let _ = db_execute("INSERT INTO forge_finding_decisions (task_id, stage_id, step, finding_text, decision) VALUES (?, ?, ?, ?, 'declined')", [task_id, stage_id, step, to_string(f)])
+    let n = n + 1.0
+  }
+  let _ = AuditLog("forge_findings_declined", "owner", "task=" + task_id + " step=" + step + " n=" + to_string(n))
+  return "Записано отклонённых находок: " + to_string(n)
+}
+
+// ── C.8: чтение истории решений (сбой не останавливает конвейер) ────────
+pattern ForgeDeclinedContext(task_id: String) -> String {
+  let rows = try query("SELECT step, finding_text FROM forge_finding_decisions WHERE task_id = ? AND decision = 'declined' ORDER BY id DESC LIMIT 20", [task_id])
+  if to_string(rows) == "()" then {
+    let _ = AuditLog("forge_history_warn", "forge", "история решений недоступна — конвейер продолжил (советует, не блокирует)")
+    return ""
+  }
+  if length(rows) < 1.0 then { return "" }
+  let mut ctx = "УЖЕ ОТКЛОНЕНО владельцем (не предлагай и не сообщай повторно; позднее решение отменяет раннее, записанное решение важнее формулировки задания):\n"
+  each r in rows {
+    let ctx = ctx + "- [" + to_string(json_get(r, "step", "")) + "] " + to_string(json_get(r, "finding_text", "")) + "\n"
+  }
+  return ctx
+}
+
+// ── B.5/B.6: этапы — старт, коммит+метка, провал, откат ─────────────────
+pattern ForgeStageGet(stage_id: String) -> Dict {
+  let rows = query("SELECT id, task_id, seq, title, description, needs_owner_gate, status, commit_tag, commit_sha, failed_runs FROM forge_stages WHERE id = ? LIMIT 1", [stage_id])
+  if length(rows) < 1.0 then { return { id: "" } }
+  return get(rows, 0)
+}
+
+pattern ForgeStageStart(stage_id: String) -> String {
+  let s = ForgeStageGet(stage_id)
+  if to_string(json_get(s, "id", "x")) == "" then { return "ОТКАЗ: этап не найден" }
+  if to_string(json_get(s, "status", "")) != "pending" and to_string(json_get(s, "status", "")) != "failed" then {
+    return "ОТКАЗ: этап в статусе " + to_string(json_get(s, "status", ""))
+  }
+  let _ = db_execute("UPDATE forge_stages SET status = 'in_progress', started_at = datetime('now') WHERE id = ?", [stage_id])
+  return "Этап " + to_string(json_get(s, "seq", "")) + " начат: " + to_string(json_get(s, "title", ""))
+}
+
+pattern ForgeStageComplete(stage_id: String, repo_name: String, commit_sha: String) -> String {
+  let s = ForgeStageGet(stage_id)
+  if to_string(json_get(s, "id", "x")) == "" then { return "ОТКАЗ: этап не найден" }
+  let task_id = to_string(json_get(s, "task_id", ""))
+  let seq = to_string(json_get(s, "seq", ""))
+  let tag = "stage-" + seq
+  let tr = ForgeTag(repo_name, tag, commit_sha)
+  if starts_with(tr, "ОТКАЗ") then { return "ОТКАЗ: метка этапа: " + tr }
+  let _ = db_execute("UPDATE forge_stages SET status = 'done', commit_tag = ?, commit_sha = ?, finished_at = datetime('now'), failed_runs = 0 WHERE id = ?", [tag, commit_sha, stage_id])
+  let _ = AuditLog("forge_stage_done", "forge", "task=" + task_id + " stage=" + seq + " tag=" + tag + " sha=" + commit_sha)
+  return "Этап " + seq + " завершён: " + tag + " → " + commit_sha + ". " + tr
+}
+
+// Метка fix-правки владельца (§5.6, FO-038): stage-N-fix-<k>, предыдущая остаётся
+pattern ForgeStageFixTag(stage_id: String, repo_name: String, commit_sha: String) -> String {
+  let s = ForgeStageGet(stage_id)
+  if to_string(json_get(s, "id", "x")) == "" then { return "ОТКАЗ: этап не найден" }
+  let k = to_float(json_get(s, "failed_runs", "0")) + 1.0
+  let tag = "stage-" + to_string(json_get(s, "seq", "")) + "-fix-" + to_string(k)
+  let tr = ForgeTag(repo_name, tag, commit_sha)
+  if starts_with(tr, "ОТКАЗ") then { return "ОТКАЗ: fix-метка: " + tr }
+  let _ = db_execute("UPDATE forge_stages SET commit_tag = ?, commit_sha = ? WHERE id = ?", [tag, commit_sha, stage_id])
+  return "Fix-метка " + tag + " → " + commit_sha
+}
+
+pattern ForgeStageFail(stage_id: String) -> String {
+  let s = ForgeStageGet(stage_id)
+  if to_string(json_get(s, "id", "x")) == "" then { return "ОТКАЗ: этап не найден" }
+  let task_id = to_string(json_get(s, "task_id", ""))
+  let fails = to_float(json_get(s, "failed_runs", "0")) + 1.0
+  let _ = db_execute("UPDATE forge_stages SET failed_runs = ? WHERE id = ?", [to_string(fails), stage_id])
+  if fails >= 3.0 then {
+    let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_owner', updated_at = datetime('now') WHERE id = ?", [task_id])
+    let _ = db_execute("UPDATE forge_stages SET status = 'failed' WHERE id = ?", [stage_id])
+    let _ = AuditLog("forge_stage_3fails", "forge", "task=" + task_id + " stage=" + to_string(json_get(s, "seq", "")) + " → awaiting_owner")
+    return "Три неудачных прогона подряд — задача " + task_id + " → awaiting_owner (доставка текстом, гейт — FO-038)"
+  }
+  return "Неудачный прогон " + to_string(fails) + "/3 на этапе " + to_string(json_get(s, "seq", ""))
+}
+
+// ── C.3/C.4/C.5/C.6: шаги конвейера ─────────────────────────────────────
+// Каждый шаг — отдельная функция; результат — String:
+//   "ok" | "ОТКАЗ: ..." (парковка/отказ) | "FILES:<json>" (автоправка)
+
+// Шаг «Намерение» (C.2): содержимое сверяется с утверждённым заданием —
+// механическая предпосылка (бриф утверждён) + задание подаётся в следующие шаги.
+pattern ForgeStepIntent(brief: String) -> String {
+  if trim(brief) == "" then { return "ОТКАЗ: нет утверждённого задания (гейт №1 не пройден) — намерение не зафиксировано" }
+  return "ok"
+}
+
+// Шаг «Секреты» (C.3): GateNoSecretsInRepo (dept/dev.mlog) — уже стоял на
+// рубеже FO-035; автоправок нет — только отказ. НЕ дублируется.
+pattern ForgeStepSecrets(files_json: String) -> String {
+  let files = parse_json(files_json)
+  if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
+  let mut all_content = ""
+  each f in files {
+    let all_content = all_content + "\n" + to_string(json_get(f, "content", ""))
+  }
+  let gate = GateNoSecretsInRepo(all_content)
+  if gate.passed == false then { return "ОТКАЗ: " + gate.message }
+  return "ok"
+}
+
+// Шаг «Ревью» (C.4): смысловая проверка LLM с заданием в промпте — делает ли
+// код то, что утверждено. Находки ТОЛЬКО паркуются владельцу; автоправки нет
+// никогда. gate_policy проекта управляет этим шагом.
+pattern ForgeStepReview(task_id: String, stage_id: String, files_json: String, brief: String) -> String {
+  // policy: gate_policy проекта (C.4). every_stage — ревью на каждом этапе;
+  // key_stages — только на этапах с needs_owner_gate=true; minimal — механика
+  // без смыслового ревью (владелец смотрит на точках остановки).
+  let stage = ForgeStageGet(stage_id)
+  if stage_id == "" then { let stage = { id: "", needs_owner_gate: "false" } }
+  let needs_gate = to_string(json_get(stage, "needs_owner_gate", "false"))
+  let gate_policy = _ProjectPolicy(task_id)
+  if gate_policy == "minimal" then { return "ok" }
+  if gate_policy == "key_stages" and needs_gate != "true" then { return "ok" }
+  let declined = ForgeDeclinedContext(task_id)
+  let mut files_text = ""
+  let fl = parse_json(files_json)
+  each f in fl {
+    let files_text = files_text + "\n--- файл: " + to_string(json_get(f, "path", "")) + " ---\n" + substring(to_string(json_get(f, "content", "")), 0.0, 6000.0)
+  }
+  let prompt = "Ты — ревьюер кода. Проверь, делает ли код ровно то, что утверждено в задании. Не предлагай то, что уже отклонено владельцем.\n\n== УТВЕРЖДЁННОЕ ЗАДАНИЕ ==\n" + substring(brief, 0.0, 4000.0) + "\n\n" + declined + "\n== КОД ==\n" + files_text + "\n\nОтветь строго: 'OK' если код соответствует заданию, либо списком находок (по одной в строке, каждая конкретной правкой)."
+  let review = try call_llm("Ревью кода FORGE: сверка с утверждённым заданием.", prompt)
+  if to_string(review) == "()" then {
+    let _ = AuditLog("forge_review_unavailable", "forge", "task=" + task_id + " — LLM сбой, парковка владельцу")
+    return "ОТКАЗ: ревью недоступно (сбой LLM) — находки запаркованы владельцу; задача ждёт решения"
+  }
+  let review_text = trim(to_string(review))
+  if review_text == "OK" or review_text == "ok" then { return "ok" }
+  // Парковка владельцу: задача уходит из активной очереди (решение 9)
+  let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_owner', updated_at = datetime('now') WHERE id = ?", [task_id])
+  let _ = AuditLog("forge_review_parked", "forge", "task=" + task_id + " stage=" + stage_id + " находки владельцу")
+  return "ОТКАЗ: ревью — находки запаркованы владельцу (автоправки нет):\n" + substring(review_text, 0.0, 1500.0)
+}
+
+// Шаг «Тест» (C.5): целевая проверка заявленного намерения через ForgeRun.
+// До сдачи FO-037 шаг честно отказывает с понятной причиной. Полная регрессия
+// — НЕ здесь (только на публикации этапа, FO-037).
+pattern ForgeStepTest(task_id: String, stage_id: String, files_json: String, brief: String) -> String {
+  return "ОТКАЗ: конвейер ждёт ForgeRun (FO-037) — исполнение тестов на рубеже станет доступно после сдачи исполнительного контура"
+}
+
+// Шаг «Документация» (C.6): README уходит с записью; autopilot — добавить
+// заглушку молча; refuse — отказ; park_owner — парковка.
+pattern ForgeStepDocs(files_json: String, policy: String, brief: String) -> String {
+  let files = parse_json(files_json)
+  if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
+  let mut has_readme = false
+  each f in files {
+    if to_string(json_get(f, "path", "")) == "README.md" then { let has_readme = true }
+  }
+  if has_readme then { return "ok" }
+  if policy == "autopilot" then {
+    let stub = "# Проект\n\nЗадание: " + substring(brief, 0.0, 600.0) + "\n\nREADME сгенерирован конвейером (шаг Документация) — дополните разделы установки и использования.\n"
+    // to_string(struct) даёт отладочный формат, не JSON — реконструкция явная
+    let mut new_files = "["
+    let mut first = true
+    each f in files {
+      let new_files = _Comma(new_files, first) + "{\"path\":\"" + escape_json(to_string(json_get(f, "path", ""))) + "\",\"content\":\"" + escape_json(to_string(json_get(f, "content", ""))) + "\"}"
+      let first = false
+    }
+    let new_files = _Comma(new_files, first) + "{\"path\":\"README.md\",\"content\":\"" + escape_json(stub) + "\"}]"
+    return "FILES:" + new_files
+  }
+  if policy == "park_owner" then {
+    return "ОТКАЗ: документация отсутствует (README.md) — находка запаркована владельцу"
+  }
+  return "ОТКАЗ: документация отсутствует (README.md) — шаг «Документация» в режиме refuse"
+}
+
+// Шаг «Линт» (C.6): хвостовые пробелы чинятся молча в autopilot.
+pattern ForgeStepLint(files_json: String, policy: String) -> String {
+  let files = parse_json(files_json)
+  if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
+  // mark-строка вместо булева флага: if-без-else внутри each ненадёжен
+  let mut mark = ""
+  let mut new_files = "["
+  let mut first = true
+  each f in files {
+    let content = to_string(json_get(f, "content", ""))
+    let lines = split(content, "\n")
+    let mut fixed = ""
+    each line in lines {
+      let fixed = fixed + trim_end(to_string(line)) + "\n"
+    }
+    let fixed = _LintTail(content, fixed)
+    let mark = mark + _NeMark(content, fixed)
+    let new_files = _Comma(new_files, first) + "{\"path\":\"" + escape_json(to_string(json_get(f, "path", ""))) + "\",\"content\":\"" + escape_json(fixed) + "\"}"
+    let first = false
+  }
+  if contains(mark, "1") == false then { return "ok" }
+  if policy == "autopilot" then { return "FILES:" + new_files + "" }
+  if policy == "park_owner" then {
+    return "ОТКАЗ: линт нашёл хвостовые пробелы — находка запаркована владельцу (автоправка запрещена политикой)"
+  }
+  return "ОТКАЗ: линт нашёл нарушения — шаг «Линт» в режиме refuse"
+}
+
+// ── C.7: непрерывность — правка строится на отсмотренном коммите ────────
+// Автоправка допустима только при HEAD == commit_sha утверждённого этапа;
+// нельзя доказать — правка уходит через ревью (парковка), история не подменяется.
+pattern ForgeContinuityCheck(repo_name: String, stage_id: String) -> String {
+  if stage_id == "" then { return "ok" }
+  let s = ForgeStageGet(stage_id)
+  // length() на Dict запрещён ядром — проверка через поле-сентинел
+  if to_string(json_get(s, "id", "x")) == "" then { return "ok" }
+  let stage_sha = to_string(json_get(s, "commit_sha", ""))
+  if stage_sha == "" then { return "ok" }
+  let bare = ForgeReposDir() + "/forge/repos/" + repo_name + ".git"
+  let head = ForgeRunScript("git -C \"" + bare + "\" rev-parse --short HEAD")
+  let head_sha = trim(head.output)
+  if head.exit_code == 0.0 and head_sha == stage_sha then { return "ok" }
+  let _ = AuditLog("forge_continuity_fail", "forge", "repo=" + repo_name + " HEAD=" + head_sha + " != stage_sha=" + stage_sha + " — правка через ревью")
+  return "ОТКАЗ: непрерывность не доказана (HEAD " + head_sha + " != отсмотренный " + stage_sha + ") — правка уходит через ревью, утверждённый коммит не подменяется"
+}
+
+// ── C.1: состав конвейера — конфигурируемый, не if-лесенка ─────────────
+// per-step policy {step → autopilot | park_owner | refuse | skip} —
+// forge_step_config (project_slug, step, policy); skip исключает шаг.
+// Полная регрессия — НЕ здесь (публикация этапа, FO-037).
+pattern ForgeStepPolicy(project_slug: String, step: String) -> String {
+  let rows = query("SELECT policy FROM forge_step_config WHERE project_slug = ? AND step = ? LIMIT 1", [project_slug, step])
+  if length(rows) > 0.0 then { return to_string(json_get(get(rows, 0), "policy", "")) }
+  // Дефолты: механика чинится молча, смысловое — владельцу
+  if step == "intent" then { return "refuse" }
+  if step == "secrets" then { return "refuse" }
+  if step == "review" then { return "park_owner" }
+  if step == "test" then { return "refuse" }
+  if step == "docs" then { return "autopilot" }
+  if step == "lint" then { return "autopilot" }
+  return "refuse"
+}
+
+pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
+  let files = parse_json(files_json)
+  if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
+
+  // Контекст задачи: проект репозитория → активная задача (in_progress / awaiting_owner)
+  let proj_rows = query("SELECT project_slug FROM forge_repos WHERE name = ? LIMIT 1", [name])
+  if length(proj_rows) < 1.0 then { return "ОТКАЗ: репозиторий " + name + " не найден" }
+  let project_slug = to_string(json_get(get(proj_rows, 0), "project_slug", ""))
+  // Сбой схемы FO-036 (старая БД/тест-харнесс FO-035) → минимальный рубеж,
+  // не падаем: конвейер деградирует до шага «Секреты» с предупреждением
+  let task_rows = try query("SELECT id, status FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug])
+  if to_string(task_rows) == "()" then {
+    let _ = AuditLog("forge_pipeline_warn", "forge", "repo=" + name + ": таблицы FO-036 недоступны — рубеж деградировал до «Секреты»")
+    let task_rows = []
+  }
+
+  // Вне задачи — минимальный рубеж FO-035 (секреты), сохраняем поведение
+  if length(task_rows) < 1.0 then {
+    let secret_gate = ForgeStepSecrets(files_json)
+    if starts_with(secret_gate, "ОТКАЗ") then {
+      let _ = AuditLog("forge_pipeline_reject", "dev", "repo=" + name + " step=Секреты")
+      return "ОТКАЗ рубежа ForgeCheckPipeline (шаг «Секреты»): " + substring(secret_gate, 6.0, length(secret_gate))
+    }
+    return "ok"
+  }
+
+  let task_id = to_string(json_get(get(task_rows, 0), "id", ""))
+  let stage_rows = query("SELECT id FROM forge_stages WHERE task_id = ? AND status = 'in_progress' ORDER BY seq DESC LIMIT 1", [task_id])
+  let stage_id = ""
+  if to_string(stage_rows) != "()" and length(stage_rows) > 0.0 then { let stage_id = to_string(json_get(get(stage_rows, 0), "id", "")) }
+  // Утверждённое задание — критерий приёмки каждого шага (намерение §5.8)
+  let brief_rows = query("SELECT content FROM forge_briefs WHERE task_id = ? AND approved = 'true' ORDER BY version DESC LIMIT 1", [task_id])
+  let brief = ""
+  if to_string(brief_rows) != "()" and length(brief_rows) > 0.0 then { let brief = to_string(json_get(get(brief_rows, 0), "content", "")) }
+
+  // Состав: порядок фиксирован (§5.8), шаги с policy=skip исключаются конфигом
+  let mut steps = ["intent", "secrets", "review", "test", "docs", "lint"]
+  if env("FORGE_RUN_ENABLED") != "1" then { let steps = ["intent", "secrets", "review", "docs", "lint"] }
+
+  let mut current_files = files_json
+  each step in steps {
+    let policy = ForgeStepPolicy(project_slug, to_string(step))
+    if policy != "skip" then {
+      let result = "ok"
+      if to_string(step) == "intent" then { let result = ForgeStepIntent(brief) }
+      if to_string(step) == "secrets" then { let result = ForgeStepSecrets(current_files) }
+      if to_string(step) == "review" then { let result = ForgeStepReview(task_id, stage_id, current_files, brief) }
+      if to_string(step) == "test" then { let result = ForgeStepTest(task_id, stage_id, current_files, brief) }
+      if to_string(step) == "docs" then { let result = ForgeStepDocs(current_files, policy, brief) }
+      if to_string(step) == "lint" then { let result = ForgeStepLint(current_files, policy) }
+      if starts_with(result, "ОТКАЗ") then {
+        // C.4/C.7: парковка ревью/непрерывности — задача уже переведена в
+        // awaiting_owner внутри шага ревью; прочие отказы — рубеж держит запись
+        let _ = AuditLog("forge_pipeline_reject", "dev", "repo=" + name + " step=" + to_string(step) + " task=" + task_id)
+        return "ОТКАЗ рубежа ForgeCheckPipeline (шаг «" + to_string(step) + "»): " + substring(result, 6.0, length(result))
+      }
+      if starts_with(result, "FILES:") then {
+        // C.7: автоправка — доказать непрерывность от отсмотренного коммита
+        let cont = ForgeContinuityCheck(name, stage_id)
+        if starts_with(cont, "ОТКАЗ") then { return cont }
+        let current_files = substring(result, 6.0, length(result))
+      }
+    }
+  }
+  if current_files != files_json then { return "FILES:" + current_files }
+  return "ok"
 }
