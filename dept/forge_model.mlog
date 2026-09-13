@@ -8,7 +8,8 @@
 //
 // Безопасность: ModelSafePath (только [a-zA-Z0-9._/-], без "/", "..", "$", "`" и
 // пр.) ДО любой файловой операции. Читающий цикл: ≤5 файлов и ≤100 КБ за запрос.
-// Diff: контекст не совпал — отказ, не угадывание (файл устарел → перечитать).
+// Diff (§5.7 v3): точное совпадение → нечёткое (пробелы/отступы, ровно одно
+// близкое место — применить с меткой) → отказ только при неоднозначности.
 // Содержимое тегов уходит в ForgeWriteFiles — рубеж ForgeCheckPipeline применяется
 // автоматически, обходного пути нет (D.5).
 //
@@ -102,53 +103,119 @@ pattern ModelParseMkdirs(response: String) -> String {
 }
 
 // ── D.3: <read file="..."/> — запросы на чтение ─────────────────────────
+// FO-043 C.1: необязательные from/to (1-based, включительно):
+//   <read file="src/app.py" from="40" to="90"/>
+// Полный текст больших файлов — ТОЛЬКО по явному диапазону (см. ModelServeReads).
 pattern ModelParseReads(response: String) -> String {
   let mut reads = "["
   let mut first = true
   let mut rest = response
   let mut guard = 0.0
-  let mut caps = regex_captures("<read file=\"([^\"]+)\"\\s*/>", rest)
-  while length(caps) >= 2.0 and guard < 50.0 {
+  let mut caps = regex_captures("<read file=\"([^\"]+)\"([^/>]*)/>", rest)
+  while length(caps) >= 3.0 and guard < 50.0 {
     let f = ModelSafePath(to_string(get(caps, 1)))
     if f == "" then { return "ОТКАЗ: путь <read> вне рабочей зоны: " + to_string(get(caps, 1)) }
-    let reads = _Comma(reads, first) + "\"" + escape_json(f) + "\""
+    let attrs = to_string(get(caps, 2))
+    let from_m = regex_captures("from=\"([0-9]+)\"", attrs)
+    let to_m = regex_captures("to=\"([0-9]+)\"", attrs)
+    let from_v = ""
+    if length(from_m) >= 2.0 then { let from_v = trim(to_string(get(from_m, 1))) }
+    let to_v = ""
+    if length(to_m) >= 2.0 then { let to_v = trim(to_string(get(to_m, 1))) }
+    let reads = _Comma(reads, first) + "{\"path\":\"" + escape_json(f) + "\",\"from\":\"" + from_v + "\",\"to\":\"" + to_v + "\"}"
     let first = false
     let parts = split(rest, to_string(get(caps, 0)))
     if length(parts) < 2.0 then { let guard = 50.0 } else { let rest = to_string(get(parts, 1)) }
     let guard = guard + 1.0
-    let caps = regex_captures("<read file=\"([^\"]+)\"\\s*/>", rest)
+    let caps = regex_captures("<read file=\"([^\"]+)\"([^/>]*)/>", rest)
   }
   let reads = reads + "]"
   return reads
 }
 
 // ── D.3: читающий цикл — ≤5 файлов и ≤100 КБ суммарно за запрос ─────────
-// Модель отвечает <read>-тегами → отдел читает через ForgeReadFile (с лимитом
-// размера) → возвращает содержимое в следующем запросе → модель отвечает правками.
+// FO-043 C.1 (§5.7 «чтение со сводкой»): файл > 400 строк БЕЗ явного
+// диапазона отдаётся структурой (объявления + номера строк) с инструкцией;
+// полный текст — только по <read file="..." from="X" to="Y"/> (срез, до 400
+// строк). Отказы — инструкцией модели: что делать, а не только что не так.
+pattern _ServeReadRange(content: String, from_v: String, to_v: String) -> String {
+  let lines = split(content, "\n")
+  let n = length(lines)
+  // нормализация границ: from пуст → 1; to пуст → from+399 (срез ≤400 строк)
+  let mut f = from_v
+  if f == "" then { let f = "1" }
+  let mut from_n = to_float(f)
+  if from_n < 1.0 then { let from_n = 1.0 }
+  let mut to_n = to_float(n)
+  if to_v != "" then { let to_n = to_float(to_v) }
+  if to_v == "" then { let to_n = from_n + 399.0 }
+  if from_n > n then { return "ОТКАЗ: from=" + from_v + " за пределами файла (" + to_string(n) + " строк) — перечитайте сводку и укажите корректный диапазон" }
+  if to_n > n then { let to_n = to_float(n) }
+  if to_n < from_n then { return "ОТКАЗ: диапазон from=" + from_v + " to=" + to_v + " пуст — проверьте границы (файл " + to_string(n) + " строк)" }
+  // срез > 400 строк режется — полный файл читается несколькими запросами
+  if to_n - from_n + 1.0 > 400.0 then { let to_n = from_n + 399.0 }
+  return join(slice(lines, from_n - 1.0, to_n), "\n")
+}
+
+// сводка: объявления (ключевые слова/заголовки/теги) с номерами строк + инструкция
+pattern _ServeReadOutline(content: String) -> String {
+  let lines = split(content, "\n")
+  let n = length(lines)
+  let mut out = "СВОДКА ФАЙЛА (" + to_string(n) + " строк, показаны объявления):\n"
+  let mut i = 0.0
+  let mut found = 0.0
+  while i < n {
+    let line = to_string(get(lines, i))
+    if length(line) > 0.0 and length(line) < 300.0 then {
+      let hit = regex_captures("^\\s*(def |class |function |const |let |var |async |import |from |export |func |fn |struct |impl |type |interface |public |private |protected )|^#{1,6} |^<(h[1-3]|section|div|header|footer|nav|main|article|body|head|script|style)", line)
+      if length(hit) >= 1.0 and found < 100.0 then {
+        let out = out + to_string(i + 1.0) + ": " + trim(substring(line, 0.0, 150.0)) + "\n"
+        let found = found + 1.0
+      }
+    }
+    let i = i + 1.0
+  }
+  let out = out + "Инструкция: полный текст читается по диапазону — <read file=\"...\" from=\"" + to_string(1.0) + "\" to=\"400\"/> (до 400 строк за запрос), затем следующие диапазоны. Правка — только по реально прочитанному контексту."
+  return out
+}
+
 pattern ModelServeReads(repo_name: String, refv: String, reads_json: String) -> String {
   let paths = parse_json(reads_json)
   if to_string(paths) == "()" then { return "ОТКАЗ: reads не разбираются" }
   let n = length(paths)
-  if n > 5.0 then { return "ОТКАЗ: запрошено " + to_string(n) + " файлов за запрос — лимит 5 (защита контекста)" }
+  if n > 5.0 then { return "ОТКАЗ: запрошено " + to_string(n) + " файлов за запрос — лимит 5 (защита контекста). Инструкция: разбейте чтение на несколько ходов по ≤5 файлов." }
   let mut out = "{"
   let mut first = true
   let mut total = 0.0
   each p in paths {
-    let content = ForgeReadFile(repo_name, refv, to_string(p))
+    let f = to_string(json_get(p, "path", ""))
+    let from_v = to_string(json_get(p, "from", ""))
+    let to_v = to_string(json_get(p, "to", ""))
+    let content = ForgeReadFile(repo_name, refv, f)
     if starts_with(content, "ОТКАЗ") then { return content }
-    let total = total + to_float(length(content))
-    let out = _Comma(out, first) + "\"" + escape_json(to_string(p)) + "\":\"" + escape_json(substring(content, 0.0, 20000.0)) + "\""
+    // режим (диапазон / сводка / полный) — через паттерн: условные значения
+    // в each только через паттерны (ловушка mlog)
+    let served = _ServeOne(content, from_v, to_v)
+    if starts_with(served, "ОТКАЗ") then { return served }
+    let total = total + to_float(length(served))
+    let out = _Comma(out, first) + "\"" + escape_json(f) + "\":\"" + escape_json(substring(served, 0.0, 20000.0)) + "\""
     let first = false
   }
-  if total > 100000.0 then { return "ОТКАЗ: суммарно " + to_string(total) + " байт — лимит 100 КБ за запрос" }
+  if total > 100000.0 then { return "ОТКАЗ: суммарно " + to_string(total) + " байт — лимит 100 КБ за запрос. Инструкция: читайте файлы диапазонами (<read file=\"...\" from=\"X\" to=\"Y\"/>) и ходами по ≤5 файлов." }
   return out + "}"
+}
+
+// выбор режима отдачи: явный диапазон → срез; большой файл без диапазона → сводка
+pattern _ServeOne(content: String, from_v: String, to_v: String) -> String {
+  if from_v != "" or to_v != "" then { return _ServeReadRange(content, from_v, to_v) }
+  if length(split(content, "\n")) > 400.0 then { return _ServeReadOutline(content) }
+  return content
 }
 
 // ── D.4: ```diff path="..." — точечная правка по строкам ────────────────
 // Внутри fence: строки "- X" (удалить) и "+ Y" (добавить). Удалённые строки
-// ДОЛЖНЫ совпасть подряд в файле; контекст не совпал — ОТКАЗ, не угадывание
-// (файл устарел → модель перечитывает через <read>). Возвращает JSON-массив
-// файлов [{path, content}] — как ModelParseFiles.
+// ищутся подряд: точное совпадение → нечёткое (§5.7) → отказ только при
+// неоднозначности. Возвращает JSON-массив файлов [{path, removed, added}].
 pattern ModelParseDiffs(response: String) -> String {
   let mut files = "["
   let mut first = true
@@ -199,7 +266,58 @@ pattern ModelParseDiffs(response: String) -> String {
 
 // ── D.4: _patch_lines-эквивалент: один diff → содержимое файла ──────────
 // diff_json: {"path", "removed": "строка1\nстрока2", "added": "..."} —
-// удалённые строки должны совпасть ПОДРЯД; не совпали — отказ.
+// порядок применения (§5.7 v3): точное совпадение → нечёткое (нормализация
+// пробелов/отступов; ровно одно близкое место — применить с меткой) → отказ
+// ТОЛЬКО при неоднозначности/отсутствии. Возврат-маркер: "EXACT:<файл>" /
+// "FUZZY:<файл>" / "ОТКАЗ: …" — вызывающий (ForgeModelStageWrite) пишет
+// исход в forge_edit_stats и снимает маркер.
+//
+// FO-043 (наряд #150): regex_replace в mlog нестабилен (проверено раном,
+// dept/forge.mlog:_CollapseSpaces) — нормализация строится на replace/trim,
+// не на регэкспах.
+
+// ── нормализация строки: табы → пробел, CR срезается, прогоны пробелов
+// схлопываются, края обрезаются. Игнорирует расхождения в пробелах/отступах.
+pattern _NormLine(line: String) -> String {
+  let mut out = replace(line, "\t", " ")
+  let out = replace(out, "\r", "")
+  let mut guard = 0.0
+  while contains(out, "  ") and guard < 100.0 {
+    let out = replace(out, "  ", " ")
+    let guard = guard + 1.0
+  }
+  return trim(out)
+}
+
+// склейка нормализованного окна [from_i, from_i+n) списка строк
+pattern _NormWindow(lines: List, from_i: Float, n: Float) -> String {
+  let mut out = ""
+  let mut k = 0.0
+  while k < n {
+    let out = out + _NormLine(to_string(get(lines, from_i + k)))
+    let k = k + 1.0
+    if k < n then { let out = out + "\n" }
+  }
+  return out
+}
+
+// исход записи статистики по маркеру (условные значения — только через паттерны)
+pattern _OutcomeFor(marker: String) -> String {
+  if marker == "FUZZY" then { return "fuzzy" }
+  return "first_try"
+}
+
+// маркер применения: "FUZZY:" или "EXACT:" (ОТКАЗ отсечён вызывающим)
+pattern _MarkerFor(applied: String) -> String {
+  if starts_with(applied, "FUZZY:") then { return "FUZZY" }
+  return "EXACT"
+}
+
+// снять маркер ("EXACT:" и "FUZZY:" — ровно 6 символов)
+pattern _StripMarker(applied: String) -> String {
+  return substring(applied, 6.0, length(applied))
+}
+
 pattern ModelApplyDiff(current_content: String, diff_json: String) -> String {
   let d = parse_json(diff_json)
   if to_string(d) == "()" then { return "ОТКАЗ: diff не разбирается" }
@@ -212,19 +330,61 @@ pattern ModelApplyDiff(current_content: String, diff_json: String) -> String {
   let added = split(add_str, "\n")
   let lines = split(current_content, "\n")
   let n_removed = length(removed)
+  let n_lines = length(lines)
+
+  // ── 1. точное совпадение подряд (§5.7: несколько мест — тоже неоднозначность)
   let mut found_at = -1.0
+  let mut exact_count = 0.0
   let mut i = 0.0
   each line in lines {
-    if found_at < 0.0 and i + n_removed <= length(lines) then {
+    if i + n_removed <= n_lines then {
       let window = slice(lines, i, i + n_removed)
-      if join(window, "\n") == join(removed, "\n") then { let found_at = i }
+      if join(window, "\n") == join(removed, "\n") then {
+        let exact_count = exact_count + 1.0
+        if found_at < 0.0 then { let found_at = i }
+      }
     }
     let i = i + 1.0
   }
-  if found_at < 0.0 then {
-    return "ОТКАЗ: контекст diff не совпал — файл устарел, перечитайте через <read>"
+  if exact_count == 1.0 then {
+    let applied = _AssemblePatch(lines, found_at, n_removed, added, current_content)
+    return "EXACT:" + applied
   }
-  // Списки в mlog не конкатенируются через + — собираем head/middle/tail через join
+  if exact_count > 1.0 then {
+    return "ОТКАЗ: контекст diff совпал в " + to_string(exact_count) + " местах файла " + path + " — место неоднозначно. Инструкция: включите в diff БОЛЬШЕ строк уникального контекста (соседние строки до/после) или перечитайте файл через <read file=\"" + path + "\"/> и повторите правку с обновлённым контекстом."
+  }
+
+  // ── 2. нечёткое сопоставление (§5.7): игнор пробелов/отступов ────────
+  // Предфильтр точный: кандидаты начинаются только там, где ПЕРВАЯ строка
+  // окна совпала нормализованно (полная последовательность должна совпасть
+  // целиком, включая первую строку) — нормализуем окно лишь у кандидатов.
+  let rem_norm = _NormWindow(removed, 0.0, n_removed)
+  let first_norm = _NormLine(to_string(get(removed, 0)))
+  let mut count = 0.0
+  let mut fuzzy_at = -1.0
+  let mut j = 0.0
+  while j + n_removed <= n_lines {
+    if _NormLine(to_string(get(lines, j))) == first_norm then {
+      if _NormWindow(lines, j, n_removed) == rem_norm then {
+        let count = count + 1.0
+        if fuzzy_at < 0.0 then { let fuzzy_at = j }
+      }
+    }
+    let j = j + 1.0
+  }
+  if count == 1.0 {
+    // ровно одно близкое место с высокой уверенностью → применить с меткой
+    let applied = _AssemblePatch(lines, fuzzy_at, n_removed, added, current_content)
+    return "FUZZY:" + applied
+  }
+  if count > 1.0 {
+    return "ОТКАЗ: контекст diff совпал в " + to_string(count) + " местах файла " + path + " (с точностью до пробелов/отступов) — место неоднозначно. Инструкция: включите в diff БОЛЬШЕ строк уникального контекста (соседние строки до/после) или перечитайте файл через <read file=\"" + path + "\"/> и повторите правку с обновлённым контекстом."
+  }
+  return "ОТКАЗ: контекст diff не найден в файле " + path + " ни точно, ни с точностью до пробелов/отступов (первая строка искомого: «" + substring(to_string(get(removed, 0)), 0.0, 80.0) + "»). Файл устарел или контекст выдуман. Инструкция: перечитайте файл через <read file=\"" + path + "\"/>, найдите актуальное место и повторите diff по нему; если правка больше не нужна — объясните текстом."
+}
+
+// сборка результата: head + added + tail (списки через join — не конкатенируются)
+pattern _AssemblePatch(lines: List, found_at: Float, n_removed: Float, added: List, current_content: String) -> String {
   let head = join(slice(lines, 0.0, found_at), "\n")
   let tail = join(slice(lines, found_at + n_removed, length(lines)), "\n")
   let middle = join(added, "\n")
@@ -248,7 +408,8 @@ pattern ForgeModelStageWrite(repo_name: String, refv: String, response: String, 
   let reads_list = parse_json(reads)
   let n_reads = length(reads_list)
 
-  // 2. Diff-запросы: читаем каждый файл, применяем патч по строкам
+  // 2. Diff-запросы: читаем каждый файл, применяем патч по строкам.
+  // FO-043: исход применения (first_try / fuzzy / reject) — в forge_edit_stats
   let diffs = ModelParseDiffs(response)
   if starts_with(diffs, "ОТКАЗ") then { return diffs }
   let diffs_list = parse_json(diffs)
@@ -260,8 +421,16 @@ pattern ForgeModelStageWrite(repo_name: String, refv: String, response: String, 
     let current = ForgeReadFile(repo_name, refv, path)
     if starts_with(current, "ОТКАЗ") then { return "ОТКАЗ: diff для отсутствующего/нечитаемого файла " + path }
     let applied = ModelApplyDiff(current, json_encode(d))
-    if starts_with(applied, "ОТКАЗ") then { return applied }
-    let combined = _Comma(combined, first) + "{\"path\":\"" + escape_json(path) + "\",\"content\":\"" + escape_json(applied) + "\"}"
+    if starts_with(applied, "ОТКАЗ") then {
+      let _ = ForgeEditStatsRecord(repo_name, path, "reject", "")
+      return applied
+    }
+    // маркер исхода → статистика + чистое содержимое (условные значения в
+    // each — только через паттерны: ловушка mlog)
+    let marker = _MarkerFor(applied)
+    let content = _StripMarker(applied)
+    let _ = ForgeEditStatsRecord(repo_name, path, _OutcomeFor(marker), marker)
+    let combined = _Comma(combined, first) + "{\"path\":\"" + escape_json(path) + "\",\"content\":\"" + escape_json(content) + "\"}"
     let first = false
   }
 
@@ -288,7 +457,11 @@ pattern ForgeModelStageWrite(repo_name: String, refv: String, response: String, 
   let n_items = length(parse_json(combined))
   if n_items == 0.0 {
     if n_reads > 0.0 then {
-      return "READS:" + ModelServeReads(repo_name, refv, reads)
+      // FO-043: ОТКАЗ чтения больше не глотается под маркером READS —
+      // уходит вызывающему как есть (громкая неудача)
+      let served = ModelServeReads(repo_name, refv, reads)
+      if starts_with(served, "ОТКАЗ") then { return served }
+      return "READS:" + served
     }
     return "ОТКАЗ: в ответе модели нет файлов, diff-блоков или <read>-запросов"
   }
@@ -296,7 +469,9 @@ pattern ForgeModelStageWrite(repo_name: String, refv: String, response: String, 
     // Файлы и <read> в одном ответе: сначала отдаём чтение (модель могла
     // запросить контекст для следующей правки), правки не теряются —
     // возвращаем оба маркера: READS приоритетен, caller сохранит ответ.
-    return "READS:" + ModelServeReads(repo_name, refv, reads) + "\nFILES_PENDING:" + combined
+    let served2 = ModelServeReads(repo_name, refv, reads)
+    if starts_with(served2, "ОТКАЗ") then { return served2 }
+    return "READS:" + served2 + "\nFILES_PENDING:" + combined
   }
   return ForgeWriteFiles(repo_name, combined, message, author_dept)
 }

@@ -1,0 +1,171 @@
+// test_forge8v3.mlog — FO-043 (наряд #150): §5.7 нечёткое сопоставление,
+// метрика first-try (forge_edit_stats), чтение со сводкой/диапазоном.
+// Кейсы наряда: табы против пробелов, CRLF, сдвиг отступа блока, единственный
+// близкий контекст (применить), два похожих контекста (отказ).
+// Запуск: rm -rf /tmp/forge-test8 && mkdir -p /tmp/forge-test8 && METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test8 ./bin/mlog run test_forge8v3.mlog
+
+db { url: "sqlite:/tmp/forge-test8/forge.db" }
+import dept/utils
+import dept/dev
+import dept/forge
+import dept/forge_model
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, seq INTEGER, title TEXT, description TEXT, needs_owner_gate TEXT DEFAULT 'false', status TEXT DEFAULT 'pending', commit_tag TEXT, commit_sha TEXT, failed_runs INTEGER DEFAULT 0, started_at TEXT, finished_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_briefs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, version INTEGER DEFAULT 1, content TEXT, approved TEXT DEFAULT 'false', approved_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_edit_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, stage_id TEXT, path TEXT, outcome TEXT, fuzzy TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  return "ok"
+}
+
+pattern Check(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name }
+  return "FAIL " + name + " — " + substring(detail, 0.0, 200.0)
+}
+
+pattern RejectCall(checks: String, name: String, result: String) -> String {
+  if starts_with(result, "ОТКАЗ") then { return checks + "PASS " + name + "\n" }
+  return checks + "FAIL " + name + " — ожидался ОТКАЗ, получено: " + substring(result, 0.0, 160.0) + "\n"
+}
+
+// diff_json: {"path", "removed": "a\nb", "added": "c"}
+pattern DiffJson(path: String, removed: String, added: String) -> String {
+  return "{\"path\":\"" + escape_json(path) + "\",\"removed\":\"" + escape_json(removed) + "\",\"added\":\"" + escape_json(added) + "\"}"
+}
+
+// большой файл: N строк; каждая 50-я — def-строка (без сдвига нумерации)
+pattern BigContent(n: Float) -> String {
+  let mut out = ""
+  let mut i = 1.0
+  while i <= n {
+    if _IsDeclLine(i) then {
+      let out = out + "def line_" + to_string(i) + "(): pass\n"
+    } else {
+      let out = out + "строка " + to_string(i) + "\n"
+    }
+    let i = i + 1.0
+  }
+  return out
+}
+
+pattern _IsDeclLine(i: Float) -> Bool {
+  let m = regex_captures("50", to_string(i))
+  if length(m) >= 1.0 then { return true }
+  return false
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut checks = ""
+
+  // ═══ A.3: нечёткое сопоставление — прямые вызовы ModelApplyDiff ═══
+
+  // 1. табы против пробелов: файл с табами, diff с пробелами (ParserDiffs триммит — тут сырой JSON)
+  let tabs_file = "def top():\n\tx = 1\n\treturn x\n"
+  let r1 = ModelApplyDiff(tabs_file, DiffJson("t.py", "x = 1\nreturn x", "x = 2\nreturn x"))
+  let checks = checks + Check("fuzzy-tabs-vs-spaces", starts_with(r1, "FUZZY:") and contains(r1, "x = 2"), r1) + "\n"
+
+  // 2. CRLF: файл с \r\n, diff с \n
+  let crlf_file = "alpha = 1\r\nbeta = 2\r\ngamma = 3\r\n"
+  let r2 = ModelApplyDiff(crlf_file, DiffJson("c.txt", "beta = 2", "beta = 20"))
+  let checks = checks + Check("fuzzy-crlf", starts_with(r2, "FUZZY:") and contains(r2, "beta = 20"), r2) + "\n"
+
+  // 3. сдвиг отступа блока: файл с отступами, diff без
+  let indent_file = "def f():\n    if ok:\n        return 1\n    return 0\n"
+  let r3 = ModelApplyDiff(indent_file, DiffJson("i.py", "if ok:\nreturn 1", "if ok:\nreturn 42"))
+  let checks = checks + Check("fuzzy-indent-shift", starts_with(r3, "FUZZY:") and contains(r3, "return 42"), r3) + "\n"
+
+  // 4. точное совпадение по-прежнему работает и помечено EXACT
+  let r4 = ModelApplyDiff("one\ntwo\nthree\n", DiffJson("e.txt", "two", "два"))
+  let checks = checks + Check("exact-still-works", starts_with(r4, "EXACT:") and contains(r4, "два"), r4) + "\n"
+
+  // 5. два похожих контекста → отказ (неоднозначность) + инструкция
+  let amb_file = "seed\nvalue = 1\nseed\nvalue = 1\nseed\n"
+  let r5 = ModelApplyDiff(amb_file, DiffJson("a.txt", "value = 1", "value = 2"))
+  let checks = RejectCall(checks, "fuzzy-ambiguous-rejected", r5)
+  let checks = checks + Check("fuzzy-ambiguous-instruction", contains(r5, "Инструкция") and contains(r5, "мест"), r5) + "\n"
+
+  // 6. контекста нет вообще → отказ + инструкция перечитать
+  let r6 = ModelApplyDiff("совсем\nдругое\n", DiffJson("n.txt", "value = 1", "value = 2"))
+  let checks = RejectCall(checks, "fuzzy-absent-rejected", r6)
+  let checks = checks + Check("fuzzy-absent-instruction", contains(r6, "Инструкция") and contains(r6, "перечитайте"), r6) + "\n"
+
+  // ═══ B.1: метрика — ForgeModelStageWrite пишет исходы в forge_edit_stats ═══
+  let proj = ForgeCreateProject("forge8-test", "Forge8 Test", "тест FO-043", "метрика правок", "site", "landing", "Владелец", "minimal", "fosved-standard", "dev")
+  let checks = checks + Check("create-project", starts_with(proj, "Проект создан"), proj) + "\n"
+  let _ = ForgeCreateRepo("forge8-repo", "forge8-test", "репо метрики", "dev")
+  let w = ForgeWriteFiles("forge8-repo", "[{\"path\":\"app.py\",\"content\":\"def main():\\n    print(1)\\n\"}]", "feat: база", "dev")
+  let checks = checks + Check("seed-write", starts_with(w, "Записано"), w) + "\n"
+  // контекст задачи: owner-задача → гейт №1 → approve (этапы создаются) → in_progress
+  let t = ForgeTaskCreate("forge8-test", "Правки формата", "метрика", "normal", "owner", "owner")
+  let caps = regex_captures("Задача ([0-9]+)", t)
+  let task_id = to_string(get(caps, 1))
+  let plan8 = "[{\"title\":\"Правки\",\"description\":\"формат диффов\",\"needs_owner_gate\":\"false\"}]"
+  let _ = ForgeGate1Submit(task_id, plan8)
+  let _ = ForgeGate1Approve(task_id, "ЗАДАНИЕ: правки формата. Критерии: диффы ложатся.", plan8)
+  let _ = ForgeTaskClaim(task_id, "dev")
+  let st_rows = query("SELECT id FROM forge_stages WHERE task_id = ? ORDER BY seq LIMIT 1", [task_id])
+  let _ = ForgeStageStart(to_string(json_get(get(st_rows, 0), "id", "")))
+
+  // fuzzy через полный цикл: ParserDiffs триммит строки → diff с пробелами против файла с табами
+  let w2 = ForgeModelStageWrite("forge8-repo", "main", "```diff path=\"app.py\"\n-def main():\n-    print(1)\n+def main():\n+    print(2)\n```", "fix: печать", "dev")
+  let checks = checks + Check("stage-fuzzy-write", starts_with(w2, "Записано"), w2) + "\n"
+  let back = ForgeReadFile("forge8-repo", "main", "app.py")
+  let checks = checks + Check("stage-fuzzy-content", contains(back, "print(2)"), back) + "\n"
+
+  // reject через полный цикл: контекст не найден вообще
+  let w3 = ForgeModelStageWrite("forge8-repo", "main", "```diff path=\"app.py\"\n-несуществующая строка XX\n+игнор\n```", "fix: мимо", "dev")
+  let checks = RejectCall(checks, "stage-reject", w3)
+
+  let stat_rows = query("SELECT outcome, COUNT(*) as c FROM forge_edit_stats GROUP BY outcome", [])
+  let mut n_fuzzy = 0.0
+  let mut n_reject = 0.0
+  let mut n_first = 0.0
+  each s in stat_rows {
+    let oc = to_string(json_get(s, "outcome", ""))
+    if oc == "fuzzy" then { let n_fuzzy = to_float(json_get(s, "c", "0")) }
+    if oc == "reject" then { let n_reject = to_float(json_get(s, "c", "0")) }
+    if oc == "first_try" then { let n_first = to_float(json_get(s, "c", "0")) }
+  }
+  let checks = checks + Check("stats-fuzzy-recorded", n_fuzzy >= 1.0, "fuzzy=" + to_string(n_fuzzy)) + "\n"
+  let checks = checks + Check("stats-reject-recorded", n_reject >= 1.0, "reject=" + to_string(n_reject)) + "\n"
+  // привязка к задаче/этапу состоялась
+  let linked = query("SELECT COUNT(*) as c FROM forge_edit_stats WHERE task_id = ? AND stage_id != ''", [task_id])
+  let checks = checks + Check("stats-task-linked", to_float(json_get(get(linked, 0), "c", "0")) >= 1.0, to_string(length(linked))) + "\n"
+
+  // недельный срез рендерится с вердиктом
+  let weekly = ForgeEditStatsWeekly()
+  let checks = checks + Check("stats-weekly-line", contains(weekly, "Правки за 7 дней") and contains(weekly, "%"), weekly) + "\n"
+
+  // ═══ C.1: чтение со сводкой и по диапазону ═══
+  let big = BigContent(450.0)
+  let wb = ForgeWriteFiles("forge8-repo", "[{\"path\":\"big.txt\",\"content\":\"" + escape_json(big) + "\"}]", "feat: большой файл", "dev")
+  let checks = checks + Check("big-file-write", starts_with(wb, "Записано"), wb) + "\n"
+  // без диапазона: сводка (файл 451+ строк > 400)
+  let resp_read = "<read file=\"big.txt\"/>"
+  let served = ForgeModelStageWrite("forge8-repo", "main", resp_read, "msg", "dev")
+  let checks = checks + Check("read-outline-served", starts_with(served, "READS:") and contains(served, "СВОДКА ФАЙЛА") and contains(served, "Инструкция"), served) + "\n"
+  // с диапазоном: сырой срез, не сводка
+  let resp_range = "<read file=\"big.txt\" from=\"10\" to=\"12\"/>"
+  let served2 = ForgeModelStageWrite("forge8-repo", "main", resp_range, "msg", "dev")
+  let checks = checks + Check("read-range-served", starts_with(served2, "READS:") and contains(served2, "строка 10") and contains(served2, "строка 12") and contains(served2, "строка 11") and contains(served2, "СВОДКА") == false, served2) + "\n"
+  // вне границ: честный отказ с инструкцией
+  let resp_bad = "<read file=\"big.txt\" from=\"9999\" to=\"10005\"/>"
+  let served3 = ForgeModelStageWrite("forge8-repo", "main", resp_bad, "msg", "dev")
+  let checks = RejectCall(checks, "read-range-out-of-bounds", served3)
+
+  let fails = split(checks, "FAIL")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(checks, "PASS")) - 1.0) + " проверок)\n" + checks }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + "\n" + checks
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

@@ -1,0 +1,69 @@
+// test_forge7v3.mlog — FO-042 (наряд #149) C.1: stamp чекпоинта с sha256-хвостом.
+// Два чекпоинта подряд (одна секунда, один репозиторий) обязаны дать РАЗНЫЕ
+// теги — до фикса stamp был to_string(now()) без хвоста.
+// Запуск: rm -rf /tmp/forge-test7 && mkdir -p /tmp/forge-test7 && METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test7 ./bin/mlog run test_forge7v3.mlog
+
+db { url: "sqlite:/tmp/forge-test7/forge.db" }
+import dept/utils
+import dept/dev
+import dept/forge
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, seq INTEGER, title TEXT, description TEXT, needs_owner_gate TEXT DEFAULT 'false', status TEXT DEFAULT 'pending', commit_tag TEXT, commit_sha TEXT, failed_runs INTEGER DEFAULT 0, started_at TEXT, finished_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_briefs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, version INTEGER DEFAULT 1, content TEXT, approved TEXT DEFAULT 'false', approved_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
+  return "ok"
+}
+
+pattern Check(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name }
+  return "FAIL " + name + " — " + substring(detail, 0.0, 160.0)
+}
+
+// тег чекпоинта из ответа «Чекпоинт checkpoint-<stamp> создан. Тег … → <sha>»
+pattern TagFrom(result: String) -> String {
+  let caps = regex_captures("checkpoint-[0-9.]+-[0-9a-f]{6}", result)
+  if length(caps) < 1.0 then { return "" }
+  return to_string(get(caps, 0))
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut checks = ""
+
+  let proj = ForgeCreateProject("forge7-test", "Forge7 Test", "тест FO-042", "чекпоинты", "site", "landing", "Владелец", "minimal", "fosved-standard", "dev")
+  let checks = checks + Check("create-project", starts_with(proj, "Проект создан"), proj) + "\n"
+  let _ = ForgeCreateRepo("forge7-repo", "forge7-test", "репо чекпоинтов", "dev")
+  // HEAD должен существовать: одна запись через полный рубеж конвейера
+  let w = ForgeWriteFiles("forge7-repo", "[{\"path\":\"index.html\",\"content\":\"<h1>чекпоинт</h1>\\n\"}]", "feat: каркас", "dev")
+  let checks = checks + Check("write-head-exists", starts_with(w, "Записано"), w) + "\n"
+
+  // ═══ C.1: два чекпоинта подряд — оба успешны, теги разные ═══
+  let cp1 = ForgeCheckpoint("forge7-repo")
+  let checks = checks + Check("checkpoint-1-ok", contains(cp1, "создан"), cp1) + "\n"
+  let cp2 = ForgeCheckpoint("forge7-repo")
+  let checks = checks + Check("checkpoint-2-ok", contains(cp2, "создан"), cp2) + "\n"
+  let t1 = TagFrom(cp1)
+  let t2 = TagFrom(cp2)
+  let checks = checks + Check("checkpoint-stamp-has-sha-tail", contains(t1, "-") and length(t1) > length("checkpoint-1789325915.44"), t1) + "\n"
+  let checks = checks + Check("checkpoint-tags-unique", t1 != "" and t2 != "" and t1 != t2, t1 + " vs " + t2) + "\n"
+  // оба тега реально в git: чекпоинт-список читается
+  let tag_list = ForgeRunScript("git -C \"" + ForgeReposDir() + "/forge/repos/forge7-repo.git\" tag --list \"checkpoint-*\"")
+  let n_tags = length(split(trim(tag_list.output), "\n"))
+  let checks = checks + Check("checkpoint-tags-in-git", n_tags >= 2.0, tag_list.output) + "\n"
+
+  let fails = split(checks, "FAIL")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(checks, "PASS")) - 1.0) + " проверок)\n" + checks }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + "\n" + checks
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

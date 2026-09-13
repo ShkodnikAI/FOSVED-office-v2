@@ -234,6 +234,15 @@ def scheduler_morning_brief():
         log.warning(f"[morning_brief] forge backup/export failed (non-fatal): {e}")
         forge_backup_line = f"бэкап FORGE: сбой контура ({str(e)[:120]})"
 
+    # FO-043 (наряд #150): недельный срез доли first-try — только по понедельникам
+    forge_edit_line = ""
+    try:
+        if datetime.utcnow().weekday() == 0:
+            from proxy.forge_backup import forge_edit_stats_week_line
+            forge_edit_line = forge_edit_stats_week_line()
+    except Exception as e:
+        log.warning(f"[morning_brief] forge edit stats failed (non-fatal): {e}")
+
     try:
         now = datetime.utcnow()
         # Minsk time for display (UTC+3 year-round)
@@ -377,6 +386,9 @@ def scheduler_morning_brief():
 === FORGE: РЕЗЕРВНЫЙ КОНТУР (bundle-бэкап репозиториев) ===
 {forge_backup_line if forge_backup_line else 'Резерв FORGE не выполнялся — проверить контур backup_forge_repos.py'}
 
+=== FORGE: МЕТРИКА ФОРМАТА ПРАВОК (неделя, по понедельникам) ===
+{forge_edit_line if forge_edit_line else ''}
+
 === ПОВТОРЯЮЩИЕСЯ ОШИБКИ ОФИСА ЗА СУТКИ ===
 {errors_digest if errors_digest else 'Нет'}
 
@@ -417,6 +429,9 @@ def scheduler_morning_brief():
         # цифры не искажались пересказом)
         if forge_backup_line:
             brief = brief + "\n\n💾 Резерв FORGE: " + forge_backup_line
+        # FO-043: недельный срез first-try — тоже дословно (по понедельникам)
+        if forge_edit_line:
+            brief = brief + "\n🛠 Правки FORGE: " + forge_edit_line
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})

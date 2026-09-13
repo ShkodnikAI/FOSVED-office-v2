@@ -106,6 +106,49 @@ def forge_backup_summary_line() -> str:
     return ""
 
 
+def forge_edit_stats_week_line() -> str:
+    """Недельный срез доли first-try (§15) — строка для брифа по понедельникам.
+
+    Зеркало mlog-паттерна ForgeEditStatsWeekly (dept/forge.mlog) на python:
+    after_reread = успехи по тому же task+path после reject. Пустая строка —
+    применений не было / таблицы нет (деградация честная).
+    """
+    try:
+        rows = _query(
+            "SELECT outcome, COUNT(*) as c FROM forge_edit_stats "
+            "WHERE created_at > datetime('now', '-7 days') GROUP BY outcome", fetch=True)
+    except Exception:
+        return ""
+    counts = {(r["outcome"] or ""): int(r["c"]) for r in rows or []}
+    first_try = counts.get("first_try", 0)
+    fuzzy = counts.get("fuzzy", 0)
+    reject = counts.get("reject", 0)
+    try:
+        overlap = _query(
+            "SELECT outcome, COUNT(*) as c FROM forge_edit_stats s "
+            "WHERE s.outcome IN ('first_try','fuzzy') "
+            "AND s.created_at > datetime('now', '-7 days') "
+            "AND EXISTS (SELECT 1 FROM forge_edit_stats r WHERE r.task_id = s.task_id "
+            "AND r.path = s.path AND r.outcome = 'reject' AND r.created_at <= s.created_at) "
+            "GROUP BY outcome",
+            fetch=True)
+        ov = {(r["outcome"] or ""): int(r["c"]) for r in overlap or []}
+    except Exception:
+        ov = {}
+    ov_first = ov.get("first_try", 0)
+    ov_fuzzy = ov.get("fuzzy", 0)
+    after_reread = ov_first + ov_fuzzy
+    first_clean = max(0, first_try - ov_first)
+    fuzzy_clean = max(0, fuzzy - ov_fuzzy)
+    total = first_clean + fuzzy_clean + after_reread + reject
+    if total == 0:
+        return ""
+    share = round((first_clean + after_reread) * 100.0 / total)
+    verdict = "формат ок" if share >= 50 else "низкая доля first-try → менять формат диффов, а не модель (§15)"
+    return (f"Правки за 7 дней: {total} попыток; с первой попытки {first_clean} ({share}%), "
+            f"после перечитывания {after_reread}, нечётко {fuzzy_clean}, отказов {reject}. {verdict}")
+
+
 def export_forge_state(chat_id: str = "") -> dict:
     """Выгрузка forge_* в JSON-файл + документ владельцу (§10).
 
