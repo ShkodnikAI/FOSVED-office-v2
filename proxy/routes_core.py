@@ -49,7 +49,23 @@ from proxy.reports import (
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "circuit_breaker": _breaker.status(), "combos": list(COMBO_CHAINS.keys())})
+    # FO-022: failure buckets за 24 ч (из трейсов FO-004, переживают рестарт)
+    # + активные квотные кулдауны 429 + long-cooldown (notFound/forbidden).
+    from proxy.resilience import buckets_last_24h, quota_status, provider_long_cooldown
+    from proxy.providers import PROVIDERS as _PROV_ALL
+    cooldowns = {}
+    for p in _PROV_ALL:
+        reason = provider_long_cooldown(p)
+        if reason:
+            cooldowns[p] = reason
+    return jsonify({
+        "status": "ok",
+        "circuit_breaker": _breaker.status(),
+        "combos": list(COMBO_CHAINS.keys()),
+        "failure_buckets_24h": buckets_last_24h(),
+        "quota_cooldowns": quota_status(),
+        "provider_cooldowns": cooldowns,
+    })
 
 @app.get("/now-time")
 def now_time_endpoint():
