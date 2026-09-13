@@ -188,6 +188,7 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
   db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS forge_gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, kind TEXT, question TEXT, context TEXT, options_json TEXT, decision TEXT, decided_by TEXT, decided_at TEXT, telegram_message_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_previews (slug TEXT PRIMARY KEY, project_slug TEXT, repo_name TEXT, kind TEXT DEFAULT 'live', port INTEGER, pid TEXT, status TEXT DEFAULT 'running', last_access_at TEXT, started_at TEXT)")
   db_execute("CREATE TABLE IF NOT EXISTS forge_remarks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, commit_sha TEXT, text TEXT, file_hint TEXT, attachment_ref TEXT, kind TEXT, status TEXT DEFAULT 'open', resolved_by_commit TEXT, gate_id TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)")
   // FO-027: durable-степы цепочек (чекпоинты + resume; Temporal/Inngest паттерн)
   db_execute("CREATE TABLE IF NOT EXISTS chain_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, chain_id TEXT, chat_id TEXT, step_num REAL, dept TEXT, mode TEXT, input_hash TEXT, reply TEXT, model TEXT, tokens_in TEXT, tokens_out TEXT, cost_usd TEXT, status TEXT DEFAULT 'pending', dept_chain TEXT DEFAULT '', query TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
@@ -2412,11 +2413,45 @@ mlogserver {
       html = html + "<li>[" + ForgeEscape(to_string(json_get(d, "decision", ""))) + "] " + ForgeEscape(substring(to_string(json_get(d, "finding_text", "")), 0, 140)) + " <small>" + ForgeEscape(to_string(json_get(d, "decided_at", ""))) + "</small></li>"
     }
     html = html + "</ul>"
+    // FO-039: живое превью по требованию
+    let prevs = query("SELECT slug, status, port FROM forge_previews WHERE repo_name IN (SELECT name FROM forge_repos WHERE project_slug = (SELECT project_slug FROM forge_tasks WHERE id = ? LIMIT 1)) ORDER BY started_at DESC LIMIT 3", [task_id])
+    html = html + "<h2>Живое превью</h2><ul>"
+    each pv in prevs {
+      let pv_slug = to_string(json_get(pv, "slug", ""))
+      let pv_status = to_string(json_get(pv, "status", ""))
+      if pv_status == "running" then {
+        html = html + "<li><a href='/preview-live/" + pv_slug + "/' style='color:#8f8'>открыть</a> [" + pv_status + "] порт " + to_string(json_get(pv, "port", "")) + " <a href='/repos/task/preview-down?slug=" + pv_slug + "'>погасить</a></li>"
+      } else {
+        html = html + "<li>[" + pv_status + "] — поднять снова кнопкой</li>"
+      }
+    }
+    let html = html + "</ul><p><a href='/repos/task/preview-up?task_id=" + task_id + "' style='color:#fc6'>▶ Поднять превью</a> (команда из белого списка по типу проекта)</p>"
     html = html + "<p><a href='/repos/project?slug=" + ForgeEscape(to_string(json_get(t, "project_slug", ""))) + "' style='color:#8ab'>← проект</a></p></body></html>"
     return respond(html)
   }
 
   // решение по гейту из веба (дубль Telegram-кнопок)
+  // FO-039: подъём/гашение живого превью из веба
+  route "/repos/task/preview-up" method=GET {
+    let task_id = query_param("task_id")
+    let rows = query("SELECT t.project_slug, p.project_type, (SELECT name FROM forge_repos WHERE project_slug = t.project_slug LIMIT 1) as repo_name, (SELECT COUNT(*) FROM forge_repos r WHERE r.project_slug = t.project_slug AND r.name LIKE '%package%') as has_pkg FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
+    if length(rows) < 1.0 then { return respond("404 task not found") }
+    let r = get(rows, 0)
+    let project_slug = to_string(json_get(r, "project_slug", ""))
+    let repo_name = to_string(json_get(r, "repo_name", ""))
+    let ptype = to_string(json_get(r, "project_type", ""))
+    let cmd = "python3 -m http.server"
+    if ptype == "ai_office" then { let cmd = "python3 app.py" }
+    let result = ForgePreviewUp(project_slug, repo_name, cmd)
+    return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(substring(result, 0.0, 500)) + " <a href='/repos/task?task_id=" + task_id + "' style='color:#8ab'>← задача</a></body></html>")
+  }
+
+  route "/repos/task/preview-down" method=GET {
+    let slug = query_param("slug")
+    let result = ForgePreviewDown(slug)
+    return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(result) + "</body></html>")
+  }
+
   route "/repos/task/decide" method=GET {
     let gate = query_param("gate")
     let idx = query_param("idx")
@@ -4654,6 +4689,18 @@ return respond("200 ok") }
 
   // Diagnostic: read last checkpoint trail from trace_log (FO-007: чекпоинты больше не в audit_log)
   // After a Block C crash, curl this to see exactly which step failed
+  // FO-039 B.3: sweep живых превью — гашение по 30 минутам тишины
+  route "/cron/preview-sweep" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let result = ForgePreviewSweep()
+    let _ = AuditLog("cron_preview_sweep", "scheduler", result)
+    return respond("200 ok: " + result)
+  }
+
   route "/cron/last-checkpoints" method=GET {
     let secret = query_param("secret")
     let cron_secret = env("CRON_SECRET")

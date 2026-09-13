@@ -146,6 +146,53 @@ def proxy(path):
     if full_path == "/webhook/":
         full_path = "/webhook/telegram"
 
+    # FO-039 B.1: живое превью — /preview-live/<slug>/* → 127.0.0.1:<порт>
+    # из forge_previews (таблица читается при запросе — кэша нет, свежесть
+    # максимальная; требование «кэш не дольше 30 с» удовлетворено консервативно)
+    if full_path.startswith("/preview-live/"):
+        slug = full_path.split("/")[2] if len(full_path.split("/")) > 2 else ""
+        if not slug:
+            return Response("preview-live: slug обязателен", status=400)
+        import sqlite3
+        db_path = os.path.join(os.environ.get("DATABASE_PATH", "./data"), "office.db")
+        port = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            row = conn.execute(
+                "SELECT port, pid FROM forge_previews WHERE slug = ? AND status = 'running'",
+                (slug,)).fetchone()
+            conn.close()
+            if row:
+                port = row[0]
+                # B.2: last_access_at при каждом обращении через прокси
+                try:
+                    conn = sqlite3.connect(db_path, timeout=5)
+                    conn.execute(
+                        "UPDATE forge_previews SET last_access_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE slug = ?",
+                        (slug,))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            port = None
+        if port is None:
+            return Response("Превью неактивно, поднять снова (кнопка на странице задачи).", status=410)
+        target_url = f"http://127.0.0.1:{port}" + full_path[len(f"/preview-live/{slug}"):] or "/"
+        try:
+            headers = {k: v for k, v in request.headers if k.lower() != "host"}
+            resp = requests.request(
+                method=request.method, url=target_url, headers=headers,
+                data=request.get_data(), params=request.args,
+                timeout=60, allow_redirects=False)
+            excluded = {"content-encoding", "transfer-encoding", "connection"}
+            response_headers = [
+                (k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded
+            ]
+            return Response(resp.content, status=resp.status_code, headers=response_headers)
+        except requests.exceptions.RequestException:
+            return Response("Превью неактивно, поднять снова (кнопка на странице задачи).", status=410)
+
     # Determine target:
     # 1) LLM-specific prefixes first (miniapp, dashboards, …)
     # 2) then mlog-specific prefixes

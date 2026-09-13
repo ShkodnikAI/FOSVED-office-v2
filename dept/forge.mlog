@@ -1490,3 +1490,155 @@ pattern ForgeAttention() -> String {
   let remarks_n = to_string(json_get(get(remarks_rows, 0), "cnt", "0"))
   return "{\"pending_gates\":" + gates_n + ",\"open_remarks\":" + remarks_n + "}"
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// FO-039 (наряд #137): FORGE-5v3 — живое превью по требованию.
+// A: подъём (порт 8100–8110, forge_previews, клон, nohup + env -i +
+//    timeout 1800, ключи только проекта). B: маршрутизация reverse_proxy
+//    (/preview-live/<slug>/, last_access_at), планировщик — sweep по
+//    30 минутам тишины + лениво при каждом подъёме. Лимит 2 живых.
+// env -i закрывает окружение, но НЕ сеть (§15: unshare -n — отдельная очередь).
+// ══════════════════════════════════════════════════════════════════════
+
+// ── A.1: свободный порт из 8100–8110 ───────────────────────────────────
+pattern _PreviewFreePort() -> String {
+  let used = query("SELECT port FROM forge_previews WHERE status = 'running'", [])
+  let mut port = 8100.0
+  let mut found = ""
+  while port <= 8110.0 and found == "" {
+    let busy = false
+    each u in used {
+      if to_string(json_get(u, "port", "")) == to_string(port) then { let busy = true }
+    }
+    if busy == false then { let found = to_string(port) }
+    let port = port + 1.0
+  }
+  return found
+}
+
+// ── A.2: подъём живого превью ──────────────────────────────────────────
+// Команда — белый список ПОЛНОЙ строки (расширен: npm start, npm run dev,
+// python3 app.py). nohup переживает вызов (проверено ТЗ §2); pid записан.
+pattern ForgePreviewUp(project_slug: String, repo_name: String, command: String) -> String {
+  // ленивый sweep: гасим просроченных перед лимитом
+  let _ = ForgePreviewSweep()
+  let allowed = _CommandAllowed(command)
+  if starts_with(allowed, "ОТКАЗ") then {
+    // расширенный whitelist превью
+    let collapsed = _CollapseSpaces(command)
+    if collapsed == "npm start" then { let allowed = "ok" }
+    if collapsed == "npm run dev" then { let allowed = "ok" }
+    if collapsed == "python3 app.py" then { let allowed = "ok" }
+    if collapsed == "python -m http.server" then { let allowed = "ok" }
+    if starts_with(allowed, "ОТКАЗ") then { return allowed }
+  }
+  let danger = ForgeDangerInText(command)
+  if starts_with(danger, "ОТКАЗ") then { return "GATE:" + danger }
+  let v = ForgeValidSlug(repo_name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  // A.3: лимит 2 живых одновременно
+  let active = query("SELECT slug, port, started_at FROM forge_previews WHERE status = 'running'", [])
+  if length(active) >= 2.0 then {
+    let mut listing = ""
+    each a in active {
+      let listing = listing + " " + to_string(json_get(a, "slug", "")) + "(порт " + to_string(json_get(a, "port", "")) + ", с " + to_string(json_get(a, "started_at", "")) + ")"
+    }
+    return "ОТКАЗ: лимит 2 живых превью исчерпан, активны:" + listing + " — гаснут по 30 минутам тишины"
+  }
+  // выбор порта: DB-свободный + реальная TCP-проба (утечки/системные слушатели)
+  let mut port = _PreviewFreePort()
+  if port == "" then { return "ОТКАЗ: нет свободного порта 8100–8110" }
+  let mut probe = ForgeRunScript("timeout 1 bash -c '</dev/tcp/127.0.0.1/" + port + "' 2>/dev/null && echo BUSY || echo FREE")
+  while contains(probe.output, "BUSY") and to_float(port) < 8110.0 {
+    let port = to_string(to_float(port) + 1.0)
+    let probe = ForgeRunScript("timeout 1 bash -c '</dev/tcp/127.0.0.1/" + port + "' 2>/dev/null && echo BUSY || echo FREE")
+  }
+  if contains(probe.output, "BUSY") then { return "ОТКАЗ: нет реально свободного порта 8100–8110" }
+  // клон в forge/previews/<slug>
+  let slug = repo_name + "-" + substring(to_string(sha256(command + to_string(now()))), 0.0, 6.0)
+  let bare = ForgeReposDir() + "/forge/repos/" + repo_name + ".git"
+  let dest = ForgeReposDir() + "/forge/previews/" + slug
+  let mk = ForgeRunScript("mkdir -p \"" + ForgeReposDir() + "/forge/previews\" && git clone -q \"" + bare + "\" \"" + dest + "\"")
+  if mk.exit_code != 0.0 then { return "ОТКАЗ: клон превью: " + mk.output }
+  // ключи проекта — только его собственные, офисные никогда
+  let mut env_prefix = ""
+  let sec_rows = query("SELECT env_key, secret_ref FROM forge_project_secrets WHERE project_slug = ?", [project_slug])
+  each r in sec_rows {
+    let env_key = to_string(json_get(r, "env_key", ""))
+    let secret_ref = to_string(json_get(r, "secret_ref", ""))
+    if env_key != "" and secret_ref != "" and regex_match("[a-zA-Z_][a-zA-Z0-9_]*", env_key) then {
+      let val = GetSecret(secret_ref)
+      if val != "" then { let env_prefix = env_prefix + " " + env_key + "=\"" + val + "\"" }
+    }
+  }
+  // A.2: nohup + timeout 1800 (второй рубеж поверх планировщика); pid из $!
+  let log_path = ForgeReposDir() + "/forge/previews/" + slug + ".log"
+  let home_d = _EnvDefault("HOME", "/tmp")
+  // порт подставляется командам, которые его принимают. http.server —
+  // ПОЗИЦИОННЫЙ аргумент (checked: --port отвергается); app.py — флаг;
+  // npm start требует "--" — не портируем, сервис сам читает PORT
+  let port_arg = ""
+  let collapsed_cmd = _CollapseSpaces(command)
+  if collapsed_cmd == "python3 -m http.server" or collapsed_cmd == "python -m http.server" then { let port_arg = " " + port }
+  if collapsed_cmd == "python3 app.py" or collapsed_cmd == "python app.py" then { let port_arg = " --port " + port }
+  let spawn = "cd \"" + dest + "\" && nohup env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=" + home_d + env_prefix + " timeout 1800 " + command + port_arg + " > \"" + log_path + "\" 2>&1 & echo SPAWN-PID:$!"
+  let r = ForgeRunScript(spawn)
+  let pid_parts = split(r.output, "SPAWN-PID:")
+  let pid = trim(to_string(get(pid_parts, 1)))
+  if pid == "" then { return "ОТКАЗ: процесс не поднялся: " + r.output }
+  let _ = db_execute("INSERT INTO forge_previews (slug, project_slug, repo_name, kind, port, pid, status, last_access_at, started_at) VALUES (?, ?, ?, 'live', ?, ?, 'running', ?, ?)", [slug, project_slug, repo_name, port, pid, to_string(now()), to_string(now())])
+  let _ = AuditLog("forge_preview_up", "forge", "slug=" + slug + " port=" + port + " pid=" + pid)
+  return "Живое превью поднято: /preview-live/" + slug + "/ (порт " + port + ", pid " + pid + ", погаснет по 30 минутам тишины или timeout 1800)"
+}
+
+// ── B.3: планировщик — sweep по тишины 30 минут / упавших ─────────────
+pattern ForgePreviewSweep() -> String {
+  let running = query("SELECT slug, pid, port, last_access_at FROM forge_previews WHERE status = 'running'", [])
+  let mut killed = 0.0
+  let mut failed = 0.0
+  each p in running {
+    let slug = to_string(json_get(p, "slug", ""))
+    let pid = to_string(json_get(p, "pid", ""))
+    let last = to_float(json_get(p, "last_access_at", "0"))
+    let idle = now() - last
+    // проверка живости процесса: kill -0
+    let alive_check = ForgeRunScript("kill -0 " + pid + " 2>/dev/null && echo ALIVE || echo DEAD")
+    let alive = contains(alive_check.output, "ALIVE")
+    if alive == false then {
+      let _ = db_execute("UPDATE forge_previews SET status = 'failed' WHERE slug = ?", [slug])
+      let failed = failed + 1.0
+    } else {
+      if idle > 1800.0 then {
+        let _ = ForgeRunScript("kill " + pid + " 2>/dev/null; true")
+        let _ = db_execute("UPDATE forge_previews SET status = 'stopped' WHERE slug = ?", [slug])
+        let _ = AuditLog("forge_preview_sweep", "forge", "slug=" + slug + " погашен по тишины 30 мин")
+        let killed = killed + 1.0
+      }
+    }
+  }
+  return "sweep: погашено " + to_string(killed) + ", failed " + to_string(failed)
+}
+
+// ── B.4: статус + последняя строка лога ────────────────────────────────
+pattern ForgePreviewStatus(slug: String) -> String {
+  let rows = query("SELECT status, port, pid, repo_name FROM forge_previews WHERE slug = ? LIMIT 1", [slug])
+  if length(rows) < 1.0 then { return "ОТКАЗ: превью не найдено" }
+  let r = get(rows, 0)
+  let status = to_string(json_get(r, "status", ""))
+  let log_line = ""
+  if status == "running" then {
+    let lr = ForgeRunScript("tail -1 \"" + ForgeReposDir() + "/forge/previews/" + slug + ".log\" 2>/dev/null")
+    let log_line = trim(lr.output)
+  }
+  return "Превью " + slug + " [" + status + "] порт " + to_string(json_get(r, "port", "")) + " — последний лог: " + log_line
+}
+
+// ── гашение вручную ────────────────────────────────────────────────────
+pattern ForgePreviewDown(slug: String) -> String {
+  let rows = query("SELECT pid, status FROM forge_previews WHERE slug = ? LIMIT 1", [slug])
+  if length(rows) < 1.0 then { return "ОТКАЗ: превью не найдено" }
+  let pid = to_string(json_get(get(rows, 0), "pid", ""))
+  let _ = ForgeRunScript("kill " + pid + " 2>/dev/null; true")
+  let _ = db_execute("UPDATE forge_previews SET status = 'stopped' WHERE slug = ?", [slug])
+  return "Превью " + slug + " погашено, порт свободен."
+}
