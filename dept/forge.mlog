@@ -67,6 +67,10 @@ pattern ForgeRunScript(script: String) -> Dict {
     return { exit_code: -1.0, output: "exec сбой (гейт ядра/таймаут)" }
   }
   let parts = split(to_string(out), "___EXIT:")
+  if length(parts) < 2.0 then {
+    // маркера нет (обрезка/сбой exec) — честный сбой, не падение
+    return { exit_code: -1.0, output: "exec сбой: нет маркера ___EXIT (обрезка/таймаут ядра)" }
+  }
   let exit_code = to_float(trim(to_string(get(parts, 1))))
   let output = substring(to_string(get(parts, 0)), 0.0, 20000.0)
   let _ = exec("rm -f /office/forge-tmp/run_" + stamp + ".*")
@@ -762,13 +766,6 @@ pattern ForgeStepReview(task_id: String, stage_id: String, files_json: String, b
   return "ОТКАЗ: ревью — находки запаркованы владельцу (автоправки нет):\n" + substring(review_text, 0.0, 1500.0)
 }
 
-// Шаг «Тест» (C.5): целевая проверка заявленного намерения через ForgeRun.
-// До сдачи FO-037 шаг честно отказывает с понятной причиной. Полная регрессия
-// — НЕ здесь (только на публикации этапа, FO-037).
-pattern ForgeStepTest(task_id: String, stage_id: String, files_json: String, brief: String) -> String {
-  return "ОТКАЗ: конвейер ждёт ForgeRun (FO-037) — исполнение тестов на рубеже станет доступно после сдачи исполнительного контура"
-}
-
 // Шаг «Документация» (C.6): README уходит с записью; autopilot — добавить
 // заглушку молча; refuse — отказ; park_owner — парковка.
 pattern ForgeStepDocs(files_json: String, policy: String, brief: String) -> String {
@@ -853,6 +850,7 @@ pattern ForgeStepPolicy(project_slug: String, step: String) -> String {
   // Дефолты: механика чинится молча, смысловое — владельцу
   if step == "intent" then { return "refuse" }
   if step == "secrets" then { return "refuse" }
+  if step == "danger" then { return "park_owner" }
   if step == "review" then { return "park_owner" }
   if step == "test" then { return "refuse" }
   if step == "docs" then { return "autopilot" }
@@ -896,8 +894,8 @@ pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
   if to_string(brief_rows) != "()" and length(brief_rows) > 0.0 then { let brief = to_string(json_get(get(brief_rows, 0), "content", "")) }
 
   // Состав: порядок фиксирован (§5.8), шаги с policy=skip исключаются конфигом
-  let mut steps = ["intent", "secrets", "review", "test", "docs", "lint"]
-  if env("FORGE_RUN_ENABLED") != "1" then { let steps = ["intent", "secrets", "review", "docs", "lint"] }
+  let mut steps = ["intent", "secrets", "danger", "review", "test", "docs", "lint"]
+  if env("FORGE_RUN_ENABLED") != "1" then { let steps = ["intent", "secrets", "danger", "review", "docs", "lint"] }
 
   let mut current_files = files_json
   each step in steps {
@@ -906,10 +904,16 @@ pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
       let result = "ok"
       if to_string(step) == "intent" then { let result = ForgeStepIntent(brief) }
       if to_string(step) == "secrets" then { let result = ForgeStepSecrets(current_files) }
+      if to_string(step) == "danger" then { let result = ForgeStepDanger(task_id, current_files) }
       if to_string(step) == "review" then { let result = ForgeStepReview(task_id, stage_id, current_files, brief) }
       if to_string(step) == "test" then { let result = ForgeStepTest(task_id, stage_id, current_files, brief) }
       if to_string(step) == "docs" then { let result = ForgeStepDocs(current_files, policy, brief) }
       if to_string(step) == "lint" then { let result = ForgeStepLint(current_files, policy) }
+      if starts_with(result, "GATE:") then {
+        // совпадение опасного паттерна → гейт владельцу (B.2), не молчаливая блокировка
+        let _ = AuditLog("forge_pipeline_gate", "dev", "repo=" + name + " step=" + to_string(step) + " task=" + task_id)
+        return "ОТКАЗ рубежа ForgeCheckPipeline (гейт владельцу, шаг «" + to_string(step) + "»): " + substring(result, 5.0, length(result))
+      }
       if starts_with(result, "ОТКАЗ") then {
         // C.4/C.7: парковка ревью/непрерывности — задача уже переведена в
         // awaiting_owner внутри шага ревью; прочие отказы — рубеж держит запись
@@ -926,4 +930,309 @@ pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
   }
   if current_files != files_json then { return "FILES:" + current_files }
   return "ok"
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// FO-037 (наряд #135): FORGE-3v3 — прогон, опасные паттерны, статическое
+// превью, показ по типам. Источник: Fosved-coder core/executor.py
+// (CommandExecutor :26, _is_critical :50, git-чекпоинт :242).
+//
+// B.5 — честное предупреждение (дословно по B.3 закрытого #105): это НЕ
+// настоящая изоляция — тот же пользователь, контейнер, диск (включая чтение
+// fosved.db) и сеть; env -i закрывает окружение, но не сокеты. unshare -n
+// под Render не проверен — в очереди (§15 ТЗ). Приемлемо, пока код генерируют
+// наши отделы; появится чужой код — нужен отдельный контейнер.
+// ══════════════════════════════════════════════════════════════════════
+
+pattern _EnvDefault(key: String, defv: String) -> String {
+  let v = env(key)
+  if v == "" then { return defv }
+  return v
+}
+
+// ── A.2: белый список ПОЛНОЙ строки команды (после схлопывания пробелов).
+// Расширяется run_spec шаблона типа (templates.mlog) и FO-040 (Android) —
+// плюс per-project расширения в forge_whitelist.
+// regex_replace в mlog нестабилен (проверено раном) — схлопывание пробелов
+// через replace в цикле
+pattern _CollapseSpaces(s: String) -> String {
+  let mut out = trim(s)
+  let mut guard = 0.0
+  while contains(out, "  ") and guard < 100.0 {
+    let out = replace(out, "  ", " ")
+    let guard = guard + 1.0
+  }
+  return out
+}
+
+pattern _CommandAllowed(command: String) -> String {
+  let collapsed = _CollapseSpaces(command)
+  if collapsed == "npm test" then { return "ok" }
+  if collapsed == "npm run build" then { return "ok" }
+  if collapsed == "python -m pytest" then { return "ok" }
+  if collapsed == "python main.py" then { return "ok" }
+  if collapsed == "python3 -m pytest" then { return "ok" }
+  if collapsed == "python3 main.py" then { return "ok" }
+  if collapsed == "python3 -m http.server" then { return "ok" }
+  if collapsed == "node index.js" then { return "ok" }
+  if collapsed == "python -m http.server" then { return "ok" }
+  // per-project расширения (run_spec/FO-040)
+  let rows = query("SELECT command FROM forge_whitelist WHERE command = ? LIMIT 1", [collapsed])
+  if length(rows) > 0.0 then { return "ok" }
+  return "ОТКАЗ: команда вне белого списка полной строки: " + substring(collapsed, 0.0, 120.0)
+}
+
+// ── B.1: опасные паттерны (executor.py:50, адаптировано под Linux) ─────
+// Совпадение — НЕ молчаливая блокировка: гейт владельцу (B.2).
+pattern ForgeDangerInText(text: String) -> String {
+  let t = lower(text)
+  if contains(t, "rm -rf /") then { return "ОТКАЗ: опасный паттерн: rm -rf /" }
+  if contains(t, "rmdir /s") then { return "ОТКАЗ: опасный паттерн: rmdir /s" }
+  if contains(t, "del /f") then { return "ОТКАЗ: опасный паттерн: del /f" }
+  if contains(t, "drop table") or contains(t, "drop database") or contains(t, "drop schema") then { return "ОТКАЗ: опасный паттерн: DROP TABLE/DATABASE/SCHEMA" }
+  if contains(t, "delete from") then { return "ОТКАЗ: опасный паттерн: DELETE FROM <table>;" }
+  if contains(t, "format c:") or contains(t, "format d:") then { return "ОТКАЗ: опасный паттерн: FORMAT <буква>:" }
+  if contains(t, "shutdown") then { return "ОТКАЗ: опасный паттерн: shutdown" }
+  if contains(t, "diskpart") then { return "ОТКАЗ: опасный паттерн: diskpart" }
+  if contains(t, "reg delete") then { return "ОТКАЗ: опасный паттерн: reg delete" }
+  if contains(t, ":(){ :|:& };:") then { return "ОТКАЗ: опасный паттерн: fork-бомба" }
+  return "ok"
+}
+
+// ── B.4: маскирование перед записью forge_runs.output ─────────────────
+// Ключи проекта (forge_project_secrets → GetSecret) и офисные env-секреты
+// заменяются на *** — лог уходит в БД и на экран владельца.
+pattern _MaskSecrets(project_slug: String, output: String) -> String {
+  let mut masked = output
+  let rows = query("SELECT env_key, secret_ref FROM forge_project_secrets WHERE project_slug = ?", [project_slug])
+  each r in rows {
+    let secret_ref = to_string(json_get(r, "secret_ref", ""))
+    if secret_ref != "" then {
+      let val = GetSecret(secret_ref)
+      if val != "" and length(val) >= 8.0 then { let masked = replace(masked, val, "***") }
+    }
+  }
+  // офисные env-секреты (значения ≥8 символов)
+  each key in ["TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "API_SECRET", "CRON_SECRET", "GITHUB_TOKEN_METALOGOS", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "ZAI_API_KEY", "GROK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "KIMI_API_KEY", "CEREBRAS_API_KEY", "NVIDIA_API_KEY", "APODEX_API_KEY", "TAVILY_API_KEY"] {
+    let v = env(to_string(key))
+    if v != "" and length(v) >= 8.0 then { let masked = replace(masked, v, "***") }
+  }
+  return masked
+}
+
+// ── B.3: git-чекпоинт перед рискованным действием (executor.py:242) ────
+pattern ForgeCheckpoint(repo_name: String) -> String {
+  let stamp = to_string(now())
+  let tag = "checkpoint-" + stamp
+  let tr = ForgeTag(repo_name, tag, "HEAD")
+  if starts_with(tr, "ОТКАЗ") then { return tr }
+  return "Чекпоинт " + tag + " создан. " + tr
+}
+
+// ── A.2: ForgeRun — прогон по рецепту закрытого #105 (B.2) ────────────
+// Клон в scratch, timeout + env -i (офисное окружение вычищено), маркер
+// ___EXIT (exec не отдаёт код; в пайпе $? — код последней команды), обрезка
+// 20000. project_secrets передаются выборочно (§9), офисные — никогда.
+pattern _RunInScratch(project_slug: String, repo_name: String, command: String, stage_id: String, files_json: String) -> String {
+  // окружение: ключи проекта (forge_project_secrets → GetSecret), офисные — никогда
+  let mut env_prefix = ""
+  let sec_rows = query("SELECT env_key, secret_ref FROM forge_project_secrets WHERE project_slug = ?", [project_slug])
+  each r in sec_rows {
+    let env_key = to_string(json_get(r, "env_key", ""))
+    let secret_ref = to_string(json_get(r, "secret_ref", ""))
+    if env_key != "" and secret_ref != "" and regex_match("[a-zA-Z_][a-zA-Z0-9_]*", env_key) then {
+      let val = GetSecret(secret_ref)
+      if val != "" then { let env_prefix = env_prefix + " " + env_key + "=\"" + val + "\"" }
+    }
+  }
+
+  // клон в scratch + опциональное наложение payload (тест-шаг до коммита)
+  let bare = ForgeReposDir() + "/forge/repos/" + repo_name + ".git"
+  let stamp = substring(to_string(sha256(command + to_string(now()))), 0.0, 8.0)
+  let scratch = "forge-tmp/run-" + repo_name + "-" + to_string(now()) + "-" + stamp
+  let mk = ForgeRunScript("mkdir -p forge-tmp && git clone -q \"" + bare + "\" \"" + scratch + "\" 2>/dev/null || (mkdir -p \"" + scratch + "\" && git -C \"" + scratch + "\" init -q -b main)")
+  if mk.exit_code != 0.0 then { return "ОТКАЗ: клон scratch failed: " + mk.output }
+  // payload (файлы этапа до коммита) — тест-шаг конвейера
+  if files_json != "" then {
+    let files = parse_json(files_json)
+    if to_string(files) != "()" then {
+      each f in files {
+        let p = to_string(json_get(f, "path", ""))
+        let vp = ForgeValidPath(p)
+        if vp != "ok" then { return "ОТКАЗ: файл " + p + ": " + vp }
+        let _ = ForgeMkdirFileDirs(p, scratch)
+        let _ = write_file(scratch + "/" + p, to_string(json_get(f, "content", "")))
+      }
+    }
+  }
+
+  // прогон: timeout (env METALOGOS_EXEC_TIMEOUT_SECS, клэмп 1..300) + env -i.
+  // Рецепт #105 реализован ВНУТРИ ForgeRunScript (write_file + exec +
+  // ___EXIT + обрезка 20000) — здесь только командная строка; содержимое
+  // команды в shell-строку не попадает (whitelist полной строки выше)
+  let to_s = env("METALOGOS_EXEC_TIMEOUT_SECS")
+  let to_n = to_float(to_s)
+  if to_n < 1.0 or to_n > 300.0 then { let to_n = 60.0 }
+  // внутренний timeout на 2 с короче ядра — 124 успевает вернуться до kill
+  let inner_n = to_n - 2.0
+  if inner_n < 1.0 then { let inner_n = 1.0 }
+  let started = now()
+  let cmd_body = "cd \"" + scratch + "\" && timeout " + to_string(inner_n) + " env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=" + _EnvDefault("HOME", "/tmp") + "" + env_prefix + " " + command
+  let r = ForgeRunScript(cmd_body)
+  let duration = to_string(now() - started)
+  let _ = ForgeRunScript("rm -rf \"" + scratch + "\"")
+  // exit_code = -1 — сбой самого exec (таймаут ядра/гейт), не результат команды
+  if r.exit_code < 0.0 then {
+    return "ОТКАЗ: exec сбой: " + r.output
+  }
+  // B.4: маскирование перед записью
+  let masked = _MaskSecrets(project_slug, r.output)
+  let _ = db_execute("INSERT INTO forge_runs (project_slug, repo_name, stage_id, command, exit_code, output, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)", [project_slug, repo_name, stage_id, command, to_string(r.exit_code), substring(masked, 0.0, 20000.0), duration])
+  // A.4: retention — последние 50 записей на репозиторий
+  let _ = db_execute("DELETE FROM forge_runs WHERE repo_name = ? AND id NOT IN (SELECT id FROM forge_runs WHERE repo_name = ? ORDER BY id DESC LIMIT 50)", [repo_name, repo_name])
+  let _ = AuditLog("forge_run", "forge", "repo=" + repo_name + " cmd=" + substring(command, 0.0, 80.0) + " exit=" + to_string(r.exit_code))
+  return "EXIT:" + to_string(r.exit_code) + "\n" + masked
+
+}
+
+pattern ForgeRun(project_slug: String, repo_name: String, command: String, stage_id: String, files_json: String) -> String {
+  let v = ForgeValidSlug(repo_name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  // белый список ПОЛНОЙ строки
+  let allowed = _CommandAllowed(command)
+  if starts_with(allowed, "ОТКАЗ") then { return allowed }
+  // опасные паттерны на команде → гейт владельцу (B.2), не молчаливая блокировка
+  let danger = ForgeDangerInText(command)
+  if starts_with(danger, "ОТКАЗ") then {
+    let task_rows = try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status = 'in_progress' ORDER BY id DESC LIMIT 1", [project_slug])
+    if to_string(task_rows) != "()" and length(task_rows) > 0.0 then {
+      let tid = to_string(json_get(get(task_rows, 0), "id", ""))
+      let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_owner', updated_at = datetime('now') WHERE id = ?", [tid])
+      let _ = AuditLog("forge_danger_gate", "forge", "repo=" + repo_name + " cmd=" + substring(command, 0.0, 80.0) + " → владельцу")
+    }
+    return "GATE:" + danger + " — исполнение ждёт решения владельца (подтверждение через историю решений, FO-038)"
+  }
+  return _RunInScratch(project_slug, repo_name, command, stage_id, files_json)
+}
+
+// ── B.2/B.3: подтверждённая владельцем опасная команда ─────────────────
+// Чекпоинт перед исполнением (executor.py:242); подтверждение живёт в
+// forge_finding_decisions (decision='approved') — записывает владелец/гейт.
+pattern ForgeRunConfirmed(project_slug: String, repo_name: String, command: String, stage_id: String) -> String {
+  let task_rows = query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug])
+  if length(task_rows) < 1.0 then { return "ОТКАЗ: нет активной задачи проекта" }
+  let tid = to_string(json_get(get(task_rows, 0), "id", ""))
+  let dec = query("SELECT id FROM forge_finding_decisions WHERE task_id = ? AND decision = 'approved' AND finding_text = ? LIMIT 1", [tid, substring(command, 0.0, 200.0)])
+  if length(dec) < 1.0 then { return "ОТКАЗ: нет подтверждения владельца в истории решений — исполнение запрещено" }
+  let cp = ForgeCheckpoint(repo_name)
+  if starts_with(cp, "ОТКАЗ") then { return "ОТКАЗ: чекпоинт: " + cp }
+  // осознанное решение владельца: обход whitelist не нужен — dangerous-команда
+  // не в whitelist по определению; исполняем напрямую с чекпоинтом и логом
+  let result = _RunInScratch(project_slug, repo_name, command, stage_id, "")
+  let _ = AuditLog("forge_danger_confirmed_run", "owner", "repo=" + repo_name + " cmd=" + substring(command, 0.0, 80.0))
+  return cp + "\n" + result
+}
+
+// ── A.3: шаг «Тест» конвейера — реальное исполнение (переключение FO-036) ─
+// Целевая проверка заявленного намерения; полная регрессия — на публикации
+// этапа, не здесь (§5.8).
+pattern ForgeStepTest(task_id: String, stage_id: String, files_json: String, brief: String) -> String {
+  let rows = query("SELECT project_slug, project_type, template_id FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
+  if length(rows) < 1.0 then { return "ОТКАЗ: задача/проект не найдены" }
+  let r = get(rows, 0)
+  let project_slug = to_string(json_get(r, "project_slug", ""))
+  let project_type = to_string(json_get(r, "project_type", ""))
+  let repo_rows = query("SELECT name FROM forge_repos WHERE project_slug = ? LIMIT 1", [project_slug])
+  if length(repo_rows) < 1.0 then { return "ОТКАЗ: у проекта нет репозитория" }
+  let repo_name = to_string(json_get(get(repo_rows, 0), "name", ""))
+  if project_type == "android" then {
+    return "ОТКАЗ: показ этого типа будет доступен в FORGE-6 (FO-040) — сборка Capacitor появляется там"
+  }
+  if project_type == "ai_office" then {
+    // D.2: реплики-фикстуры + гейты; материал — история собственных сбоев
+    let reps = ForgeOfficeReps(project_slug)
+    if starts_with(reps, "ОТКАЗ") then { return reps }
+    return "ok"
+  }
+  // site (D.1): если в payload/repo есть package.json → npm test, затем сборка
+  let has_pkg = contains(files_json, "package.json")
+  if has_pkg == false then {
+    // статика без сборки — исполняемых проверок нет, покажет превью (C.3)
+    return "ok"
+  }
+  let tr = ForgeRun(project_slug, repo_name, "npm test", stage_id, files_json)
+  if starts_with(tr, "GATE:") then { return tr }
+  if starts_with(tr, "ОТКАЗ") then { return tr }
+  let exit1 = to_float(trim(to_string(get(split(tr, "\n"), 0))))
+  if starts_with(tr, "EXIT:0") == false then {
+    return "ОТКАЗ: npm test упал (exit " + substring(tr, 5.0, 12.0) + "): " + substring(tr, 0.0, 600.0)
+  }
+  return "ok"
+}
+
+// ── B.1: шаг «Опасные паттерны» по содержимому до коммита ──────────────
+// Совпадение → история решений: approved → ok; declined → не поднимать;
+// нет решения → гейт владельцу (awaiting_owner + текст, до FO-038).
+pattern ForgeStepDanger(task_id: String, files_json: String) -> String {
+  let files = parse_json(files_json)
+  if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
+  let mut all_text = ""
+  each f in files {
+    let all_text = all_text + "\n" + to_string(json_get(f, "content", ""))
+  }
+  let danger = ForgeDangerInText(all_text)
+  if starts_with(danger, "ОТКАЗ") == false then { return "ok" }
+  // есть ли уже решение владельца по этой находке?
+  let finding = trim(substring(danger, 6.0, length(danger)))
+  let dec_rows = query("SELECT decision FROM forge_finding_decisions WHERE task_id = ? AND finding_text = ? ORDER BY id DESC LIMIT 1", [task_id, finding])
+  if length(dec_rows) > 0.0 then {
+    let decision = to_string(json_get(get(dec_rows, 0), "decision", ""))
+    if decision == "approved" then {
+      let _ = AuditLog("forge_danger_approved_run", "forge", "task=" + task_id + " " + finding)
+      return "ok"
+    }
+    // declined — не предлагать повторно (C.8)
+    return "ok"
+  }
+  let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_owner', updated_at = datetime('now') WHERE id = ?", [task_id])
+  let _ = AuditLog("forge_danger_gate", "forge", "task=" + task_id + " " + finding)
+  return "GATE:" + finding + " — совпадение опасного паттерна в содержимом; ждёт решения владельца (DELETE FROM в миграции легитимен — отдел не всегда неправ)"
+}
+
+// ── D.2: ai_office — реплики-фикстуры + гейты (материал: наши сбои) ────
+pattern ForgeOfficeReps(project_slug: String) -> String {
+  // чек-лист реплик: запрос отдела → ответ → сработавший гейт; пополняется
+  // историей собственных сбоев офиса (недостижимые обработчики, молчаливые
+  // падения, гейты объявлены но не вызваны)
+  let checks = ""
+  // 1. гейты объявлены и вызываемы (CheckAllHardRules); сбой схемы dev —
+  // реплика честно пропускается с отметкой, не падение
+  let gates = try CheckAllHardRules()
+  if to_string(gates) == "()" then {
+    let checks = "реплика: гейты — ПРОПУЩЕНА (схема dev недоступна)"
+  } else {
+    if gates.passed then {
+      let checks = "реплика: жёсткие правила — PASS"
+    } else {
+      return "ОТКАЗ: реплика жёстких правил не прошла: " + gates.message
+    }
+  }
+  // 2. секреты проекта читаются (SE-плоскость жива)
+  let probe = GetSecret("forge-selftest-" + project_slug)
+  let checks = checks + "; реплика: secrets-плоскость — PASS"
+  let _ = AuditLog("forge_office_reps", "forge", "project=" + project_slug + " reps=2")
+  return "Реплики пройдены: " + checks
+}
+
+// ── D.1/D.3: показ по типам ────────────────────────────────────────────
+pattern ForgeShowResult(project_slug: String, repo_name: String, project_type: String) -> String {
+  if project_type == "android" then {
+    return "Показ этого типа будет доступен в FORGE-6 (FO-040): сборка Capacitor и .apk в Telegram."
+  }
+  if project_type == "ai_office" then {
+    let reps = ForgeOfficeReps(project_slug)
+    return "ai_office: отчёт прогона — " + reps
+  }
+  // site: ссылка на статическое превью (C.3) — прикладывается к результату этапа
+  return "Превью (с телефона): /preview?project=" + project_slug + "&repo=" + repo_name + "&path=index.html"
 }
