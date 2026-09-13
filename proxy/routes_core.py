@@ -67,6 +67,51 @@ def health():
         "provider_cooldowns": cooldowns,
     })
 
+# ── FO-037 C.1: статическое превью (файлы из репозитория напрямую, без процессов) ──
+# Query-роут (§9 ТЗ: path-стиль /preview/<project>/<repo>/<path> не работает
+# на exact-match диспетчере mlog — v1 query-эквивалент, перевод после №283).
+_PREVIEW_MIME = {
+    "html": "text/html; charset=utf-8", "htm": "text/html; charset=utf-8",
+    "css": "text/css; charset=utf-8", "js": "application/javascript; charset=utf-8",
+    "mjs": "application/javascript; charset=utf-8", "json": "application/json; charset=utf-8",
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
+    "svg": "image/svg+xml", "ico": "image/x-icon", "txt": "text/plain; charset=utf-8",
+    "md": "text/plain; charset=utf-8", "pdf": "application/pdf", "webp": "image/webp",
+}
+_PREVIEW_PATH_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
+
+@app.get("/preview")
+def preview_file():
+    """Статическое превью файла из FORGE-репозитория: git show из bare,
+    без процессов, без сети. Protected (C.2). Контент-Type по расширению."""
+    import subprocess
+    project = request.args.get("project", "")
+    repo = request.args.get("repo", "")
+    path = request.args.get("path", "")
+    ref = request.args.get("ref", "main")
+    if not re.match(r"^[a-z0-9-]{2,40}$", project) or not re.match(r"^[a-z0-9-]{2,40}$", repo):
+        return jsonify({"error": "invalid project/repo"}), 400
+    if not path or len(path) > 400 or path.startswith("/") or ".." in path or not _PREVIEW_PATH_RE.match(path):
+        return jsonify({"error": "invalid path"}), 400
+    if not re.match(r"^[a-zA-Z0-9._/~^-]{1,120}$", ref) or ref.startswith("-"):
+        return jsonify({"error": "invalid ref"}), 400
+    repos_dir = os.environ.get("FORGE_REPOS_DIR", "/var/forge/repos")
+    bare = os.path.join(repos_dir, "forge", "repos", f"{repo}.git")
+    if not os.path.isdir(bare):
+        return jsonify({"error": "repo not found"}), 404
+    try:
+        res = subprocess.run(
+            ["git", "-C", bare, "show", f"{ref}:{path}"],
+            capture_output=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "git timeout"}), 504
+    if res.returncode != 0:
+        return jsonify({"error": "file not found"}), 404
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    mime = _PREVIEW_MIME.get(ext, "application/octet-stream")
+    return Response(res.stdout, mimetype=mime.split(";")[0], headers={"Content-Type": mime})
+
 @app.get("/now-time")
 def now_time_endpoint():
     """Return current date/time in human-readable form for Yana prompt injection.

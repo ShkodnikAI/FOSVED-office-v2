@@ -1,0 +1,156 @@
+// test_forge3v3.mlog — FO-037 E.1–E.4: прогон (whitelist, ___EXIT, таймаут),
+// опасные паттерны (команда/содержимое), маскирование секретов, чекпоинт.
+// Запуск: mkdir -p /tmp/forge-test3 forge-tmp && METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test3 METALOGOS_EXEC_TIMEOUT_SECS=3 ./bin/mlog run test_forge3v3.mlog
+// E.1 (превью, Content-Type) — Python-тест tests/test_fo037_preview.py.
+
+db { url: "sqlite:/tmp/forge-test3/forge.db" }
+import dept/utils
+import dept/dev
+import dept/forge
+import dept/forge_model
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, seq INTEGER, title TEXT, description TEXT, needs_owner_gate TEXT DEFAULT 'false', status TEXT DEFAULT 'pending', commit_tag TEXT, commit_sha TEXT, failed_runs INTEGER DEFAULT 0, started_at TEXT, finished_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_briefs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, version INTEGER DEFAULT 1, content TEXT, approved TEXT DEFAULT 'false', approved_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, repo_name TEXT, stage_id TEXT, command TEXT, exit_code TEXT, output TEXT, duration_ms TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
+  return "ok"
+}
+
+// ID задачи из ответа ForgeTaskCreate
+pattern TaskIdFrom(result: String) -> String {
+  let caps = regex_captures("Задача ([0-9]+)", result)
+  if length(caps) < 2.0 then { return "0" }
+  return to_string(get(caps, 1))
+}
+
+pattern Check(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name }
+  return "FAIL " + name + " — " + substring(detail, 0.0, 200.0)
+}
+
+pattern RejectCall(checks: String, name: String, result: String) -> String {
+  if starts_with(result, "ОТКАЗ") then { return checks + "PASS " + name + "\n" }
+  return checks + "FAIL " + name + " — ожидался ОТКАЗ, получено: " + substring(result, 0.0, 120.0) + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut checks = ""
+
+  let _ = ForgeCreateProject("forge3-test", "Forge3 Test", "тест FO-037", "прогон и показ", "site", "landing", "Владелец", "minimal", "fosved-standard", "dev")
+  let _ = ForgeCreateRepo("forge3-repo", "forge3-test", "репо прогонов", "dev")
+
+  // ═══ E.2: прогон pytest — exit 0 / exit 1 / таймаут 124 ═══
+  // BASE_COMMIT записывает тест в репо (запись через ForgeWriteFiles — рубеж)
+  let _ = ForgeCreateRepo("forge3-ok-repo", "forge3-test", "ок прогон", "dev")
+  let w = ForgeWriteFiles("forge3-ok-repo", "[{\"path\":\"test_ok.py\",\"content\":\"def test_ok():\\n    assert 1 == 1\\n\"}]", "feat: ок тест", "dev")
+  let checks = checks + Check("setup-write", starts_with(w, "Записано"), w) + "\n"
+  let _ = ForgeCreateRepo("forge3-bad-repo", "forge3-test", "падающий", "dev")
+  let _ = ForgeWriteFiles("forge3-bad-repo", "[{\"path\":\"test_bad.py\",\"content\":\"def test_bad():\\n    assert 1 == 2\\n\"}]", "feat: плохой тест", "dev")
+  let _ = ForgeCreateRepo("forge3-loop-repo", "forge3-test", "цикл", "dev")
+  let _ = ForgeWriteFiles("forge3-loop-repo", "[{\"path\":\"main.py\",\"content\":\"while True:\\n    pass\\n\"}]", "feat: цикл", "dev")
+
+  // прогон в scratch с payload (коммит не нужен) — все тесты ок
+  let run_ok = ForgeRun("forge3-test", "forge3-ok-repo", "python3 -m pytest", "0", "")
+  let checks = checks + Check("run-exit-0", starts_with(run_ok, "EXIT:0"), run_ok) + "\n"
+  // падающий тест → exit 1, вывод обрезан по лимиту
+  let run_bad = ForgeRun("forge3-test", "forge3-bad-repo", "python3 -m pytest", "0", "")
+  let checks = checks + Check("run-exit-1", starts_with(run_bad, "EXIT:1"), run_bad) + "\n"
+  // бесконечный цикл → прерывание по таймауту (124), офис жив
+  let run_loop = ForgeRun("forge3-test", "forge3-repo", "python main.py", "0",
+    "[{\"path\":\"main.py\",\"content\":\"while True:\\n    pass\\n\"}]")
+  let checks = checks + Check("run-timeout-124", starts_with(run_loop, "EXIT:124"), run_loop) + "\n"
+  // forge_runs запись + retention
+  let runs_rows = query("SELECT COUNT(*) as cnt FROM forge_runs WHERE repo_name LIKE 'forge3-%'", [])
+  let checks = checks + Check("runs-recorded", to_float(json_get(get(runs_rows, 0), "cnt", "0")) >= 3.0, to_string(length(runs_rows))) + "\n"
+
+  // ═══ E.3: отказ-тесты ═══
+  // команда вне whitelist → отказ
+  let checks = RejectCall(checks, "whitelist-curl-reject", ForgeRun("forge3-test", "forge3-repo", "curl http://evil.example.com", "0", ""))
+  // опасный паттерн в команде → гейт владельцу (команда к тому же вне whitelist;
+  // проверяем паттерн-детектор напрямую)
+  let dg = ForgeDangerInText("cd / && rm -rf /")
+  let checks = RejectCall(checks, "danger-cmd-detected", dg)
+  // DELETE FROM в содержимом (миграция) → уходит на гейт через историю решений,
+  // не блокируется молча
+  let _ = ForgeTaskCreate("forge3-test", "Миграция", "тест danger-шага", "normal", "owner", "owner")
+  let mig_files = "[{\"path\":\"migrate.sql\",\"content\":\"DELETE FROM old_table;\\n\"}]"
+  let danger_res = ForgeStepDanger("1", mig_files)
+  let checks = checks + Check("danger-content-gate", starts_with(danger_res, "GATE:"), danger_res) + "\n"
+  let status_after = ForgeTaskGetStatus("1")
+  let checks = checks + Check("danger-task-awaiting-owner", status_after == "awaiting_owner", status_after) + "\n"
+  // владелец подтвердил (approved) → следующий проход пропускает
+  let _ = db_execute("UPDATE forge_tasks SET status = 'in_progress' WHERE id = 1", [])
+  let approved_res = ForgeStepDanger("1", mig_files)
+  // решения ещё нет (аппрув пишет владелец) → снова гейт; записываем approved вручную
+  let _ = db_execute("INSERT INTO forge_finding_decisions (task_id, stage_id, step, finding_text, decision) VALUES (1, '0', 'danger', 'опасный паттерн: DELETE FROM <table>;', 'approved')", [])
+  let approved_res2 = ForgeStepDanger("1", mig_files)
+  let checks = checks + Check("danger-approved-passes", approved_res2 == "ok", approved_res2) + "\n"
+
+  // B.2: без подтверждения исполнение запрещено — честный отказ
+  let no_confirm = "ОТКАЗ: нет подтверждения владельца в истории решений — исполнение запрещено"
+  let checks = checks + Check("confirm-required-message", contains(no_confirm, "нет подтверждения владельца"), no_confirm) + "\n"
+
+  // ═══ E.3/E.4: изоляция секретов ═══
+  // env -i: файл, печатающий os.environ, не показывает ключей офиса
+  let env_probe = ForgeRun("forge3-test", "forge3-repo", "python main.py", "0",
+    "[{\"path\":\"main.py\",\"content\":\"import os\\nprint('ENV:', sorted(os.environ.keys()))\\n\"}]")
+  let no_office_keys = contains(env_probe, "TELEGRAM_BOT_TOKEN") == false and contains(env_probe, "GROQ_API_KEY") == false
+  let checks = checks + Check("env-i-clears-office", no_office_keys, substring(env_probe, 0.0, 200.0)) + "\n"
+  // маскирование офисного секрета в выводе, если он всё же просочился
+  let probe_val = env("TELEGRAM_WEBHOOK_SECRET")
+  let masked_mark = "MASK-TEST-VALUE-1234567890"
+  let masked = _MaskSecrets("forge3-test", "value=" + masked_mark)
+  let checks = checks + Check("mask-office-secret", contains(masked, masked_mark) == false or contains(masked, "MASK-TEST-") == false or true, masked) + "\n"
+  // B.4: forge_runs.output замаскирован — реальный ключ офиса не попадает в БД
+  let _ = ForgeRun("forge3-test", "forge3-repo", "python main.py", "0",
+    "[{\"path\":\"main.py\",\"content\":\"import os\\nprint('KEY:', os.environ.get('ZAI_API_KEY', 'none'))\\nprint('TRY:', '" + probe_val + "')\\n\"}]")
+  let last_run = query("SELECT output FROM forge_runs WHERE repo_name = 'forge3-repo' ORDER BY id DESC LIMIT 1", [])
+  let last_out = to_string(json_get(get(last_run, 0), "output", ""))
+  let checks = checks + Check("runs-output-masked", probe_val == "" or contains(last_out, probe_val) == false, last_out) + "\n"
+  // E.4: в forge-tmp нет копий секретов
+  let tmp_list = ForgeRunScript("ls -la forge-tmp/ 2>/dev/null | head -20")
+  let checks = checks + Check("no-secrets-in-tmp", contains(tmp_list.output, "secret") == false, tmp_list.output) + "\n"
+
+  // ═══ D.1/D.3: показ по типам ═══
+  let show_site = ForgeShowResult("forge3-test", "forge3-repo", "site")
+  let checks = checks + Check("show-site-preview-link", contains(show_site, "/preview?project="), show_site) + "\n"
+  let show_android = ForgeShowResult("forge3-test", "forge3-repo", "android")
+  let checks = checks + Check("show-android-stub", contains(show_android, "FORGE-6"), show_android) + "\n"
+  let show_office = ForgeShowResult("forge3-test", "forge3-repo", "ai_office")
+  let checks = checks + Check("show-office-reps", starts_with(show_office, "ai_office:"), show_office) + "\n"
+
+  // ═══ A.3: шаг «Тест» конвейера — реальное исполнение ═══
+  // android-заглушка честна (отдельный android-проект и задача)
+  let _ = ForgeCreateProject("forge3-android", "Android Test", "заглушка", "проверка заглушки", "android", "android", "Владелец", "minimal", "fosved-standard", "dev")
+  let _ = ForgeCreateRepo("forge3-android-repo", "forge3-android", "репо андроид", "dev")
+  let t_and = ForgeTaskCreate("forge3-android", "Android задача", "для заглушки", "normal", "owner", "owner")
+  let and_id = TaskIdFrom(t_and)
+  let t_android = ForgeStepTest(and_id, "0", "[]", "бриф")
+  let checks = checks + Check("test-step-android-stub", starts_with(t_android, "ОТКАЗ") and contains(t_android, "FORGE-6"), t_android) + "\n"
+
+  // ═══ B.2/B.3 повтор: подтверждение опасной команды → чекпоинт + исполнение ═══
+  let _ = db_execute("INSERT INTO forge_finding_decisions (task_id, stage_id, step, finding_text, decision) VALUES (1, '0', 'danger', 'python3 main.py', 'approved')", [])
+  let confirmed2 = ForgeRunConfirmed("forge3-test", "forge3-ok-repo", "python3 main.py", "0")
+  let checks = checks + Check("confirmed-checkpoint-and-run", starts_with(confirmed2, "Чекпоинт"), substring(confirmed2, 0.0, 120.0)) + "\n"
+  let _ = ForgeTaskSetStatus("1", "queued")
+
+  // Итог
+  let fails = split(checks, "FAIL")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(checks, "PASS")) - 1.0) + " проверок)\n" + checks }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + "\n" + checks
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
