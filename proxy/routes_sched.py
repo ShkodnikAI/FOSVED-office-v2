@@ -220,6 +220,20 @@ def scheduler_morning_brief():
     except Exception as e:
         log.warning(f"lz-daily scan inside morning-brief failed (non-fatal): {e}")
 
+    # FO-042 (наряд #149): резервный контур FORGE — bundle-бэкап bare-репозиториев
+    # + выгрузка forge_* документом. Запуск рядом с брифом — триггер BRIEF-1
+    # (надёжный, подтверждён lz-daily); неудачи громкие (строка в брифе), не молчаливые.
+    forge_backup_line = ""
+    try:
+        from proxy.forge_backup import run_forge_backup, store_backup_summary, export_forge_state
+        backup_result = run_forge_backup()
+        store_backup_summary(backup_result)
+        forge_backup_line = backup_result.get("line", "")
+        export_forge_state(owner_id)  # документ владельцу; неудача не роняет бриф
+    except Exception as e:
+        log.warning(f"[morning_brief] forge backup/export failed (non-fatal): {e}")
+        forge_backup_line = f"бэкап FORGE: сбой контура ({str(e)[:120]})"
+
     try:
         now = datetime.utcnow()
         # Minsk time for display (UTC+3 year-round)
@@ -360,6 +374,9 @@ def scheduler_morning_brief():
 === FORGE: ТРЕБУЕТ ВНИМАНИЯ (гейты и замечания, ежедневно пока не решены) ===
 {forge_attention if forge_attention else 'Нет висящих гейтов и замечаний'}
 
+=== FORGE: РЕЗЕРВНЫЙ КОНТУР (bundle-бэкап репозиториев) ===
+{forge_backup_line if forge_backup_line else 'Резерв FORGE не выполнялся — проверить контур backup_forge_repos.py'}
+
 === ПОВТОРЯЮЩИЕСЯ ОШИБКИ ОФИСА ЗА СУТКИ ===
 {errors_digest if errors_digest else 'Нет'}
 
@@ -395,6 +412,11 @@ def scheduler_morning_brief():
 
         result = call_llm("yana", messages)
         brief = result["reply"]
+
+        # FO-042: строка резерва FORGE — точно в бриф (не через LLM, чтобы
+        # цифры не искажались пересказом)
+        if forge_backup_line:
+            brief = brief + "\n\n💾 Резерв FORGE: " + forge_backup_line
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
