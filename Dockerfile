@@ -27,6 +27,11 @@ RUN npm install --production 2>/dev/null || true
 RUN npx prisma generate 2>/dev/null || true
 
 RUN mkdir -p /office/data /tmp
+
+# FO-014: office-owned MCP-серверы (github + filesystem) — исполняемые,
+# вызываются из mlog через mcp_call (allowlist: mcp_servers/github,mcp_servers/filesystem)
+RUN chmod +x /office/mcp_servers/github /office/mcp_servers/filesystem \
+    && mkdir -p /office/data/documents /office/data/logs
 RUN git config --global user.email "agent@fosved.office" \
     && git config --global user.name "Fosved Agent"
 
