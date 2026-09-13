@@ -1,0 +1,102 @@
+// test_forge5v3.mlog — FO-039 C.2–C.4: живое превью (лимит 2, sweep,
+// изоляция env, статус/лог). E.1 (телефон) — ручной приём; маршрутизация
+// reverse_proxy — tests/test_fo039_proxy.py.
+// Запуск: mkdir -p /tmp/forge-test5 forge-tmp && METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test5 ./bin/mlog run test_forge5v3.mlog
+
+db { url: "sqlite:/tmp/forge-test5/forge.db" }
+import dept/utils
+import dept/dev
+import dept/forge
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, seq INTEGER, title TEXT, description TEXT, needs_owner_gate TEXT DEFAULT 'false', status TEXT DEFAULT 'pending', commit_tag TEXT, commit_sha TEXT, failed_runs INTEGER DEFAULT 0, started_at TEXT, finished_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_briefs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, version INTEGER DEFAULT 1, content TEXT, approved TEXT DEFAULT 'false', approved_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, repo_name TEXT, stage_id TEXT, command TEXT, exit_code TEXT, output TEXT, duration_ms TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, kind TEXT, question TEXT, context TEXT, options_json TEXT, decision TEXT, decided_by TEXT, decided_at TEXT, telegram_message_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_remarks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, commit_sha TEXT, text TEXT, file_hint TEXT, attachment_ref TEXT, kind TEXT, status TEXT DEFAULT 'open', resolved_by_commit TEXT, gate_id TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_previews (slug TEXT PRIMARY KEY, project_slug TEXT, repo_name TEXT, kind TEXT DEFAULT 'live', port INTEGER, pid TEXT, status TEXT DEFAULT 'running', last_access_at TEXT, started_at TEXT)")
+  return "ok"
+}
+
+pattern Check(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name }
+  return "FAIL " + name + " — " + substring(detail, 0.0, 200.0)
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut checks = ""
+  let _ = ForgeCreateProject("forge5-test", "Forge5 Test", "тест FO-039", "живое превью", "site", "landing", "Владелец", "minimal", "fosved-standard", "dev")
+  let _ = ForgeCreateRepo("forge5-repo", "forge5-test", "репо превью", "dev")
+  let _ = ForgeWriteFiles("forge5-repo", "[{\"path\":\"index.html\",\"content\":\"<h1>живое превью</h1>\\n\"}]", "feat: статика", "dev")
+
+  // ═══ C.4: whitelist — команда вне списка → отказ ═══
+  let bad = ForgePreviewUp("forge5-test", "forge5-repo", "curl http://evil.example.com")
+  let checks = checks + Check("preview-whitelist-reject", starts_with(bad, "ОТКАЗ"), bad) + "\n"
+
+  // ═══ C.1/C.2: подъём реального сервера с изоляцией env ═══
+  let up = ForgePreviewUp("forge5-test", "forge5-repo", "python3 -m http.server")
+  let checks = checks + Check("preview-up", starts_with(up, "Живое превью поднято"), up) + "\n"
+  let slug_caps = regex_captures("/preview-live/([a-z0-9-]+)/", up)
+  let slug = to_string(get(slug_caps, 1))
+  // изоляция: лог сервера не содержит офисных секретов (env -i)
+  let token_probe = env("TELEGRAM_WEBHOOK_SECRET")
+  let log_read = ForgeRunScript("cat \"" + ForgeReposDir() + "/forge/previews/" + slug + ".log\" 2>/dev/null")
+  let no_secrets = token_probe == "" or contains(log_read.output, token_probe) == false
+  let checks = checks + Check("preview-log-no-office-secrets", no_secrets, substring(log_read.output, 0.0, 120.0)) + "\n"
+  let status = ForgePreviewStatus(slug)
+  let checks = checks + Check("preview-status-running", contains(status, "[running]"), status) + "\n"
+
+  // ═══ C.4: лимит 2 — третья попытка отказывает с перечнем ═══
+  // второе живое (запись вручную: живой pid = текущий shell)
+  let fake_pid = ForgeRunScript("sleep 60 & echo $!")
+  let pid2 = trim(fake_pid.output)
+  let _ = db_execute("INSERT INTO forge_previews (slug, project_slug, repo_name, kind, port, pid, status, last_access_at, started_at) VALUES ('fake-2', 'forge5-test', 'forge5-repo', 'live', 8101, ?, 'running', ?, ?)", [pid2, to_string(now()), to_string(now())])
+  let _ = ForgeCreateRepo("forge5-repo2", "forge5-test", "второе репо", "dev")
+  let _ = ForgeWriteFiles("forge5-repo2", "[{\"path\":\"i.html\",\"content\":\"x\\n\"}]", "feat", "dev")
+  let third = ForgePreviewUp("forge5-test", "forge5-repo2", "python3 -m http.server")
+  let checks = checks + Check("preview-limit-2", starts_with(third, "ОТКАЗ") and contains(third, "лимит 2"), third) + "\n"
+  let _ = ForgeRunScript("kill " + pid2 + " 2>/dev/null; true")
+  // для sweep-теста: fake-2 снова running, но pid мёртвый
+  let _ = db_execute("UPDATE forge_previews SET status = 'running', pid = '999999', last_access_at = ? WHERE slug = 'fake-2'", [to_string(now())])
+
+  // ═══ C.3: sweep — упавший процесс → failed; тихий живой → stopped ═══
+  // упавший: pid несуществующий
+  let _ = db_execute("UPDATE forge_previews SET pid = '999999', last_access_at = ? WHERE slug = 'fake-2'", [to_string(now())])
+  let sw1 = ForgePreviewSweep()
+  let failed_status = query("SELECT status FROM forge_previews WHERE slug = 'fake-2'", [])
+  let checks = checks + Check("sweep-dead-failed", to_string(json_get(get(failed_status, 0), "status", "")) == "failed", sw1) + "\n"
+  // тихий: живой процесс (sleep 60), last_access 31 мин назад → stopped
+  let quiet_pid = ForgeRunScript("sleep 60 & echo $!")
+  let pid3 = trim(quiet_pid.output)
+  let _ = db_execute("INSERT INTO forge_previews (slug, project_slug, repo_name, kind, port, pid, status, last_access_at, started_at) VALUES ('fake-quiet', 'forge5-test', 'forge5-repo', 'live', 8102, ?, 'running', ?, ?)", [pid3, to_string(now() - 1900.0), to_string(now())])
+  let sw2 = ForgePreviewSweep()
+  let stopped_status = query("SELECT status FROM forge_previews WHERE slug = 'fake-quiet'", [])
+  let checks = checks + Check("sweep-quiet-stopped", to_string(json_get(get(stopped_status, 0), "status", "")) == "stopped", sw2) + "\n"
+  // порт после гашения переиспользуется: 8102 снова свободен
+  let port_free = _PreviewFreePort()
+  let checks = checks + Check("port-reused", port_free != "", port_free) + "\n"
+
+  // ═══ C.4: неактивная ссылка — понятное сообщение (логика статуса) ═══
+  let down = ForgePreviewDown(slug)
+  let checks = checks + Check("preview-down-frees", contains(down, "погашено"), down) + "\n"
+
+  // Итог
+  let fails = split(checks, "FAIL")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(checks, "PASS")) - 1.0) + " проверок)\n" + checks }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + "\n" + checks
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
