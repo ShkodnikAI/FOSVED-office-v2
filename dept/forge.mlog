@@ -939,15 +939,33 @@ pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
 //
 // B.5 — честное предупреждение (дословно по B.3 закрытого #105): это НЕ
 // настоящая изоляция — тот же пользователь, контейнер, диск (включая чтение
-// fosved.db) и сеть; env -i закрывает окружение, но не сокеты. unshare -n
-// под Render не проверен — в очереди (§15 ТЗ). Приемлемо, пока код генерируют
-// наши отделы; появится чужой код — нужен отдельный контейнер.
+// fosved.db); env -i закрывает окружение, сеть отсекается частично. Итог
+// спайка FO-044 (#151, scripts/spike_isolation.sh): ulimit -v (RLIMIT_AS)
+// — Go и внедрён (память прогона ограничена по типу проекта); unshare -n
+// — No-Go без CAP_SYS_ADMIN; unshare -Urn сработал на прокси-окружении
+// (сеть отсечена, loopback жив) — на Render не проверен, в отчёте наряда.
+// Чтение fosved.db и диск — только отдельным контейнером (§15, сознательно
+// отложено). Приемлемо, пока код генерируют наши отделы.
 // ══════════════════════════════════════════════════════════════════════
 
 pattern _EnvDefault(key: String, defv: String) -> String {
   let v = env(key)
   if v == "" then { return defv }
   return v
+}
+
+// ── FO-044 B.1 (наряд #151): лимит виртуальной памяти прогона (RLIMIT_AS).
+// Приоритет: env FORGE_RUN_VLIMIT_KB (оверрайд эксплуатации, 64 МБ..8 ГБ)
+// → поле шаблона типа (TemplateRunMemLimit, §5.5). Убой по лимиту — обычный
+// провал прогона в forge_runs (счётчик 3-х провалов → гейт работает).
+pattern _RunMemLimitKB(project_slug: String) -> String {
+  let v = env("FORGE_RUN_VLIMIT_KB")
+  let n = to_float(v)
+  if n >= 65536.0 and n <= 8388608.0 then { return to_string(n) }
+  let rows = query("SELECT template_id FROM forge_projects WHERE slug = ? LIMIT 1", [project_slug])
+  let tid = ""
+  if length(rows) > 0.0 then { let tid = to_string(json_get(get(rows, 0), "template_id", "")) }
+  return TemplateRunMemLimit(tid)
 }
 
 // ── A.2: белый список ПОЛНОЙ строки команды (после схлопывания пробелов).
@@ -1079,7 +1097,11 @@ pattern _RunInScratch(project_slug: String, repo_name: String, command: String, 
   let inner_n = to_n - 2.0
   if inner_n < 1.0 then { let inner_n = 1.0 }
   let started = now()
-  let cmd_body = "cd \"" + scratch + "\" && timeout " + to_string(inner_n) + " env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=" + _EnvDefault("HOME", "/tmp") + "" + env_prefix + " " + command
+  // FO-044 B.1: ulimit -v (RLIMIT_AS) — встроенная bash, наследуется детьми;
+  // env -i на rlimit не влияет. Стоит ДО timeout/env -i. При превышении —
+  // обычный провал прогона (ExitCode ≠ 0), счётчик 3-х провалов не тронут.
+  let mem_kb = _RunMemLimitKB(project_slug)
+  let cmd_body = "cd \"" + scratch + "\" && ulimit -v " + mem_kb + " && timeout " + to_string(inner_n) + " env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=" + _EnvDefault("HOME", "/tmp") + "" + env_prefix + " " + command
   let r = ForgeRunScript(cmd_body)
   let duration = to_string(now() - started)
   let _ = ForgeRunScript("rm -rf \"" + scratch + "\"")
@@ -1644,6 +1666,8 @@ pattern ForgePreviewUp(project_slug: String, repo_name: String, command: String)
     }
   }
   // A.2: nohup + timeout 1800 (второй рубеж поверх планировщика); pid из $!
+  // FO-044 B.1: ulimit -v по типу проекта — превью под тем же лимитом VA
+  let mem_kb_p = _RunMemLimitKB(project_slug)
   let log_path = ForgeReposDir() + "/forge/previews/" + slug + ".log"
   let home_d = _EnvDefault("HOME", "/tmp")
   // порт подставляется командам, которые его принимают. http.server —
@@ -1653,7 +1677,7 @@ pattern ForgePreviewUp(project_slug: String, repo_name: String, command: String)
   let collapsed_cmd = _CollapseSpaces(command)
   if collapsed_cmd == "python3 -m http.server" or collapsed_cmd == "python -m http.server" then { let port_arg = " " + port }
   if collapsed_cmd == "python3 app.py" or collapsed_cmd == "python app.py" then { let port_arg = " --port " + port }
-  let spawn = "cd \"" + dest + "\" && nohup env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=" + home_d + env_prefix + " timeout 1800 " + command + port_arg + " > \"" + log_path + "\" 2>&1 & echo SPAWN-PID:$!"
+  let spawn = "cd \"" + dest + "\" && ulimit -v " + mem_kb_p + " && nohup env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=" + home_d + env_prefix + " timeout 1800 " + command + port_arg + " > \"" + log_path + "\" 2>&1 & echo SPAWN-PID:$!"
   let r = ForgeRunScript(spawn)
   let pid_parts = split(r.output, "SPAWN-PID:")
   let pid = trim(to_string(get(pid_parts, 1)))
