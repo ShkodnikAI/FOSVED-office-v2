@@ -187,6 +187,8 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
   db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, kind TEXT, question TEXT, context TEXT, options_json TEXT, decision TEXT, decided_by TEXT, decided_at TEXT, telegram_message_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_remarks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, commit_sha TEXT, text TEXT, file_hint TEXT, attachment_ref TEXT, kind TEXT, status TEXT DEFAULT 'open', resolved_by_commit TEXT, gate_id TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)")
   // FO-027: durable-степы цепочек (чекпоинты + resume; Temporal/Inngest паттерн)
   db_execute("CREATE TABLE IF NOT EXISTS chain_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, chain_id TEXT, chat_id TEXT, step_num REAL, dept TEXT, mode TEXT, input_hash TEXT, reply TEXT, model TEXT, tokens_in TEXT, tokens_out TEXT, cost_usd TEXT, status TEXT DEFAULT 'pending', dept_chain TEXT DEFAULT '', query TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE INDEX IF NOT EXISTS idx_chain_steps_chain ON chain_steps(chain_id, step_num, dept)")
@@ -2356,6 +2358,72 @@ mlogserver {
     return respond_html(html)
   }
 
+  // ── FO-038 C.1: страница задачи — гейты, этапы, прогоны, замечания, история ──
+  route "/repos/task" method=GET {
+    let task_id = query_param("task_id")
+    let rows = query("SELECT t.title, t.status, t.project_slug, p.name FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
+    if length(rows) < 1.0 then { return respond("404 task not found") }
+    let t = get(rows, 0)
+    let mut html = "<html><head><meta charset='utf-8'><title>Задача " + task_id + "</title></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee;padding:16px'>"
+    html = html + "<h1>" + ForgeEscape(to_string(json_get(t, "name", ""))) + " — задача " + task_id + "</h1>"
+    html = html + "<p>" + ForgeEscape(to_string(json_get(t, "title", ""))) + " [" + ForgeEscape(to_string(json_get(t, "status", ""))) + "]</p>"
+    // активный гейт с кнопками-ссылками (дубль Telegram)
+    let gates = query("SELECT id, kind, question, options_json, decision FROM forge_gates WHERE task_id = ? ORDER BY id DESC LIMIT 10", [task_id])
+    html = html + "<h2>Гейты</h2><ul>"
+    each g in gates {
+      let gid = to_string(json_get(g, "id", ""))
+      let dec = to_string(json_get(g, "decision", ""))
+      let dec_mark = "<b>ждёт решения</b> "
+      if dec != "" then { let dec_mark = "решён: " + ForgeEscape(dec) + " " }
+      html = html + "<li>#" + gid + " [" + ForgeEscape(to_string(json_get(g, "kind", ""))) + "] " + ForgeEscape(substring(to_string(json_get(g, "question", "")), 0, 120)) + " — " + dec_mark
+      if dec == "" then {
+        let opts = parse_json(to_string(json_get(g, "options_json", "[]")))
+        each o in opts {
+          let html = html + "<a href='/repos/task/decide?task_id=" + task_id + "&gate=" + gid + "&idx=" + to_string(json_get(o, "idx", "")) + "'>[" + ForgeEscape(to_string(json_get(o, "label", ""))) + "]</a> "
+        }
+      }
+      let html = html + "</li>"
+    }
+    html = html + "</ul>"
+    // план этапов с отметками
+    let stages = query("SELECT id, seq, title, status, commit_tag FROM forge_stages WHERE task_id = ? ORDER BY seq", [task_id])
+    html = html + "<h2>Этапы</h2><ul>"
+    each st in stages {
+      html = html + "<li>" + to_string(json_get(st, "seq", "")) + ". " + ForgeEscape(to_string(json_get(st, "title", ""))) + " [" + ForgeEscape(to_string(json_get(st, "status", ""))) + "] " + ForgeEscape(to_string(json_get(st, "commit_tag", ""))) + "</li>"
+    }
+    html = html + "</ul>"
+    // логи прогонов (последние 5)
+    let runs = query("SELECT command, exit_code, output, created_at FROM forge_runs WHERE stage_id IN (SELECT id FROM forge_stages WHERE task_id = ?) ORDER BY id DESC LIMIT 5", [task_id])
+    html = html + "<h2>Прогоны</h2><ul>"
+    each r in runs {
+      html = html + "<li><code>" + ForgeEscape(substring(to_string(json_get(r, "command", "")), 0, 60)) + "</code> → exit " + ForgeEscape(to_string(json_get(r, "exit_code", ""))) + " <small>" + ForgeEscape(substring(to_string(json_get(r, "output", "")), 0, 100)) + "</small></li>"
+    }
+    html = html + "</ul>"
+    // замечания + история решений по находкам
+    let remarks = query("SELECT id, text, kind, status, resolved_by_commit FROM forge_remarks WHERE task_id = ? ORDER BY id DESC LIMIT 10", [task_id])
+    html = html + "<h2>Замечания</h2><ul>"
+    each r in remarks {
+      html = html + "<li>#" + to_string(json_get(r, "id", "")) + " [" + ForgeEscape(to_string(json_get(r, "kind", ""))) + "/" + ForgeEscape(to_string(json_get(r, "status", ""))) + "] " + ForgeEscape(substring(to_string(json_get(r, "text", "")), 0, 140)) + " " + ForgeEscape(to_string(json_get(r, "resolved_by_commit", ""))) + "</li>"
+    }
+    html = html + "</ul>"
+    let decs = query("SELECT finding_text, decision, decided_at FROM forge_finding_decisions WHERE task_id = ? ORDER BY id DESC LIMIT 15", [task_id])
+    html = html + "<h2>История решений по находкам</h2><ul>"
+    each d in decs {
+      html = html + "<li>[" + ForgeEscape(to_string(json_get(d, "decision", ""))) + "] " + ForgeEscape(substring(to_string(json_get(d, "finding_text", "")), 0, 140)) + " <small>" + ForgeEscape(to_string(json_get(d, "decided_at", ""))) + "</small></li>"
+    }
+    html = html + "</ul>"
+    html = html + "<p><a href='/repos/project?slug=" + ForgeEscape(to_string(json_get(t, "project_slug", ""))) + "' style='color:#8ab'>← проект</a></p></body></html>"
+    return respond(html)
+  }
+
+  // решение по гейту из веба (дубль Telegram-кнопок)
+  route "/repos/task/decide" method=GET {
+    let gate = query_param("gate")
+    let idx = query_param("idx")
+    let result = ForgeGateDecide(gate, idx, "owner-web")
+    return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(substring(result, 0.0, 400)) + "</body></html>")
+  }
+
   route "/repos/repo" method=GET {
     let name = query_param("name")
     let files_out = ForgeRepoFiles(name, "main")
@@ -2567,6 +2635,18 @@ mlogserver {
 
     if text == "" then { return respond("200 ok") }
 
+    // FO-038 B.1: ответ владельца на сообщение гейта/показа = замечание
+    let reply_id = to_string(json_get(data, "message.reply_to_message.message_id", "0"))
+    if reply_id != "0" then {
+      let remark_check = try query("SELECT id FROM forge_gates WHERE telegram_message_id = ? LIMIT 1", [reply_id])
+      if to_string(remark_check) != "()" and length(remark_check) > 0.0 then {
+        let attachment = to_string(json_get(data, "message.photo.0.file_id", ""))
+        let _ = ForgeRemarkFromReply(reply_id, text, attachment)
+        let _ = AuditLog("forge_remark_reply", "owner", "reply_to=" + reply_id)
+        return respond("200 ok")
+      }
+    }
+
     // Callback query handler
     if has_field(data, "callback_query") then {
       let cb_data = to_string(json_get(data, "callback_query.data", ""))
@@ -2575,6 +2655,19 @@ mlogserver {
       let token = env("TELEGRAM_BOT_TOKEN")
       let _ = try http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id}), "application/json")
 
+      // FO-038 A.3: гейты FORGE — callback_data fg:<gate_id>:<option_idx>
+      if starts_with(cb_data, "fg:") then {
+        let rest_cb = substring(cb_data, 3.0, length(cb_data))
+        let cb_parts = split(rest_cb, ":")
+        if length(cb_parts) >= 2.0 then {
+          let fg_gate = trim(to_string(get(cb_parts, 0)))
+          let fg_idx = trim(to_string(get(cb_parts, 1)))
+          let fg_result = ForgeGateDecide(fg_gate, fg_idx, "owner")
+          let _ = try http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id, text: substring(fg_result, 0.0, 180.0), show_alert: false}), "application/json")
+          let _ = SendTelegramReply(cb_chat_id, substring(fg_result, 0.0, 3500.0))
+        }
+        return respond("200 ok")
+      }
       // Handle approve/reject narads
       if starts_with(cb_data, "approve_") then {
         let narad_id = substring(cb_data, 8.0, length(cb_data))

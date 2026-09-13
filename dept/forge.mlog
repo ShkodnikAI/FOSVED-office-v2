@@ -1236,3 +1236,257 @@ pattern ForgeShowResult(project_slug: String, repo_name: String, project_type: S
   // site: ссылка на статическое превью (C.3) — прикладывается к результату этапа
   return "Превью (с телефона): /preview?project=" + project_slug + "&repo=" + repo_name + "&path=index.html"
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// FO-038 (наряд #136): FORGE-4v3 — стоп-гейты, замечания, история решений.
+// Виды гейтов §8: plan | stage | remark | delivery. callback_data ≤ 64 байт:
+// формат fg:<gate_id>:<option_idx>, остальное — в БД.
+// Замечания — сущности (решение 19): fix (stage-N-fix-<k>) vs rescope
+// (возврат к гейту №1). При сомнении — гейт remark, не догадка.
+// ══════════════════════════════════════════════════════════════════════
+
+// ── A.2: варианты по умолчанию с последствиями ────────────────────────
+pattern _GateOptionsFor(kind: String) -> String {
+  if kind == "plan" then {
+    return "[{\"idx\":\"0\",\"label\":\"Утвердить\",\"consequence\":\"отдел берёт этап 1 в работу\"},{\"idx\":\"1\",\"label\":\"Правка\",\"consequence\":\"вернуть на доработку задания — укажите, что изменить, ответом на это сообщение\"},{\"idx\":\"2\",\"label\":\"Отклонить\",\"consequence\":\"задача закрывается, находки раунда пишутся в историю решений\"}]"
+  }
+  if kind == "stage" then {
+    return "[{\"idx\":\"0\",\"label\":\"Продолжить\",\"consequence\":\"следующий этап по плану\"},{\"idx\":\"1\",\"label\":\"Правка этапа\",\"consequence\":\"правка внутри этапа, метка stage-N-fix-<k>, прогон заново\"},{\"idx\":\"2\",\"label\":\"Стоп\",\"consequence\":\"задача ждёт, очередь идёт дальше\"}]"
+  }
+  if kind == "remark" then {
+    return "[{\"idx\":\"0\",\"label\":\"Это fix\",\"consequence\":\"правка внутри этапа N, метка fix, прогон заново\"},{\"idx\":\"1\",\"label\":\"Это rescope\",\"consequence\":\"меняется замысел — возврат к гейту №1, пересогласование\"}]"
+  }
+  if kind == "delivery" then {
+    return "[{\"idx\":\"0\",\"label\":\"Передать заказчику\",\"consequence\":\"transfer GitHub-репозитория средствами GitHub (§10)\"},{\"idx\":\"1\",\"label\":\"Ещё рано\",\"consequence\":\"вернуть в работу с вашими комментариями\"}]"
+  }
+  return "[{\"idx\":\"0\",\"label\":\"Продолжить\",\"consequence\":\"по плану\"},{\"idx\":\"1\",\"label\":\"Стоп\",\"consequence\":\"ждёт решения\"}]"
+}
+
+// ── A.2/A.5: создание гейта + отправка владельцу ───────────────────────
+// options_json "" → дефолтные варианты вида гейта. Возвращает id гейта.
+pattern ForgeGateCreate(task_id: String, stage_id: String, kind: String, question: String, options_json: String) -> String {
+  if kind != "plan" and kind != "stage" and kind != "remark" and kind != "delivery" then {
+    return "ОТКАЗ: kind ∈ {plan, stage, remark, delivery}"
+  }
+  let opts = options_json
+  if trim(opts) == "" then { let opts = _GateOptionsFor(kind) }
+  let _ = db_execute("INSERT INTO forge_gates (task_id, stage_id, kind, question, options_json) VALUES (?, ?, ?, ?, ?)", [task_id, stage_id, kind, question, opts])
+  let rows = query("SELECT id FROM forge_gates WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1", [task_id, kind])
+  return to_string(json_get(get(rows, 0), "id", "0"))
+}
+
+// короткий diff для сообщения: какие файлы, сколько строк
+pattern _GateDiffStat(repo_name: String, from_ref: String, to_ref: String) -> String {
+  let vf = ForgeValidRef(from_ref)
+  if vf != "ok" then { return "" }
+  let vt = ForgeValidRef(to_ref)
+  if vt != "ok" then { return "" }
+  let stat = ForgeRunScript("git -C \"" + ForgeReposDir() + "/forge/repos/" + repo_name + ".git\" diff --stat \"" + from_ref + "\" \"" + to_ref + "\" | tail -1")
+  return trim(stat.output)
+}
+
+// формат сообщения гейта (A.2): проект/задача/этап N из M + diff + варианты
+pattern ForgeGateMessage(gate_id: String) -> String {
+  let rows = query("SELECT g.kind, g.question, g.options_json, g.task_id, g.stage_id, t.title, t.project_slug FROM forge_gates g JOIN forge_tasks t ON t.id = g.task_id WHERE g.id = ? LIMIT 1", [gate_id])
+  if length(rows) < 1.0 then { return "ОТКАЗ: гейт не найден" }
+  let g = get(rows, 0)
+  let kind = to_string(json_get(g, "kind", ""))
+  let task_id = to_string(json_get(g, "task_id", ""))
+  // этап N из M
+  let stage_info = ""
+  let sid = to_string(json_get(g, "stage_id", ""))
+  if sid != "" and sid != "0" then {
+    let st = ForgeStageGet(sid)
+    let seq = to_string(json_get(st, "seq", "?"))
+    let st_rows = query("SELECT COUNT(*) as cnt FROM forge_stages WHERE task_id = ?", [task_id])
+    let total = to_string(json_get(get(st_rows, 0), "cnt", "?"))
+    let stage_info = "\nЭтап " + seq + " из " + total + ": " + to_string(json_get(st, "title", ""))
+  }
+  // короткий diff (если у этапа есть коммит)
+  let repo_rows = query("SELECT name FROM forge_repos WHERE project_slug = (SELECT project_slug FROM forge_tasks WHERE id = ? LIMIT 1) LIMIT 1", [task_id])
+  let diff_stat = ""
+  if sid != "" and sid != "0" and length(repo_rows) > 0.0 then {
+    let st2 = ForgeStageGet(sid)
+    let sha = to_string(json_get(st2, "commit_sha", ""))
+    if sha != "" then {
+      let repo_name = to_string(json_get(get(repo_rows, 0), "name", ""))
+      let ds = _GateDiffStat(repo_name, "stage-1", sha)
+      if ds != "" then { let diff_stat = "\nИзменения (кратко): " + ds }
+    }
+  }
+  // варианты с последствиями
+  let opts = parse_json(to_string(json_get(g, "options_json", "[]")))
+  let mut opt_text = ""
+  each o in opts {
+    let opt_text = opt_text + "• " + to_string(json_get(o, "label", "")) + " → " + to_string(json_get(o, "consequence", "")) + "\n"
+  }
+  let kind_ru = kind
+  if kind == "plan" then { let kind_ru = "задание+план" }
+  if kind == "stage" then { let kind_ru = "остановка этапа" }
+  if kind == "remark" then { let kind_ru = "уточнение: fix или rescope" }
+  if kind == "delivery" then { let kind_ru = "передача заказчику" }
+  return "== ГЕЙТ #" + gate_id + " [" + kind_ru + "] ==\nПроект: " + to_string(json_get(g, "project_slug", "")) +
+    "\nЗадача " + task_id + ": " + to_string(json_get(g, "title", "")) + stage_info +
+    "\n\n" + to_string(json_get(g, "question", "")) + diff_stat +
+    "\n\nВарианты:\n" + opt_text +
+    "\n(кнопки под сообщением; fg:" + gate_id + ":<номер>)"
+}
+
+// отправка с inline-кнопками; telegram_message_id пишется для ответов-замечаний
+pattern ForgeGateSend(gate_id: String) -> String {
+  let msg = ForgeGateMessage(gate_id)
+  if starts_with(msg, "ОТКАЗ") then { return msg }
+  let rows = query("SELECT options_json FROM forge_gates WHERE id = ? LIMIT 1", [gate_id])
+  let opts = parse_json(to_string(json_get(get(rows, 0), "options_json", "[]")))
+  let mut buttons = "["
+  let mut first = true
+  each o in opts {
+    if first == false then { let buttons = buttons + "," }
+    let buttons = buttons + "[{\"text\":\"" + escape_json(to_string(json_get(o, "label", ""))) + "\",\"callback_data\":\"fg:" + gate_id + ":" + to_string(json_get(o, "idx", "0")) + "\"}]"
+    let first = false
+  }
+  let buttons = buttons + "]"
+  let owner_id = env("OWNER_TELEGRAM_ID")
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let body = json_encode({chat_id: to_float(owner_id), text: substring(msg, 0.0, 3500.0), reply_markup: {inline_keyboard: []}})
+  // reply_markup с кнопками — json_encode выше с пустым списком; собираем строкой
+  let raw_body = "{\"chat_id\":" + owner_id + ",\"text\":" + escape_json(substring(msg, 0.0, 3500.0)) + ",\"reply_markup\":{\"inline_keyboard\":" + buttons + "}}"
+  let resp = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", raw_body, "application/json")
+  if to_string(resp) != "()" then {
+    let parsed = parse_json(resp)
+    let mid = to_string(json_get(parsed, "result.message_id", ""))
+    if mid != "" then {
+      let _ = db_execute("UPDATE forge_gates SET telegram_message_id = ? WHERE id = ?", [mid, gate_id])
+    }
+  }
+  return "Гейт " + gate_id + " отправлен владельцу."
+}
+
+// ── A.3: решение по гейту (dedup повторных callback) ───────────────────
+pattern ForgeGateDecide(gate_id: String, option_idx: String, decided_by: String) -> String {
+  let rows = query("SELECT decision, kind, task_id, options_json FROM forge_gates WHERE id = ? LIMIT 1", [gate_id])
+  if length(rows) < 1.0 then { return "ОТКАЗ: гейт не найден" }
+  let g = get(rows, 0)
+  let existing = to_string(json_get(g, "decision", ""))
+  if existing != "" then {
+    return "ОТКАЗ: гейт уже решён («" + existing + "») — повторное нажатие игнорируется"
+  }
+  let kind = to_string(json_get(g, "kind", ""))
+  let task_id = to_string(json_get(g, "task_id", ""))
+  // какой вариант выбран
+  let opts = parse_json(to_string(json_get(g, "options_json", "[]")))
+  let mut label = ""
+  each o in opts {
+    if to_string(json_get(o, "idx", "")) == option_idx then { let label = to_string(json_get(o, "label", "")) }
+  }
+  let _ = db_execute("UPDATE forge_gates SET decision = ?, decided_by = ?, decided_at = datetime('now') WHERE id = ?", [label, decided_by, gate_id])
+  let _ = AuditLog("forge_gate_decision", decided_by, "gate=" + gate_id + " kind=" + kind + " → " + label)
+  // вывод задачи из awaiting_owner + продолжение по варианту
+  if label == "Отклонить" then {
+    // A.4: находки раунда → declined
+    let _ = db_execute("UPDATE forge_tasks SET status = 'archived', updated_at = datetime('now') WHERE id = ?", [task_id])
+  } else {
+    let _ = db_execute("UPDATE forge_tasks SET status = 'queued', updated_at = datetime('now') WHERE id = ?", [task_id])
+  }
+  return "Гейт " + gate_id + " → " + label + ". " + _GateTaskEffect(kind, label, task_id)
+}
+
+// следствие решения для контура (продолжение с выбранного варианта)
+pattern _GateTaskEffect(kind: String, label: String, task_id: String) -> String {
+  if kind == "plan" and label == "Отклонить" then { return "Задача архивирована, находки раунда записаны declined." }
+  if kind == "plan" and label == "Правка" then { return "Ответьте на это сообщение текстом правки — вернёмся к заданию." }
+  if kind == "stage" and label == "Правка этапа" then { return "Правка внутри этапа: метка stage-N-fix-<k>, прогон заново." }
+  if kind == "stage" and label == "Стоп" then { return "Задача ждёт в awaiting_owner до вашего возвращения." }
+  if kind == "remark" and label == "Это fix" then { return "Правка внутри этапа запланирована." }
+  if kind == "remark" and label == "Это rescope" then {
+    let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_plan', updated_at = datetime('now') WHERE id = ?", [task_id])
+    return "Замысел меняется: возврат к гейту №1, пересогласование."
+  }
+  if kind == "delivery" and label == "Передать заказчику" then {
+    return "Transfer GitHub-репозитория средствами GitHub (§10) — по кнопке в интерфейсе проекта."
+  }
+  return "Задача продолжается."
+}
+
+// ── B.1/B.3: замечания владельца ───────────────────────────────────────
+// Вход ответом на сообщение: telegram_message_id → gate → task/stage/commit.
+pattern ForgeRemarkFromReply(message_id: String, text: String, attachment_ref: String) -> String {
+  let rows = query("SELECT id, task_id, stage_id FROM forge_gates WHERE telegram_message_id = ? LIMIT 1", [message_id])
+  if length(rows) < 1.0 then { return "" }
+  let g = get(rows, 0)
+  let gate_id = to_string(json_get(g, "id", ""))
+  let task_id = to_string(json_get(g, "task_id", ""))
+  let stage_id = to_string(json_get(g, "stage_id", ""))
+  // commit_sha, который владелец смотрел
+  let commit_sha = ""
+  if stage_id != "" and stage_id != "0" then {
+    let st = ForgeStageGet(stage_id)
+    let commit_sha = to_string(json_get(st, "commit_sha", ""))
+  }
+  // fix или rescope: если владелец не сказал — вопрос ему (гейт remark)
+  let kind = ""
+  let t = lower(text)
+  if starts_with(t, "fix:") or contains(t, "правка этапа") then { let kind = "fix" }
+  if starts_with(t, "rescope:") or contains(t, "меняем замысел") then { let kind = "rescope" }
+  let rid = ForgeRemarkCreate(task_id, stage_id, commit_sha, text, "", kind, attachment_ref, gate_id)
+  if kind == "" then {
+    // A.6: сомнение отдела/владельца → гейт remark с вариантами
+    let gid = ForgeGateCreate(task_id, stage_id, "remark", "Замечание к задаче " + task_id + ": «" + substring(text, 0.0, 200.0) + "» — это fix или rescope?", "")
+    let _ = ForgeGateSend(gid)
+    return "Замечание " + rid + " записано, гейт " + gid + " отправлен (fix/rescope)."
+  }
+  return "Замечание " + rid + " записано (" + kind + ")."
+}
+
+pattern ForgeRemarkCreate(task_id: String, stage_id: String, commit_sha: String, text: String, file_hint: String, kind: String, attachment_ref: String, gate_id: String) -> String {
+  if length(trim(text)) < 3.0 then { return "ОТКАЗ: текст замечания слишком короткий" }
+  let _ = db_execute("INSERT INTO forge_remarks (task_id, stage_id, commit_sha, text, file_hint, attachment_ref, kind, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'open')", [task_id, stage_id, commit_sha, text, file_hint, attachment_ref, kind])
+  let rows = query("SELECT id FROM forge_remarks WHERE task_id = ? ORDER BY id DESC LIMIT 1", [task_id])
+  let rid = to_string(json_get(get(rows, 0), "id", "0"))
+  let _ = AuditLog("forge_remark_create", "owner", "remark=" + rid + " task=" + task_id + " kind=" + kind)
+  return rid
+}
+
+// B.3: сверка непрерывности перед правкой — HEAD этапа == commit_sha замечания
+pattern ForgeRemarkContinuity(repo_name: String, remark_id: String) -> String {
+  let rows = query("SELECT commit_sha FROM forge_remarks WHERE id = ? LIMIT 1", [remark_id])
+  if length(rows) < 1.0 then { return "ОТКАЗ: замечание не найдено" }
+  let seen_sha = to_string(json_get(get(rows, 0), "commit_sha", ""))
+  if seen_sha == "" then { return "ok" }
+  let head = ForgeRunScript("git -C \"" + ForgeReposDir() + "/forge/repos/" + repo_name + ".git\" rev-parse --short HEAD")
+  let head_sha = trim(head.output)
+  if head_sha == seen_sha then { return "ok" }
+  return "ОТКАЗ: HEAD (" + head_sha + ") разошёлся с тем, что вы смотрели (" + seen_sha + "). Между показом и замечанием что-то изменилось — правка ляжет не на то. Подтвердите или обновите замечание."
+}
+
+// B.4: обработка fix — правка внутри этапа, метка stage-N-fix-<k>
+pattern ForgeRemarkResolveFix(remark_id: String, repo_name: String, new_commit_sha: String) -> String {
+  let rows = query("SELECT task_id, stage_id FROM forge_remarks WHERE id = ? LIMIT 1", [remark_id])
+  if length(rows) < 1.0 then { return "ОТКАЗ: замечание не найдено" }
+  let r = get(rows, 0)
+  let stage_id = to_string(json_get(r, "stage_id", ""))
+  let ft = ForgeStageFixTag(stage_id, repo_name, new_commit_sha)
+  if starts_with(ft, "ОТКАЗ") then { return "ОТКАЗ: " + ft }
+  let _ = db_execute("UPDATE forge_remarks SET status = 'resolved', resolved_by_commit = ?, resolved_at = datetime('now') WHERE id = ?", [new_commit_sha, remark_id])
+  return "Замечание " + remark_id + " resolved: " + ft
+}
+
+// B.5: обработка rescope — возврат к гейту №1 (новая версия задания)
+pattern ForgeRemarkResolveRescope(remark_id: String) -> String {
+  let rows = query("SELECT task_id FROM forge_remarks WHERE id = ? LIMIT 1", [remark_id])
+  if length(rows) < 1.0 then { return "ОТКАЗ: замечание не найдено" }
+  let task_id = to_string(json_get(get(rows, 0), "task_id", ""))
+  let _ = db_execute("UPDATE forge_remarks SET status = 'rescope', resolved_at = datetime('now') WHERE id = ?", [remark_id])
+  let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_plan', updated_at = datetime('now') WHERE id = ?", [task_id])
+  let _ = AuditLog("forge_remark_rescope", "owner", "remark=" + remark_id + " task=" + task_id + " → гейт №1")
+  return "Rescope: задача " + task_id + " → awaiting_plan (гейт №1 заново, новая версия задания)."
+}
+
+// ── C.3: раздел «требует внимания» для утреннего брифа ────────────────
+pattern ForgeAttention() -> String {
+  let gates_rows = query("SELECT COUNT(*) as cnt FROM forge_gates WHERE decision IS NULL OR decision = ''", [])
+  let gates_n = to_string(json_get(get(gates_rows, 0), "cnt", "0"))
+  let remarks_rows = query("SELECT COUNT(*) as cnt FROM forge_remarks WHERE status = 'open'", [])
+  let remarks_n = to_string(json_get(get(remarks_rows, 0), "cnt", "0"))
+  return "{\"pending_gates\":" + gates_n + ",\"open_remarks\":" + remarks_n + "}"
+}

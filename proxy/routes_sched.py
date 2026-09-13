@@ -285,6 +285,24 @@ def scheduler_morning_brief():
                     [f"  - #{r['id']} [{r['priority']}] {r['project_slug']}: {r['title']}" for r in fp_rows])
         except Exception as e:
             log.warning(f"[morning_brief] forge proposed query failed: {e}")
+        # FO-038 C.3: FORGE-гейты и замечания — «требует внимания» ежедневно
+        forge_attention = ""
+        fa_count = 0
+        try:
+            fg_rows = _query(
+                "SELECT id, kind, question FROM forge_gates "
+                "WHERE decision IS NULL OR decision = '' ORDER BY id LIMIT 5", fetch=True)
+            fr_rows = _query(
+                "SELECT COUNT(*) as c FROM forge_remarks WHERE status = 'open'", fetch=True)
+            fa_count = len(fg_rows) if fg_rows else 0
+            open_remarks = fr_rows[0]["c"] if fr_rows else 0
+            if fg_rows or open_remarks:
+                lines = [f"  - Гейт #{r['id']} [{r['kind']}]: {r['question'][:100]}" for r in fg_rows]
+                if open_remarks:
+                    lines.append(f"  - Открытых замечаний: {open_remarks}")
+                forge_attention = "\n".join(lines)
+        except Exception as e:
+            log.warning(f"[morning_brief] forge attention query failed: {e}")
 
         # FO-007: повторяющиеся ошибки департаментов за сутки — в дайджест
         errors_digest = ""
@@ -338,6 +356,9 @@ def scheduler_morning_brief():
 
 === FORGE: ЗАДАЧИ ОТ АГЕНТОВ, ЖДУЩИЕ ПОДТВЕРЖДЕНИЯ (proposed) ===
 {forge_proposed if forge_proposed else 'Нет предложенных задач'}
+
+=== FORGE: ТРЕБУЕТ ВНИМАНИЯ (гейты и замечания, ежедневно пока не решены) ===
+{forge_attention if forge_attention else 'Нет висящих гейтов и замечаний'}
 
 === ПОВТОРЯЮЩИЕСЯ ОШИБКИ ОФИСА ЗА СУТКИ ===
 {errors_digest if errors_digest else 'Нет'}
