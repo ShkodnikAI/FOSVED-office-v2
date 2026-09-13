@@ -1,0 +1,114 @@
+// test_forge9v3.mlog — FO-044 (наряд #151) B.1: ulimit -v в ForgeRun.
+// Легенда: b1 лимит ai_office 256МБ; b2 landing 2ГБ; b3 неизвестный тип — дефолт;
+// b4/b5 резолв по проекту; b6 лёгкий python живёт под лимитом; b7 прожорливый
+// убит под лимитом; b8 провал записан в forge_runs; b9 тот же прожорливый живёт
+// под 2ГБ VA (site); b10 несуществующий проект — дефолт.
+// NB: маркеры проверок — только короткие литералы и плоская конкатенация.
+// Длинные литералы с дефисами или вызовы паттернов-маркеров после exec-паттернов
+// валит рантайм mlog (parse_json фантомный сбой) — проверено раном, ловушка.
+// Запуск: rm -rf /tmp/forge-test9 и mkdir -p /tmp/forge-test9, затем
+//   METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test9 ./bin/mlog run test_forge9v3.mlog
+db { url: "sqlite:/tmp/forge-test9/forge.db" }
+import dept/utils
+import dept/dev
+import dept/templates
+import dept/forge
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, repo_name TEXT, stage_id TEXT, command TEXT, exit_code TEXT, output TEXT, duration_ms TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
+  return "ok"
+}
+
+pattern _Mark(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + " — " + substring(detail, 0.0, 160.0) + "\n"
+}
+
+pattern _EqStr(a: String, b: String) -> Bool {
+  if a == b then { return true }
+  return false
+}
+
+pattern _IsFailedExit(s: String) -> Bool {
+  if starts_with(s, "EXIT:0") then { return false }
+  if starts_with(s, "EXIT:") then { return true }
+  return false
+}
+
+pattern _IsRecordedFail(rows: List) -> Bool {
+  if length(rows) != 1.0 then { return false }
+  let ec = to_string(json_get(get(rows, 0), "exit_code", "?"))
+  if ec == "0" then { return false }
+  return true
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut out = ""
+
+  let t1 = TemplateRunMemLimit("ai_office")
+  let b1 = _EqStr(t1, "262144")
+  let out = out + "b1=" + to_string(b1) + ";"
+
+  let t2 = TemplateRunMemLimit("landing")
+  let b2 = _EqStr(t2, "2097152")
+  let out = out + "b2=" + to_string(b2) + ";"
+
+  let t3 = TemplateRunMemLimit("что-то-новое")
+  let b3 = _EqStr(t3, "2097152")
+  let out = out + "b3=" + to_string(b3) + ";"
+
+  let _ = ForgeCreateProject("forge9-py", "Py Project", "лимит python", "тест", "ai_office", "ai_office", "Владелец", "minimal", "fosved-standard", "dev")
+  let _ = ForgeCreateRepo("forge9-py-repo", "forge9-py", "репо", "dev")
+  let _ = ForgeCreateProject("forge9-site", "Site Project", "лимит site", "тест", "site", "landing", "Владелец", "minimal", "fosved-standard", "dev")
+  let _ = ForgeCreateRepo("forge9-site-repo", "forge9-site", "репо", "dev")
+
+  let l1 = _RunMemLimitKB("forge9-py")
+  let b4 = _EqStr(l1, "262144")
+  let out = out + "b4=" + to_string(b4) + ";"
+
+  let l2 = _RunMemLimitKB("forge9-site")
+  let b5 = _EqStr(l2, "2097152")
+  let out = out + "b5=" + to_string(b5) + ";"
+
+  let w1 = ForgeRun("forge9-py", "forge9-py-repo", "python3 main.py", "stage-9", "[{\"path\":\"main.py\",\"content\":\"print('py-ok')\\n\"}]")
+  let b6 = starts_with(w1, "EXIT:0")
+  let d6 = substring(w1, 0.0, 80.0)
+  let out = out + "b6=" + to_string(b6) + ";"
+
+  let _ = db_execute("INSERT INTO forge_whitelist (project_slug, command) VALUES ('forge9-py', 'python3 hog.py')", [])
+  let w2 = ForgeRun("forge9-py", "forge9-py-repo", "python3 hog.py", "stage-9", "[{\"path\":\"hog.py\",\"content\":\"b = bytearray(536870912)\\nprint(1)\\n\"}]")
+  let b7 = _IsFailedExit(w2)
+  let d7 = substring(w2, 0.0, 80.0)
+  let out = out + "b7=" + to_string(b7) + ";"
+
+  let runs = query("SELECT exit_code FROM forge_runs WHERE repo_name = 'forge9-py-repo' AND command = 'python3 hog.py' ORDER BY id DESC LIMIT 1", [])
+  let b8 = _IsRecordedFail(runs)
+  let d8 = to_string(length(runs))
+  let out = out + "b8=" + to_string(b8) + ";"
+
+  let _ = db_execute("INSERT INTO forge_whitelist (project_slug, command) VALUES ('forge9-site', 'python3 hog.py')", [])
+  let w3 = ForgeRun("forge9-site", "forge9-site-repo", "python3 hog.py", "stage-9", "[{\"path\":\"hog.py\",\"content\":\"b = bytearray(536870912)\\nprint(1)\\n\"}]")
+  let b9 = starts_with(w3, "EXIT:0")
+  let d9 = substring(w3, 0.0, 80.0)
+  let out = out + "b9=" + to_string(b9) + ";"
+
+  let l3 = _RunMemLimitKB("нет-такого-проекта")
+  let b10 = _EqStr(l3, "2097152")
+  let out = out + "b10=" + to_string(b10) + ";"
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
