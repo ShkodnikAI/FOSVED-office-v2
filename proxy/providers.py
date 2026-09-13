@@ -281,6 +281,9 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
                        (provider_name, model, t_in, t_out, round(cost, 6), dept, now))
             except Exception as e:
                 _log_error(f"token_usage insert failed: {e}", dept=dept, kind="metrics_loss")
+            finally:
+                from proxy.budget import invalidate as budget_invalidate
+                budget_invalidate()  # FO-024: счётчик дня — по каждой записи
             log.info(f"LLM ok: provider={provider_name} model={model} dept={dept} "
                      f"t_in={t_in} t_out={t_out} reply_chars={len(reply)} reply_head={reply[:120]!r}")
 
@@ -345,12 +348,28 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
     """Call LLM via native combo chain with circuit breaker and context compaction.
     
     Flow:
+    0. FO-024: budget enforcement (soft 80% alert / hard 100% econom / stop 120%)
     1. FO-016: compact context if over budget (offload → prune → summarize)
     2. Select combo chain (or use model_override for direct single-provider call)
     3. Walk the chain: for each (provider, [models]), try each model until one works
     4. Circuit breaker skips providers with recent consecutive failures
     5. If combo chain exhausted, fall back to legacy priority-provider ordering
     """
+    # 0. FO-024: enforcement бюджета ДО любой точки расхода. admin и аварийные
+    # команды не стопятся (см. proxy/budget.py). stop → честный отказ департаменту.
+    try:
+        from proxy.budget import enforce as budget_enforce
+        bstate = budget_enforce(dept, command=command)
+    except Exception as e:  # бюджет не должен ронять вызовы LLM
+        _log_error(f"budget enforce failed: {e}", dept=dept, kind="budget_enforce")
+        bstate = {"state": "unknown"}
+    if bstate.get("state") == "stop":
+        return {"reply": ("[Budget] Суточный бюджет департамента исчерпан (>120%). "
+                          "Вызовы остановлены до ролловера дня (UTC). "
+                          "Аварийные команды (/status /budget /admin) живы."),
+                "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0,
+                "budget_state": "stop"}
+
     # 1. FO-016: компакция контекста (наряд #82) — offload → prune → summarize.
     # Бюджет = флор окон провайдеров combo-цепи − резерв ответа (compaction.py);
     # полные метрики конвейера — в трейсах FO-004 (event=compaction).
@@ -368,6 +387,12 @@ def call_llm(dept, messages, model_override=None, combo=None, command='', depth=
             model_override = model_for(dept)
         except Exception as e:
             log.warning(f"[departments] model_for({dept}) failed, combo as usual: {e}")
+
+    # FO-024 (hard ≥100%): эконом-режим — модель = последний элемент fallback-цепи
+    # (самая дешёвая, зеркало GetModelFallbackChain), heavy-модели deny.
+    if bstate.get("state") == "hard":
+        model_override = bstate.get("econom_model") or model_override
+        log.info(f"[budget] hard≥100% dept={dept}: econom model={model_override}")
 
     # 2. If model_override is set, do direct single-provider call
     if model_override:

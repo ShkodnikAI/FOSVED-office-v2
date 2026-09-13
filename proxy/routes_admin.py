@@ -287,6 +287,17 @@ def api_economics():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.get("/api/budget/status")
+def api_budget_status():
+    """FO-024: срез бюджетов для /budget — spent/limit по департаментам,
+    кто в эконом-режиме. Читающий эндпоинт: без алертов и side-effects."""
+    try:
+        from proxy.budget import status_snapshot
+        return jsonify({"status": "ok", **status_snapshot()})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.get("/api/narads")
 def api_narads():
     """List narads."""

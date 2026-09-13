@@ -696,6 +696,8 @@ def lz_osint():
     now_iso = datetime.utcnow().isoformat()
     _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
            (prov, 'osint-analysis', t_in, t_out, 0, 'lz', now_iso))
+    from proxy.budget import invalidate as budget_invalidate
+    budget_invalidate()  # FO-024: счётчик дня — по каждой записи
 
     _log_audit('lz_osint', {
         'username': username, 'found': result['found'], 'maybe': result['maybe'],

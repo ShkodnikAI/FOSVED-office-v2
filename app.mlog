@@ -3229,7 +3229,37 @@ mlogserver {
       } else {
         let mut budget = kv_get("daily_budget")
         if budget == "" then { budget = "not set" }
-        let _ = SendTelegramReply(chat_id, "Daily budget: $" + budget)
+        // FO-024: срез бюджетов — spent/limit по департаментам + кто в эконом-режиме
+        let resp = try http_get("http://127.0.0.1:4000/api/budget/status")
+        let mut extra = ""
+        if to_string(resp) != "()" then {
+          let parsed = try parse_json(resp)
+          if to_string(parsed) != "()" then {
+            let g = try json_get(parsed, "global", "{}")
+            let gspent = to_string(json_get(g, "spent", "0"))
+            let glimit = to_string(json_get(g, "limit", "-"))
+            let gstate = to_string(json_get(g, "state", "?"))
+            let extra = "\n\nToday (UTC): spent $" + gspent + " / limit $" + glimit + " — " + gstate
+            let depts = try json_get(parsed, "depts", "[]")
+            if to_string(depts) != "()" then {
+              each d in depts {
+                let dn = to_string(json_get(d, "dept", "?"))
+                let dsp = to_string(json_get(d, "spent", "0"))
+                let dst = to_string(json_get(d, "state", "?"))
+                let dlim = to_string(json_get(d, "limit", "-"))
+                let extra = extra + "\n  " + dn + ": $" + dsp + " / $" + dlim + " — " + dst
+              }
+            }
+            let econom = try json_get(parsed, "econom", "[]")
+            if to_string(econom) != "()" then {
+              let econ_list = join(econom, ", ")
+              if econ_list != "" then {
+                let extra = extra + "\n\nЭконом-режим (hard/stop): " + econ_list
+              }
+            }
+          }
+        }
+        let _ = SendTelegramReply(chat_id, "Daily budget: $" + budget + extra)
       }
       return respond("200 ok")
     }
