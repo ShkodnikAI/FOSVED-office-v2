@@ -171,6 +171,9 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS quests (id TEXT PRIMARY KEY, title TEXT, quest_type TEXT DEFAULT 'general', status TEXT DEFAULT 'active', current_step INTEGER DEFAULT 0, total_steps INTEGER DEFAULT 0, deadline TEXT, owner_chat_id TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS quest_files (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, filename TEXT, file_type TEXT, version INTEGER DEFAULT 1, storage_path TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(quest_id) REFERENCES quests(id))")
   db_execute("CREATE TABLE IF NOT EXISTS quest_checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, step_num INTEGER, step_label TEXT, status TEXT DEFAULT 'pending', approved_by TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, FOREIGN KEY(quest_id) REFERENCES quests(id))")
+  // FO-027: durable-степы цепочек (чекпоинты + resume; Temporal/Inngest паттерн)
+  db_execute("CREATE TABLE IF NOT EXISTS chain_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, chain_id TEXT, chat_id TEXT, step_num REAL, dept TEXT, mode TEXT, input_hash TEXT, reply TEXT, model TEXT, tokens_in TEXT, tokens_out TEXT, cost_usd TEXT, status TEXT DEFAULT 'pending', dept_chain TEXT DEFAULT '', query TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_chain_steps_chain ON chain_steps(chain_id, step_num, dept)")
 
   // ── FOIP-003 Phase 1: Session Log + Token Metering ──
   db_execute("CREATE TABLE IF NOT EXISTS session_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, session_seq INTEGER DEFAULT 0, event_type TEXT, dept TEXT, data TEXT, model TEXT, tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0, latency_ms INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))")
@@ -3534,6 +3537,22 @@ mlogserver {
       return respond("200 ok")
     }
 
+    // /chain continue — FO-027: возобновление цепочки с последней ok-степы
+    if starts_with(text, "/chain continue ") then {
+      let rest_c = substring(text, 16.0, length(text))
+      let parts_c = split(rest_c, _sp)
+      if length(parts_c) > 1.0 then {
+        let chain_id_c = trim(to_string(get(parts_c, 0.0)))
+        let query_c = substring(rest_c, length(chain_id_c) + 1.0, length(rest_c))
+        let _ = RecordUserMessage(chat_id, "chain", text)
+        let result_c = ResumeChainSteps(chain_id_c, "", query_c, chat_id)
+        let _ = SendTelegramReply(chat_id, result_c)
+      } else {
+        let _ = SendTelegramReply(chat_id, "Usage: /chain continue <chain_id> <query>")
+      }
+      return respond("200 ok")
+    }
+
     // /chain
     if starts_with(text, "/chain") then {
       let rest = substring(text, 7.0, length(text))
@@ -4389,6 +4408,18 @@ return respond("200 ok") }
     if cron_secret == "" then { return respond("403 Forbidden") }
     if secret != cron_secret then { return respond("403 Forbidden") }
     let _ = InitDB()
+
+    // Phase: FO-027 TTL chain_steps — очистка старше 14 дней; pending/failed
+    // без прогресса >24 ч → expired + Telegram-алерт владельцу
+    let _ = db_execute("DELETE FROM chain_steps WHERE created_at < datetime('now', '-14 days')")
+    let expired_rows = query("SELECT chain_id, COUNT(*) AS c FROM chain_steps WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day') GROUP BY chain_id", [])
+    let _ = db_execute("UPDATE chain_steps SET status='expired', updated_at=datetime('now') WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day')")
+    each er in expired_rows {
+      let exp_chain = to_string(json_get(er, "chain_id", "?"))
+      let exp_count = to_string(json_get(er, "c", "?"))
+      let _ = AuditLog("chain_expired", "system", exp_chain + " steps=" + exp_count)
+      let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), "FO-027: цепочка " + exp_chain + " истекла без прогресса >24 ч (" + exp_count + " степов) — resume: /chain continue " + exp_chain + " <query>")
+    }
 
     // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
     let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
