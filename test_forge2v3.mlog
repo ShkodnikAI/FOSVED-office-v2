@@ -1,0 +1,232 @@
+// test_forge2v3.mlog — FO-036 E.1–E.6: сквозной цикл §6, конвейер, история
+// решений, непрерывность, читающий цикл, отказ-тесты.
+// Запуск: mkdir -p /tmp/forge-test2 forge-tmp && METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test2 ./bin/mlog run test_forge2v3.mlog
+// Источники: no-mistakes (принципы конвейера §5.8), Fosved-coder response_parser (§5.7).
+
+db { url: "sqlite:/tmp/forge-test2/forge.db" }
+import dept/utils
+import dept/dev
+import dept/forge
+import dept/forge_model
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, seq INTEGER, title TEXT, description TEXT, needs_owner_gate TEXT DEFAULT 'false', status TEXT DEFAULT 'pending', commit_tag TEXT, commit_sha TEXT, failed_runs INTEGER DEFAULT 0, started_at TEXT, finished_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_briefs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, version INTEGER DEFAULT 1, content TEXT, approved TEXT DEFAULT 'false', approved_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
+  return "ok"
+}
+
+// ID задачи из ответа ForgeTaskCreate («Задача N создана …»)
+pattern TaskIdFrom(result: String) -> String {
+  let caps = regex_captures("Задача ([0-9]+)", result)
+  if length(caps) < 2.0 then { return "0" }
+  return to_string(get(caps, 1))
+}
+
+// короткий sha первой строки ForgeCommits («  abc1234 дата …»)
+pattern ShaFromLog(log: String) -> String {
+  let caps = regex_captures("([0-9a-f]{7,12})", log)
+  if length(caps) < 2.0 then { return "" }
+  return to_string(get(caps, 1))
+}
+
+pattern StageIdBySeq(task_id: String, seq: String) -> String {
+  let rows = query("SELECT id FROM forge_stages WHERE task_id = ? AND seq = ? LIMIT 1", [task_id, seq])
+  if length(rows) < 1.0 then { return "0" }
+  return to_string(json_get(get(rows, 0), "id", ""))
+}
+
+pattern Check(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name }
+  return "FAIL " + name + " — " + substring(detail, 0.0, 160.0)
+}
+
+pattern RejectCall(checks: String, name: String, result: String) -> String {
+  if starts_with(result, "ОТКАЗ") then { return checks + "PASS " + name + "\n" }
+  return checks + "FAIL " + name + " — ожидался ОТКАЗ, получено: " + substring(result, 0.0, 120.0) + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut checks = ""
+
+  // ═══ E.1: сквозной цикл §6 (fixture-ответ владельца) ═══
+  let proj = ForgeCreateProject("forge2-test", "Forge2 Test", "тест FO-036", "проверить цикл задач, гейт №1 и конвейер", "site", "landing", "Владелец", "minimal", "fosved-standard", "dev")
+  let checks = checks + Check("create-project", starts_with(proj, "Проект создан"), proj) + "\n"
+  let repo = ForgeCreateRepo("forge2-repo", "forge2-test", "репо цикла", "dev")
+  let checks = checks + Check("create-repo", starts_with(repo, "Репозиторий создан"), repo) + "\n"
+
+  // задача владельца → queued; задача агента → proposed (A.5)
+  let t_owner = ForgeTaskCreate("forge2-test", "Лендинг клиента: база", "сделать по форме проекта", "high", "owner", "owner")
+  let owner_id = TaskIdFrom(t_owner)
+  let checks = checks + Check("task-owner-queued", contains(t_owner, "queued"), t_owner) + "\n"
+  let t_agent = ForgeTaskCreate("forge2-test", "Агент предлагает: тёмная тема", "инициатива отдела", "normal", "dev", "agent")
+  let agent_id = TaskIdFrom(t_agent)
+  let checks = checks + Check("task-agent-proposed", contains(t_agent, "proposed"), t_agent) + "\n"
+  // агентская не в очереди: захват отвергнут до подтверждения
+  let checks = RejectCall(checks, "agent-task-not-claimable", ForgeTaskClaim(agent_id, "dev"))
+
+  // гейт №1 — одним сообщением (решение 17)
+  let plan = "[{\"title\":\"Каркас страниц\",\"description\":\"index + стили\",\"needs_owner_gate\":\"false\"},{\"title\":\"Форма обратной связи\",\"description\":\"валидация, отправка\",\"needs_owner_gate\":\"true\"}]"
+  let gate1 = ForgeGate1Submit(owner_id, plan)
+  let checks = checks + Check("gate1-one-message", contains(gate1, "ПЛАН ЭТАПОВ") and contains(gate1, "ЗАДАНИЕ"), gate1) + "\n"
+  let checks = checks + Check("task-awaiting-plan", ForgeTaskGetStatus(owner_id) == "awaiting_plan", ForgeTaskGetStatus(owner_id)) + "\n"
+
+  // подтверждение владельца → brief approved + этапы созданы → queued
+  let approved = ForgeGate1Approve(owner_id, "ЗАДАНИЕ: лендинг по утверждённой форме. Критерии: страницы открываются, форма валидируется.", plan)
+  let checks = checks + Check("gate1-approve", starts_with(approved, "Задание v1"), approved) + "\n"
+  let brief_rows = query("SELECT content FROM forge_briefs WHERE task_id = ? AND approved = 'true' LIMIT 1", [owner_id])
+  let checks = checks + Check("brief-approved", length(brief_rows) == 1.0, to_string(length(brief_rows))) + "\n"
+  let stage1_id = StageIdBySeq(owner_id, "1")
+  let stage2_id = StageIdBySeq(owner_id, "2")
+
+  // захват → in_progress; потолок и зависимость проверяются в E.6
+  let claim = ForgeTaskClaim(owner_id, "dev")
+  let checks = checks + Check("claim", contains(claim, "захвачена"), claim) + "\n"
+
+  // этап 1: старт → запись (конвейер minimal: ревью пропущено, README автодобавлен)
+  let s1 = ForgeStageStart(stage1_id)
+  let checks = checks + Check("stage1-start", starts_with(s1, "Этап 1"), s1) + "\n"
+  let w1 = ForgeWriteFiles("forge2-repo", "[{\"path\":\"index.html\",\"content\":\"<h1>лендинг</h1>\\n\"}]", "feat: каркас страницы", "dev")
+  let checks = checks + Check("stage1-write", starts_with(w1, "Записано"), w1) + "\n"
+  // автоправка документации сработала молча: README появился в репо
+  let readme = ForgeReadFile("forge2-repo", "main", "README.md")
+  let checks = checks + Check("docs-autopilot", starts_with(readme, "# Проект"), readme) + "\n"
+  let sha1 = ShaFromLog(ForgeCommits("forge2-repo", "1"))
+  let c1 = ForgeStageComplete(stage1_id, "forge2-repo", sha1)
+  let checks = checks + Check("stage1-complete-tag", contains(c1, "stage-1"), c1) + "\n"
+
+  // этап 2 — рутинный, проходит
+  let s2 = ForgeStageStart(stage2_id)
+  let checks = checks + Check("stage2-start", starts_with(s2, "Этап 2"), s2) + "\n"
+  let w2 = ForgeWriteFiles("forge2-repo", "[{\"path\":\"form.js\",\"content\":\"function validate(v) { return v.length > 0; }\\n\"}]", "feat: форма", "dev")
+  let checks = checks + Check("stage2-write", starts_with(w2, "Записано"), w2) + "\n"
+  let sha2 = ShaFromLog(ForgeCommits("forge2-repo", "1"))
+  let c2 = ForgeStageComplete(stage2_id, "forge2-repo", sha2)
+  let checks = checks + Check("stage2-complete-tag", contains(c2, "stage-2"), c2) + "\n"
+
+  // откат к stage-1 (история остаётся) и повторный проход этапа 2
+  let rb = ForgeRollback("forge2-repo", "stage-1")
+  let checks = checks + Check("rollback", starts_with(rb, "Откат"), rb) + "\n"
+  let w3 = ForgeWriteFiles("forge2-repo", "[{\"path\":\"form.js\",\"content\":\"function validate(v) { return v.length > 0 && v.length < 999; }\\n\"}]", "fix: форма после отката", "dev")
+  let checks = checks + Check("redo-stage2-write", starts_with(w3, "Записано"), w3) + "\n"
+  let sha3 = ShaFromLog(ForgeCommits("forge2-repo", "1"))
+  let c3 = ForgeStageComplete(stage2_id, "forge2-repo", sha3)
+  let checks = checks + Check("redo-stage2-tag", contains(c3, "stage-2"), c3) + "\n"
+  let done = ForgeTaskSetStatus(owner_id, "done")
+  let checks = checks + Check("task-done", done == "ok" and ForgeTaskGetStatus(owner_id) == "done", done) + "\n"
+
+  // ═══ E.2: конвейер — парковка ревью, per-step политика, состав ═══
+  let proj2 = ForgeCreateProject("forge2-review", "Review Test", "ревью-политика", "проверить парковку", "site", "landing", "Владелец", "key_stages", "fosved-standard", "dev")
+  let checks = checks + Check("create-project2", starts_with(proj2, "Проект создан"), proj2) + "\n"
+  let _ = ForgeCreateRepo("forge2-review-repo", "forge2-review", "репо ревью", "dev")
+  let t_rev = ForgeTaskCreate("forge2-review", "Фича с ревью", "описание", "normal", "owner", "owner")
+  let rev_id = TaskIdFrom(t_rev)
+  let plan2 = "[{\"title\":\"Смысловой код\",\"description\":\"требует ревью\",\"needs_owner_gate\":\"true\"},{\"title\":\"Рутинные правки\",\"description\":\"механика без ревью\",\"needs_owner_gate\":\"false\"}]"
+  let _ = ForgeGate1Submit(rev_id, plan2)
+  let _ = ForgeGate1Approve(rev_id, "ЗАДАНИЕ: фича под ревью. Критерии: код делает ровно это.", plan2)
+  let _ = ForgeTaskClaim(rev_id, "dev")
+  let rev_stage = StageIdBySeq(rev_id, "1")
+  let _ = ForgeStageStart(rev_stage)
+  let wrev = ForgeWriteFiles("forge2-review-repo", "[{\"path\":\"feature.js\",\"content\":\"const x = 1;\\n\"}]", "feat: фича", "dev")
+  let checks = RejectCall(checks, "review-parked-to-owner", wrev)
+  let checks = checks + Check("review-task-awaiting-owner", ForgeTaskGetStatus(rev_id) == "awaiting_owner", ForgeTaskGetStatus(rev_id)) + "\n"
+  let _ = ForgeTaskSetStatus(rev_id, "queued")
+  let _ = ForgeTaskClaim(rev_id, "dev")
+  let rev_stage2 = StageIdBySeq(rev_id, "2")
+  let _ = ForgeStageStart(rev_stage2)
+
+  // per-step политика: lint refuse — хвостовой пробел не проходит (рутинный этап)
+  let _ = db_execute("INSERT OR REPLACE INTO forge_step_config (project_slug, step, policy) VALUES ('forge2-review', 'lint', 'refuse')", [])
+  let wl = ForgeWriteFiles("forge2-review-repo", "[{\"path\":\"t.txt\",\"content\":\"x \\n\"}]", "feat: с пробелом", "dev")
+  let checks = RejectCall(checks, "lint-refuse-policy", wl)
+  // skip: docs исключён — README не обязателен; lint refuse остаётся, но без пробелов
+  let _ = db_execute("INSERT OR REPLACE INTO forge_step_config (project_slug, step, policy) VALUES ('forge2-review', 'docs', 'skip')", [])
+  let wskip = ForgeWriteFiles("forge2-review-repo", "[{\"path\":\"clean.txt\",\"content\":\"чисто\\n\"}]", "feat: чистый", "dev")
+  let checks = checks + Check("docs-skip-composition", starts_with(wskip, "Записано"), wskip) + "\n"
+  let _ = db_execute("DELETE FROM forge_step_config WHERE project_slug = 'forge2-review'", [])
+
+  // ═══ E.3: история решений ═══
+  let dec = ForgeFindingsDecline(rev_id, rev_stage, "review", "[\"не добавлять аналитику в фичу\"]")
+  let checks = checks + Check("decline-recorded", contains(dec, "1"), dec) + "\n"
+  let ctx = ForgeDeclinedContext(rev_id)
+  let checks = checks + Check("declined-read-by-steps", contains(ctx, "не добавлять аналитику"), ctx) + "\n"
+  // история сломана → предупреждение, конвейер продолжил (советует, не блокирует)
+  let _ = db_execute("DROP TABLE forge_finding_decisions", [])
+  let ctx_broken = ForgeDeclinedContext(rev_id)
+  let checks = checks + Check("history-broken-no-stop", ctx_broken == "", "история не читается, конвейер продолжает") + "\n"
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))", [])
+
+  // ═══ E.4: непрерывность (C.7) ═══
+  // отсмотренный sha этапа подменён → автоправка уходит через ревью/отказ
+  let _ = db_execute("UPDATE forge_stages SET commit_sha = 'deadbee' WHERE id = ?", [rev_stage])
+  let cont = ForgeContinuityCheck("forge2-review-repo", rev_stage)
+  let checks = RejectCall(checks, "continuity-mismatch", cont)
+
+  // ═══ E.5: читающий цикл (D.3/D.4) ═══
+  let resp_reads = "<read file=\"clean.txt\"/>"
+  let served = ForgeModelStageWrite("forge2-review-repo", "main", resp_reads, "msg", "dev")
+  let checks = checks + Check("read-cycle-served", starts_with(served, "READS:") and contains(served, "чисто"), served) + "\n"
+  let resp_diff = "```diff path=\"clean.txt\"\n-чисто\n+очень чисто\n```"
+  let applied = ForgeModelStageWrite("forge2-review-repo", "main", resp_diff, "fix: точечная правка", "dev")
+  let checks = checks + Check("diff-applied-to-write", starts_with(applied, "Записано"), applied) + "\n"
+  let back = ForgeReadFile("forge2-review-repo", "main", "clean.txt")
+  let checks = checks + Check("diff-content-verified", contains(back, "очень чисто"), back) + "\n"
+
+  // ═══ E.6: отказ-тесты ═══
+  let bad_diff = ModelApplyDiff("ДРУГОЙ\nКОНТЕНТ", "{\"path\":\"clean.txt\",\"removed\":\"чисто\",\"added\":\"x\"}")
+  let checks = RejectCall(checks, "diff-context-mismatch", bad_diff)
+  let evil = ModelParseFiles("<file path=\"../escape.txt\">x</file>")
+  let checks = RejectCall(checks, "path-traversal-tag", evil)
+  let cmd = ModelParseFiles("<command>rm -rf /</command>")
+  let checks = checks + Check("command-tag-ignored", length(parse_json(cmd)) == 0.0, cmd) + "\n"
+  let six = "[\"a.txt\",\"b.txt\",\"c.txt\",\"d.txt\",\"e.txt\",\"f.txt\"]"
+  let checks = RejectCall(checks, "read-limit-5", ModelServeReads("forge2-review-repo", "main", six))
+  // два цикла на одну задачу → второй получает отказ
+  let _ = ForgeTaskSetStatus(rev_id, "done")
+  let t_dup = ForgeTaskCreate("forge2-review", "Для двойного захвата", "двойной захват", "normal", "owner", "owner")
+  let dup_id = TaskIdFrom(t_dup)
+  let first_claim = ForgeTaskClaim(dup_id, "dev")
+  let checks = checks + Check("claim-first-ok", contains(first_claim, "захвачена"), first_claim) + "\n"
+  let checks = RejectCall(checks, "claim-double-rejected", ForgeTaskClaim(dup_id, "design"))
+  // брошенный захват: in_progress 31 минуту → освобождается и берётся заново
+  let stale_ts = to_string(now() - 1860.0)
+  let _ = db_execute("UPDATE forge_tasks SET claimed_at = ? WHERE id = ?", [stale_ts, dup_id])
+  let freed = ForgeStaleClaims()
+  let re_claim = ForgeTaskClaim(dup_id, "dev")
+  let checks = checks + Check("stale-claim-freed", contains(re_claim, "захвачена"), freed + " | " + re_claim) + "\n"
+  // потолок: две in_progress в РАЗНЫХ проектах — ок; третья → отказ
+  let _ = ForgeTaskSetStatus(dup_id, "done")
+  let _ = ForgeCreateProject("forge2-limit", "Limit Test", "потолок", "проверка §7", "site", "landing", "Владелец", "minimal", "fosved-standard", "dev")
+  let t_p1 = ForgeTaskCreate("forge2-review", "Параллель A", "in_progress №1", "normal", "owner", "owner")
+  let p1_id = TaskIdFrom(t_p1)
+  let t_p2 = ForgeTaskCreate("forge2-test", "Параллель B", "in_progress №2", "normal", "owner", "owner")
+  let p2_id = TaskIdFrom(t_p2)
+  let t_p3 = ForgeTaskCreate("forge2-limit", "Параллель C", "третья — под потолок", "normal", "owner", "owner")
+  let p3_id = TaskIdFrom(t_p3)
+  let cl1 = ForgeTaskClaim(p1_id, "design")
+  let checks = checks + Check("ceiling-second-ok", contains(cl1, "захвачена"), cl1) + "\n"
+  let cl2 = ForgeTaskClaim(p2_id, "dev")
+  let checks = checks + Check("ceiling-two-active", contains(cl2, "захвачена"), cl2) + "\n"
+  let checks = RejectCall(checks, "ceiling-2-in-progress", ForgeTaskClaim(p3_id, "dev"))
+  // тот же проект второй цикл — отказ (один репозиторий — один цикл)
+  let t_p4 = ForgeTaskCreate("forge2-test", "Та же репа третья", "коллизия репозитория", "normal", "owner", "owner")
+  let p4_id = TaskIdFrom(t_p4)
+  let checks = RejectCall(checks, "same-project-single-cycle", ForgeTaskClaim(p4_id, "design"))
+
+  // Итог
+  let fails = split(checks, "FAIL")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(checks, "PASS")) - 1.0) + " проверок)\n" + checks }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + "\n" + checks
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
