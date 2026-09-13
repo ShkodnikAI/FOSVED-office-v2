@@ -55,31 +55,37 @@ def strip_html_for_archive(html_content):
     return text.strip()
 
 # ──────────────────────────── HTML HELPERS ────────────────────────────
-def _html_base(title, bg="#0F0F0F"):
+def _html_base(title, bg="var(--paper)"):
+    """FO-045 (наряд #152): база отчётных страниц — токены «Диспетчерской».
+    Источник визуального языка один: miniapp/index.html (:root ниже — копия токенов).
+    Dark-палитра убрана; .gold/.status-* имена классов сохранены (генераторы
+    отчётов ссылаются на них), значения — из токенов.
+    """
     return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <title>{title}</title><style>
+:root{{--ink:#1C1B18;--paper:#EFEAE0;--paper-raised:#FBF8F2;--line:rgba(28,27,24,.14);--line-strong:rgba(28,27,24,.28);--stamp:#A8321E;--stamp-soft:rgba(168,50,30,.10);--muted:#6B6558;--ok:#3D6B2C;--warn:#9C6B0B;--bad:#A8321E;--d:'Newsreader',Georgia,serif;--b:'IBM Plex Sans',system-ui,sans-serif;--m:'IBM Plex Mono',ui-monospace,monospace;--ok-soft:rgba(61,107,44,.12);--warn-soft:rgba(156,107,11,.12);--bad-soft:rgba(168,50,30,.10)}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:'DM Sans',system-ui,sans-serif;background:{bg};color:#F8F7F4;min-height:100vh}}
-h1,h2,h3{{font-family:'Cormorant Garamond',serif;font-weight:700}}
-.badge{{font-family:'DM Mono',monospace;font-size:0.85rem;padding:1px 6px;border-radius:4px;display:inline-block;letter-spacing:-1px}}
-.badge-fact{{background:#dcfce7;color:#16a34a}} .badge-interp{{background:#dbeafe;color:#2563eb}}
-.badge-int{{background:#dbeafe;color:#2563eb}} .badge-spec{{background:#fef9c3;color:#ca8a04}}
-.badge-verified{{background:#d1fae5;color:#059669}} .badge-unverified{{background:#fef3c7;color:#d97706}}
-.badge-conflicting{{background:#fee2e2;color:#dc2626}}
-.card{{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:12px;padding:20px}}
-.kpi{{text-align:center;padding:16px}} .kpi .num{{font-size:2rem;font-weight:700;font-family:'DM Mono',monospace}}
-.kpi .lbl{{font-size:0.75rem;color:#999;margin-top:4px;text-transform:uppercase;letter-spacing:1px}}
-.gold{{color:#C9A84C}} .status-red{{color:#E24B4A}} .status-yellow{{color:#EF9F27}} .status-green{{color:#639922}} .status-blue{{color:#185FA5}}
-table{{width:100%;border-collapse:collapse;margin:12px 0}} th,td{{text-align:left;padding:8px 12px;border-bottom:1px solid #2a2a2a;font-size:0.85rem}}
-th{{color:#999;font-weight:500;text-transform:uppercase;font-size:0.7rem;letter-spacing:1px}}
-a{{color:#C9A84C;text-decoration:none}} a:hover{{text-decoration:underline}}
+body{{font-family:var(--b);background:{bg};color:var(--ink);min-height:100vh}}
+h1,h2,h3{{font-family:var(--d);font-weight:600}}
+.badge{{font-family:var(--m);font-size:0.85rem;padding:1px 6px;border-radius:4px;display:inline-block;letter-spacing:-1px}}
+.badge-fact{{background:var(--ok-soft);color:var(--ok)}} .badge-interp{{background:var(--stamp-soft);color:var(--stamp)}}
+.badge-int{{background:var(--stamp-soft);color:var(--stamp)}} .badge-spec{{background:var(--warn-soft);color:var(--warn)}}
+.badge-verified{{background:var(--ok-soft);color:var(--ok)}} .badge-unverified{{background:var(--warn-soft);color:var(--warn)}}
+.badge-conflicting{{background:var(--bad-soft);color:var(--bad)}}
+.card{{background:var(--paper-raised);border:1px solid var(--line);border-radius:12px;padding:20px}}
+.kpi{{text-align:center;padding:16px}} .kpi .num{{font-size:2rem;font-weight:700;font-family:var(--m)}}
+.kpi .lbl{{font-size:0.75rem;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:1px}}
+.gold{{color:var(--stamp)}} .status-red{{color:var(--bad)}} .status-yellow{{color:var(--warn)}} .status-green{{color:var(--ok)}} .status-blue{{color:var(--stamp)}}
+table{{width:100%;border-collapse:collapse;margin:12px 0}} th,td{{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);font-size:0.85rem}}
+th{{color:var(--muted);font-weight:500;text-transform:uppercase;font-size:0.7rem;letter-spacing:1px}}
+a{{color:var(--stamp);text-decoration:none}} a:hover{{text-decoration:underline}}
 .grid{{display:grid;gap:16px}} .grid-3{{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}}
 .grid-4{{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}}
 .header-grad{{padding:32px 40px;border-radius:16px;margin:20px 24px;color:#fff}}
 .section{{padding:0 24px;margin-top:24px}} .section h2{{margin-bottom:16px;font-size:1.4rem}}
-.mono{{font-family:'DM Mono',monospace}}
+.mono{{font-family:var(--m)}}
 </style></head><body>"""
 
 def _dept_header(dept, title_extra=""):
@@ -89,8 +95,9 @@ def _dept_header(dept, title_extra=""):
            f'<h1>{name} {title_extra}</h1><p style="color:{c["accent"]};font-size:0.9rem;margin-top:8px">Department Dashboard</p></div>'
 
 def _status_icon(level):
-    colors = {"high": "#639922", "medium": "#EF9F27", "low": "#E24B4A"}
-    return f'<span style="color:{colors.get(level,"#999")};font-size:1.5rem">{"&#x1F7E2;" if level=="high" else "&#x1F7E1;" if level=="medium" else "&#x1F534;"}</span>'
+    # FO-045: статусы — токены --ok/--warn/--bad (Диспетчерская)
+    colors = {"high": "var(--ok)", "medium": "var(--warn)", "low": "var(--bad)"}
+    return f'<span style="color:{colors.get(level,"var(--muted)")};font-size:1.5rem">{"&#x1F7E2;" if level=="high" else "&#x1F7E1;" if level=="medium" else "&#x1F534;"}</span>'
 
 def _dept_kpis(dept):
     now = datetime.utcnow()
@@ -233,38 +240,40 @@ def _browse_page(title, crumbs, items, back_href, tg_suffix=""):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{e_title}</title>
 <style>
-body{{margin:0;padding:16px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;
-background:#17212b;color:#e9edf2}}
-h1{{font-size:18px;margin:0 0 4px}}
-.crumbs{{font-size:13px;color:#8fa3b8;margin-bottom:16px}}
+:root{{--ink:#1C1B18;--paper:#EFEAE0;--paper-raised:#FBF8F2;--line:rgba(28,27,24,.14);--stamp:#A8321E;--muted:#6B6558;--b:'IBM Plex Sans',system-ui,sans-serif}}
+body{{margin:0;padding:16px;font-family:var(--b);
+background:var(--paper);color:var(--ink)}}
+h1{{font-size:18px;margin:0 0 4px;font-family:var(--b);font-weight:600}}
+.crumbs{{font-size:13px;color:var(--muted);margin-bottom:16px}}
 .row{{display:flex;justify-content:space-between;align-items:center;gap:12px;
-padding:14px 12px;margin-bottom:8px;background:#1f2b38;border-radius:10px;
-text-decoration:none;color:#e9edf2}}
-.row:active{{background:#26374a}}
+padding:14px 12px;margin-bottom:8px;background:var(--paper-raised);border:1px solid var(--line);border-radius:10px;
+text-decoration:none;color:var(--ink)}}
+.row:active{{background:var(--paper)}}
 .name{{font-size:15px;overflow:hidden;text-overflow:ellipsis}}
-.sub{{font-size:13px;color:#8fa3b8;white-space:nowrap}}
-.empty{{color:#8fa3b8;padding:20px 0}}
-.back{{display:inline-block;margin-bottom:14px;color:#5aa9e6;text-decoration:none;font-size:14px}}
+.sub{{font-size:13px;color:var(--muted);white-space:nowrap}}
+.empty{{color:var(--muted);padding:20px 0}}
+.back{{display:inline-block;margin-bottom:14px;color:var(--stamp);text-decoration:none;font-size:14px}}
 </style></head><body>
 {back}<h1>{e_title}</h1><div class="crumbs">{e_crumbs}</div>{body}
 </body></html>"""
 
 def _evidence_badges_css():
-    """Return CSS for Apodex evidence badges."""
+    """CSS бейджей доказательности Apodex — токены «Диспетчерской» (FO-045)."""
     return """
-.badge-verified{background:#05966922;color:#059669;border:1px solid #05966944;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
-.badge-unverified{background:#d9770622;color:#d97706;border:1px solid #d9770644;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
-.badge-conflicting{background:#dc262622;color:#dc2626;border:1px solid #dc262644;border-radius:4px;font-family:'DM Mono',monospace;font-size:0.7rem;padding:2px 8px;display:inline-block}
-.evidence-section{margin:24px 0;padding:20px;background:#111;border:1px solid #2a2a2a;border-radius:12px}
+:root{--ink:#1C1B18;--paper:#EFEAE0;--paper-raised:#FBF8F2;--line:rgba(28,27,24,.14);--stamp:#A8321E;--stamp-soft:rgba(168,50,30,.10);--muted:#6B6558;--ok:#3D6B2C;--warn:#9C6B0B;--bad:#A8321E;--m:'IBM Plex Mono',ui-monospace,monospace;--ok-soft:rgba(61,107,44,.12);--warn-soft:rgba(156,107,11,.12);--bad-soft:rgba(168,50,30,.10)}
+.badge-verified{background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok);border-radius:4px;font-family:var(--m);font-size:0.7rem;padding:2px 8px;display:inline-block}
+.badge-unverified{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn);border-radius:4px;font-family:var(--m);font-size:0.7rem;padding:2px 8px;display:inline-block}
+.badge-conflicting{background:var(--bad-soft);color:var(--bad);border:1px solid var(--bad);border-radius:4px;font-family:var(--m);font-size:0.7rem;padding:2px 8px;display:inline-block}
+.evidence-section{margin:24px 0;padding:20px;background:var(--paper-raised);border:1px solid var(--line);border-radius:12px}
 .evidence-stats{display:flex;gap:16px;margin:12px 0}
 .ev-stat{text-align:center}
-.ev-num{display:block;font-size:24px;font-weight:700;font-family:'DM Mono',monospace;color:#059669}
-.ev-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px}
-.ev-item{padding:8px 12px;border-bottom:1px solid #1a1a1a;display:flex;gap:8px;align-items:center;font-size:13px}
-.ev-item.verified{border-left:3px solid #059669}
-.ev-item.unverified{border-left:3px solid #d97706}
-.ev-item.conflicting{border-left:3px solid #dc2626}
-.ev-id{font-family:'DM Mono',monospace;color:#94a3b8;font-size:0.8rem}
+.ev-num{display:block;font-size:24px;font-weight:700;font-family:var(--m);color:var(--ok)}
+.ev-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.ev-item{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;font-size:13px}
+.ev-item.verified{border-left:3px solid var(--ok)}
+.ev-item.unverified{border-left:3px solid var(--warn)}
+.ev-item.conflicting{border-left:3px solid var(--bad)}
+.ev-id{font-family:var(--m);color:var(--muted);font-size:0.8rem}
 .ev-source{flex:1}
 .ev-status{font-size:11px;font-weight:600}
 """

@@ -320,7 +320,7 @@ def _miniapp_get_inner(doc_id):
             html = f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>{css}
-body {{ font-family:'DM Sans',sans-serif; color:#1e293b; background:#F8F7F4; margin:0; }}
+body {{ font-family:var(--b,'IBM Plex Sans',system-ui,sans-serif); color:var(--ink,#1C1B18); background:var(--paper,#EFEAE0); margin:0; }}
 </style></head><body>
 <div class="report-container">
 <div class="report-header" style="background:linear-gradient(135deg,{c['start']},{c['end']})">
@@ -643,7 +643,7 @@ def office_dashboard():
 
     html = _html_base("Fosved Office — Panel upravleniya")
     html += '<div class="header-grad" style="background:linear-gradient(135deg,#1a1a2e,#16213e)"><h1>Fosved Office v2</h1>'
-    html += f'<p style="color:#C9A84C;margin-top:8px">Obzor za {today} &nbsp;|&nbsp; Provider: <span class="mono">{_cfg_cache["priority_provider"]}</span> &nbsp;|&nbsp; Model: <span class="mono">{_cfg_cache["priority_model"] or "auto"}</span></p></div>'
+    html += f'<p style="color:var(--stamp,#A8321E);margin-top:8px">Obzor za {today} &nbsp;|&nbsp; Provider: <span class="mono">{_cfg_cache["priority_provider"]}</span> &nbsp;|&nbsp; Model: <span class="mono">{_cfg_cache["priority_model"] or "auto"}</span></p></div>'
     html += f"""<div class="grid grid-4" style="margin:20px 24px">
 <div class="card kpi"><div class="num gold">{n_today}</div><div class="lbl">Vyzovov segodnya</div></div>
 <div class="card kpi"><div class="num status-blue">{n_week}</div><div class="lbl">Za nedelyu</div></div>
