@@ -1499,6 +1499,71 @@ pattern ForgeAttention() -> String {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// FO-043 (наряд #150): метрика формата правок (§15 ТЗ).
+// Исходы применения диффов — forge_edit_stats (task_id, stage_id, path,
+// outcome, fuzzy, created_at); outcome ∈ first_try | fuzzy | reject.
+// «after_reread» вычисляется в срезе: успех по тому же task+path после
+// reject. Недельный срез — доля first-try; низкая → «менять формат, а не
+// модель» (§15). Таблицы нет (старая БД) → деградация без записи.
+// ══════════════════════════════════════════════════════════════════════
+
+// запись исхода: контекст задачи/этапа выводится из репозитория (шов как в
+// ForgeCheckPipeline: repo → project → активная задача → этап)
+pattern ForgeEditStatsRecord(repo_name: String, path: String, outcome: String, marker: String) -> String {
+  if outcome != "first_try" and outcome != "fuzzy" and outcome != "reject" then { return "ОТКАЗ: outcome ∈ {first_try, fuzzy, reject}" }
+  let probe = try query("SELECT COUNT(*) as c FROM forge_edit_stats", [])
+  if to_string(probe) == "()" then { return "stats-off: таблицы нет (деградация, запись пропущена)" }
+  let proj_rows = query("SELECT project_slug FROM forge_repos WHERE name = ? LIMIT 1", [repo_name])
+  if length(proj_rows) < 1.0 then { return "ok: репо не найдено — без привязки" }
+  let project_slug = to_string(json_get(get(proj_rows, 0), "project_slug", ""))
+  let task_id = ""
+  let stage_id = ""
+  let task_rows = try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug])
+  if to_string(task_rows) != "()" and length(task_rows) > 0.0 then {
+    let task_id = to_string(json_get(get(task_rows, 0), "id", ""))
+    let stage_rows = query("SELECT id FROM forge_stages WHERE task_id = ? AND status = 'in_progress' ORDER BY seq DESC LIMIT 1", [task_id])
+    if length(stage_rows) > 0.0 then { let stage_id = to_string(json_get(get(stage_rows, 0), "id", "")) }
+  }
+  let _ = db_execute("INSERT INTO forge_edit_stats (task_id, stage_id, path, outcome, fuzzy) VALUES (?, ?, ?, ?, ?)", [task_id, stage_id, substring(path, 0.0, 300.0), outcome, marker])
+  return "ok"
+}
+
+// недельный срез: доля first-try + вердикт по формату (для телеметрии/брифа)
+pattern ForgeEditStatsWeekly() -> String {
+  let probe = try query("SELECT COUNT(*) as c FROM forge_edit_stats", [])
+  if to_string(probe) == "()" then { return "" }
+  let rows = query("SELECT outcome, COUNT(*) as c FROM forge_edit_stats WHERE created_at > datetime('now', '-7 days') GROUP BY outcome", [])
+  let mut first_try = 0.0
+  let mut fuzzy = 0.0
+  let mut reject = 0.0
+  each r in rows {
+    let oc = to_string(json_get(r, "outcome", ""))
+    if oc == "first_try" then { let first_try = to_float(json_get(r, "c", "0")) }
+    if oc == "fuzzy" then { let fuzzy = to_float(json_get(r, "c", "0")) }
+    if oc == "reject" then { let reject = to_float(json_get(r, "c", "0")) }
+  }
+  let ov_rows = query("SELECT outcome, COUNT(*) as c FROM forge_edit_stats s WHERE s.outcome IN ('first_try','fuzzy') AND s.created_at > datetime('now', '-7 days') AND EXISTS (SELECT 1 FROM forge_edit_stats r WHERE r.task_id = s.task_id AND r.path = s.path AND r.outcome = 'reject' AND r.created_at <= s.created_at) GROUP BY outcome", [])
+  let mut ov_first = 0.0
+  let mut ov_fuzzy = 0.0
+  each o in ov_rows {
+    let oc = to_string(json_get(o, "outcome", ""))
+    if oc == "first_try" then { let ov_first = to_float(json_get(o, "c", "0")) }
+    if oc == "fuzzy" then { let ov_fuzzy = to_float(json_get(o, "c", "0")) }
+  }
+  let after_reread = ov_first + ov_fuzzy
+  let first_clean = first_try - ov_first
+  if first_clean < 0.0 then { let first_clean = 0.0 }
+  let fuzzy_clean = fuzzy - ov_fuzzy
+  if fuzzy_clean < 0.0 then { let fuzzy_clean = 0.0 }
+  let total = first_clean + fuzzy_clean + after_reread + reject
+  if total == 0.0 then { return "применений правок за неделю не было" }
+  let share = (first_clean + after_reread) * 100.0 / total
+  let verdict = "формат ок"
+  if share < 50.0 then { let verdict = "низкая доля first-try → менять формат диффов, а не модель (§15)" }
+  return "Правки за 7 дней: " + to_string(total) + " попыток; с первой попытки " + to_string(first_clean) + " (" + to_string(round(share)) + "%), после перечитывания " + to_string(after_reread) + ", нечётко " + to_string(fuzzy_clean) + ", отказов " + to_string(reject) + ". " + verdict
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // FO-039 (наряд #137): FORGE-5v3 — живое превью по требованию.
 // A: подъём (порт 8100–8110, forge_previews, клон, nohup + env -i +
 //    timeout 1800, ключи только проекта). B: маршрутизация reverse_proxy
