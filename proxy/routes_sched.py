@@ -1069,6 +1069,8 @@ Requirements:
         now = datetime.utcnow().isoformat()
         _query("INSERT INTO token_usage (provider,model,input_tokens,output_tokens,cost_usd,dept,created_at) VALUES (?,?,?,?,?,?,?)",
                (used_provider, used_model, t_in, t_out, round(cost, 6), dept, now))
+        from proxy.budget import invalidate as budget_invalidate
+        budget_invalidate()  # FO-024: счётчик дня — по каждой записи
 
         _log_audit("lz_deep_research", {
             "dept": dept, "provider": used_provider, "model": used_model,
