@@ -2282,6 +2282,30 @@ mlogserver {
   }
 
   // ============================================================
+  // FO-026: один шаг fan-out/debate — вызывает Python-плоскость
+  // /chain/fanout (ThreadPoolExecutor, параллельность по прецеденту
+  // race-first-2). Диспетчеризация — ChainDispatchDept из dept/chain.mlog.
+  // ============================================================
+  route "/chain/step" method=POST {
+    let auth = RequireInternalAuth()
+    if auth == "unauthorized" then { return respond("401 Unauthorized") }
+    let data = json_body()
+    let dept = to_string(json_get(data, "dept", ""))
+    let query = to_string(json_get(data, "query", ""))
+    let chat_id = to_string(json_get(data, "chat_id", "0"))
+    let group_id = to_string(json_get(data, "group_id", ""))
+    let round_no = to_string(json_get(data, "round", "1"))
+    let peer = to_string(json_get(data, "peer_context", ""))
+    let q = query
+    if peer != "" then {
+      let q = query + "\n\n=== РАУНД " + round_no + ": ответ коллеги — внеси поправки или подтверди ===\n" + peer
+    }
+    let _ = AuditLog("chain_step", dept, "fanout group=" + group_id + " round=" + round_no)
+    let result = ChainDispatchDept(dept, q, chat_id)
+    return respond(result)
+  }
+
+  // ============================================================
   // WEBHOOK — Telegram
   // ============================================================
 
@@ -2291,7 +2315,6 @@ mlogserver {
     let chat_id = to_string(json_get(data, "message.chat.id", "0"))
     let user_id = to_string(json_get(data, "message.from.id", "0"))
     let owner_id = env("OWNER_TELEGRAM_ID")
-
     // Owner check — ignore non-owner
     if user_id != owner_id then { return respond("200 ok") }
 
@@ -3514,7 +3537,72 @@ mlogserver {
     // /chain
     if starts_with(text, "/chain") then {
       let rest = substring(text, 7.0, length(text))
-      let parts = split(rest, _sp)
+      // FO-026: mode prefix — parallel | debate. Без mode — прежний sequential 1-в-1.
+      let mut mode = ""
+      let mut rest2 = rest
+      let trimmed_rest = trim(rest)
+      if starts_with(trimmed_rest, "parallel ") then {
+        let mode = "parallel"
+        let rest2 = substring(trimmed_rest, 9.0, length(trimmed_rest))
+      }
+      if starts_with(trimmed_rest, "debate ") then {
+        let mode = "debate"
+        let rest2 = substring(trimmed_rest, 7.0, length(trimmed_rest))
+      }
+      if mode == "" then {
+        if starts_with(trimmed_rest, "parallel") and length(trimmed_rest) == 8.0 then { let mode = "parallel" }
+        if starts_with(trimmed_rest, "debate") and length(trimmed_rest) == 6.0 then { let mode = "debate" }
+      }
+      if mode != "" then {
+        // Fan-out/debate: департаменты через запятую + query
+        let parts2 = split(rest2, _sp)
+        if length(parts2) > 1.0 then {
+          let dept_list = trim(to_string(get(parts2, 0.0)))
+          let query_fo = substring(rest2, length(dept_list) + 1.0, length(rest2))
+          // CSV → JSON array строк (вручную: json_encode завёрнул бы как строку)
+          let arr = "["
+          let mut i = 0.0
+          each dslug in split(dept_list, ",") {
+            let dd = trim(to_string(dslug))
+            if dd != "" then {
+              if i > 0.0 then { let arr = arr + "," }
+              let arr = arr + "\"" + dd + "\""
+              let i = i + 1.0
+            }
+          }
+          let arr = arr + "]"
+          let _ = RecordUserMessage(chat_id, "chain", text)
+          let _ = AuditLog("chain_start", "system", "chain " + mode + ": " + dept_list)
+          let body_fo = "{\"mode\":\"" + mode + "\",\"chat_id\":\"" + chat_id + "\",\"depts\":" + arr + ",\"query\":\"" + JsonEscapeText(query_fo) + "\"}"
+          // Таймаут группы: debate ≤ 2 раунда × шаг + судья
+          let resp_fo = try http_post("http://127.0.0.1:4000/chain/fanout", body_fo, "application/json", 540.0)
+          if to_string(resp_fo) == "()" then {
+            let _ = SendTelegramReply(chat_id, "Chain " + mode + ": плоскость fan-out недоступна (proxy не отвечает). Fallback: /chain " + dept_list + " <query> — последовательно.")
+          } else {
+            let parsed_fo = try parse_json(resp_fo)
+            if to_string(parsed_fo) == "()" then {
+              let _ = SendTelegramReply(chat_id, "Chain " + mode + ": ошибка разбора ответа fan-out.")
+            } else {
+              let status_fo = to_string(json_get(parsed_fo, "status", "error"))
+              if status_fo == "ok" then {
+                let gid = to_string(json_get(parsed_fo, "group_id", ""))
+                let judge = to_string(json_get(parsed_fo, "judge", ""))
+                let mut out = substring(judge, 0.0, 3500.0)
+                if length(judge) > 3500.0 then { let out = out + "\n…(обрезано — полное в отчёте)" }
+                let _ = SendTelegramReply(chat_id, out)
+                let _ = SendReport(judge, "chain", "Chain " + mode + " " + gid, "2.0", chat_id)
+              } else {
+                let msg_fo = to_string(json_get(parsed_fo, "message", "fan-out отказал"))
+                let _ = SendTelegramReply(chat_id, "Chain " + mode + " отклонён: " + msg_fo)
+              }
+            }
+          }
+        } else {
+          let _ = SendTelegramReply(chat_id, "Usage: /chain " + mode + " dept1,dept2 <query>")
+        }
+        return respond("200 ok")
+      }
+      // ── Sequential (без изменений, обратная совместимость 1-в-1) ──
       if length(parts) > 1.0 then {
         let dept_chain = trim(get(parts, 0.0))
         let query = substring(rest, length(dept_chain) + 1.0, length(rest))
@@ -3523,7 +3611,7 @@ mlogserver {
         let result = ExecuteChain(dept_chain, query, chat_id)
         let _ = SendTelegramReply(chat_id, result)
       } else {
-        let _ = SendTelegramReply(chat_id, "Usage: /chain dept1+dept2 <query>\nExample: /chain osp+legal test query\nMax 3 departments per chain.")
+        let _ = SendTelegramReply(chat_id, "Usage: /chain dept1+dept2 <query>\nExample: /chain osp+legal test query\nMax 3 departments per chain.\nFO-026: /chain parallel qa,legal <query> | /chain debate qa,legal <query>")
       }
       return respond("200 ok")
     }

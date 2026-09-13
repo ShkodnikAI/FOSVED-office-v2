@@ -162,6 +162,7 @@ from proxy.core import (
     KEYWORD_WEIGHTS as KEYWORD_WEIGHTS, _ANALYTICAL_DEPTS as _ANALYTICAL_DEPTS,
 )
 import proxy.routes_core  # noqa: F401 — регистрация роутов health..extract-document
+import proxy.chain_parallel  # noqa: F401 — FO-026: fan-out/debate плоскость /chain/fanout
 from proxy.telegram import (
     _send_chat_action_loop as _send_chat_action_loop,
     _tg_send_chat_action as _tg_send_chat_action,
