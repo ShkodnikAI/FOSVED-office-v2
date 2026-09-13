@@ -1,0 +1,106 @@
+// test_forge1v3.mlog — FO-035 E.3/E.5: позитивный цикл + отказ-тесты.
+// Запуск: METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test ./bin/mlog run test_forge1v3.mlog
+// Проверки: bare main, вложенные каталоги, дословное чтение, \x1f-коммиты,
+// diff/tag/rollback, гейт-на-границе (секрет → отказ ДО коммита, история пуста),
+// белые списки (slug/ref/path/author_dept).
+
+// Тестовая БД (mlog run без mlogserver — db объявляется явно)
+db { url: "sqlite:/tmp/forge-test/forge.db" }
+// Кросс-модульные зависимости (в app.mlog импортируются все; тут — явно)
+import dept/utils
+import dept/dev
+import dept/forge
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  return "ok"
+}
+
+pattern Check(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name }
+  return "FAIL " + name + " — " + detail
+}
+
+pattern RejectCall(checks: String, name: String, result: String) -> String {
+  // отказ-тест: ждём, что результат начинается с «ОТКАЗ»
+  if starts_with(result, "ОТКАЗ") then { return checks + "PASS " + name + "\n" }
+  return checks + "FAIL " + name + " — ожидался ОТКАЗ, получено: " + substring(result, 0.0, 120.0) + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut checks = ""
+
+  // ── E.4/E.5 отказ-тесты ──
+  let checks = RejectCall(checks, "reject-slug-shell", ForgeCreateRepo("test; rm -rf /", "p", "", "dev"))
+  let checks = RejectCall(checks, "reject-path-traversal", ForgeReadFile("some-repo", "main", "../../../etc/passwd"))
+  let checks = RejectCall(checks, "reject-ref-option", ForgeReadFile("some-repo", "-O", "x.txt"))
+  let checks = RejectCall(checks, "reject-leading-dash", ForgeCreateRepo("-evil", "p", "", "dev"))
+  let checks = RejectCall(checks, "reject-author-dept", ForgeWriteFiles("some-repo", "[{\"path\":\"a.txt\",\"content\":\"hi\"}]", "msg", "legal"))
+
+  // ── E.3 позитивный цикл ──
+  let proj = ForgeCreateProject("forge-test", "Forge Test", "тестовый проект", "проверить контур FORGE-1v3 end-to-end", "site", "landing", "Владелец", "key_stages", "fosved-standard", "dev")
+  let _ = AuditLog("stage_marker", "dev", "M1-after-create-project")
+  let checks = checks + Check("create-project", starts_with(proj, "Проект создан"), proj) + "\n"
+
+  let repo = ForgeCreateRepo("forge-test-repo", "forge-test", "тестовое репо", "dev")
+  let _ = AuditLog("stage_marker", "dev", "M2-after-create-repo")
+  let checks = checks + Check("create-repo", starts_with(repo, "Репозиторий создан"), repo) + "\n"
+
+  // ForgeWriteFiles: два файла, включая вложенный src/index.js; сообщение с |
+  let files_ok = "[{\"path\":\"README.md\",\"content\":\"# Forge Test\\nПроверка контура.\"},{\"path\":\"src/index.js\",\"content\":\"console.log('hello | pipe');\\n\"}]"
+  let written = ForgeWriteFiles("forge-test-repo", files_ok, "feat: первая версия | с пайпом в сообщении", "dev")
+  let _ = AuditLog("stage_marker", "dev", "M3-after-write-files")
+  let checks = checks + Check("write-files", starts_with(written, "Записано"), written) + "\n"
+
+  // Дословное чтение
+  let back = ForgeReadFile("forge-test-repo", "main", "src/index.js")
+  let _ = AuditLog("stage_marker", "dev", "M4-after-read")
+  let checks = checks + Check("read-file-verbatim", contains(back, "hello | pipe"), back) + "\n"
+
+  // Коммиты: сообщение с | парсится корректно (разделитель \x1f)
+  let commits = ForgeCommits("forge-test-repo", "5")
+  let _ = AuditLog("stage_marker", "dev", "M5-after-commits")
+  let checks = checks + Check("commits-pipe-msg", contains(commits, "с пайпом в сообщении"), commits) + "\n"
+  let checks = checks + Check("commits-author", contains(commits, "Fosved Dev"), commits) + "\n"
+
+  // Diff + Tag + Rollback
+  let files2 = "[{\"path\":\"src/index.js\",\"content\":\"console.log('v2');\\n\"}]"
+  let _ = ForgeWriteFiles("forge-test-repo", files2, "feat: v2", "dev")
+  let diff = ForgeDiff("forge-test-repo", "HEAD~1", "main")
+  let _ = AuditLog("stage_marker", "dev", "M6-after-diff")
+  let checks = checks + Check("diff", contains(diff, "diff --stat"), diff) + "\n"
+  let _ = AuditLog("stage_marker", "dev", "M7-before-headsha")
+  let head_sha = ForgeRunScript("git -C \"" + ForgeReposDir() + "/forge/repos/forge-test-repo.git\" rev-parse --short main")
+  let sha_for_tag = trim(head_sha.output)
+  let tag = ForgeTag("forge-test-repo", "v0.1", sha_for_tag)
+  let _ = AuditLog("stage_marker", "dev", "M8-after-tag")
+  let checks = checks + Check("tag", starts_with(tag, "Тег"), tag) + "\n"
+  let files3 = "[{\"path\":\"src/index.js\",\"content\":\"console.log('v3-bad');\\n\"}]"
+  let _ = ForgeWriteFiles("forge-test-repo", files3, "feat: v3-bad", "dev")
+  let rb = ForgeRollback("forge-test-repo", "v0.1")
+  let _ = AuditLog("stage_marker", "dev", "M9-after-rollback")
+  let checks = checks + Check("rollback", starts_with(rb, "Откат"), rb) + "\n"
+  let back_after = ForgeReadFile("forge-test-repo", "main", "src/index.js")
+  let checks = checks + Check("rollback-content", contains(back_after, "v2"), back_after) + "\n"
+
+  // ── Гейт-на-границе: секрет → ОТКАЗ ДО коммита, в истории пусто ──
+  let files_secret = "[{\"path\":\"config.js\",\"content\":\"const api_key = 'sk-abc123';\\n\"}]"
+  let secret_out = ForgeWriteFiles("forge-test-repo", files_secret, "feat: с секретом", "dev")
+  let checks = RejectCall(checks, "gate-secrets-reject", secret_out)
+  let history = ForgeCommits("forge-test-repo", "10")
+  let checks = checks + Check("gate-secrets-not-in-history", contains(history, "с секретом") == false, history) + "\n"
+
+  // Итог
+  let fails = split(checks, "FAIL")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(checks, "PASS")) - 1.0) + " проверок)\n" + checks }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + "\n" + checks
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

@@ -1265,6 +1265,8 @@ def expert_chart():
 CALL_PYTHON_ALLOWED = {
     # LLM-as-a-Verifier
     "llm_verifier": {"select", "score", "verify", "rank"},
+    # FO-035 A.2: secrets_store (SEC-5 минимальный) — AES-256-GCM, FORGE_MASTER_KEY
+    "forge_secrets": {"set", "get"},
     # Data processing
     "json": {"dumps", "loads"},
     "statistics": {"mean", "median", "stdev", "variance"},

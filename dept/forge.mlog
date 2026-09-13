@@ -1,0 +1,405 @@
+// Fosved Office v2 — dept/forge.mlog — FORGE-контур (FO-035, библиотека, не департамент)
+// Хранилище и проектный слой: мини-GitHub (bare repos), ForgeWriteFiles с
+// гейтом-на-границе ForgeCheckPipeline (шов конвейера §5.8 ТЗ v3), секреты,
+// зеркала GitHub. Исполнение чужого кода здесь отсутствует (FO-037).
+//
+// Гейты ядра: exec() в телах роутов требует METALOGOS_SERVE_ALLOW_EXEC=1 —
+// наряд сдается БЕЗ его включения: exec вызывается только из mlog run
+// (позитивный цикл test_forge1v3.mlog) до активации в FO-037.
+//
+// Двухзонная схема (§2 ТЗ): персистентное — только FORGE_REPOS_DIR/forge/repos/
+// через exec с абсолютными путями; scratch — /office/forge-tmp для write_file.
+// Запреты: содержимое файлов и commit-сообщения НИКОГДА не попадают в
+// shell-строки (write_file + git commit -F); проверки содержимого — только
+// в ForgeCheckPipeline (граница записи и публикации).
+
+// ── Пути (env, отчёт: mountPath настраивается в панели Render) ─────────
+pattern ForgeReposDir() -> String {
+  let d = env("FORGE_REPOS_DIR")
+  if d == "" then { return "/var/forge/repos" }
+  return trim(d)
+}
+
+pattern ForgeTmpDir() -> String {
+  return "/office/forge-tmp"
+}
+
+// ── Валидация по белым спискам ДО подстановки (отказ, не санитизация) ──
+pattern ForgeValidSlug(name: String) -> String {
+  if length(name) < 2.0 or length(name) > 40.0 then { return "отказ: длина slug/repo должна быть 2..40" }
+  if starts_with(name, "-") then { return "отказ: имя не может начинаться с '-'" }
+  if regex_match("^[a-z0-9-]+$", name) == false then { return "отказ: допустимы только [a-z0-9-]" }
+  return "ok"
+}
+
+pattern ForgeValidRef(refv: String) -> String {
+  if length(refv) < 1.0 or length(refv) > 120.0 then { return "отказ: некорректный ref" }
+  if starts_with(refv, "-") then { return "отказ: ref не может начинаться с '-' (опция-инъекция)" }
+  if regex_match("^[a-zA-Z0-9._/~^-]+$", refv) == false then { return "отказ: ref допустимы [a-zA-Z0-9._/~^-]" }
+  return "ok"
+}
+
+pattern ForgeValidPath(path: String) -> String {
+  if length(path) < 1.0 or length(path) > 400.0 then { return "отказ: некорректный путь" }
+  if starts_with(path, "/") then { return "отказ: путь не может быть абсолютным" }
+  if contains(path, "..") or contains(path, ";") or contains(path, "|") or contains(path, "&") or contains(path, "$") then { return "отказ: путь содержит запрещённые символы" }
+  if contains(path, "\"") or contains(path, "'") or contains(path, "`") or contains(path, " ") then { return "отказ: путь содержит кавычки/пробелы" }
+  if regex_match("^[a-zA-Z0-9._/-]+$", path) == false then { return "отказ: путь допустимы [a-zA-Z0-9._/-]" }
+  return "ok"
+}
+
+pattern ForgeValidAuthorDept(author_dept: String) -> String {
+  if author_dept == "dev" or author_dept == "design" or author_dept == "qa" then { return "ok" }
+  return "отказ: author_dept вне {dev, design, qa}"
+}
+
+// ── exec-рецепт: код возврата + stdout через файл (§2 ТЗ, exec не отдаёт код)
+// В script попадают ТОЛЬКО валидированные пути/имена; содержимое файлов —
+// через write_file в scratch, в shell-строку не попадает никогда.
+pattern ForgeRunScript(script: String) -> Dict {
+  let stamp = to_string(sha256(script + to_string(now())))
+  // scratch-зона — относительный путь от корня офиса (write_file sandbox:
+  // абсолютные пути ядро отвергает SANDBOX_VIOLATION — проверено)
+  let script_path = "forge-tmp/run_" + stamp + ".sh"
+  let _ = write_file(script_path, script)
+  let out = try exec("bash forge-tmp/run_" + stamp + ".sh > forge-tmp/run_" + stamp + ".out 2>&1; code=$?; head -c 20000 forge-tmp/run_" + stamp + ".out; echo \"___EXIT:$code\"")
+  if to_string(out) == "()" then {
+    return { exit_code: -1.0, output: "exec сбой (гейт ядра/таймаут)" }
+  }
+  let parts = split(to_string(out), "___EXIT:")
+  let exit_code = to_float(trim(to_string(get(parts, 1))))
+  let output = substring(to_string(get(parts, 0)), 0.0, 20000.0)
+  let _ = exec("rm -f /office/forge-tmp/run_" + stamp + ".*")
+  return { exit_code: exit_code, output: output }
+}
+
+// ── A.2: secrets_store — минимальный SEC-5 ──────────────────────────────
+// Ядро шифрует AES-256-GCM в память (Encrypted — opaque, строковой
+// репрезентации для SQLite нет — проверено по crypto.rs/values.rs), поэтому
+// персистентность через Python-плоскость (proxy/forge_secrets.py): тот же
+// AES-256-GCM, ключ env FORGE_MASTER_KEY (64 hex); отсутствие/битый ключ —
+// громкая ошибка, не молчаливое хранение в открытом виде.
+pattern SetSecret(key: String, plaintext: String) -> String {
+  let resp = try call_python("forge_secrets", "set", json_encode([key, plaintext]))
+  if to_string(resp) == "()" then { return "ОТКАЗ: secrets-плоскость недоступна" }
+  let parsed = try parse_json(resp)
+  let result = to_string(json_get(parsed, "result", "ОТКАЗ: нет result"))
+  if starts_with(result, "ОТКАЗ") then { return result }
+  return "ok"
+}
+
+pattern GetSecret(key: String) -> String {
+  let resp = try call_python("forge_secrets", "get", json_encode([key]))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "" }
+  return to_string(json_get(parsed, "result", ""))
+}
+
+// ── B.1: ForgeCreateProject ─────────────────────────────────────────────
+pattern ForgeCreateProject(slug: String, name: String, desc: String, goal: String, project_type: String, template_id: String, customer_name: String, gate_policy: String, model_combo: String, departments: String) -> String {
+  let v = ForgeValidSlug(slug)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  if gate_policy != "every_stage" and gate_policy != "key_stages" and gate_policy != "minimal" then {
+    return "ОТКАЗ: gate_policy ∈ {every_stage, key_stages, minimal}"
+  }
+  if project_type != "site" and project_type != "android" and project_type != "ai_office" then {
+    return "ОТКАЗ: project_type ∈ {site, android, ai_office}"
+  }
+  let rows = query("SELECT slug FROM forge_projects WHERE slug = ? LIMIT 1", [slug])
+  if length(rows) > 0.0 then { return "ОТКАЗ: проект " + slug + " уже существует" }
+  let _ = db_execute("INSERT INTO forge_projects (slug, name, description, goal, project_type, template_id, customer_name, gate_policy, model_combo, departments, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')", [slug, name, desc, goal, project_type, template_id, customer_name, gate_policy, model_combo, departments])
+  let _ = AuditLog("forge_project_created", "dev", "slug=" + slug + " type=" + project_type)
+  return "Проект создан: " + slug + " (" + project_type + ", гейты: " + gate_policy + ")"
+}
+
+// ── B.2: ForgeCreateRepo — bare (обязательно -b main) + приватное зеркало ──
+pattern ForgeCreateRepo(name: String, project_slug: String, desc: String, author: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let r = ForgeRunScript("mkdir -p \"" + ForgeReposDir() + "/forge/repos\" && git init --bare -q -b main \"" + bare + "\" && git -C \"" + bare + "\" rev-parse --verify HEAD >/dev/null 2>&1 || echo empty-ok")
+  if r.exit_code != 0.0 then { return "ОТКАЗ: git init failed: " + r.output }
+  // Приватное зеркало на GitHub (токен из secrets_store, scope repo)
+  let mut github_url = ""
+  let token = GetSecret("forge_github_token")
+  if token != "" then {
+    let owner_repo = env("FORGE_GITHUB_OWNER")
+    if owner_repo != "" then {
+      let resp = try http_post("https://api.github.com/user/repos", json_encode({name: name, private: true, description: desc, auto_init: false}), "application/json")
+      if to_string(resp) != "()" then {
+        let parsed = try parse_json(resp)
+        let github_url = to_string(json_get(parsed, "html_url", ""))
+      }
+    }
+  }
+  let _ = db_execute("INSERT INTO forge_repos (name, project_slug, description, github_url, commits_count) VALUES (?, ?, ?, ?, 0)", [name, project_slug, desc, github_url])
+  let _ = AuditLog("forge_repo_created", "dev", "repo=" + name + " mirror=" + github_url)
+  let mirror_note = ""
+  if github_url != "" then { let mirror_note = ", зеркало: " + github_url }
+  return "Репозиторий создан: " + name + " (bare, ветка main" + mirror_note + ")"
+}
+
+// ── B.3: ForgeListProjects ──────────────────────────────────────────────
+pattern ForgeListProjects() -> String {
+  let rows = query("SELECT slug, name, project_type, status, updated_at FROM forge_projects ORDER BY updated_at DESC LIMIT 50", [])
+  if length(rows) == 0.0 then { return "Проектов пока нет. /newproject — короткая форма." }
+  let mut out = "Проекты FORGE:\n"
+  each row in rows {
+    let slug = to_string(json_get(row, "slug", "?"))
+    let nm = to_string(json_get(row, "name", "?"))
+    let st = to_string(json_get(row, "status", "?"))
+    let out = out + "  • " + slug + " — " + nm + " [" + st + "]\n"
+  }
+  return out
+}
+
+// ── B.4: ForgeRepoFiles ─────────────────────────────────────────────────
+pattern ForgeRepoFiles(name: String, refv: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let vr = ForgeValidRef(refv)
+  if vr != "ok" then { return "ОТКАЗ: " + vr }
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let r = ForgeRunScript("git -C \"" + bare + "\" ls-tree -r --name-only \"" + refv + "\"")
+  if r.exit_code != 0.0 then { return "ОТКАЗ: " + r.output }
+  return r.output
+}
+
+// ── B.5: ForgeReadFile — размер ДО чтения (exec буферизует в память) ────
+pattern ForgeReadFile(name: String, refv: String, path: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let vr = ForgeValidRef(refv)
+  if vr != "ok" then { return "ОТКАЗ: " + vr }
+  let vp = ForgeValidPath(path)
+  if vp != "ok" then { return "ОТКАЗ: " + vp }
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let sz = ForgeRunScript("git -C \"" + bare + "\" cat-file -s \"" + refv + ":" + path + "\"")
+  if sz.exit_code != 0.0 then { return "ОТКАЗ: файл не найден: " + path }
+  if to_float(trim(sz.output)) > 200000.0 then { return "ОТКАЗ: файл > 200000 байт" }
+  let r = ForgeRunScript("git -C \"" + bare + "\" show \"" + refv + ":" + path + "\"")
+  if r.exit_code != 0.0 then { return "ОТКАЗ: " + r.output }
+  return r.output
+}
+
+// ── B.6: ForgeCommits — разделитель \x1f ────────────────────────────────
+pattern ForgeCommits(name: String, limit: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let n = to_float(limit)
+  if n < 1.0 or n > 100.0 then { return "ОТКАЗ: limit 1..100" }
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let r = ForgeRunScript("git -C \"" + bare + "\" log --format=%h%x1f%an%x1f%ad%x1f%s -n " + to_string(n))
+  if r.exit_code != 0.0 then { return "ОТКАЗ: " + r.output }
+  let lines = split(r.output, "\n")
+  let mut out = ""
+  each line in lines {
+    let fields = split(to_string(line), "\u001f")
+    if length(fields) > 3.0 then {
+      let out = out + "  " + to_string(get(fields, 0)) + " " + to_string(get(fields, 2)) + " " + to_string(get(fields, 3)) + " [" + to_string(get(fields, 1)) + "]\n"
+    }
+  }
+  return out
+}
+
+// ── B.7: ForgeDiff ──────────────────────────────────────────────────────
+pattern ForgeDiff(name: String, from_ref: String, to_ref: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let vf = ForgeValidRef(from_ref)
+  if vf != "ok" then { return "ОТКАЗ: " + vf }
+  let vt = ForgeValidRef(to_ref)
+  if vt != "ok" then { return "ОТКАЗ: " + vt }
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let stat = ForgeRunScript("git -C \"" + bare + "\" diff --stat \"" + from_ref + "\" \"" + to_ref + "\"")
+  let patch = ForgeRunScript("git -C \"" + bare + "\" diff --unified=3 \"" + from_ref + "\" \"" + to_ref + "\"")
+  return "── diff --stat ──\n" + stat.output + "\n── patch (unified=3) ──\n" + substring(patch.output, 0.0, 12000.0)
+}
+
+// ── B.9: ForgeCheckPipeline — РУБЕЖ ПРОВЕРОК (шов §5.8 ТЗ v3) ───────────
+// Единственная точка проверок содержимого на границе записи и публикации.
+// В этом наряде: шаг «Секреты» (GateNoSecretsInRepo, dept/dev.mlog).
+// FO-036 подключает полный конвейер ПРАВКОЙ ТОЛЬКО ЭТОГО ПАТТЕРНА.
+pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
+  let files = parse_json(files_json)
+  if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
+  let mut all_content = ""
+  each f in files {
+    let all_content = all_content + "\n" + to_string(json_get(f, "content", ""))
+  }
+  // Шаг «Секреты»
+  let gate = GateNoSecretsInRepo(all_content)
+  if gate.passed == false then {
+    let _ = AuditLog("forge_pipeline_reject", "dev", "repo=" + name + " step=Секреты")
+    return "ОТКАЗ рубежа ForgeCheckPipeline (шаг «Секреты»): " + gate.message
+  }
+  return "ok"
+}
+
+// Каталог файла = всё до последнего "/" (рекурсивно не нужен: mkdir -p).
+// write_file ядра НЕ создаёт отсутствующие вложенные каталоги (SANDBOX
+// "cannot resolve path" до create_dir_all) — проверено исполнением, в отчёт.
+pattern ForgeMkdirFileDirs(path: String, scratch: String) -> String {
+  let segs = split(path, "/")
+  if length(segs) < 2.0 then { return "ok" }
+  let dir = join(slice(segs, 0.0, length(segs) - 1.0), "/")
+  let r = ForgeRunScript("mkdir -p \"" + scratch + "/" + dir + "\"")
+  return "ok"
+}
+
+// ── B.8: ForgeWriteFiles — ключевой, порядок строгий (гейт-на-границе) ──
+pattern ForgeWriteFiles(name: String, files_json: String, message: String, author_dept: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let va = ForgeValidAuthorDept(author_dept)
+  if va != "ok" then { return "ОТКАЗ: " + va }
+  let files = parse_json(files_json)
+  if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
+
+  // 1. РУБЕЖ ПРОВЕРОК — до коммита, без права обхода (git-история вечная)
+  let gate = ForgeCheckPipeline(name, files_json)
+  if starts_with(gate, "ОТКАЗ") then { return gate }
+
+  // 2. Клон bare в scratch (уникальный против коллизии в одну секунду)
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let scratch = "forge-tmp/" + name + "-" + to_string(now()) + "-" + substring(to_string(sha256(message + to_string(now()))), 0.0, 6.0)
+  let mk = ForgeRunScript("git clone -q \"" + bare + "\" \"" + scratch + "\" 2>/dev/null || (git init -q -b main \"" + scratch + "\" && git -C \"" + scratch + "\" remote add origin \"" + bare + "\")")
+  if mk.exit_code != 0.0 then { return "ОТКАЗ: клон scratch failed: " + mk.output }
+
+  // 3. Запись содержимого ТОЛЬКО через write_file (в shell не попадает;
+  //    ядро создаёт родительские каталоги само — проверено io.rs:441-443)
+  each f in files {
+    let p = to_string(json_get(f, "path", ""))
+    let vp = ForgeValidPath(p)
+    if vp != "ok" then { return "ОТКАЗ: файл " + p + ": " + vp }
+    let content = to_string(json_get(f, "content", ""))
+    let _ = ForgeMkdirFileDirs(p, scratch)
+    let wr = write_file(scratch + "/" + p, content)
+    if to_string(wr) == "()" then { return "ОТКАЗ: write_file не сработал для " + p }
+  }
+
+  // 4. Коммит через -F (сообщение в msg-файле ВНЕ клона, не -m) + push
+  // Решение 5 (ТЗ): identity per-commit — Fosved Dev/Design/Qa, не глобальный Agent
+  let mut cap = "Dev"
+  if author_dept == "design" then { let cap = "Design" }
+  if author_dept == "qa" then { let cap = "Qa" }
+  let identity_name = "Fosved " + cap
+  let identity_email = author_dept + "@fosved.office"
+  let msg_path = "forge-tmp/msg_" + substring(to_string(sha256(message + to_string(now()))), 0.0, 12.0) + ".txt"
+  let _ = write_file(msg_path, message)
+  let script = "git -C \"" + scratch + "\" add -A && git -C \"" + scratch + "\" -c user.name=\"" + identity_name + "\" -c user.email=\"" + identity_email + "\" commit -q -F \"$PWD/" + msg_path + "\" && git -C \"" + scratch + "\" push -q origin main && echo COMMIT-OK"
+  let r = ForgeRunScript(script)
+  let _ = exec("rm -f /office/" + msg_path + " 2>/dev/null; rm -f " + msg_path + " 2>/dev/null")
+  if r.exit_code != 0.0 or contains(r.output, "COMMIT-OK") == false then {
+    let _ = AuditLog("forge_write_failed", "dev", "repo=" + name + ": " + substring(replace(r.output, "'", ""), 0.0, 200.0))
+    return "ОТКАЗ: commit/push failed: " + r.output
+  }
+
+  // 5. Зеркало → метаданные → очистка scratch
+  let mirror = ForgeMirror(name)
+  let _ = exec("rm -rf \"" + scratch + "\"")
+  let _ = db_execute("UPDATE forge_repos SET commits_count = commits_count + 1, last_commit_at = datetime('now') WHERE name = ?", [name])
+  let _ = AuditLog("forge_write_files", author_dept, "repo=" + name + " files=" + to_string(length(files)))
+  return "Записано в " + name + ": " + to_string(length(files)) + " файл(ов), commit " + identity_name + ".\nЗеркало: " + mirror
+}
+
+// ── B.9: ForgeTag / ForgeRollback ───────────────────────────────────────
+pattern ForgeTag(name: String, tag: String, sha: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let vt = ForgeValidRef(tag)
+  if vt != "ok" then { return "ОТКАЗ: " + vt }
+  let vs = ForgeValidRef(sha)
+  if vs != "ok" then { return "ОТКАЗ: " + vs }
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let r = ForgeRunScript("git -C \"" + bare + "\" tag \"" + tag + "\" \"" + sha + "\" && git -C \"" + bare + "\" rev-parse --short \"" + tag + "\"")
+  if r.exit_code != 0.0 then { return "ОТКАЗ: " + r.output }
+  let _ = AuditLog("forge_tag", "dev", "repo=" + name + " tag=" + tag)
+  return "Тег " + tag + " → " + r.output
+}
+
+pattern ForgeRollback(name: String, tag: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let vt = ForgeValidRef(tag)
+  if vt != "ok" then { return "ОТКАЗ: " + vt }
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let scratch = "forge-tmp/" + name + "-rb-" + to_string(now())
+  let r = ForgeRunScript("git clone -q \"" + bare + "\" \"" + scratch + "\" && git -C \"" + scratch + "\" checkout -q -B rollback \"" + tag + "\" && git -C \"" + scratch + "\" push -q -f origin rollback:main && echo ROLLBACK-OK")
+  let _ = exec("rm -rf \"" + scratch + "\"")
+  if r.exit_code != 0.0 or contains(r.output, "ROLLBACK-OK") == false then { return "ОТКАЗ: " + r.output }
+  let _ = AuditLog("forge_rollback", "dev", "repo=" + name + " → " + tag)
+  return "Откат " + name + " на " + tag + " выполнен (main обновлён)."
+}
+
+// ── B.11: ForgeMirror — неудача ОБЯЗАНА быть громкой (утренний бриф) ────
+pattern ForgeMirror(name: String) -> String {
+  let v = ForgeValidSlug(name)
+  if v != "ok" then { return "ОТКАЗ: " + v }
+  let rows = query("SELECT github_url FROM forge_repos WHERE name = ? LIMIT 1", [name])
+  let url = to_string(json_get(rows[0], "github_url", ""))
+  if url == "" then { return "зеркало не настроено (github_url пуст) — локальный bare без зеркала" }
+  let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
+  let token = GetSecret("forge_github_token")
+  if token == "" then {
+    let _ = AuditLog("forge_mirror_fail", "dev", "repo=" + name + ": нет forge_github_token")
+    return "ОТКАЗ: нет forge_github_token — зеркалирование НЕ выполнено (попадёт в бриф)"
+  }
+  let auth_url = "https://x-access-token:" + token + "@" + substring(url, 8.0, length(url))
+  let r = ForgeRunScript("git -C \"" + bare + "\" push --mirror \"" + auth_url + "\" 2>&1 | tail -3")
+  if r.exit_code != 0.0 then {
+    // НЕ try-глушилка: audit + пометка утреннего брифа
+    let _ = AuditLog("forge_mirror_fail", "dev", "repo=" + name + ": " + substring(r.output, 0.0, 200.0))
+    return "ОТКАЗ зеркалирования (в бриф): " + substring(replace(r.output, "'", ""), 0.0, 300.0)
+  }
+  let _ = AuditLog("forge_mirror_ok", "dev", "repo=" + name)
+  return "зеркало обновлено"
+}
+
+// ── D.4: ForgeEscape — всё интерполируемое в HTML ───────────────────────
+pattern ForgeEscape(s: String) -> String {
+  let r = replace(s, "&", "&amp;")
+  let r = replace(r, "<", "&lt;")
+  let r = replace(r, ">", "&gt;")
+  let r = replace(r, "\"", "&quot;")
+  let r = replace(r, "'", "&#39;")
+  return r
+}
+
+// ── C.1: короткая форма проекта — диалог в Telegram (kv-стейт) ──────────
+// 4 поля: название; что должно получиться (одной фразой); заказчик; тип.
+// Всё остальное — значения по умолчанию (§5.5 ТЗ).
+pattern ForgeShortFormStep(chat_id: String, answer: String) -> String {
+  let step = kv_get("forge_form_step_" + chat_id)
+  if step == "" or step == "done" then { return "" }
+  let mut next_q = ""
+  if step == "name" then {
+    kv_set("forge_form_name_" + chat_id, answer)
+    kv_set("forge_form_step_" + chat_id, "goal")
+    let next_q = "2/4. Что должно получиться — одной фразой?"
+  }
+  if step == "goal" then {
+    kv_set("forge_form_goal_" + chat_id, answer)
+    kv_set("forge_form_step_" + chat_id, "customer")
+    let next_q = "3/4. Кто заказчик?"
+  }
+  if step == "customer" then {
+    kv_set("forge_form_customer_" + chat_id, answer)
+    kv_set("forge_form_step_" + chat_id, "ptype")
+    let next_q = "4/4. Тип проекта: site | android | ai_office"
+  }
+  if step == "ptype" then {
+    let ptype = trim(answer)
+    if ptype != "site" and ptype != "android" and ptype != "ai_office" then {
+      return "Тип должен быть site | android | ai_office. Повторите 4/4."
+    }
+    let slug = to_string(sha256(to_string(now()) + kv_get("forge_form_name_" + chat_id)))
+    let slug = "pr-" + substring(slug, 0.0, 8.0)
+    let created = ForgeCreateProject(slug, kv_get("forge_form_name_" + chat_id), "", kv_get("forge_form_goal_" + chat_id), ptype, ptype, kv_get("forge_form_customer_" + chat_id), "key_stages", "fosved-standard", "dev")
+    kv_set("forge_form_step_" + chat_id, "done")
+    let _ = SendTelegramReply(chat_id, created + "\nSlug: " + slug + "\nРепозиторий: /forge-repo " + slug)
+    return "done:" + slug
+  }
+  return next_q
+}
