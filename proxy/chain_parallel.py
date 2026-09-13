@@ -62,17 +62,30 @@ def _invoke_step(dept, query, chat_id, group_id, round_no=1, peer_context=None):
     return str(data.get("result", ""))
 
 
+def _invoke_durable(dept, query, chat_id, chain_id, step_num, peer_context=None,
+                    hash_extra=""):
+    """FO-027: durable-степа — чекпоинт ДО/ПОСЛЕ, идемпотентность по
+    input_hash; ok-степы переиспользуются без LLM-вызова."""
+    from proxy.chain_durable import run_durable_step
+    peer_ctx = peer_context if (step_num == 2 and peer_context) else None
+    extra = hash_extra or (f"peer:{peer_ctx}" if peer_ctx else "")
+    out = run_durable_step(dept, query, chat_id, chain_id, step_num,
+                           "fanout", _invoke_step, hash_extra=extra,
+                           peer_context=peer_ctx)
+    return out["reply"]
+
+
 def _audit_step(group_id, what, details):
     _log_audit(what, {"group_id": group_id, **details}, dept="chain")
 
 
 def _fanout_once(depts, query, chat_id, group_id, round_no=1, peer_for=None):
-    """Параллельный прогон списка департаментов. Возвращает (answers, failed).
+    """Параллельный прогон списка департаментов (durable-степы FO-027).
     peer_for: {dept: peer_text} — контекст коллеги для раунда 2 debate."""
     futures = {}
     for d in depts:
         ctx = peer_for.get(d) if peer_for else None
-        futures[_pool.submit(_invoke_step, d, query, chat_id, group_id,
+        futures[_pool.submit(_invoke_durable, d, query, chat_id, group_id,
                              round_no, ctx)] = d
     answers, failed = {}, []
     deadline = time.monotonic() + GROUP_TIMEOUT_SECS

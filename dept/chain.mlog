@@ -25,6 +25,18 @@ pattern ChainDispatchDept(dept: String, query: String, chat_id: String) -> Strin
 }
 
 pattern ExecuteChain(dept_chain: String, query: String, chat_id: String) -> String {
+  // FO-027: авто-resume — цепочка тех же департаментов, стартовавшая <1 ч назад
+  // и имеющая незавершённые степы, продолжается вместо нового запуска
+  let resume_rows = query("SELECT chain_id FROM chain_steps WHERE dept_chain = ? AND mode = 'sequential' AND status IN ('pending','failed') AND created_at > datetime('now', '-1 hour') ORDER BY id DESC LIMIT 1", [dept_chain])
+  if to_string(resume_rows) != "()" and length(resume_rows) > 0.0 then {
+    let old_chain_id = to_string(json_get(resume_rows[0], "chain_id", ""))
+    let _ = AuditLog("chain_auto_resume", "system", old_chain_id)
+    let _ = SendTelegramReply(chat_id, "Обнаружена незавершённая цепочка <1 ч — авто-resume " + old_chain_id)
+    return ResumeChainSteps(old_chain_id, dept_chain, query, chat_id)
+  }
+
+  // FO-027: durable chain_id для чекпоинтов степов
+  let chain_id = "seq_" + to_string(sha256(dept_chain + query + to_string(now())))
   // Parse "dept1+dept2+dept3" format
   let _plus = "+"
   let depts = split(dept_chain, _plus)
@@ -49,9 +61,16 @@ pattern ExecuteChain(dept_chain: String, query: String, chat_id: String) -> Stri
         let count = count + 1.0
         let _ = AuditLog("chain_step", dept, "step " + to_string(count) + " of " + to_string(total))
 
+        // FO-027: чекпоинт ДО вызова (Temporal-паттерн: persist before run)
+        let step_hash = to_string(sha256(chain_id + to_string(count) + dept + query))
+        let _ = db_execute("INSERT INTO chain_steps (chain_id, chat_id, step_num, dept, mode, input_hash, status, dept_chain, query) VALUES (?, ?, ?, ?, 'sequential', ?, 'pending', ?, ?)", [chain_id, chat_id, count, dept, step_hash, dept_chain, query])
+
         // Call the appropriate handler (FO-026: единая диспетчеризация —
         // тот же паттерн используется HTTP-роутом /chain/step для fan-out)
         let step_result = ChainDispatchDept(dept, query, chat_id)
+
+        // FO-027: результат ПОСЛЕ вызова (крах между ними возобновляем)
+        let _ = db_execute("UPDATE chain_steps SET status='ok', reply=?, updated_at=datetime('now') WHERE chain_id=? AND step_num=? AND dept=? AND status='pending'", [substring(step_result, 0.0, 20000.0), chain_id, count, dept])
 
         // If individual result is long, send as separate report
         if length(step_result) > 800.0 then {
@@ -89,4 +108,46 @@ pattern FormatChainBody(dept: String, text: String) -> String {
   let body = replace(body, "[FACT]", "<span class=\"badge badge-fact\">FACT</span>")
   let body = replace(body, "[FACT verified]", "<span class=\"badge badge-verified\">FACT verified</span>")
   return body
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FO-027: Resume — возобновление цепочки с последней ok-степы.
+// Идемпотентность по input_hash: ok + совпал hash → reply из кэша
+// (LLM-вызовов ноль); hash разошёлся → степа инвалидна, исполняется заново.
+// Используется авто-resume (<1 ч, ExecuteChain) и /chain continue <chain_id>.
+// ═══════════════════════════════════════════════════════════════════════
+pattern ResumeChainSteps(chain_id: String, dept_chain: String, query: String, chat_id: String) -> String {
+  let _ = AuditLog("chain_resume", "system", "chain: " + chain_id)
+  let rows = query("SELECT step_num, dept, status, reply, input_hash FROM chain_steps WHERE chain_id = ? ORDER BY step_num", [chain_id])
+  if to_string(rows) == "()" or length(rows) == 0.0 then {
+    return "Цепочка " + chain_id + " не найдена или пуста."
+  }
+  let mut results = ""
+  let mut reused = 0.0
+  let mut reran = 0.0
+  each row in rows {
+    let dept = trim(to_string(json_get(row, "dept", "")))
+    let step_num = to_float(json_get(row, "step_num", "0"))
+    let st = to_string(json_get(row, "status", ""))
+    let stored_hash = to_string(json_get(row, "input_hash", ""))
+    let h = to_string(sha256(chain_id + to_string(step_num) + dept + query))
+    if st == "ok" and stored_hash == h then {
+      let reused = reused + 1.0
+      let results = results + "\n\n=== " + dept + " === (из кэша, без LLM)\n" + to_string(json_get(row, "reply", ""))
+    } else {
+      if st == "ok" then {
+        // hash разошёлся — степа инвалидна (детерминизм против молчаливой неактуальности)
+        let _ = SendTelegramReply(chat_id, "FO-027: степа " + dept + " инвалидна (query изменился) — переисполнение.")
+      }
+      let reran = reran + 1.0
+      let _ = db_execute("UPDATE chain_steps SET status='pending', input_hash=?, updated_at=datetime('now') WHERE chain_id=? AND step_num=? AND dept=?", [h, chain_id, step_num, dept])
+      let rerun_result = ChainDispatchDept(dept, query, chat_id)
+      let _ = db_execute("UPDATE chain_steps SET status='ok', reply=?, updated_at=datetime('now') WHERE chain_id=? AND step_num=? AND dept=? AND status='pending'", [substring(rerun_result, 0.0, 20000.0), chain_id, step_num, dept])
+      let results = results + "\n\n=== " + dept + " === (переисполнено)\n" + rerun_result
+    }
+  }
+  let summary = "Resume " + chain_id + ": " + to_string(reused) + " из кэша, " + to_string(reran) + " переисполнено"
+  let _ = SendTelegramReply(chat_id, summary)
+  let _ = AuditLog("chain_resume_done", "system", chain_id + " reused=" + to_string(reused) + " reran=" + to_string(reran))
+  return results
 }
