@@ -1,0 +1,71 @@
+// test_forge6v3.mlog — FO-041 A.5: сквозной dev-запрос → FORGE; дубли;
+// автопрогон. Запуск: METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test6 ./bin/mlog run test_forge6v3.mlog
+db { url: "sqlite:/tmp/forge-test6/forge.db" }
+import dept/utils
+import dept/dev
+import dept/forge
+import dept/forge_model
+
+pattern TInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, seq INTEGER, title TEXT, description TEXT, needs_owner_gate TEXT DEFAULT 'false', status TEXT DEFAULT 'pending', commit_tag TEXT, commit_sha TEXT, failed_runs INTEGER DEFAULT 0, started_at TEXT, finished_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_briefs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, version INTEGER DEFAULT 1, content TEXT, approved TEXT DEFAULT 'false', approved_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, repo_name TEXT, stage_id TEXT, command TEXT, exit_code TEXT, output TEXT, duration_ms TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, kind TEXT, question TEXT, context TEXT, options_json TEXT, decision TEXT, decided_by TEXT, decided_at TEXT, telegram_message_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_remarks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, commit_sha TEXT, text TEXT, file_hint TEXT, attachment_ref TEXT, kind TEXT, status TEXT DEFAULT 'open', resolved_by_commit TEXT, gate_id TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_previews (slug TEXT PRIMARY KEY, project_slug TEXT, repo_name TEXT, kind TEXT DEFAULT 'live', port INTEGER, pid TEXT, status TEXT DEFAULT 'running', last_access_at TEXT, started_at TEXT)")
+  return "ok"
+}
+
+pattern Check(name: String, ok: Bool, detail: String) -> String {
+  if ok then { return "PASS " + name }
+  return "FAIL " + name + " — " + substring(detail, 0.0, 200.0)
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TInit()
+  let mut checks = ""
+
+  // dev-запрос БЕЗ проекта → короткая форма, не произвольное создание
+  let r1 = ForgeFromDevRequest("сделай сайт вакансий", "123")
+  let checks = checks + Check("no-project-short-form", contains(r1, "создайте проект") and contains(r1, "Вопросы формы"), r1) + "\n"
+
+  // проект создан → задача + гейт №1
+  let _ = ForgeCreateProject("vacancy", "Вакансии", "сайт вакансий", "сквозной тест", "site", "landing", "В", "minimal", "fosved-standard", "dev")
+  let r2 = ForgeFromDevRequest("сделай сайт vacancy: страница списка", "123")
+  let checks = checks + Check("with-project-task-gate", contains(r2, "Задача 1 создана") and contains(r2, "ГЕЙТ"), r2) + "\n"
+  // повторный запрос не создаёт дубликат репозитория (репозиторий один, задача новая)
+  let r3 = ForgeFromDevRequest("сделай сайт vacancy: добавить фильтр", "123")
+  let checks = checks + Check("repeat-no-repo-dup", contains(r3, "Задача 2 создана"), r3) + "\n"
+  let repo_rows = query("SELECT COUNT(*) as c FROM forge_repos", [])
+  let checks = checks + Check("repos-still-zero", to_float(json_get(get(repo_rows, 0), "c", "1")) == 0.0, "репозитории создаёт CreateRepo по решению владельца, не запрос") + "\n"
+
+  // CreateRepo (переиспользование точки dev-конвейера) → один репозиторий
+  let _ = ForgeCreateRepo("vacancy-repo", "vacancy", "репо", "dev")
+  let repo_count = query("SELECT COUNT(*) as c FROM forge_repos", [])
+  let checks = checks + Check("create-repo-reused", to_float(json_get(get(repo_count, 0), "c", "0")) == 1.0, "1") + "\n"
+
+  // автопрогон: репо с тестом → pytest PASS приложен
+  let _ = ForgeWriteFiles("vacancy-repo", "[{\"path\":\"test_x.py\",\"content\":\"def test_x():\\n    assert True\\n\"}]", "feat", "dev")
+  let ar = ForgeAutoRunIfTests("vacancy", "vacancy-repo", "0")
+  let checks = checks + Check("auto-run-pytest-pass", contains(ar, "Автопрогон pytest: PASS"), ar) + "\n"
+
+  // гейт №1 решается владельцем → задача продолжается
+  let dec = ForgeGateDecide("1", "0", "owner")
+  let checks = checks + Check("gate1-decided-flow", contains(dec, "Утвердить"), dec) + "\n"
+
+  let fails = split(checks, "FAIL")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(checks, "PASS")) - 1.0) + " проверок)\n" + checks }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + "\n" + checks
+}
+
+flow Main { input: String = "" -> Main1 -> output }

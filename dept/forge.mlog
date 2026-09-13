@@ -1363,6 +1363,11 @@ pattern ForgeGateSend(gate_id: String) -> String {
 }
 
 // ── A.3: решение по гейту (dedup повторных callback) ───────────────────
+pattern _PickLabel(current: String, o: Dict, idx: String) -> String {
+  if to_string(json_get(o, "idx", "")) == idx then { return to_string(json_get(o, "label", "")) }
+  return current
+}
+
 pattern ForgeGateDecide(gate_id: String, option_idx: String, decided_by: String) -> String {
   let rows = query("SELECT decision, kind, task_id, options_json FROM forge_gates WHERE id = ? LIMIT 1", [gate_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: гейт не найден" }
@@ -1377,7 +1382,7 @@ pattern ForgeGateDecide(gate_id: String, option_idx: String, decided_by: String)
   let opts = parse_json(to_string(json_get(g, "options_json", "[]")))
   let mut label = ""
   each o in opts {
-    if to_string(json_get(o, "idx", "")) == option_idx then { let label = to_string(json_get(o, "label", "")) }
+    let label = _PickLabel(label, o, option_idx)
   }
   let _ = db_execute("UPDATE forge_gates SET decision = ?, decided_by = ?, decided_at = datetime('now') WHERE id = ?", [label, decided_by, gate_id])
   let _ = AuditLog("forge_gate_decision", decided_by, "gate=" + gate_id + " kind=" + kind + " → " + label)
@@ -1641,4 +1646,56 @@ pattern ForgePreviewDown(slug: String) -> String {
   let _ = ForgeRunScript("kill " + pid + " 2>/dev/null; true")
   let _ = db_execute("UPDATE forge_previews SET status = 'stopped' WHERE slug = ?", [slug])
   return "Превью " + slug + " погашено, порт свободен."
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// FO-041 (наряд #139): FORGE-7v3 — интеграция контура в dev-конвейер.
+// Владелец пишет dev-запрос как раньше — FORGE включается сам (§13).
+// CreateRepo (dev.mlog:1387) переиспользуется — дублей нет.
+// ══════════════════════════════════════════════════════════════════════
+
+// A.2: dev-запрос → FORGE. Проект не создан → короткая форма FO-035
+// (вопросы шаблона), НЕ произвольное создание. Проект есть → задача +
+// гейт №1 (подсистема FO-038) без ручных переключений.
+pattern ForgeFromDevRequest(query: String, chat_id: String) -> String {
+  if length(trim(query)) < 5.0 then { return "ОТКАЗ: опишите задачу после /dev-forge" }
+  // ищем проект по вхождению слов запроса в slug/имя (без LLM, честно)
+  let rows = query("SELECT slug FROM forge_projects WHERE status = 'active' ORDER BY updated_at DESC LIMIT 5", [])
+  let mut matched_slug = ""
+  each r in rows {
+    let slug = to_string(json_get(r, "slug", ""))
+    if matched_slug == "" and contains(lower(query), substring(slug, 0.0, 6.0)) then { let matched_slug = slug }
+  }
+  if matched_slug == "" then {
+    // проект не создан → короткая форма: вопросы шаблона по умолчанию
+    let questions = TemplateQuestions("landing")
+    return "Чтобы включить FORGE-контур, создайте проект и ответьте на форму:\n\n/forge-project create <slug>\n\nВопросы формы (FO-035):\n" + questions + "\n\nПосле создания повторите: /dev-forge <ваш запрос>"
+  }
+  // проект есть: задача (владелец-источник) + гейт №1 одним сообщением
+  let t = ForgeTaskCreate(matched_slug, substring(trim(query), 0.0, 120.0), trim(query), "normal", "owner", "owner")
+  let caps = regex_captures("Задача ([0-9]+)", t)
+  if length(caps) < 2.0 then { return t }
+  let task_id = to_string(get(caps, 1))
+  let plan = "[{\"title\":\"Реализация\",\"description\":\"" + escape_json(substring(trim(query), 0.0, 80.0)) + "\",\"needs_owner_gate\":\"true\"},{\"title\":\"Проверка и показ\",\"description\":\"конвейер + прогон + превью\",\"needs_owner_gate\":\"false\"}]"
+  let gate1 = ForgeGateCreate(task_id, "0", "plan", "FORGE-задача из dev-запроса: «" + substring(trim(query), 0.0, 100.0) + "». Утвердить план?", "")
+  let sent = ForgeGateSend(gate1)
+  return "Задача " + task_id + " создана в проекте " + matched_slug + ".\n" + sent + "\n" + substring(ForgeGateMessage(gate1), 0.0, 1500.0)
+}
+
+// A.3: автопрогон — package.json с test или test_*.py в репо → ForgeRun
+pattern ForgeAutoRunIfTests(project_slug: String, repo_name: String, stage_id: String) -> String {
+  let files = ForgeRunScript("git -C \"" + ForgeReposDir() + "/forge/repos/" + repo_name + ".git\" ls-tree -r --name-only HEAD 2>/dev/null")
+  let listing = files.output
+  if (contains(listing, "test_") and contains(listing, ".py")) then {
+    let r = ForgeRun(project_slug, repo_name, "python3 -m pytest", stage_id, "")
+    if starts_with(r, "EXIT:0") then { return "Автопрогон pytest: PASS\n" + substring(r, 0.0, 400.0) }
+    if starts_with(r, "EXIT:") then { return "Автопрогон pytest: FAIL\n" + substring(r, 0.0, 600.0) }
+    return r
+  }
+  if contains(listing, "package.json") then {
+    let r2 = ForgeRun(project_slug, repo_name, "npm test", stage_id, "")
+    if starts_with(r2, "EXIT:") then { return "Автопрогон npm test:\n" + substring(r2, 0.0, 500.0) }
+    return r2
+  }
+  return "Автопрогон пропущен: тестов в репозитории нет"
 }
