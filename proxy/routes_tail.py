@@ -1337,3 +1337,93 @@ def call_python_endpoint():
     except Exception as e:
         _log_audit("call_python_error", {"module": module_name, "function": func_name, "error": str(e)[:200]}, "system")
         return jsonify({"error": str(e)[:500]}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FO-025: shadow-оценка моделей — недельный отчёт из trace_log
+# ═══════════════════════════════════════════════════════════════════════════
+@app.get("/api/shadow/report")
+def api_shadow_report():
+    """Недельный отчёт shadow-канарейки: win-rate, дельта-качество,
+    дельта-цена/латентность по департаментам; рекомендация владельцу
+    Go/No-Go на изменение GetModelFallbackChain. Источник — парные
+    trace-записи (event='shadow', одинаковый pair_id)."""
+    try:
+        from proxy.core import _TRACE_DIR
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        pairs = {}
+        trace_dir = Path(_TRACE_DIR)
+        if trace_dir.exists():
+            for tf in sorted(trace_dir.glob("llm_*.jsonl")):
+                try:
+                    for line in tf.read_text(encoding="utf-8", errors="replace").splitlines():
+                        if '"event": "shadow"' not in line and '"event":"shadow"' not in line:
+                            continue
+                        rec = json.loads(line)
+                        if rec.get("event") != "shadow" or rec.get("ts", "") < cutoff:
+                            continue
+                        pid = rec.get("pair_id")
+                        if pid:
+                            pairs.setdefault(pid, {})[rec.get("side")] = rec
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+        by_dept = {}
+        for p in pairs.values():
+            main = p.get("main")
+            sh = p.get("shadow")
+            if not main or not sh:
+                continue
+            d = by_dept.setdefault(main.get("dept", "?"), {
+                "pairs": 0, "wins": 0, "losses": 0, "ties": 0,
+                "delta_quality": 0.0, "delta_cost": 0.0, "delta_latency_ms": 0.0,
+                "candidate": sh.get("gen_ai.request.model", "?"),
+                "scored": 0,
+            })
+            d["pairs"] += 1
+            ms, ss = main.get("verifier_score"), sh.get("verifier_score")
+            if ms is not None and ss is not None:
+                d["scored"] += 1
+                delta = ss - ms
+                d["delta_quality"] += delta
+                if delta > 0.05:
+                    d["wins"] += 1
+                elif delta < -0.05:
+                    d["losses"] += 1
+                else:
+                    d["ties"] += 1
+            d["delta_cost"] += (sh.get("cost_usd", 0) or 0)
+            d["delta_latency_ms"] += ((sh.get("latency_ms") or 0) - (main.get("latency_ms") or 0))
+
+        depts = []
+        for dept, d in sorted(by_dept.items()):
+            scored = d["scored"]
+            win_rate = round(d["wins"] / scored, 3) if scored else None
+            avg_dq = round(d["delta_quality"] / scored, 4) if scored else None
+            entry = {
+                "dept": dept,
+                "candidate_model": d["candidate"],
+                "pairs": d["pairs"],
+                "scored_pairs": scored,
+                "win_rate": win_rate,
+                "avg_delta_quality": avg_dq,
+                "avg_delta_cost_usd": round(d["delta_cost"] / d["pairs"], 6) if d["pairs"] else None,
+                "avg_delta_latency_ms": round(d["delta_latency_ms"] / d["pairs"]) if d["pairs"] else None,
+            }
+            # Рекомендация: кандидата имеет смысл ставить в цепь, если он
+            # чаще выигрывает у основной модели и не дороже заметно.
+            if scored and win_rate is not None and avg_dq is not None:
+                if win_rate >= 0.6 and avg_dq >= 0:
+                    entry["recommendation"] = "GO"
+                elif win_rate <= 0.35 or avg_dq <= -0.1:
+                    entry["recommendation"] = "NO-GO"
+                else:
+                    entry["recommendation"] = "KEEP-TESTING"
+            else:
+                entry["recommendation"] = "KEEP-TESTING"
+            depts.append(entry)
+
+        return jsonify({"status": "ok", "window_days": 7,
+                        "total_pairs": len(pairs), "depts": depts})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
