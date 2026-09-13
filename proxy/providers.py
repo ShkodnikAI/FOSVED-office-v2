@@ -24,6 +24,17 @@ from proxy.core import (
     DEPT_NAMES,
 )
 
+# FO-022 (#88): free-tier intelligence — failure buckets, квоты 429 (quota.mjs),
+# long-cooldown notFound/forbidden. Односторонний импорт: resilience не знает
+# о providers (skip-предикат вызывается отсюда).
+from proxy.resilience import (  # noqa: F401
+    classify_failure as _classify_failure,
+    note_rate_limited as _note_rate_limited,
+    note_long_cooldown as _note_long_cooldown,
+    provider_skipped as _resilience_skipped,
+    trace_fallback_event as _trace_fallback,
+)
+
 # FO-016 (#82): полный конвейер компакции — budget + prune + summarize +
 # offload — в proxy/compaction.py. Импорт односторонний: compaction НЕ
 # импортирует providers (разрыв цикла — summarize_fn передаётся параметром).
@@ -234,6 +245,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
     _trace_id = uuid.uuid4().hex[:16]
     _trace_ok = False
     _trace_err = None
+    _trace_bucket = None
 
     try:
         # FO-018: температура департамента из departments/<dept>.md (дефолт 0.7 — прежний хардкод)
@@ -256,6 +268,15 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
             headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
             body = {"model": model, "max_tokens": max_tokens, "system": sys_msg, "messages": user_msgs}
 
+        # FO-022: env-redact перед upstream — taint-инвариант: секреты (поля
+        # *_API_KEY/... и литеральные значения известных секретов) не уходят
+        # к LLM-провайдеру. Общий модуль с FO-021 (proxy/redact.py).
+        try:
+            from proxy.redact import redact_obj as _redact_obj
+            body = _redact_obj(body)
+        except Exception as e:
+            _log_error(f"payload redact failed (отправка без redact): {e}", dept=dept, kind="redact_error")
+
         resp = http_requests.post(prov["url"], headers=headers, json=body, timeout=prov["timeout"])
         resp.raise_for_status()
         data = resp.json()
@@ -268,6 +289,28 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
             reply = data["content"][0]["text"]
             t_in = data.get("usage", {}).get("input_tokens", 0)
             t_out = data.get("usage", {}).get("output_tokens", 0)
+
+        # FO-022: пустой ответ = отказ (bucket empty), а не успех —
+        # иначе цепь примет пустышку и клиент получит ничего.
+        if not reply or not str(reply).strip():
+            _breaker.record_failure(provider_name)
+            log.warning(f"LLM empty reply: provider={provider_name} model={model}")
+            _trace_bucket = "empty"
+            _write_llm_trace({
+                "trace_id": _trace_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "gen_ai.system": provider_name,
+                "gen_ai.request.model": model,
+                "gen_ai.usage.input_tokens": 0,
+                "gen_ai.usage.output_tokens": 0,
+                "latency_ms": round((time.monotonic() - _trace_start) * 1000),
+                "dept": dept,
+                "ok": False,
+                "error": "empty reply",
+                "failure_bucket": _trace_bucket,
+                "is_internal": is_internal,
+            })
+            return None
 
         _breaker.record_success(provider_name)
         _trace_ok = True
@@ -306,8 +349,40 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
         return {"reply": reply, "provider": provider_name, "model": model, "tokens_in": t_in, "tokens_out": t_out}
     except Exception as e:
         _breaker.record_failure(provider_name)
-        log.warning(f"LLM fail: provider={provider_name} model={model} err={e}")
         _trace_err = str(e)[:200]
+        # FO-022: категоризация отказа (failure buckets) + реакция фолбэка.
+        _resp = getattr(e, "response", None)
+        _status = getattr(_resp, "status_code", None)
+        _body_text = ""
+        if _resp is not None:
+            try:
+                _body_text = _resp.text[:2000]
+            except Exception as e2:
+                log.debug(f"429 body read failed: {e2}")
+        if isinstance(e, http_requests.exceptions.Timeout):
+            _kind = "timeout"
+        elif isinstance(e, http_requests.exceptions.ConnectionError):
+            _kind = "conn"
+        elif _resp is not None:
+            _kind = "http"
+        else:
+            _kind = None
+        # секретные значения не попадают в трейсы (taint-инвариант FO-022)
+        try:
+            from proxy.redact import redact_values_in_text as _rvit
+            _trace_err = _rvit(_trace_err)[:200]
+        except Exception as e2:
+            log.debug(f"trace redact failed: {e2}")
+        _trace_bucket = _classify_failure(status_code=_status, error_text=f"{_trace_err} {_body_text[:300]}", kind=_kind)
+        if _status == 429:
+            try:
+                _note_rate_limited(provider_name, model, body_text=_body_text,
+                                   headers=dict(getattr(_resp, "headers", {}) or {}))
+            except Exception as e2:
+                log.warning(f"quota note failed: {e2}")
+        if _trace_bucket in ("notFound", "forbidden"):
+            _note_long_cooldown(provider_name, f"{_trace_bucket}: {_trace_err}")
+        log.warning(f"LLM fail: provider={provider_name} model={model} bucket={_trace_bucket} err={_trace_err}")
         # FO-004: trace the failure too
         _write_llm_trace({
             "trace_id": _trace_id,
@@ -320,6 +395,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
             "dept": dept,
             "ok": False,
             "error": _trace_err,
+            "failure_bucket": _trace_bucket,
             "is_internal": is_internal,
         })
         return None
@@ -446,6 +522,11 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
         if not _breaker.can_call(prov_name):
             continue
         for model in models:
+            # FO-022: квота 429 / long-cooldown (notFound/forbidden) → пара вычеркнута
+            skip_reason = _resilience_skipped(prov_name, model)
+            if skip_reason:
+                log.info(f"[resilience] skip {prov_name}/{model}: {skip_reason}")
+                continue
             max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
             cap = PROVIDER_MAX_TOKENS.get(prov_name)
             if cap:
@@ -485,6 +566,11 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
         for model in models:
             if (prov_name, model) in raced_set:
                 continue
+            # FO-022: квота 429 / long-cooldown → пара вычеркнута
+            skip_reason = _resilience_skipped(prov_name, model)
+            if skip_reason:
+                log.info(f"[resilience] skip {prov_name}/{model}: {skip_reason}")
+                continue
             max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
             cap = PROVIDER_MAX_TOKENS.get(prov_name)
             if cap:
@@ -498,12 +584,17 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
 
     # 5. Fallback: legacy priority-provider ordering (all providers, priority first)
     log.warning(f"Combo chain '{combo}' exhausted, falling back to legacy ordering")
+    # FO-022: событие исчерпания цепи в трейс — причина фолбэка читается за 10 секунд
+    _trace_fallback("combo_chain", "exhausted", "chain_exhausted", combo=combo, dept=dept)
     priority = _cfg_cache["priority_provider"]
     fallback_model = _cfg_cache["overrides"].get(dept) or _cfg_cache["priority_model"] or "glm-4.6"
     order = [p for p in [priority] + [k for k in PROVIDERS if k != priority] if p in PROVIDERS]
     last_err = None
     for prov_name in order:
         if not _breaker.can_call(prov_name):
+            continue
+        if _resilience_skipped(prov_name, fallback_model):
+            log.info(f"[resilience] skip legacy {prov_name}/{fallback_model}")
             continue
         use_model = fallback_model
         # Auto-adapt model to provider
