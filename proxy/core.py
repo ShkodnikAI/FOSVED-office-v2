@@ -127,7 +127,7 @@ API_SECRET = os.environ.get("API_SECRET", "")  # Bearer token for protected endp
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # X-Telegram-Bot-Api-Secret-Token
 
 # ── Auth helpers ──────────────────────────────────────────────
-PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/dialog/', '/profile/', '/webhook/miniapp-action', '/traces')
+PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/dialog/', '/profile/', '/webhook/miniapp-action', '/traces', '/repos/')  # FO-035 D.5
 
 def _check_bearer():
     """Return True if request bears valid API_SECRET, or if API_SECRET is empty (open mode)."""

@@ -33,6 +33,7 @@ import dept/legal
 import dept/dev
 import dept/design
 import dept/templates
+import dept/forge
 import dept/qa
 import dept/visual
 import dept/engineering
@@ -171,6 +172,14 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS quests (id TEXT PRIMARY KEY, title TEXT, quest_type TEXT DEFAULT 'general', status TEXT DEFAULT 'active', current_step INTEGER DEFAULT 0, total_steps INTEGER DEFAULT 0, deadline TEXT, owner_chat_id TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS quest_files (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, filename TEXT, file_type TEXT, version INTEGER DEFAULT 1, storage_path TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(quest_id) REFERENCES quests(id))")
   db_execute("CREATE TABLE IF NOT EXISTS quest_checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, step_num INTEGER, step_label TEXT, status TEXT DEFAULT 'pending', approved_by TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, FOREIGN KEY(quest_id) REFERENCES quests(id))")
+  // ── FO-035: FORGE-контур — схема §4 ТЗ v3 ──
+  db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_customer_data (project_slug TEXT PRIMARY KEY, secret_ref TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, repo_name TEXT, stage_id TEXT, command TEXT, exit_code TEXT, output TEXT, duration_ms TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // FO-035 A.2: secrets_store (SEC-5 минимальный; шифрование — proxy/forge_secrets.py, AES-256-GCM, FORGE_MASTER_KEY)
+  db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
   // FO-027: durable-степы цепочек (чекпоинты + resume; Temporal/Inngest паттерн)
   db_execute("CREATE TABLE IF NOT EXISTS chain_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, chain_id TEXT, chat_id TEXT, step_num REAL, dept TEXT, mode TEXT, input_hash TEXT, reply TEXT, model TEXT, tokens_in TEXT, tokens_out TEXT, cost_usd TEXT, status TEXT DEFAULT 'pending', dept_chain TEXT DEFAULT '', query TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE INDEX IF NOT EXISTS idx_chain_steps_chain ON chain_steps(chain_id, step_num, dept)")
@@ -2309,6 +2318,59 @@ mlogserver {
   }
 
   // ============================================================
+  // FO-035 D: веб /repos — панель проектов (стиль «Диспетчерская»,
+  // узкий экран, query-роуты exact-match, ForgeEscape на всё)
+  // ============================================================
+  route "/repos" method=GET {
+    let rows = query("SELECT slug, name, project_type, status, gate_policy, updated_at FROM forge_projects ORDER BY updated_at DESC LIMIT 50", [])
+    let mut items = ""
+    each r in rows {
+      let slug = ForgeEscape(to_string(json_get(r, "slug", "")))
+      let nm = ForgeEscape(to_string(json_get(r, "name", "")))
+      let st = ForgeEscape(to_string(json_get(r, "status", "")))
+      let pt = ForgeEscape(to_string(json_get(r, "project_type", "")))
+      let items = items + "<li><a href='/repos/project?slug=" + slug + "'>" + nm + "</a> — " + pt + " [" + st + "]</li>"
+    }
+    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Репозитории — FORGE</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;margin:0;padding:16px;max-width:480px;margin-left:auto}h1{font-family:Newsreader,serif;color:#1C1B18}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}a{color:#A8321E}ul{list-style:none;padding:0}</style></head><body><h1>Проекты FORGE</h1><div class='panel'><ul>" + items + "</ul></div></body></html>"
+    return respond_html(html)
+  }
+
+  route "/repos/project" method=GET {
+    let slug = query_param("slug")
+    let rows = query("SELECT slug, name, description, goal, project_type, gate_policy, model_combo, departments, status, updated_at FROM forge_projects WHERE slug = ? LIMIT 1", [slug])
+    if length(rows) == 0.0 then { return respond("404 project not found") }
+    let repos = query("SELECT name, description, github_url, commits_count, last_commit_at FROM forge_repos WHERE project_slug = ? ORDER BY created_at DESC", [slug])
+    let mut rep_html = ""
+    each r in repos {
+      let rn = ForgeEscape(to_string(json_get(r, "name", "")))
+      let rep_html = rep_html + "<li><a href='/repos/repo?name=" + rn + "'>" + rn + "</a> — коммитов: " + to_string(json_get(r, "commits_count", "0")) + "</li>"
+    }
+    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(to_string(json_get(rows[0], "name", ""))) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1,h2{font-family:Newsreader,serif}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}a{color:#A8321E}pre{background:#FBF8F2;padding:8px;overflow-x:auto}ul{list-style:none;padding:0}</style></head><body><h1>" + ForgeEscape(to_string(json_get(rows[0], "name", ""))) + "</h1><div class='panel'><p>" + ForgeEscape(to_string(json_get(rows[0], "goal", ""))) + "</p><p>Тип: " + ForgeEscape(to_string(json_get(rows[0], "project_type", ""))) + " · Гейты: " + ForgeEscape(to_string(json_get(rows[0], "gate_policy", ""))) + " · Статус: " + ForgeEscape(to_string(json_get(rows[0], "status", ""))) + "</p></div><h2>Репозитории</h2><div class='panel'><ul>" + rep_html + "</ul></div></body></html>"
+    return respond_html(html)
+  }
+
+  route "/repos/repo" method=GET {
+    let name = query_param("name")
+    let files_out = ForgeRepoFiles(name, "main")
+    let commits_out = ForgeCommits(name, "20")
+    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(name) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1,h2{font-family:Newsreader,serif}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}pre{background:#FBF8F2;padding:8px;overflow-x:auto;font-size:12px}</style></head><body><h1>" + ForgeEscape(name) + "</h1><h2>Дерево (main)</h2><div class='panel'><pre>" + ForgeEscape(files_out) + "</pre></div><h2>Коммиты</h2><div class='panel'><pre>" + ForgeEscape(commits_out) + "</pre></div></body></html>"
+    return respond_html(html)
+  }
+
+  route "/repos/file" method=GET {
+    let name = query_param("name")
+    let refv = query_param("ref")
+    let path = query_param("path")
+    let rv = ForgeValidRef(refv)
+    if rv != "ok" then { return respond("400 " + rv) }
+    let vp = ForgeValidPath(path)
+    if vp != "ok" then { return respond("400 " + vp) }
+    let content = ForgeReadFile(name, refv, path)
+    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(path) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1{font-family:Newsreader,serif}pre{background:#FBF8F2;padding:8px;overflow-x:auto;font-size:12px;white-space:pre-wrap}</style></head><body><h1>" + ForgeEscape(path) + " @" + ForgeEscape(refv) + "</h1><pre>" + ForgeEscape(content) + "</pre></body></html>"
+    return respond_html(html)
+  }
+
+  // ============================================================
   // WEBHOOK — Telegram
   // ============================================================
 
@@ -3534,6 +3596,27 @@ mlogserver {
       } else {
         let _ = SendTelegramReply(chat_id, "Usage: /search <query>")
       }
+      return respond("200 ok")
+    }
+
+    // FO-035 C.1: короткая форма проекта — активный диалог перехватывает ввод
+    if kv_get("forge_form_step_" + chat_id) != "" and kv_get("forge_form_step_" + chat_id) != "done" then {
+      if trim(text) == "/cancelform" then {
+        kv_set("forge_form_step_" + chat_id, "done")
+        let _ = SendTelegramReply(chat_id, "Форма проекта отменена.")
+        return respond("200 ok")
+      }
+      let form_reply = ForgeShortFormStep(chat_id, text)
+      if form_reply != "" then {
+        if starts_with(form_reply, "done:") == false then { let _ = SendTelegramReply(chat_id, form_reply) }
+        return respond("200 ok")
+      }
+    }
+
+    // /newproject — FO-035 C.1: короткая форма (4 поля, с телефона)
+    if starts_with(text, "/newproject") then {
+      kv_set("forge_form_step_" + chat_id, "name")
+      let _ = SendTelegramReply(chat_id, "Новый проект FORGE — короткая форма (4 вопроса). /cancelform — отмена.\n1/4. Название проекта?")
       return respond("200 ok")
     }
 

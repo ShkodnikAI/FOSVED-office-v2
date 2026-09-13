@@ -74,6 +74,13 @@ for i in {1..10}; do
   sleep 2
 done
 
+# FO-035 E.1: двухзонная инициализация FORGE — персистентный mount (форж-репо)
+# + scratch зона; sweep хвостов scratch после падения процесса
+FORGE_REPOS_DIR="${FORGE_REPOS_DIR:-/var/forge/repos}"
+mkdir -p "${FORGE_REPOS_DIR}/forge/repos" /office/forge-tmp 2>/dev/null || mkdir -p /office/forge-tmp
+rm -rf /office/forge-tmp/* 2>/dev/null
+echo "--- FORGE: repos dir=${FORGE_REPOS_DIR}/forge/repos, scratch swept ---"
+
 # 2. Metalogos
 # FO-014: песочница документов filesystem-MCP + каталог subprocess-аудита ядра
 mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs"
