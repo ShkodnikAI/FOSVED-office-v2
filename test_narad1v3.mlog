@@ -1,0 +1,127 @@
+// test_narad1v3.mlog — FO-046 (диспатч #161): модель наряда 2.0.
+// Легенда: b1/b2 валидатор отделов; b3/b3s переход в очередь + состояние БД;
+// b4 очередь без исполнителя запрещена; b5 назначение отдела; b6 неизвестный
+// отдел; b7a/b7b приоритет (ошибка и ок); b8a test из queued запрещён;
+// b8b/b8c work + состояние; b8d/b8e test из in_work + состояние;
+// b9a/b9b блок + состояние; b9c/b9d разблок → в очередь;
+// b10 вью очереди; b11 NaradGet; b12a/b12b разбор аргументов.
+// NB: маркеры — короткие литералы, плоская конкатенация (ловушка parse_json).
+// Запуск: rm -rf /tmp/narad-test1 && mkdir -p /tmp/narad-test1, затем
+//   ./bin/mlog run test_narad1v3.mlog
+db { url: "sqlite:/tmp/narad-test1/narad.db" }
+import dept/utils
+import dept/narad
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS narads (id TEXT PRIMARY KEY, title TEXT, description TEXT, requested_by TEXT, changed_files TEXT, risk_level TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, executed_at TEXT, result TEXT, dept TEXT, priority TEXT DEFAULT 'normal', plan TEXT, acceptance TEXT, test_status TEXT DEFAULT 'none', test_log TEXT, report TEXT, dispatch_id TEXT, rework_count INTEGER DEFAULT 0, in_work_at TEXT, testing_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("DELETE FROM narads")
+  let _ = db_execute("DELETE FROM audit_log")
+  return "ok"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern _EqStr(a: String, b: String) -> Bool {
+  if a == b then { return true }
+  return false
+}
+
+pattern _StatusOf(nid: String) -> String {
+  let rows = query("SELECT status FROM narads WHERE id = ?1", [nid])
+  if length(rows) == 0.0 then { return "" }
+  return to_string(json_get(get(rows, 0), "status", ""))
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut out = ""
+
+  let v1 = NaradValidDept("dev")
+  let b1 = _EqStr(v1, "ok")
+  let out = out + "b1=" + to_string(b1) + ";"
+
+  let v2 = NaradValidDept("неттакого")
+  let b2 = _EqStr(v2, "")
+  let out = out + "b2=" + to_string(b2) + ";"
+
+  let _ = db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES ('N1', 'наряд один', 'описание', 'owner', 'low', 'pending')", [])
+  let _ = db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status, dept) VALUES ('N2', 'наряд два', 'описание', 'owner', 'low', 'pending', 'dev')", [])
+  let _ = db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status, dept) VALUES ('N3', 'наряд три', 'описание', 'owner', 'low', 'in_work', 'dev')", [])
+
+  let r3 = NaradTransition("N2", "queue", "owner", "")
+  let b3 = starts_with(r3, "ok")
+  let out = out + "b3=" + to_string(b3) + ";"
+  let b3s = _EqStr(_StatusOf("N2"), "queued")
+  let out = out + "b3s=" + to_string(b3s) + ";"
+
+  let r4 = NaradTransition("N1", "queue", "owner", "")
+  let b4 = starts_with(r4, "ERR")
+  let out = out + "b4=" + to_string(b4) + ";"
+
+  let r5 = NaradSetField("N1", "dept", "dev")
+  let b5 = starts_with(r5, "ok")
+  let out = out + "b5=" + to_string(b5) + ";"
+
+  let r6 = NaradSetField("N1", "dept", "неттакого")
+  let b6 = starts_with(r6, "ERR")
+  let out = out + "b6=" + to_string(b6) + ";"
+
+  let r7a = NaradSetField("N1", "priority", "срочно")
+  let b7a = starts_with(r7a, "ERR")
+  let out = out + "b7a=" + to_string(b7a) + ";"
+  let r7b = NaradSetField("N1", "priority", "high")
+  let b7b = starts_with(r7b, "ok")
+  let out = out + "b7b=" + to_string(b7b) + ";"
+
+  let r8a = NaradTransition("N2", "test", "owner", "")
+  let b8a = starts_with(r8a, "ERR")
+  let out = out + "b8a=" + to_string(b8a) + ";"
+  let r8b = NaradTransition("N2", "work", "owner", "")
+  let b8b = starts_with(r8b, "ok")
+  let out = out + "b8b=" + to_string(b8b) + ";"
+  let b8c = _EqStr(_StatusOf("N2"), "in_work")
+  let out = out + "b8c=" + to_string(b8c) + ";"
+  let r8d = NaradTransition("N2", "test", "owner", "")
+  let b8d = starts_with(r8d, "ok")
+  let out = out + "b8d=" + to_string(b8d) + ";"
+  let b8e = _EqStr(_StatusOf("N2"), "testing")
+  let out = out + "b8e=" + to_string(b8e) + ";"
+
+  let r9a = NaradTransition("N3", "block", "owner", "ждём доступ")
+  let b9a = starts_with(r9a, "ok")
+  let out = out + "b9a=" + to_string(b9a) + ";"
+  let b9b = _EqStr(_StatusOf("N3"), "blocked")
+  let out = out + "b9b=" + to_string(b9b) + ";"
+  let r9b = NaradTransition("N3", "unblock", "owner", "")
+  let b9c = starts_with(r9b, "ok")
+  let out = out + "b9c=" + to_string(b9c) + ";"
+  let b9d = _EqStr(_StatusOf("N3"), "queued")
+  let out = out + "b9d=" + to_string(b9d) + ";"
+
+  let view = NaradQueueView()
+  let b10 = starts_with(view, "Нарядная очередь")
+  let out = out + "b10=" + to_string(b10) + ";"
+
+  let g1 = NaradGet("N1")
+  let b11 = index_of(g1, "dev") >= 0.0
+  let out = out + "b11=" + to_string(b11) + ";"
+
+  let parsed = parse_json(NaradSplitArgs("N1 сделать шаги один"))
+  let b12a = _EqStr(to_string(json_get(parsed, "id", "")), "N1")
+  let out = out + "b12a=" + to_string(b12a) + ";"
+  let b12b = _EqStr(to_string(json_get(parsed, "tail", "")), "сделать шаги один")
+  let out = out + "b12b=" + to_string(b12b) + ";"
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

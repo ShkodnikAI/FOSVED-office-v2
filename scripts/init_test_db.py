@@ -19,7 +19,9 @@ TABLES = [
     "CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, period TEXT, created_at TEXT DEFAULT (datetime('now')))",
     "CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, provider TEXT, model TEXT, input_tokens TEXT, output_tokens TEXT, cost_usd TEXT, request_type TEXT, created_at TEXT DEFAULT (datetime('now')))",
     "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP, action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)",
-    "CREATE TABLE IF NOT EXISTS narads (id TEXT PRIMARY KEY, title TEXT, description TEXT, requested_by TEXT, changed_files TEXT, risk_level TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, executed_at TEXT, result TEXT)",
+    # FO-046: нарядный контур 2.0 — схема narads с колонками контура
+    # (в проде добираются через ALTER TABLE в InitDB, app.mlog)
+    "CREATE TABLE IF NOT EXISTS narads (id TEXT PRIMARY KEY, title TEXT, description TEXT, requested_by TEXT, changed_files TEXT, risk_level TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, executed_at TEXT, result TEXT, dept TEXT, priority TEXT DEFAULT 'normal', plan TEXT, acceptance TEXT, test_status TEXT DEFAULT 'none', test_log TEXT, report TEXT, dispatch_id TEXT, rework_count INTEGER DEFAULT 0, in_work_at TEXT, testing_at TEXT)",
     "CREATE TABLE IF NOT EXISTS debriefs (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, period TEXT, content TEXT, actions_taken TEXT, created_at TEXT DEFAULT (datetime('now')))",
     "CREATE TABLE IF NOT EXISTS admin_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, content TEXT, duration_sec TEXT, created_at TEXT DEFAULT (datetime('now')))",
     "CREATE TABLE IF NOT EXISTS admin_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, severity TEXT, file_path TEXT, issue TEXT, fix_suggestion TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')))",
