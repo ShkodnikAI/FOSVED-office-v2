@@ -287,9 +287,19 @@ def scheduler_morning_brief():
         dept_rows = _query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", fetch=True)
         active_depts = [r["dept"] for r in dept_rows] if dept_rows else []
 
-        # Pending narads
+        # Pending narads + FO-047: полная нарядная очередь (бриф показывает
+        # жизненный цикл, а не только pending)
         narad_rows = _query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", fetch=True)
         narads_pending = narad_rows[0]["cnt"] if narad_rows else 0
+        try:
+            from proxy.narad_queue import queue_counts as _narad_counts
+            _nq = _narad_counts()
+            narads_queue_line = (f"Нарядная очередь: в ожидании {_nq['pending']}, одобрено {_nq['approved']}, "
+                                 f"в очереди {_nq['queued']}, в работе {_nq['in_work']}, "
+                                 f"на приёмке {_nq['testing']}, заблокировано {_nq['blocked']}")
+        except Exception as nq_err:  # noqa: BLE001 — бриф деградирует к счётчику pending
+            log.warning(f"narad queue line failed: {nq_err}")
+            narads_queue_line = f"Нарядная очередь: нерешённых {narads_pending}"
 
         # Recent corrections
         corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
@@ -373,7 +383,7 @@ def scheduler_morning_brief():
 === КАК РАБОТАЕТ ОФИС (последние 24ч) ===
 Диалогов: {dialog_24h}
 Активные отделы: {', '.join(active_depts) if active_depts else 'нет активности'}
-Нерешённых нарядов: {narads_pending}
+{narads_queue_line}
 Коррекций за сутки: {corrections_24h}
 {metrics_text}
 
