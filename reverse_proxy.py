@@ -20,6 +20,7 @@ LLM_ROUTES_PREFIXES = [
     "/cron/collect-news",  # registered in LLM Proxy, not in Metalogos; guarded by CRON_SECRET
     "/cron/backup",        # FO-001 db-backup: роут был только здесь — раньше уходил в mlog и молча 404 (нашли FO-042)
     "/cron/backup-forge",  # FO-042: git bundle bare-репозиториев FORGE
+    "/cron/narad-tick",    # FO-047: такт нарядной очереди (исполнение через /chain/step)
     "/news/stats",         # read-only counters, used by the smoke script,
     "/scheduler/morning-brief",   # cron-accessible
     "/scheduler/lz-daily",        # cron-accessible

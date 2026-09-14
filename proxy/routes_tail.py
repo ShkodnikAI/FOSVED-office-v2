@@ -340,6 +340,25 @@ def cron_backup_forge():
                     "summary": result["summary"]})
 
 
+# ── FO-047: диспетчер нарядной очереди (диспатч #161) ─────────────────────────
+# Один такт: resume зависшего in_work-наряда → или исполнить следующий
+# (approved/queued, приоритет→возраст) через /chain/step. Штатный ритм —
+# keep-alive крон каждые 14 мин (render.yaml); approve в miniapp дёргает
+# такт в фоне (narad_queue.trigger_async).
+@app.route("/cron/narad-tick", methods=["GET"])
+def cron_narad_tick():
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    from proxy.narad_queue import tick
+    try:
+        result = tick()
+        return jsonify({"ok": True, **result})
+    except Exception as e:  # noqa: BLE001 — крон должен видеть ошибку, а не 500-стек
+        _log_audit("narad_tick_error", {"error": str(e)[:300]}, "system")
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+
 # ── FO-042 B: выгрузка состояния FORGE (наряд #149) ──────────────────────
 # Выборка forge_projects / открытых задач / гейтов без решения / открытых
 # замечаний → JSON-файл на постоянном диске → документом владельцу.

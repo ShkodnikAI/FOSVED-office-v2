@@ -327,6 +327,13 @@ def api_narad_approve(nid):
     try:
         _query("UPDATE narads SET status='approved', approved_at=datetime('now') WHERE id=?", (nid,))
         _log_audit("narad_approve_miniapp", {"narad_id": nid})
+        # FO-047: мгновенный такт очереди в фоне — одобренный наряд с
+        # исполнителем берётся в работу без ожидания крона (≤14 мин).
+        try:
+            from proxy.narad_queue import trigger_async
+            trigger_async()
+        except Exception as tick_err:  # noqa: BLE001 — approve не должен падать из-за тика
+            _log_audit("narad_tick_trigger_error", {"narad_id": nid, "error": str(tick_err)[:200]})
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
