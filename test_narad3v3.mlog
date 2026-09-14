@@ -1,0 +1,87 @@
+// test_narad3v3.mlog — FO-049 (диспатч #161): метрики нарядной дисциплины.
+// Легенда: m1 закрытие с первой попытки пишет строку narad_stats
+// (first_try=1, lead_seconds>0); m2 отчёт отдела попадает в narads.report;
+// m3 после доработки (fail → work → test → ok) first_try=0, rework=1;
+// m4 всего строк в narad_stats = 2.
+// NB: маркеры — короткие литералы, плоская конкатенация (ловушка parse_json).
+// Запуск: rm -rf /tmp/narad-test3 && mkdir -p /tmp/narad-test3, затем
+//   ./bin/mlog run test_narad3v3.mlog
+db { url: "sqlite:/tmp/narad-test3/narad.db" }
+import dept/utils
+import dept/narad
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS narads (id TEXT PRIMARY KEY, title TEXT, description TEXT, requested_by TEXT, changed_files TEXT, risk_level TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, executed_at TEXT, result TEXT, dept TEXT, priority TEXT DEFAULT 'normal', plan TEXT, acceptance TEXT, test_status TEXT DEFAULT 'none', test_log TEXT, report TEXT, dispatch_id TEXT, rework_count INTEGER DEFAULT 0, in_work_at TEXT, testing_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS narad_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, narad_id TEXT, dept TEXT, first_try INTEGER DEFAULT 0, rework_count INTEGER DEFAULT 0, lead_seconds INTEGER, accepted_by TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("DELETE FROM narads")
+  let _ = db_execute("DELETE FROM narad_stats")
+  let _ = db_execute("DELETE FROM audit_log")
+  return "ok"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern _EqStr(a: String, b: String) -> Bool {
+  if a == b then { return true }
+  return false
+}
+
+pattern _Col(nid: String, col: String) -> String {
+  let rows = query("SELECT status, test_status, report, rework_count FROM narads WHERE id = ?1", [nid])
+  if length(rows) == 0.0 then { return "" }
+  return to_string(json_get(get(rows, 0), col, ""))
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut out = ""
+
+  let _ = db_execute("INSERT INTO narads (id, title, status, dept, result, created_at) VALUES ('M1', 'первый', 'testing', 'dev', 'ОТЧЁТ: сделано и проверено', datetime('now', '-2 hours'))", [])
+
+  let r1 = NaradAccept("M1", "ok", "owner", "по критериям")
+  let m1r = starts_with(r1, "ok")
+  let out = out + "m1r=" + to_string(m1r) + ";"
+
+  let srows = query("SELECT first_try, lead_seconds FROM narad_stats WHERE narad_id = 'M1'", [])
+  let m1n = _EqStr(to_string(length(srows)), "1")
+  let out = out + "m1n=" + to_string(m1n) + ";"
+  let ft = to_string(json_get(get(srows, 0), "first_try", "9"))
+  let m1f = _EqStr(ft, "1")
+  let out = out + "m1f=" + to_string(m1f) + ";"
+  let lead = to_float(json_get(get(srows, 0), "lead_seconds", "0"))
+  let m1l = lead > 7000.0
+  let out = out + "m1l=" + to_string(m1l) + ";"
+
+  let m2 = index_of(_Col("M1", "report"), "ОТЧЁТ") >= 0.0
+  let out = out + "m2=" + to_string(m2) + ";"
+
+  let _ = db_execute("INSERT INTO narads (id, title, status, dept, result, created_at) VALUES ('M2', 'второй', 'testing', 'qa', 'ОТЧЁТ: не всё', datetime('now', '-1 hours'))", [])
+  let _ = NaradAccept("M2", "fail", "owner", "переделать блок")
+  let _ = NaradTransition("M2", "work", "qa", "")
+  let _ = NaradTransition("M2", "test", "qa", "")
+  let r3 = NaradAccept("M2", "ok", "owner", "теперь ок")
+  let m3r = starts_with(r3, "ok")
+  let out = out + "m3r=" + to_string(m3r) + ";"
+  let s2 = query("SELECT first_try, rework_count FROM narad_stats WHERE narad_id = 'M2'", [])
+  let m3f = _EqStr(to_string(json_get(get(s2, 0), "first_try", "9")), "0")
+  let out = out + "m3f=" + to_string(m3f) + ";"
+  let m3w = _EqStr(to_string(json_get(get(s2, 0), "rework_count", "9")), "1")
+  let out = out + "m3w=" + to_string(m3w) + ";"
+
+  let cnt = query("SELECT COUNT(*) AS c FROM narad_stats", [])
+  let m4 = _EqStr(to_string(json_get(get(cnt, 0), "c", "0")), "2")
+  let out = out + "m4=" + to_string(m4) + ";"
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

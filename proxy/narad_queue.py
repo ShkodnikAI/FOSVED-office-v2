@@ -266,3 +266,34 @@ def trigger_async():
             log.warning(f"narad_queue.trigger_async: {e}")
 
     threading.Thread(target=_run, daemon=True, name="narad-tick").start()
+
+
+def narad_stats_week_line():
+    """Недельный срез закрытых нарядов — строка для утреннего брифа
+    (по понедельникам, зеркало forge_edit_stats_week_line FO-043).
+
+    Метрики: закрыто / first-try / доработки / средний цикл.
+    Вердикт: доля first-try < 50% — «процесс требует внимания».
+    Пустая неделя или отсутствие таблицы — пустая строка (честная
+    деградация, бриф не падает).
+    """
+    try:
+        rows = _query(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(first_try), 0) AS ft, "
+            "COALESCE(SUM(rework_count), 0) AS rw, COALESCE(AVG(lead_seconds), 0) AS lead "
+            "FROM narad_stats WHERE created_at > datetime('now', '-7 days')", fetch=True)
+    except Exception:  # noqa: BLE001 — нет таблицы/БД не готова → пустая строка (честная деградация брифа)
+        return ""
+    if not rows or not rows[0]["n"]:
+        return ""
+    r = rows[0]
+    n = int(r["n"])
+    ft = int(r["ft"] or 0)
+    rw = int(r["rw"] or 0)
+    lead = int(r["lead"] or 0)
+    share = round(100.0 * ft / n)
+    hours, mins = lead // 3600, (lead % 3600) // 60
+    lead_str = f"{hours}ч {mins}м" if hours else f"{mins}м"
+    verdict = "дисциплина ок" if share >= 50 else "процесс требует внимания"
+    return (f"Наряды: закрыто {n}, с первой попытки {ft} из {n} ({share}%), "
+            f"доработок {rw}, средний цикл {lead_str} — {verdict}")

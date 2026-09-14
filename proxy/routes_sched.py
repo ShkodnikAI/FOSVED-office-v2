@@ -243,6 +243,15 @@ def scheduler_morning_brief():
     except Exception as e:
         log.warning(f"[morning_brief] forge edit stats failed (non-fatal): {e}")
 
+    # FO-049 (диспатч #161): недельная метрика нарядной дисциплины — по понедельникам
+    narad_stats_line = ""
+    try:
+        if datetime.utcnow().weekday() == 0:
+            from proxy.narad_queue import narad_stats_week_line
+            narad_stats_line = narad_stats_week_line()
+    except Exception as e:
+        log.warning(f"[morning_brief] narad stats failed (non-fatal): {e}")
+
     try:
         now = datetime.utcnow()
         # Minsk time for display (UTC+3 year-round)
@@ -398,6 +407,9 @@ def scheduler_morning_brief():
 
 === FORGE: МЕТРИКА ФОРМАТА ПРАВОК (неделя, по понедельникам) ===
 {forge_edit_line if forge_edit_line else ''}
+
+=== НАРЯДЫ: МЕТРИКА ДИСЦИПЛИНЫ (неделя, по понедельникам) ===
+{narad_stats_line if narad_stats_line else ''}
 
 === ПОВТОРЯЮЩИЕСЯ ОШИБКИ ОФИСА ЗА СУТКИ ===
 {errors_digest if errors_digest else 'Нет'}
