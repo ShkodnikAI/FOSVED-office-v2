@@ -44,7 +44,7 @@ def schema(monkeypatch):
     _query(NARADS_SQL)
     _query("DELETE FROM narads")
     _query("DELETE FROM narad_steps")
-    monkeypatch.setattr(nq, "_notify_owner", lambda text: None)
+    monkeypatch.setattr(nq, "_notify_owner", lambda text, markup=None: None)
     yield
     _query("DELETE FROM narads")
     _query("DELETE FROM narad_steps")

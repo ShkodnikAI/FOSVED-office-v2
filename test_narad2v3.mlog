@@ -1,0 +1,112 @@
+// test_narad2v3.mlog — FO-048 (диспатч #161): приёмка-gate.
+// Легенда: a1 приёмка ok из testing → done + passed; a2 приёмка не из
+// testing → ERR; a3 fail → queued + rework 1 + failed; a3s повторная
+// петля доработки копит rework; a4 done без приёмки → ERR; a5 done после
+// приёмки → done; a6 несуществующий наряд; a7 гейт на done_naryad-пути
+// (NaradDone) совпадает с командой.
+// NB: маркеры — короткие литералы, плоская конкатенация (ловушка parse_json).
+// Запуск: rm -rf /tmp/narad-test2 && mkdir -p /tmp/narad-test2, затем
+//   ./bin/mlog run test_narad2v3.mlog
+db { url: "sqlite:/tmp/narad-test2/narad.db" }
+import dept/utils
+import dept/narad
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS narads (id TEXT PRIMARY KEY, title TEXT, description TEXT, requested_by TEXT, changed_files TEXT, risk_level TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, executed_at TEXT, result TEXT, dept TEXT, priority TEXT DEFAULT 'normal', plan TEXT, acceptance TEXT, test_status TEXT DEFAULT 'none', test_log TEXT, report TEXT, dispatch_id TEXT, rework_count INTEGER DEFAULT 0, in_work_at TEXT, testing_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("DELETE FROM narads")
+  let _ = db_execute("DELETE FROM audit_log")
+  return "ok"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern _EqStr(a: String, b: String) -> Bool {
+  if a == b then { return true }
+  return false
+}
+
+pattern _StatusOf(nid: String) -> String {
+  let rows = query("SELECT status FROM narads WHERE id = ?1", [nid])
+  if length(rows) == 0.0 then { return "" }
+  return to_string(json_get(get(rows, 0), "status", ""))
+}
+
+pattern _Col(nid: String, col: String) -> String {
+  let rows = query("SELECT status, test_status, rework_count FROM narads WHERE id = ?1", [nid])
+  if length(rows) == 0.0 then { return "" }
+  return to_string(json_get(get(rows, 0), col, ""))
+}
+
+pattern Main1(x: String) -> String {
+  let _ = TestDbInit()
+  let mut out = ""
+
+  let _ = db_execute("INSERT INTO narads (id, title, status, dept, test_status) VALUES ('A1', 'наряд приёмки', 'testing', 'dev', 'none')", [])
+  let _ = db_execute("INSERT INTO narads (id, title, status, dept, test_status) VALUES ('A2', 'в работе', 'in_work', 'dev', 'none')", [])
+  let _ = db_execute("INSERT INTO narads (id, title, status, dept, test_status) VALUES ('A3', 'петля доработки', 'testing', 'dev', 'none')", [])
+
+  let r1 = NaradAccept("A1", "ok", "owner", "проверил по критериям")
+  let a1 = starts_with(r1, "ok")
+  let out = out + "a1=" + to_string(a1) + ";"
+  let a1s = _EqStr(_StatusOf("A1"), "done")
+  let out = out + "a1s=" + to_string(a1s) + ";"
+  let a1t = _EqStr(_Col("A1", "test_status"), "passed")
+  let out = out + "a1t=" + to_string(a1t) + ";"
+
+  let r2 = NaradAccept("A2", "ok", "owner", "")
+  let a2 = starts_with(r2, "ERR")
+  let out = out + "a2=" + to_string(a2) + ";"
+
+  let r3 = NaradAccept("A3", "fail", "owner", "не все критерии закрыты")
+  let a3 = starts_with(r3, "ok")
+  let out = out + "a3=" + to_string(a3) + ";"
+  let a3s = _EqStr(_StatusOf("A3"), "queued")
+  let out = out + "a3s=" + to_string(a3s) + ";"
+  let a3r = _EqStr(_Col("A3", "rework_count"), "1")
+  let out = out + "a3r=" + to_string(a3r) + ";"
+
+  // повторная петля: диспетчер берёт queued → in_work → testing → снова fail
+  let _ = NaradTransition("A3", "work", "dev", "")
+  let _ = NaradTransition("A3", "test", "dev", "")
+  let r3b = NaradAccept("A3", "fail", "owner", "второй раз не то")
+  let a3b = starts_with(r3b, "ok")
+  let out = out + "a3b=" + to_string(a3b) + ";"
+  let a3br = _EqStr(_Col("A3", "rework_count"), "2")
+  let out = out + "a3br=" + to_string(a3br) + ";"
+
+  let r4 = NaradDone("A3", "owner")
+  let a4 = starts_with(r4, "ERR")
+  let out = out + "a4=" + to_string(a4) + ";"
+
+  // третий прогон: work → test → приёмка ok → done
+  let _ = NaradTransition("A3", "work", "dev", "")
+  let _ = NaradTransition("A3", "test", "dev", "")
+  let r5a = NaradAccept("A3", "ok", "owner", "теперь всё")
+  let a5a = starts_with(r5a, "ok")
+  let out = out + "a5a=" + to_string(a5a) + ";"
+  let a5s = _EqStr(_StatusOf("A3"), "done")
+  let out = out + "a5s=" + to_string(a5s) + ";"
+
+  let r6 = NaradDone("A9", "owner")
+  let a6 = starts_with(r6, "ERR")
+  let out = out + "a6=" + to_string(a6) + ";"
+
+  // гейт через NaradDone: тест_status passed в testing, но вручную переведён
+  let _ = db_execute("INSERT INTO narads (id, title, status, dept, test_status) VALUES ('A5', 'ручной путь', 'testing', 'qa', 'passed')", [])
+  let r7 = NaradDone("A5", "owner")
+  let a7 = starts_with(r7, "ok")
+  let out = out + "a7=" + to_string(a7) + ";"
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
