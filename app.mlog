@@ -175,6 +175,7 @@ pattern InitDB() -> String {
   // Webhook dedup — time-windowed (WH-3): replaces eternal kv-flag
   db_execute("CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS dev_tasks (id TEXT PRIMARY KEY, title TEXT, task_type TEXT, status TEXT, qa_status TEXT, telegram_snapshot_id TEXT, estimate_low TEXT, estimate_expected TEXT, estimate_high TEXT, estimate_confidence TEXT, actual_hours TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS dept_activity (dept TEXT PRIMARY KEY, last_used_at TEXT, use_count INTEGER DEFAULT 0)")
   db_execute("CREATE TABLE IF NOT EXISTS campaign_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id TEXT, conversion_accuracy TEXT, cac_accuracy TEXT, reach_accuracy TEXT, conversion_within_target TEXT, cac_within_target TEXT, was_overoptimistic TEXT, verified_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS legal_assessments (id INTEGER PRIMARY KEY AUTOINCREMENT, short_title TEXT, full_result TEXT, document_type TEXT, status TEXT, jurisdiction TEXT, business_form TEXT, counterparty_jurisdiction TEXT, counterparty_form TEXT, risk_level TEXT, confidence TEXT, verification_date TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS training_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, dept_name TEXT, specialist_name TEXT, session_type TEXT, status TEXT, polygon_pass_rate TEXT, created_at TEXT DEFAULT (datetime('now')), completed_at TEXT, ratified_at TEXT)")
@@ -315,6 +316,7 @@ pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> S
 pattern RecordUserMessage(chat_id: String, dept: String, text: String) -> String {
   db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES (?1, 'user', ?2, ?3)", [chat_id, dept, text])
   let _ = SaveDialogV2(chat_id, "user", dept, text)
+  let _ = try db_execute("INSERT INTO dept_activity (dept, last_used_at, use_count) VALUES (?1, datetime('now'), 1) ON CONFLICT(dept) DO UPDATE SET last_used_at = datetime('now'), use_count = use_count + 1", [dept])
   return "ok"
 }
 
@@ -4831,7 +4833,10 @@ return respond("200 ok") }
 
     // Phase 3: Original AdminNightCycle
     let result = AdminNightCycle()
-    let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400)
+    // Phase 4: Устаревшие отделы (hermes-agent lifecycle, адаптировано под use-based сигнал)
+    let stale_result = try AdminCheckStaleDepts()
+    if to_string(stale_result) == "()" then { let stale_result = "проверка не выполнена" }
+    let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result
     kv_set("admin_night_summary", result)
     return respond("200 ok")
   }

@@ -494,6 +494,38 @@ pattern AdminProposals() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // Admin Night Cycle — UA 6-subagent + native call_llm phases
 // ═══════════════════════════════════════════════════════════════════════
+// Проверка устаревших отделов — по образцу жизненного цикла скиллов
+// из hermes-agent (active/stale/archived, но без exec: git log недоступен
+// в теле роута, поэтому сигнал не «когда правили файл», а «когда реально
+// обращались» — dept_activity, обновляется в RecordUserMessage).
+// Порог намеренно короче их 14/30 дней — у нас 14 отделов, не сотни
+// скиллов, реже используемый должен быть виден раньше.
+pattern AdminCheckStaleDepts() -> String {
+  let all_depts = ["yana", "osp", "lz", "expert", "marketing", "finance", "legal", "dev", "design", "qa", "visual", "engineering", "kavalnya", "admin"]
+  let stale_days = 60.0
+  let mut never_used = ""
+  let mut stale_used = ""
+  each dept_name in all_depts {
+    let rows = try query("SELECT last_used_at, use_count, julianday('now') - julianday(last_used_at) as days_ago FROM dept_activity WHERE dept = ?1", [dept_name])
+    if to_string(rows) == "()" or to_string(rows) == "[]" then {
+      let never_used = never_used + dept_name + ", "
+    } else {
+      let days_ago = to_float(try json_get(get(rows, 0.0), "days_ago", "0"))
+      if days_ago > stale_days then {
+        let stale_used = stale_used + dept_name + " (" + to_string(to_int(days_ago)) + " дн.), "
+      }
+    }
+  }
+  if never_used == "" and stale_used == "" then { return "все отделы использовались в последние " + to_string(to_int(stale_days)) + " дней" }
+  if never_used != "" then {
+    let _ = try db_execute("INSERT INTO admin_findings (severity, file_path, issue, fix_suggestion, status) VALUES (?1, ?2, ?3, ?4, ?5)", ["info", "dept_activity", "Ни разу не обращались с момента запуска отслеживания: " + never_used, "Проверить, нужен ли отдел вообще, или просто не было повода обратиться", "open"])
+  }
+  if stale_used != "" then {
+    let _ = try db_execute("INSERT INTO admin_findings (severity, file_path, issue, fix_suggestion, status) VALUES (?1, ?2, ?3, ?4, ?5)", ["info", "dept_activity", "Не использовались дольше " + to_string(to_int(stale_days)) + " дней: " + stale_used, "Профиль отдела мог устареть без практики — не жёсткая проблема, но стоит взглянуть при следующем аудите", "open"])
+  }
+  return "никогда: [" + never_used + "] устарели: [" + stale_used + "]"
+}
+
 pattern AdminNightCycle() -> String {
   let start_time = now()
   let _ = AuditLog("night_cycle_start", "admin", "night cycle started")
