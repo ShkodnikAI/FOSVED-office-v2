@@ -178,3 +178,46 @@ pattern NaradSendButtons(chat_id: String, text: String, narad_id: String) -> Str
   let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
   return result
 }
+
+// ── FO-048 (#161): приёмка-gate ──────────────────────────────────────────
+// testing → done ТОЛЬКО через приёмку. ok → done (test_status=passed);
+// fail → в очередь на доработку (test_status=failed, rework_count+1),
+// диспетчер FO-047 отправит наряд отделу снова — с замечаниями приёмки.
+
+// NaradAccept — вердикт приёмки: ok | fail.
+// Возвращает "ok: ..." или "ERR: ...". Решение — в audit_log.
+pattern NaradAccept(narad_id: String, verdict: String, actor: String, comment: String) -> String {
+  let rows = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
+  if length(rows) == 0.0 then { return "ERR: наряд " + narad_id + " не найден" }
+  let st = to_string(json_get(get(rows, 0), "status", ""))
+  if st != "testing" then { return "ERR: приёмка возможна только из testing (сейчас " + st + ")" }
+  let cmt = trim(comment)
+  if cmt == "" then { let cmt = "без комментария" }
+  if verdict == "ok" then {
+    db_execute("UPDATE narads SET status = 'done', test_status = 'passed', test_log = ?2, executed_at = datetime('now') WHERE id = ?1", [narad_id, substring(cmt, 0.0, 1000.0)])
+    let _ = AuditLog("narad_accepted", "narad", "id=" + narad_id + " passed, by " + actor)
+    return "ok: наряд закрыт (done), приёмка пройдена"
+  }
+  if verdict == "fail" then {
+    db_execute("UPDATE narads SET status = 'queued', test_status = 'failed', test_log = ?2, rework_count = rework_count + 1 WHERE id = ?1", [narad_id, substring(cmt, 0.0, 1000.0)])
+    let _ = AuditLog("narad_accepted", "narad", "id=" + narad_id + " failed, rework, by " + actor)
+    return "ok: наряд возвращён на доработку (queued), rework +1"
+  }
+  return "ERR: вердикт должен быть ok или fail"
+}
+
+// NaradDone — закрытие наряда (gated /наряд готов): только с пройденной
+// приёмкой. Иначе — отказ с инструкцией.
+pattern NaradDone(narad_id: String, actor: String) -> String {
+  let rows = query("SELECT status, test_status FROM narads WHERE id = ?1", [narad_id])
+  if length(rows) == 0.0 then { return "ERR: наряд " + narad_id + " не найден" }
+  let row = get(rows, 0)
+  let st = to_string(json_get(row, "status", ""))
+  let ts = to_string(json_get(row, "test_status", "none"))
+  if st == "done" then { return "ERR: наряд уже закрыт" }
+  if ts != "passed" then { return "ERR: сначала приёмка — /наряд приёмка " + narad_id + " ok|fail <комментарий>" }
+  if st != "testing" and st != "in_work" then { return "ERR: из статуса " + st + " закрыть нельзя" }
+  db_execute("UPDATE narads SET status = 'done', executed_at = datetime('now') WHERE id = ?1", [narad_id])
+  let _ = AuditLog("narad_done", "narad", "id=" + narad_id + " closed by " + actor)
+  return "ok: наряд закрыт (done)"
+}

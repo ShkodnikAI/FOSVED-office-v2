@@ -80,15 +80,24 @@ def next_narad():
     """Следующий наряд к исполнению: одобрен/в очереди, с исполнителем;
     приоритет high → normal → low, внутри — старые вперёд."""
     return _query(
-        "SELECT id, title, description, plan, acceptance, dept, priority, risk_level "
+        "SELECT id, title, description, plan, acceptance, dept, priority, risk_level, "
+        "test_status, test_log, rework_count "
         "FROM narads WHERE status IN ('approved','queued') AND dept IS NOT NULL AND dept != '' "
         "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, "
         "created_at ASC LIMIT 1", fetch=True)
 
 
+def _row_get(row, key, default=None):
+    """Чтение поля из sqlite3.Row или dict без AttributeError."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
 def build_query(row):
     """Текст задачи для отдела: наряд целиком — задача, детали, план,
-    критерии приёмки (отдел работает по нарядной дисциплине)."""
+    критерии приёмки, а при доработке (FO-048) — замечания приёмки."""
     parts = [f"НАРЯД {row['id']} (приоритет {row['priority'] or 'normal'}, риск {row['risk_level'] or 'low'})",
              f"Задача: {row['title']}"]
     if row["description"]:
@@ -97,6 +106,9 @@ def build_query(row):
         parts.append(f"План работ: {row['plan']}")
     if row["acceptance"]:
         parts.append(f"Критерии приёмки (сделано, когда): {row['acceptance']}")
+    if _row_get(row, "test_status") == "failed" and _row_get(row, "test_log"):
+        parts.append(f"ПРЕДЫДУЩАЯ ПОПЫТКА ОТКЛОНЕНА НА ПРИЁМКЕ (rework {_row_get(row, 'rework_count') or 0}): "
+                     f"{_row_get(row, 'test_log')}. Устрани замечания и повтори отчёт.")
     parts.append("Работай по нарядной дисциплине: выполни план, проверь себя по критериям приёмки и отчитайся по форме: что сделано / что НЕ трогалось / как проверялось.")
     return "\n".join(parts)[:20000]
 
@@ -109,13 +121,21 @@ def _invoke_step(dept, query, chat_id):
     return str(resp.json().get("result", ""))
 
 
-def _notify_owner(text):
+def _accept_markup(narad_id):
+    """Кнопки приёмки (FO-048) в уведомлении о результате."""
+    return {"inline_keyboard": [[
+        {"text": "✅ Принять", "callback_data": f"na_ok_{narad_id}"},
+        {"text": "↩️ На доработку", "callback_data": f"na_fail_{narad_id}"},
+    ]]}
+
+
+def _notify_owner(text, markup=None):
     """Уведомление владельца (не валим тик при ошибке отправки)."""
     if not OWNER_ID:
         return
     try:
         from proxy.telegram import _tg_send_message
-        _tg_send_message(OWNER_ID, text[:3500])
+        _tg_send_message(OWNER_ID, text[:3500], reply_markup=markup)
     except Exception as e:  # noqa: BLE001 — уведомление не должно валить исполнение
         log.warning(f"narad_queue._notify_owner: {e}")
 
@@ -167,7 +187,8 @@ def execute_next(invoke_fn=None):
     _query("UPDATE narads SET status='testing', testing_at=datetime('now'), result=? WHERE id=?",
            (reply[:500], narad_id))
     _log_audit("narad_execute_done", {"narad_id": narad_id, "dept": dept, "reply_len": len(reply)}, dept="narad")
-    _notify_owner(f"✅ Наряд {narad_id} исполнен отделом {dept}, переведён на приёмку (testing).\n{reply[:600]}")
+    _notify_owner(f"✅ Наряд {narad_id} исполнен отделом {dept}, переведён на приёмку (testing).\n{reply[:600]}",
+                  _accept_markup(narad_id))
     return {"action": "executed", "narad_id": narad_id, "dept": dept, "reply_len": len(reply)}
 
 
@@ -221,7 +242,8 @@ def resume_stuck(invoke_fn=None):
            (reply[:20000], _now_iso(), narad_id))
     _query("UPDATE narads SET status='testing', testing_at=datetime('now'), result=? WHERE id=?",
            (reply[:500], narad_id))
-    _notify_owner(f"✅ Наряд {narad_id} ({dept}) восстановлен и исполнен после сбоя, на приёмке (testing).\n{reply[:600]}")
+    _notify_owner(f"✅ Наряд {narad_id} ({dept}) восстановлен и исполнен после сбоя, на приёмке (testing).\n{reply[:600]}",
+                  _accept_markup(narad_id))
     return {"action": "resumed", "narad_id": narad_id, "dept": dept}
 
 
