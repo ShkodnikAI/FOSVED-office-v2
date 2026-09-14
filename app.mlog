@@ -21,6 +21,7 @@ import dept/utils
 // import dept/context — REMOVED: inlined below to bypass binary import caching (same issue as dept/yana)
 import dept/miniapp
 import dept/chain
+import dept/narad
 import dept/scheduler
 import dept/quest
 // import dept/yana — REMOVED: HandleYana inlined below to bypass binary import caching
@@ -69,6 +70,21 @@ pattern InitDB() -> String {
 
   // DevOps
   db_execute("CREATE TABLE IF NOT EXISTS narads (id TEXT PRIMARY KEY, title TEXT, description TEXT, requested_by TEXT, changed_files TEXT, risk_level TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, executed_at TEXT, result TEXT)")
+  // FO-046 (#161): нарядный контур 2.0 — расширение модели наряда.
+  // dept/priority/plan/acceptance/test_status/test_log/report/dispatch_id/
+  // rework_count/in_work_at/testing_at. ALTER идемпотентен (try): колонки
+  // добираются к живой БД при старте. Логика — в dept/narad.mlog.
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN dept TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN plan TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN acceptance TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN test_log TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN report TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN in_work_at TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN testing_at TEXT")
   db_execute("CREATE TABLE IF NOT EXISTS debriefs (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, period TEXT, content TEXT, actions_taken TEXT, created_at TEXT DEFAULT (datetime('now')))")
 
   // Admin
@@ -2723,7 +2739,7 @@ mlogserver {
         let narad_id = substring(cb_data, 11.0, length(cb_data))
         db_execute("UPDATE narads SET status = 'approved', approved_at = datetime('now') WHERE id = ?1", [narad_id])
         let _ = AuditLog("naryad_do", "admin", "approved naryad: " + narad_id)
-        let _ = SendTelegramReply(cb_chat_id, "Наряд " + narad_id + " принят в работу.")
+        let _ = SendTelegramReply(cb_chat_id, "Наряд " + narad_id + " одобрен (approved). Диспетчер возьмёт его в работу.")
       }
       if starts_with(cb_data, "skip_naryad_") then {
         let narad_id = substring(cb_data, 13.0, length(cb_data))
@@ -2806,7 +2822,7 @@ mlogserver {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam /osp bet /osp watch /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /stats /cost /costs /budget /model\nAnalytics: /stats-aggregate /model-cost\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — список открытых\n  /наряд готов <ID> | /наряд отмена <ID>\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nDev-MCP (FO-014): /issue <repo> <текст> — открыть issue через MCP\n  /ci <repo> [ветка] — CI-статус через MCP\n  /docs list | /docs read <path> | /docs write <path> <текст> — документы (песочница)\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam /osp bet /osp watch /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all | /lz compare\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /stats /cost /costs /budget /model\nAnalytics: /stats-aggregate /model-cost\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — нарядная очередь\n  /наряд готов <ID> | /наряд отмена <ID>\n  /наряд план|критерии|исполнитель|приоритет <ID> <значение>\n  /наряд в-очередь|в-работу|в-тест|разблок <ID> | /наряд блок <ID> <причина>\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nDev-MCP (FO-014): /issue <repo> <текст> — открыть issue через MCP\n  /ci <repo> [ветка] — CI-статус через MCP\n  /docs list | /docs read <path> | /docs write <path> <текст> — документы (песочница)\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -2901,24 +2917,11 @@ mlogserver {
       return respond("200 ok")
     }
 
-    // /наряды — list pending naryads (must be before /наряд to avoid prefix match)
+    // /наряды — нарядная очередь (FO-046, must be before /наряд to avoid prefix match):
+    // счётчики по статусам + открытые наряды (паттерн NaradQueueView в dept/narad.mlog)
     if text == "/наряды" then {
-      let rows = query("SELECT id, title, description, status, created_at FROM narads WHERE status = 'pending' ORDER BY created_at DESC LIMIT 10", [])
-      if length(rows) == 0.0 then {
-        let _ = SendTelegramReply(chat_id, "Нет открытых нарядов.")
-        return respond("200 ok")
-      }
-      let msg = "Открытые наряды:\n\n"
-      let mut i = 1.0
-      each row in rows {
-        let nid = to_string(json_get(row, "id", "?"))
-        let title = to_string(json_get(row, "title", ""))
-        let created = to_string(json_get(row, "created_at", ""))
-        let msg = msg + to_string(i) + ". " + nid + ": " + title + "\n   " + substring(created, 0.0, 16.0) + "\n\n"
-        let i = i + 1.0
-      }
-      let msg = msg + "Всего: " + to_string(length(rows))
-      let _ = SendTelegramReply(chat_id, msg)
+      let queue_msg = NaradQueueView()
+      let _ = SendTelegramReply(chat_id, queue_msg)
       return respond("200 ok")
     }
 
@@ -2937,6 +2940,94 @@ mlogserver {
       db_execute("UPDATE narads SET status = 'rejected' WHERE id = ?1", [narad_id])
       let _ = AuditLog("naryad_cancel_cmd", "admin", "cancelled: " + narad_id)
       let _ = SendTelegramReply(chat_id, "Наряд " + narad_id + " отменён.")
+      return respond("200 ok")
+    }
+
+    // ── FO-046 (#161): нарядный контур 2.0 — поля и переходы ─────────────
+    // Поля: план, критерии, исполнитель, приоритет. Переходы: в-очередь,
+    // в-работу, в-тест, блок, разблок. Логика — dept/narad.mlog.
+    if starts_with(text, "/наряд план ") then {
+      let parsed = parse_json(NaradSplitArgs(substring(text, 12.0, length(text))))
+      let nid = to_string(json_get(parsed, "id", ""))
+      let body_text = to_string(json_get(parsed, "tail", ""))
+      if nid == "" or body_text == "" then {
+        let _ = SendTelegramReply(chat_id, "Формат: /наряд план <ID> <шаги работ>")
+        return respond("200 ok")
+      }
+      let res = NaradSetField(nid, "plan", body_text)
+      let _ = SendTelegramReply(chat_id, res)
+      return respond("200 ok")
+    }
+    if starts_with(text, "/наряд критерии ") then {
+      let parsed = parse_json(NaradSplitArgs(substring(text, 16.0, length(text))))
+      let nid = to_string(json_get(parsed, "id", ""))
+      let body_text = to_string(json_get(parsed, "tail", ""))
+      if nid == "" or body_text == "" then {
+        let _ = SendTelegramReply(chat_id, "Формат: /наряд критерии <ID> <сделано, когда...>")
+        return respond("200 ok")
+      }
+      let res = NaradSetField(nid, "acceptance", body_text)
+      let _ = SendTelegramReply(chat_id, res)
+      return respond("200 ok")
+    }
+    if starts_with(text, "/наряд исполнитель ") then {
+      let parsed = parse_json(NaradSplitArgs(substring(text, 19.0, length(text))))
+      let nid = to_string(json_get(parsed, "id", ""))
+      let body_text = to_string(json_get(parsed, "tail", ""))
+      if nid == "" or body_text == "" then {
+        let _ = SendTelegramReply(chat_id, "Формат: /наряд исполнитель <ID> <отдел>")
+        return respond("200 ok")
+      }
+      let res = NaradSetField(nid, "dept", body_text)
+      let _ = SendTelegramReply(chat_id, res)
+      return respond("200 ok")
+    }
+    if starts_with(text, "/наряд приоритет ") then {
+      let parsed = parse_json(NaradSplitArgs(substring(text, 17.0, length(text))))
+      let nid = to_string(json_get(parsed, "id", ""))
+      let body_text = to_string(json_get(parsed, "tail", ""))
+      if nid == "" or body_text == "" then {
+        let _ = SendTelegramReply(chat_id, "Формат: /наряд приоритет <ID> <high|normal|low>")
+        return respond("200 ok")
+      }
+      let res = NaradSetField(nid, "priority", body_text)
+      let _ = SendTelegramReply(chat_id, res)
+      return respond("200 ok")
+    }
+    if starts_with(text, "/наряд в-очередь ") then {
+      let nid = trim(substring(text, 17.0, length(text)))
+      let res = NaradTransition(nid, "queue", chat_id, "")
+      let _ = SendTelegramReply(chat_id, res)
+      return respond("200 ok")
+    }
+    if starts_with(text, "/наряд в-работу ") then {
+      let nid = trim(substring(text, 16.0, length(text)))
+      let res = NaradTransition(nid, "work", chat_id, "")
+      let _ = SendTelegramReply(chat_id, res)
+      return respond("200 ok")
+    }
+    if starts_with(text, "/наряд в-тест ") then {
+      let nid = trim(substring(text, 14.0, length(text)))
+      let res = NaradTransition(nid, "test", chat_id, "")
+      let _ = SendTelegramReply(chat_id, res)
+      return respond("200 ok")
+    }
+    if starts_with(text, "/наряд блок ") then {
+      let parsed = parse_json(NaradSplitArgs(substring(text, 12.0, length(text))))
+      let nid = to_string(json_get(parsed, "id", ""))
+      let body_text = to_string(json_get(parsed, "tail", ""))
+      if nid == "" then {
+        let _ = SendTelegramReply(chat_id, "Формат: /наряд блок <ID> <причина>")
+        return respond("200 ok")
+      }
+      let res = NaradTransition(nid, "block", chat_id, body_text)
+      let _ = SendTelegramReply(chat_id, res)
+      return respond("200 ok")
+    }
+    if starts_with(text, "/наряд разблок ") then {
+      let nid = trim(substring(text, 15.0, length(text)))
+      let res = NaradTransition(nid, "unblock", chat_id, "")
+      let _ = SendTelegramReply(chat_id, res)
       return respond("200 ok")
     }
 
@@ -2968,8 +3059,9 @@ mlogserver {
       // Save to narads table
       db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status) VALUES (?1, ?2, ?3, ?4, ?5, 'pending')", [naryad_id, substring(naryad_text, 0.0, 100.0), naryad_text, chat_id, "low"])
       let _ = AuditLog("naryad_created", "admin", "id=" + naryad_id + " text=" + substring(naryad_text, 0.0, 80.0))
-      // Send confirmation
-      let _ = SendTelegramReply(chat_id, "Наряд " + naryad_id + " записан:\n" + naryad_text + "\n" + context_line)
+      // FO-046: подтверждение с кнопками Принять/Пропустить (do_naryad_/skip_naryad_)
+      let confirm = "Наряд " + naryad_id + " записан:\n" + naryad_text + "\n" + context_line
+      let _ = NaradSendButtons(chat_id, confirm, naryad_id)
       return respond("200 ok")
     }
 

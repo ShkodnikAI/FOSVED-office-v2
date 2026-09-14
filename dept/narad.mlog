@@ -1,0 +1,180 @@
+// ═══════════════════════════════════════════════════════════════════════
+// Fosved Office v2 — Нарядный контур (FO-046, диспатч #161)
+// Модель наряда 2.0: план, критерии приёмки, исполнитель, приоритет.
+// Жизненный цикл: pending → approved → queued → in_work → testing → done
+//   | rejected | blocked. Исполнение очереди — FO-047, приёмка-gate —
+//   FO-048, отчёт и метрики — FO-049.
+// Колонки narads добавляются в InitDB (app.mlog) через ALTER TABLE.
+// ═══════════════════════════════════════════════════════════════════════
+
+// NaradValidDept — может ли отдел быть исполнителем наряда.
+// Возвращает "ok" или "" (пусто = неизвестный отдел).
+pattern NaradValidDept(dept: String) -> String {
+  if dept == "yana" then { return "ok" }
+  if dept == "osp" then { return "ok" }
+  if dept == "lz" then { return "ok" }
+  if dept == "expert" then { return "ok" }
+  if dept == "marketing" then { return "ok" }
+  if dept == "finance" then { return "ok" }
+  if dept == "legal" then { return "ok" }
+  if dept == "dev" then { return "ok" }
+  if dept == "design" then { return "ok" }
+  if dept == "qa" then { return "ok" }
+  if dept == "visual" then { return "ok" }
+  if dept == "engineering" then { return "ok" }
+  if dept == "kavalnya" then { return "ok" }
+  if dept == "admin" then { return "ok" }
+  if dept == "forge" then { return "ok" }
+  return ""
+}
+
+// NaradGet — JSON наряда по id; "" если не найден.
+pattern NaradGet(narad_id: String) -> String {
+  let rows = query("SELECT id, title, description, requested_by, risk_level, status, dept, priority, plan, acceptance, test_status, rework_count, created_at FROM narads WHERE id = ?1", [narad_id])
+  if length(rows) == 0.0 then { return "" }
+  return json_encode(get(rows, 0))
+}
+
+// NaradSplitArgs — разбор "<ID> <хвост>" без join (первый пробел).
+// Возвращает JSON {id, tail}; для строки без пробела tail пуст.
+pattern NaradSplitArgs(rest: String) -> String {
+  let r = trim(rest)
+  let sp = index_of(r, " ")
+  if sp < 0.0 then { return json_encode({id: r, tail: ""}) }
+  let id = substring(r, 0.0, sp)
+  let tail = trim(substring(r, sp + 1.0, length(r)))
+  return json_encode({id: id, tail: tail})
+}
+
+// NaradSetField — присвоить поле наряда: dept | priority | plan | acceptance.
+// Возвращает "ok: ..." или "ERR: ...". Все решения — в audit_log.
+pattern NaradSetField(narad_id: String, field: String, value: String) -> String {
+  let rows = query("SELECT id FROM narads WHERE id = ?1", [narad_id])
+  if length(rows) == 0.0 then { return "ERR: наряд " + narad_id + " не найден" }
+  if field == "dept" then {
+    let v = trim(value)
+    if NaradValidDept(v) == "" then { return "ERR: неизвестный отдел (см. список в /help)" }
+    db_execute("UPDATE narads SET dept = ?2 WHERE id = ?1", [narad_id, v])
+    let _ = AuditLog("narad_set", "narad", "id=" + narad_id + " dept=" + v)
+    return "ok: исполнитель " + v
+  }
+  if field == "priority" then {
+    let v = trim(value)
+    if v != "high" and v != "normal" and v != "low" then { return "ERR: приоритет должен быть high, normal или low" }
+    db_execute("UPDATE narads SET priority = ?2 WHERE id = ?1", [narad_id, v])
+    let _ = AuditLog("narad_set", "narad", "id=" + narad_id + " priority=" + v)
+    return "ok: приоритет " + v
+  }
+  if field == "plan" then {
+    db_execute("UPDATE narads SET plan = ?2 WHERE id = ?1", [narad_id, substring(value, 0.0, 4000.0)])
+    let _ = AuditLog("narad_set", "narad", "id=" + narad_id + " plan len=" + to_string(length(value)))
+    return "ok: план записан"
+  }
+  if field == "acceptance" then {
+    db_execute("UPDATE narads SET acceptance = ?2 WHERE id = ?1", [narad_id, substring(value, 0.0, 4000.0)])
+    let _ = AuditLog("narad_set", "narad", "id=" + narad_id + " acceptance len=" + to_string(length(value)))
+    return "ok: критерии приёмки записаны"
+  }
+  return "ERR: неизвестное поле " + field
+}
+
+// NaradTransition — переход статуса: queue | work | test | block | unblock.
+// Возвращает "ok: ..." или "ERR: ...". Каждый переход — в audit_log.
+// Смысл статусов:
+//   queued  — стоит в очереди на исполнение (нужен назначенный отдел);
+//   in_work — исполнитель работает (вручную или диспетчером FO-047);
+//   testing — работы завершены, идёт приёмка (гейт FO-048 перед done);
+//   blocked — ждёт внешнего события, причина в result.
+pattern NaradTransition(narad_id: String, action: String, actor: String, detail: String) -> String {
+  let rows = query("SELECT status, dept FROM narads WHERE id = ?1", [narad_id])
+  if length(rows) == 0.0 then { return "ERR: наряд " + narad_id + " не найден" }
+  let row = get(rows, 0)
+  let st = to_string(json_get(row, "status", ""))
+  let dept = to_string(json_get(row, "dept", ""))
+  if action == "queue" then {
+    if st != "pending" and st != "approved" and st != "blocked" then { return "ERR: в очередь нельзя из статуса " + st }
+    if dept == "" then { return "ERR: не назначен исполнитель (команда /наряд исполнитель " + narad_id + " <отдел>)" }
+    db_execute("UPDATE narads SET status = 'queued' WHERE id = ?1", [narad_id])
+    let _ = AuditLog("narad_transition", "narad", "id=" + narad_id + " " + st + " to queued, by " + actor)
+    return "ok: наряд в очереди"
+  }
+  if action == "work" then {
+    if st != "pending" and st != "approved" and st != "queued" then { return "ERR: в работу нельзя из статуса " + st }
+    db_execute("UPDATE narads SET status = 'in_work', in_work_at = datetime('now') WHERE id = ?1", [narad_id])
+    let _ = AuditLog("narad_transition", "narad", "id=" + narad_id + " " + st + " to in_work, by " + actor)
+    return "ok: наряд в работе"
+  }
+  if action == "test" then {
+    if st != "in_work" then { return "ERR: на приёмку нельзя из статуса " + st + " (сначала в работу)" }
+    db_execute("UPDATE narads SET status = 'testing', testing_at = datetime('now') WHERE id = ?1", [narad_id])
+    let _ = AuditLog("narad_transition", "narad", "id=" + narad_id + " " + st + " to testing, by " + actor)
+    return "ok: наряд на приёмке"
+  }
+  if action == "block" then {
+    if st == "done" or st == "rejected" then { return "ERR: закрытый наряд нельзя блокировать (" + st + ")" }
+    let why = trim(detail)
+    if why == "" then { let why = "без причины" }
+    db_execute("UPDATE narads SET status = 'blocked', result = ?2 WHERE id = ?1", [narad_id, substring(why, 0.0, 500.0)])
+    let _ = AuditLog("narad_transition", "narad", "id=" + narad_id + " " + st + " to blocked, by " + actor)
+    return "ok: наряд заблокирован"
+  }
+  if action == "unblock" then {
+    if st != "blocked" then { return "ERR: наряд не заблокирован (" + st + ")" }
+    if dept == "" then {
+      db_execute("UPDATE narads SET status = 'pending' WHERE id = ?1", [narad_id])
+      let _ = AuditLog("narad_transition", "narad", "id=" + narad_id + " blocked to pending, by " + actor)
+      return "ok: наряд возвращён в pending"
+    }
+    db_execute("UPDATE narads SET status = 'queued' WHERE id = ?1", [narad_id])
+    let _ = AuditLog("narad_transition", "narad", "id=" + narad_id + " blocked to queued, by " + actor)
+    return "ok: наряд возвращён в очередь"
+  }
+  return "ERR: неизвестное действие " + action
+}
+
+// NaradQueueView — текст для /наряды: счётчики по статусам + открытые наряды.
+// Порядок: priority high → normal → low, внутри — старые вперёд.
+pattern NaradQueueView() -> String {
+  let cnt_rows = query("SELECT status, COUNT(*) as cnt FROM narads WHERE status IN ('pending','approved','queued','in_work','testing','blocked') GROUP BY status", [])
+  let mut counts = ""
+  let mut total = 0.0
+  each row in cnt_rows {
+    let s = to_string(json_get(row, "status", ""))
+    let c = to_string(json_get(row, "cnt", "0"))
+    if counts != "" then { let counts = counts + ", " }
+    let counts = counts + s + " " + c
+    let total = total + to_float(c)
+  }
+  if total == 0.0 then { return "Открытых нарядов нет." }
+  let rows = query("SELECT id, title, status, dept, priority FROM narads WHERE status IN ('pending','approved','queued','in_work','testing','blocked') ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at ASC LIMIT 12", [])
+  let msg = "Нарядная очередь: " + counts + "\n\n"
+  let mut i = 1.0
+  each row in rows {
+    let nid = to_string(json_get(row, "id", "?"))
+    let title = to_string(json_get(row, "title", ""))
+    let st = to_string(json_get(row, "status", ""))
+    let d = to_string(json_get(row, "dept", ""))
+    let pr = to_string(json_get(row, "priority", "normal"))
+    let msg = msg + to_string(i) + ". " + nid + " [" + st + "] " + d + " (" + pr + ") — " + substring(title, 0.0, 80.0) + "\n"
+    let i = i + 1.0
+  }
+  return substring(msg, 0.0, 3800.0)
+}
+
+// NaradSendButtons — подтверждение создания наряда с кнопками Принять/Пропустить
+// (callback do_naryad_/skip_naryad_ уже обслуживаются в webhook-контуре).
+pattern NaradSendButtons(chat_id: String, text: String, narad_id: String) -> String {
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let body = json_encode({
+    chat_id: to_float(chat_id),
+    text: text,
+    reply_markup: {
+      inline_keyboard: [[
+        {text: "Принять", callback_data: "do_naryad_" + narad_id},
+        {text: "Пропустить", callback_data: "skip_naryad_" + narad_id}
+      ]]
+    }
+  })
+  let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+  return result
+}
