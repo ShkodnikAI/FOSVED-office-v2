@@ -25,5 +25,24 @@
 2. Для углубления — указанные в наряде § этого плана (read-only доступ к офис-репо).
 3. Факты перепроверить по кодовым якорям (AGENTS.md §1).
 
+## Доступ исполнителей (deploy keys, read-only)
+
+Зарегистрированы 2026-09-15 (директива владельца), ed25519, строго read-only,
+привязаны только к этому репо:
+
+| Ключ | Fingerprint (SHA256) |
+|---|---|
+| `executor-a-ro` | `kbJLl1LuC8j7ribpBE6tHNaMYPmS+GAaIeSAYqjHkYE` |
+| `executor-b-ro` | `LEkb7K5ha6gfL3KF6ZpCUhml1m+wD8PNS6erpQ4Ia/s` |
+| `executor-c-ro` | `eNwrEIRtV43hfZjm6ZXO3K2xwXfzDywHflyMWjG/jcg` |
+
+- Приватные ключи выдаёт владелец защищённым каналом (пакет вне репо; в issues/PR не публиковать).
+- Проверка: `ssh -i <ключ> -p 443 -T git@ssh.github.com` → «Hi ShkodnikAI/FOSVED-office-v2! …»;
+  клон: `git clone git@ssh.github.com:ShkodnikAI/FOSVED-office-v2.git --depth 1`.
+- Ротация — раз в квартал либо при компрометации: Settings → Deploy keys → удалить,
+  новый выпускает издатель (`scripts/deploy_keys_office.py`, идемпотентен).
+- Ключи дают только чтение канона для Шага 0; запись в публичный Metalogos- — учётными
+  данными исполнителя, как в Волне 0.
+
 История: канон заведён 2026-09-15 исследовательской веткой (Super Z) по директиве
 владельца «спрятать план в офисе, агент читает перед работой» (вариант A+C).
