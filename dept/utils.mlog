@@ -366,3 +366,39 @@ pattern EscapeMarkdownV2Simple(text: String) -> String {
   let t = replace(t, "!", "\\!")
   return t
 }
+
+// ── MCP: markets (FO-XXX, коннекторы) ──────────────────────────────
+// Общий, параметризованный по dept вызов — в отличие от McpGithubCall/
+// McpFsCall в dept/dev.mlog (жёстко 'dev', написаны раньше, до того как
+// понадобилось больше одного отдела). Тот же защитный паттерн: audit
+// до/после, проверка parse_json, redact() на выход сервера (вывод MCP —
+// недоверенные данные, taint UserInput, №268 Metalogos).
+pattern McpMarketsServerCmd() -> String {
+  return "mcp_servers/markets"
+}
+
+pattern McpAuditFor(dept: String, server: String, tool: String, purpose: String, status: String) -> String {
+  let _ = db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('mcp_call', ?, ?, ?, ?)", [dept, dept, "server=" + server + " tool=" + tool + " purpose=" + purpose, status])
+  return "ok"
+}
+
+pattern McpMarketsCall(dept: String, tool: String, args_json: String, purpose: String) -> Dict {
+  let _ = McpAuditFor(dept, "markets", tool, purpose, "attempt")
+  let out = try mcp_call(McpMarketsServerCmd(), [], tool, args_json)
+  if to_string(out) == "()" then {
+    let _ = McpAuditFor(dept, "markets", tool, purpose, "error")
+    return { ok: false, body: "", note: "MCP-сервер markets недоступен (гейт ядра/сбой/таймаут). Fallback: сообщить, что данные сейчас недоступны, не выдумывать цифры." }
+  }
+  let parsed = try parse_json(to_string(out))
+  if to_string(parsed) == "()" then {
+    let _ = McpAuditFor(dept, "markets", tool, purpose, "error")
+    return { ok: false, body: redact(to_string(out), "secrets"), note: "ответ сервера не JSON" }
+  }
+  if to_string(json_get(parsed, "ok", "false")) == "true" then {
+    let _ = McpAuditFor(dept, "markets", tool, purpose, "ok")
+    return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
+  }
+  let _ = McpAuditFor(dept, "markets", tool, purpose, "refused")
+  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе" }
+}
