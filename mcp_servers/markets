@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""FOSVED office MCP server: markets (FO-XXX, наряд по коннекторам).
+
+Office-owned stdio MCP server — финансовые и биржевые данные для
+Finance и ЛЗ. Диалект: legacy MCP (newline-delimited JSON-RPC 2.0
+over stdio), контракт зеркалит mcp_servers/github (тот же паттерн,
+проверенный в проде).
+
+Тулзы v1:
+  get_crypto_price(coin_id, vs_currency?)     — CoinGecko, без ключа
+  get_stock_quote(symbol)                     — Alpha Vantage GLOBAL_QUOTE
+  get_forex_rate(from_currency, to_currency)  — Alpha Vantage CURRENCY_EXCHANGE_RATE
+
+ВАЖНО — честная оговорка, не проверено вживую:
+  Сеть в песочнице, где писался этот файл, не пропускает внешние API
+  (белый список блокирует api.coingecko.com и www.alphavantage.co
+  напрямую). Структура JSON-RPC протокола проверена исполнением —
+  это та же самая инфраструктура, что уже работает в mcp_servers/
+  github. А вот КОНКРЕТНЫЕ пути эндпоинтов, форма ответа и лимиты
+  Alpha Vantage/CoinGecko — по памяти обучения, не по факту. Первый
+  реальный вызов после деплоя может показать, что что-то в форме
+  ответа изменилось — это единственный способ проверить, сеть
+  снаружи песочницы обязательна.
+
+Безопасность:
+  - ALPHAVANTAGE_API_KEY берётся из env, НЕ из кода;
+  - CoinGecko используется без ключа (публичный тир, есть лимит
+    в районе 10-30 запросов в минуту — не проверено точно, если
+    начнёт бросать 429, нужен ключ Demo/Pro);
+  - весь вывод — недоверенные данные (taint UserInput, №268):
+    mlog-сторона обязана прогонять через redact() до промптов;
+  - инцидент-политика та же, что в github-сервере: тулзы НИКОГДА
+    не бросают, ошибка REST возвращается как {"ok": false, "error": ...}.
+
+Stdout — ТОЛЬКО JSON-RPC; stderr — диагностика; shutdown — stdin close.
+"""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+SERVER_NAME = "fosved-markets"
+SERVER_VERSION = "1.0.0"
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+ALPHAVANTAGE_BASE = "https://www.alphavantage.co/query"
+
+TOOLS = [
+    {"name": "get_crypto_price",
+     "description": "Цена криптовалюты в фиате: coin_id (напр. 'bitcoin', 'ethereum' — id CoinGecko, не тикер), vs_currency (опц., по умолчанию 'usd')",
+     "inputSchema": {"type": "object", "properties": {
+         "coin_id": {"type": "string"}, "vs_currency": {"type": "string"}},
+         "required": ["coin_id"]}},
+    {"name": "get_stock_quote",
+     "description": "Котировка акции: symbol (тикер, напр. 'AAPL')",
+     "inputSchema": {"type": "object", "properties": {
+         "symbol": {"type": "string"}},
+         "required": ["symbol"]}},
+    {"name": "get_forex_rate",
+     "description": "Курс валюты: from_currency, to_currency (коды ISO, напр. 'USD', 'EUR')",
+     "inputSchema": {"type": "object", "properties": {
+         "from_currency": {"type": "string"}, "to_currency": {"type": "string"}},
+         "required": ["from_currency", "to_currency"]}},
+]
+
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def respond(msg_id, result):
+    send({"jsonrpc": "2.0", "id": msg_id, "result": result})
+
+
+def respond_error(msg_id, code, message):
+    send({"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}})
+
+
+def av_key():
+    return os.environ.get("ALPHAVANTAGE_API_KEY", "")
+
+
+def http_get_json(url, timeout=20):
+    """GET с громкой диагностикой. Возвращает распарсенный JSON."""
+    req = urllib.request.Request(url, headers={"User-Agent": "fosved-office-mcp"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.reason}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"сеть недоступна: {e.reason}")
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise RuntimeError(f"ответ не JSON (первые 200 символов): {body[:200]}")
+
+
+def check_symbol(s):
+    s = str(s).strip()
+    if not s or len(s) > 20 or not all(c.isalnum() or c in "-._" for c in s):
+        raise RuntimeError("некорректный идентификатор (буквы/цифры/-._  до 20 символов)")
+    return s
+
+
+def tool_get_crypto_price(args):
+    try:
+        coin_id = check_symbol(args.get("coin_id", ""))
+        vs = check_symbol(args.get("vs_currency") or "usd").lower()
+        # NB: не проверено вживую — форма ответа CoinGecko simple/price
+        # по памяти обучения: {"<coin_id>": {"<vs>": <число>}}
+        url = f"{COINGECKO_BASE}/simple/price?ids={coin_id}&vs_currencies={vs}"
+        data = http_get_json(url)
+        if coin_id not in data:
+            return {"ok": False, "error": f"'{coin_id}' не найден — проверь id CoinGecko (не тикер, напр. 'bitcoin', не 'BTC')"}
+        price = data[coin_id].get(vs)
+        return {"ok": True, "coin_id": coin_id, "vs_currency": vs, "price": price}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_get_stock_quote(args):
+    try:
+        key = av_key()
+        if not key:
+            return {"ok": False, "error": "ALPHAVANTAGE_API_KEY не установлен"}
+        symbol = check_symbol(args.get("symbol", ""))
+        # NB: не проверено вживую — форма ответа GLOBAL_QUOTE по памяти
+        # обучения: {"Global Quote": {"05. price": "...", "10. change percent": "...", ...}}
+        url = f"{ALPHAVANTAGE_BASE}?function=GLOBAL_QUOTE&symbol={symbol}&apikey={key}"
+        data = http_get_json(url)
+        quote = data.get("Global Quote") or {}
+        if not quote:
+            note = data.get("Note") or data.get("Information") or "пустой ответ"
+            return {"ok": False, "error": f"нет данных по '{symbol}': {note}"}
+        return {"ok": True, "symbol": symbol,
+                "price": quote.get("05. price"),
+                "change_percent": quote.get("10. change percent"),
+                "volume": quote.get("06. volume")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def tool_get_forex_rate(args):
+    try:
+        key = av_key()
+        if not key:
+            return {"ok": False, "error": "ALPHAVANTAGE_API_KEY не установлен"}
+        from_c = check_symbol(args.get("from_currency", "")).upper()
+        to_c = check_symbol(args.get("to_currency", "")).upper()
+        url = (f"{ALPHAVANTAGE_BASE}?function=CURRENCY_EXCHANGE_RATE"
+               f"&from_currency={from_c}&to_currency={to_c}&apikey={key}")
+        data = http_get_json(url)
+        rate_data = data.get("Realtime Currency Exchange Rate") or {}
+        if not rate_data:
+            note = data.get("Note") or data.get("Information") or "пустой ответ"
+            return {"ok": False, "error": f"курс {from_c}->{to_c} не получен: {note}"}
+        return {"ok": True, "from": from_c, "to": to_c,
+                "rate": rate_data.get("5. Exchange Rate")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+TOOL_FUNCS = {
+    "get_crypto_price": tool_get_crypto_price,
+    "get_stock_quote": tool_get_stock_quote,
+    "get_forex_rate": tool_get_forex_rate,
+}
+
+
+def main():
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue  # спека: сервер молчит на мусоре во входе
+        method = msg.get("method")
+        msg_id = msg.get("id")
+        params = msg.get("params") or {}
+
+        if method == "initialize":
+            respond(msg_id, {
+                "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            })
+        elif method == "notifications/initialized":
+            pass  # notification: никогда не отвечаем
+        elif method == "tools/list":
+            respond(msg_id, {"tools": TOOLS})
+        elif method == "tools/call":
+            name = params.get("name", "")
+            args = params.get("arguments") or {}
+            func = TOOL_FUNCS.get(name)
+            if not func:
+                respond_error(msg_id, -32602, f"Unknown tool: {name}")
+                continue
+            try:
+                result = func(args)
+                text = json.dumps(result, ensure_ascii=False)
+                respond(msg_id, {"content": [{"type": "text", "text": text}],
+                                 "isError": False})
+            except Exception as e:  # громкая диагностика, не падение сервера
+                respond(msg_id, {"content": [{"type": "text", "text": str(e)}],
+                                 "isError": True})
+        elif method == "ping":
+            respond(msg_id, {})
+        elif msg_id is not None:
+            respond_error(msg_id, -32601, f"Method not found: {method}")
+
+
+if __name__ == "__main__":
+    main()
