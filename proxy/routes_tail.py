@@ -10,6 +10,7 @@ import time
 import uuid
 import subprocess
 import threading
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from proxy.core import (
     _TRACE_DIR, _TRACE_MAX_BYTES, _TRACE_RETENTION,
     auto_enrich, _has_enricher,
     _collect_metrics_for_period, _format_metrics_text,
+    _rotate_service_logs,
 )
 from proxy.providers import (
     PROVIDERS, TOKEN_COSTS, PROVIDER_MAX_TOKENS, COMBO_CHAINS,
@@ -225,7 +227,7 @@ def scheduler_reminder_check():
             event_id = r["id"]
 
             msg = f"Напоминание: {event_text}\n({event_date})"
-            _send_telegram_message(owner_id, msg)
+            _tg_send_message(owner_id, msg)
 
             # Mark as reminded
             _query("UPDATE yana_events SET reminded_at = datetime('now') WHERE id = ?", (event_id,))
@@ -1138,7 +1140,7 @@ def scheduler_watch_sweep():
 Если есть новые существенные изменения (не шум, не повтор), опиши кратко (1-2 предложения).
 Если изменений нет — ответь ровно одним словом: NO_DELTA"""
 
-            llm_result = _call_llm_with_failover(sweep_prompt, 'osp')
+            llm_result = call_llm('osp', [{"role": "user", "content": sweep_prompt}])
             reply = llm_result.get('reply', '') if isinstance(llm_result, dict) else str(llm_result)
             new_delta = None if 'NO_DELTA' in reply.upper()[:50] else reply.strip()
 
@@ -1165,7 +1167,7 @@ def scheduler_watch_sweep():
             msg = "🔍 Watch Sweep — обнаружены дельты:\n\n" + "\n".join(notifications[:10])
             if len(notifications) > 10:
                 msg += f"\n\n...и ещё {len(notifications) - 10}"
-            _send_telegram_message(owner_id, msg)
+            _tg_send_message(owner_id, msg)
 
         _log_audit('watch_sweep', {'swept': swept, 'deltas': deltas}, 'osp')
         log.info(f"Watch sweep: {swept} items, {deltas} deltas")
@@ -1247,7 +1249,7 @@ def scheduler_indicator_pre_reminders():
 
         msg += "\n\n/osp verify <id> — верифицировать индикатор"
 
-        _send_telegram_message(owner_id, msg)
+        _tg_send_message(owner_id, msg)
 
         _log_audit('indicator_pre_reminders', {'count': len(indicators), 'days_ahead': days_ahead}, 'osp')
         log.info(f"Indicator pre-reminders: {len(indicators)} indicators within {days_ahead}d")

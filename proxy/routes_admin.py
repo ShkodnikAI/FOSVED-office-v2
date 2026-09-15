@@ -10,6 +10,8 @@ import time
 import uuid
 import subprocess
 import threading
+import sqlite3
+import secrets_crypto
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 

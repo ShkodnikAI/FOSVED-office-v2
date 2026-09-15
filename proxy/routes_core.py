@@ -7,6 +7,8 @@ import re
 import json
 import time
 import uuid
+import hashlib
+import html as html_lib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -18,7 +20,7 @@ from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting,
     get_secret, set_secret, delete_secret, _has_db_override, INTEGRATIONS_REGISTRY,
-    DB_PATH, DB_FILE, BASE_DIR, LIB_DIR, CFG_DIR,
+    DB_PATH, DB_FILE, BASE_DIR, LIB_DIR, CFG_DIR, API_SECRET,
     TELEGRAM_BOT_TOKEN, TELEGRAM_ARCHIVE_CHANNEL_ID,
     memory, require_telegram, _TG_BOOTSTRAP_PAGE, _verify_init_data, _verify_webhook_secret,
     auto_enrich, _has_enricher, _auto_enrich_fn,
