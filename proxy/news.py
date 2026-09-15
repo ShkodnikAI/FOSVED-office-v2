@@ -30,8 +30,15 @@ RSS_FEEDS = {
     "rbk": {"url": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss", "category": "news_ru", "language": "ru", "name": "РБК"},
     "interfax": {"url": "https://www.interfax.ru/rss.asp", "category": "news_ru", "language": "ru", "name": "Интерфакс"},
     "kommersant": {"url": "https://www.kommersant.ru/RSS/news.xml", "category": "news_ru", "language": "ru", "name": "Коммерсантъ"},
+    # NB: Reuters закрыл публичные RSS-ленты в районе 2020 года (по памяти
+    # обучения, не проверено вживую — сеть песочницы не пропускает внешние
+    # хосты). feedparser.parse() на мёртвом URL обычно не бросает исключение,
+    # а тихо отдаёт пустой feed.entries — try выше это не поймает, значит
+    # источник мог годами не наполнять news_cache незаметно. Проверить
+    # реальным запросом после деплоя; если мёртв — заменить, не гадая тут.
     "reuters": {"url": "https://feeds.reuters.com/reuters/topNews", "category": "news_en", "language": "en", "name": "Reuters"},
     "bbc": {"url": "http://feeds.bbci.co.uk/news/world/rss.xml", "category": "news_en", "language": "en", "name": "BBC World"},
+    "aljazeera": {"url": "https://www.aljazeera.com/xml/rss/all.xml", "category": "news_en", "language": "en", "name": "Al Jazeera"},
     "techcrunch": {"url": "https://techcrunch.com/feed/", "category": "tech", "language": "en", "name": "TechCrunch"},
     "theverge": {"url": "https://www.theverge.com/rss/index.xml", "category": "tech", "language": "en", "name": "The Verge"},
     "hackernews": {"url": "https://hnrss.org/frontpage", "category": "tech", "language": "en", "name": "Hacker News"},
