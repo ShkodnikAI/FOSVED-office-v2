@@ -6,6 +6,8 @@ import os
 import re
 import json
 import time
+import hashlib
+import doc_extract
 from datetime import datetime, timedelta, timezone
 
 import feedparser

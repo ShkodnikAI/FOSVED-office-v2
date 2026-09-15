@@ -27,7 +27,7 @@ from proxy.providers import (
 )
 from proxy.telegram import (
     _tg_send_formatted, _tg_send_message, _tg_send_document, _tg_send_photo,
-    _safe_filename_part, _send_chat_action_loop,
+    _safe_filename_part, _send_chat_action_loop, _tg_send_report_with_button,
 )
 from proxy.reports import _evidence_badges_css, html_lib_escape
 from proxy.lz_sources import arxiv_search, hn_search, github_repo_search, lz_api_scan
@@ -686,7 +686,7 @@ def lz_osint():
 
 {OSINT_DISCLAIMER}"""
 
-    llm_result = _call_llm_with_failover(analysis_prompt, 'lz')
+    llm_result = call_llm('lz', [{"role": "user", "content": analysis_prompt}])
     analysis = llm_result.get('reply', 'Ошибка LLM-анализа') if isinstance(llm_result, dict) else str(llm_result)
 
     # Token tracking

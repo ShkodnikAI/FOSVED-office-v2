@@ -26,9 +26,11 @@ from proxy.core import (
     detect_dept, get_dept_prompt, CONDENSED_PROMPTS, FORMAT_INSTRUCTION,
     DEPT_COLORS, DEPT_NAMES, DEPT_HASHTAGS,
     auto_enrich, _has_enricher,
+    _collect_metrics_for_period, _format_metrics_text,
 )
 from proxy.providers import (
     PROVIDERS, COMBO_CHAINS, _breaker, _cfg_cache, call_llm, _call_single_provider,
+    TOKEN_COSTS,
 )
 from proxy.telegram import (
     _MARKER_EMOJI, _ALL_EMOJI, _escape_mdv2, _tg_send_formatted,
@@ -918,7 +920,7 @@ def learning_record():
         return jsonify({"status": "error", "message": "dept, query, approach required"}), 400
 
     try:
-        _execute("INSERT INTO continuous_learning (dept, query, approach, score, created_at) VALUES (?,?,?,?,datetime('now'))",
+        _query("INSERT INTO continuous_learning (dept, query, approach, score, created_at) VALUES (?,?,?,?,datetime('now'))",
                  (dept, query[:1000], approach[:2000], float(score)))
         log.info(f"learning_record: dept={dept} score={score} query={query[:60]}")
         return jsonify({"status": "ok"})
