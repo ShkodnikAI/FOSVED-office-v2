@@ -11,22 +11,31 @@ over stdio), контракт зеркалит mcp_servers/github (тот же �
   get_stock_quote(symbol)                     — Alpha Vantage GLOBAL_QUOTE
   get_forex_rate(from_currency, to_currency)  — Alpha Vantage CURRENCY_EXCHANGE_RATE
 
+Тулзы v2 (по разбору присланного владельцем отчёта об открытых
+источниках мониторинга — FRED назван самым открытым и надёжным
+слоем для макроданных):
+  get_fred_series(series_id, limit?)  — FRED (Fed St. Louis), макро:
+    ВВП, инфляция, ставки, безработица. Нужен бесплатный ключ.
+
 ВАЖНО — честная оговорка, не проверено вживую:
   Сеть в песочнице, где писался этот файл, не пропускает внешние API
-  (белый список блокирует api.coingecko.com и www.alphavantage.co
-  напрямую). Структура JSON-RPC протокола проверена исполнением —
-  это та же самая инфраструктура, что уже работает в mcp_servers/
-  github. А вот КОНКРЕТНЫЕ пути эндпоинтов, форма ответа и лимиты
-  Alpha Vantage/CoinGecko — по памяти обучения, не по факту. Первый
-  реальный вызов после деплоя может показать, что что-то в форме
-  ответа изменилось — это единственный способ проверить, сеть
-  снаружи песочницы обязательна.
+  (белый список блокирует api.coingecko.com, www.alphavantage.co,
+  api.stlouisfed.org напрямую). Структура JSON-RPC протокола
+  проверена исполнением — это та же самая инфраструктура, что уже
+  работает в mcp_servers/github. А вот КОНКРЕТНЫЕ пути эндпоинтов,
+  форма ответа и лимиты — по памяти обучения плюс по присланному
+  владельцем отчёту (который сам может быть не первичным источником
+  для точных цифр лимитов), не по факту. Первый реальный вызов
+  после деплоя может показать расхождение — это единственный способ
+  проверить, сеть снаружи песочницы обязательна.
 
 Безопасность:
-  - ALPHAVANTAGE_API_KEY берётся из env, НЕ из кода;
-  - CoinGecko используется без ключа (публичный тир, есть лимит
-    в районе 10-30 запросов в минуту — не проверено точно, если
-    начнёт бросать 429, нужен ключ Demo/Pro);
+  - ALPHAVANTAGE_API_KEY, FRED_API_KEY берутся из env, НЕ из кода;
+  - CoinGecko используется без ключа (публичный тир, ~10-30 запросов
+    в минуту — не проверено точно);
+  - Alpha Vantage: по присланному отчёту free tier ~25 запросов/день
+    — гораздо жёстче, чем считалось раньше. Кэшировать на стороне
+    mlog, не дёргать на каждый вопрос про акции;
   - весь вывод — недоверенные данные (taint UserInput, №268):
     mlog-сторона обязана прогонять через redact() до промптов;
   - инцидент-политика та же, что в github-сервере: тулзы НИКОГДА
@@ -44,6 +53,7 @@ SERVER_NAME = "fosved-markets"
 SERVER_VERSION = "1.0.0"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 ALPHAVANTAGE_BASE = "https://www.alphavantage.co/query"
+FRED_BASE = "https://api.stlouisfed.org/fred"
 
 TOOLS = [
     {"name": "get_crypto_price",
@@ -61,6 +71,11 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {
          "from_currency": {"type": "string"}, "to_currency": {"type": "string"}},
          "required": ["from_currency", "to_currency"]}},
+    {"name": "get_fred_series",
+     "description": "Макроэкономический ряд FRED: series_id (напр. 'CPIAUCSL' — CPI, 'UNRATE' — безработица, 'FEDFUNDS' — ставка ФРС, 'GDP' — ВВП), limit (опц., число последних точек, по умолчанию 1 — последнее значение)",
+     "inputSchema": {"type": "object", "properties": {
+         "series_id": {"type": "string"}, "limit": {"type": "integer"}},
+         "required": ["series_id"]}},
 ]
 
 
@@ -79,6 +94,10 @@ def respond_error(msg_id, code, message):
 
 def av_key():
     return os.environ.get("ALPHAVANTAGE_API_KEY", "")
+
+
+def fred_key():
+    return os.environ.get("FRED_API_KEY", "")
 
 
 def http_get_json(url, timeout=20):
@@ -162,10 +181,38 @@ def tool_get_forex_rate(args):
         return {"ok": False, "error": str(e)}
 
 
+def tool_get_fred_series(args):
+    try:
+        key = fred_key()
+        if not key:
+            return {"ok": False, "error": "FRED_API_KEY не установлен"}
+        series_id = check_symbol(args.get("series_id", "")).upper()
+        limit = args.get("limit") or 1
+        try:
+            limit = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            limit = 1
+        # NB: не проверено вживую — форма ответа series/observations по
+        # памяти обучения: {"observations": [{"date": "...", "value": "..."}, ...]},
+        # сортировка по умолчанию по возрастанию даты — берём sort_order=desc,
+        # чтобы limit давал САМЫЕ СВЕЖИЕ точки, не самые старые.
+        url = (f"{FRED_BASE}/series/observations?series_id={series_id}"
+               f"&api_key={key}&file_type=json&sort_order=desc&limit={limit}")
+        data = http_get_json(url)
+        obs = data.get("observations") or []
+        if not obs:
+            return {"ok": False, "error": f"нет данных по ряду '{series_id}' — проверь id на fred.stlouisfed.org"}
+        points = [{"date": o.get("date"), "value": o.get("value")} for o in obs]
+        return {"ok": True, "series_id": series_id, "count": len(points), "observations": points}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 TOOL_FUNCS = {
     "get_crypto_price": tool_get_crypto_price,
     "get_stock_quote": tool_get_stock_quote,
     "get_forex_rate": tool_get_forex_rate,
+    "get_fred_series": tool_get_fred_series,
 }
 
 
