@@ -5,16 +5,25 @@
 ТОТ ЖЕ бинарник (единственный JSON-RPC вызов на единственный запрос),
 каждый вызов — в audit_log (action='shop_fetch').
 
-Живые пробы из песочницы 2026-09-16 (form-истина, не память):
+Живые пробы из песочницы 2026-09-16 (form-истина, не память),
+дополнены живым диагнозом первого владельческого прогона (досье #2,
+«99 офф. без цены»):
   - search.wb.ru v4 → 200: цены в sizes[].price (копейки): product —
     продажная, basic — до скидки; отзывы = feedbacks; seller =
     supplier/supplierId/supplierRating; наличие = totalQuantity;
-    curr=byn игнорируется RU-кластером → цены RUB, BYN через курс
-    (SHOP_FX_RATES_JSON); без курса price_byn=None — честно,
-    оффер уйдёт в unscored (вопрос гео/валюты — чеклист владельца #172);
-  - api.kufar.by → 200: price_byn (число BYN), ad_link, subject,
-    account_parameters[p='name'], company_ad, paid_services.halva —
-    флаг рассрочки «Халва» → installment_ok;
+    curr=byn игнорируется RU-кластером → цены RUB, BYN через fx_rates()
+    (первый живой прогон: без FX все 100 офферов WB ушли в unscored);
+  - api.kufar.by → 200: price_byn/price_usd — СТРОКИ В КОПЕЙКАХ
+    (сверка 2026-09-16: iPhone 16 Pro price_byn="250000" = 2500 BYN и
+    price_usd="82546" = $825.46 — шкалы сходятся; предыдущая версия
+    считала поле BYN-числом — завышение в 100 раз). "0" — цены нет.
+    Полнословная фраза («… и … размер L-XL …») матчится в ноль →
+    лестница биграмм; query_used — какой запрос реально сработал;
+  - FX fx_rates(): env SHOP_FX_RATES_JSON → свежий кэш system_settings
+    (6 ч) → живой egress НБРБ (полный дневной список, periodicity=0;
+    точечные /rates/RUB?paramMode=1 отдают 404 — проверено) → резерв
+    open.er-api.com (кросс через USD) → устаревший кэш → аварийные
+    константы; отказ egress не роняет сбор (FO-007: лог, не молчание);
   - catalog.api.onliner.by → жив, но слаги категорий не подобраны из
     песочницы: категория — env SHOP_ONLINER_CATEGORY; парсер оборонительный
     (форма по памяти, kind:"api_form_mismatch" при расхождении);
@@ -29,6 +38,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -65,16 +75,137 @@ def canonical_url(url):
         (parts.scheme, parts.netloc, parts.path, query, ""))
 
 
-def _fx_rates():
-    raw = os.environ.get("SHOP_FX_RATES_JSON", "")
+# ── FX: курсы к BYN ────────────────────────────────────────────────────
+FX_CACHE_KEY = "shop_fx_rates"        # kv system_settings (общий с mlog)
+FX_CACHE_TTL = 6 * 3600
+# Аварийные константы (фиксация 2026-09-16, официальные НБРБ на дату).
+# Только чтобы досье не было пустым при полном отказе egress — источник
+# и дата фиксации задокументированы здесь; живой курс всегда точнее.
+FX_FALLBACK = {"RUB": 0.0345, "USD": 3.05, "EUR": 3.35, "CNY": 0.43}
+
+
+def _setting_get(key):
+    try:
+        from proxy.core import _query
+        rows = _query("SELECT value FROM system_settings WHERE key=?",
+                      (key,), fetch=True)
+        return rows[0]["value"] if rows else None
+    except Exception as e:  # noqa: BLE001 — kv недоступен → идём дальше
+        log.warning("system_settings недоступен: %s", e)
+        return None
+
+
+def _setting_set(key, value):
+    try:
+        from proxy.core import _query
+        _query("INSERT INTO system_settings (key, value) VALUES (?, ?) "
+               "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+               (key, value))
+    except Exception as e:  # noqa: BLE001 — кэш не написался, не беда
+        log.warning("system_settings недоступен: %s", e)
+
+
+def _nbrb_rates():
+    """НБРБ, полный дневной список (periodicity=0): Cur_OfficialRate за
+    Cur_Scale единиц → BYN за 1 единицу. Точечные /rates/RUB?paramMode=1
+    отдают 404 (живая проба) — работает только полный список."""
+    r = FETCH_JSON_FN("fetch_json",
+                      {"url": "https://api.nbrb.by/exrates/rates?periodicity=0"})
+    if not r.get("ok"):
+        return None
+    rows = r.get("data") or []
+    rates = {}
+    for row in rows if isinstance(rows, list) else []:
+        ab = str(row.get("Cur_Abbreviation") or "").upper()
+        off = _num(row.get("Cur_OfficialRate"))
+        scale = _num(row.get("Cur_Scale")) or 1.0
+        if ab and off and scale > 0:
+            rates[ab] = round(off / scale, 6)
+    return rates or None
+
+
+def _erapi_cross():
+    """Резерв: кросс через open.er-api.com (USD-база) — BYN за 1 единицу.
+    Нужен на случай, если НБРБ недоступна из региона рантайма."""
+    r = FETCH_JSON_FN("fetch_json",
+                      {"url": "https://open.er-api.com/v6/latest/USD"})
+    if not r.get("ok"):
+        return None
+    rates = (r.get("data") or {}).get("rates") or {}
+    byn = _num(rates.get("BYN"))
+    if not byn or byn <= 0:
+        return None
+    out = {"USD": round(byn, 6)}
+    for ab in ("RUB", "EUR", "CNY", "PLN", "UAH"):
+        v = _num(rates.get(ab))
+        if v and v > 0:
+            out[ab] = round(byn / v, 6)
+    return out or None
+
+
+def _fx_fetch_live():
+    """Живой egress: НБРБ → резерв er-api. (rates, source) | (None, None)."""
+    for fn, source in ((_nbrb_rates, "nbrb"), (_erapi_cross, "er-api")):
+        try:
+            rates = fn()
+        except Exception as e:  # noqa: BLE001 — транспорт, не данные
+            log.warning("FX-источник %s упал: %s", source, e)
+            continue
+        if rates:
+            _audit("fx", f"source={source}", "ok")
+            return rates, source
+    return None, None
+
+
+def _fx_cache_read():
+    raw = _setting_get(FX_CACHE_KEY)
     if not raw:
         return None
     try:
         data = json.loads(raw)
-        return data if isinstance(data, dict) else None
     except ValueError:
-        log.warning("SHOP_FX_RATES_JSON не разобран — конвертация цен недоступна")
         return None
+    if isinstance(data, dict) and isinstance(data.get("rates"), dict):
+        return data
+    return None
+
+
+def _fx_cache_write(rates, source):
+    _setting_set(FX_CACHE_KEY, json.dumps(
+        {"rates": rates, "source": source, "fetched_at": time.time()},
+        ensure_ascii=False))
+
+
+def fx_rates():
+    """Курсы к BYN. Приоритет: env SHOP_FX_RATES_JSON → свежий кэш (6 ч)
+    → живой egress НБРБ/er-api → устаревший кэш → аварийные константы.
+    Ошибка egress сбор не роняет (честная деградация, FO-007)."""
+    raw = os.environ.get("SHOP_FX_RATES_JSON", "")
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                # пустой dict — явный выключатель конвертации (тесты/ops)
+                return data
+        except ValueError:
+            log.warning("SHOP_FX_RATES_JSON не разобран — иду в кэш/egress")
+    cached = _fx_cache_read()
+    if cached and (time.time() - (cached.get("fetched_at") or 0)) < FX_CACHE_TTL:
+        return cached["rates"]
+    rates, source = _fx_fetch_live()
+    if rates:
+        _fx_cache_write(rates, source)
+        return rates
+    if cached and cached["rates"]:
+        log.warning("FX egress недоступен — устаревший кэш (age > %ss)",
+                    FX_CACHE_TTL)
+        return cached["rates"]
+    log.warning("FX недоступен совсем — аварийные константы %s", FX_FALLBACK)
+    return dict(FX_FALLBACK)
+
+
+# совместимость со старыми вызовами/тестами
+_fx_rates = fx_rates
 
 
 def _mcp_web_call(tool, args):
@@ -128,8 +259,9 @@ def _num(x):
 
 # ── WB ──────────────────────────────────────────────────────────────────
 def collect_wb(query, page=1, rates=None):
-    """Поиск WB (живая форма v4). Цены RUB → BYN по rates (иначе None)."""
-    rates = rates if rates is not None else _fx_rates()
+    """Поиск WB (живая форма v4). Цены RUB → BYN по rates (иначе None —
+    честно: явный rates=None из вызывающего кода курс не придумывает)."""
+    rates = rates if rates is not None else fx_rates()
     base = os.environ.get(
         "SHOP_WB_SEARCH_BASE",
         "https://search.wb.ru/exactmatch/ru/common/v4/search")
@@ -188,8 +320,26 @@ def collect_wb(query, page=1, rates=None):
 
 
 # ── Kufar ───────────────────────────────────────────────────────────────
-def collect_kufar(query, size=20):
-    """Поиск Kufar (живая форма search-api v2). Цены уже BYN."""
+def _kufar_kop(x):
+    """Kufar отдаёт price_byn/price_usd СТРОКАМИ В КОПЕЙКАХ (живая сверка
+    2026-09-16: iPhone 16 Pro price_byn="250000" → 2500 BYN, price_usd=
+    "82546" → $825.46 — шкалы сходятся; см. докстринг модуля). "0" —
+    цены нет (торг/договорная). Нечисловое → None без исключений."""
+    v = _num(x)
+    if v is None or v <= 0:
+        return None
+    return round(v / 100.0, 2)
+
+
+def _kufar_bigrams(query):
+    """Первые биграммы запроса (макс 3) для лестницы фолбэка."""
+    toks = str(query or "").split()
+    return [" ".join(toks[i:i + 2])
+            for i in range(min(3, max(0, len(toks) - 1)))]
+
+
+def _kufar_fetch(query, size):
+    """Один транспортный вызов search-api v2. (ok, ads|error, kind, url)."""
     base = os.environ.get(
         "SHOP_KUFAR_BASE",
         "https://api.kufar.by/search-api/v2/search/rendered-paginated")
@@ -197,13 +347,34 @@ def collect_kufar(query, size=20):
     data = FETCH_JSON_FN("fetch_json", {"url": url})
     _audit("kufar", f"search:{query}", "ok" if data.get("ok") else "refused")
     if not data.get("ok"):
-        return {"ok": False, "platform": "kufar", "error": data.get("error"),
+        return {"ok": False, "error": data.get("error"),
                 "kind": data.get("kind", "transport"), "url": url}
-    body = data.get("data") or {}
-    ads = body.get("ads")
+    ads = (data.get("data") or {}).get("ads")
     if not isinstance(ads, list):
-        return {"ok": False, "platform": "kufar", "url": url,
-                "error": "нет ads[] в ответе", "kind": "api_form_mismatch"}
+        return {"ok": False, "url": url, "error": "нет ads[] в ответе",
+                "kind": "api_form_mismatch"}
+    return {"ok": True, "url": url, "ads": ads}
+
+
+def collect_kufar(query, size=20):
+    """Поиск Kufar (search-api v2). Цены — копейки строкой → BYN.
+
+    Лестница запроса (живой диагноз досье #2): полнословная фраза
+    матчится в ноль → пробуем первые биграммы, пока не найдём ads;
+    query_used — какой запрос реально сработал (для аудита/тестов).
+    """
+    res = _kufar_fetch(query, size)
+    if res.get("ok") and not res.get("ads"):
+        for bq in _kufar_bigrams(query):
+            res2 = _kufar_fetch(bq, size)
+            if res2.get("ok") and res2.get("ads"):
+                res = {**res2, "query_used": bq}
+                _audit("kufar", f"bigram_fallback:{bq}", "ok")
+                break
+    if not res.get("ok"):
+        return {"ok": False, "platform": "kufar", "error": res.get("error"),
+                "kind": res.get("kind", "transport"), "url": res.get("url")}
+    ads = res["ads"]
     offers = []
     for a in ads:
         ad_id = a.get("ad_id")
@@ -215,7 +386,7 @@ def collect_kufar(query, size=20):
                 seller_name = prm.get("v")
                 break
         paid = a.get("paid_services") or {}
-        price_byn = _num(a.get("price_byn"))
+        price_byn = _kufar_kop(a.get("price_byn"))
         offers.append({
             "platform": "kufar",
             "platform_code": str(ad_id),
@@ -233,7 +404,10 @@ def collect_kufar(query, size=20):
             "seller_deals": None,
             "seller_official": 1 if a.get("company_ad") else 0,
         })
-    return {"ok": True, "platform": "kufar", "url": url, "offers": offers}
+    out = {"ok": True, "platform": "kufar", "url": res["url"], "offers": offers}
+    if res.get("query_used"):
+        out["query_used"] = res["query_used"]
+    return out
 
 
 # ── Onliner ─────────────────────────────────────────────────────────────
@@ -261,6 +435,7 @@ def collect_onliner(query, page=1):
     if not isinstance(products, list):
         return {"ok": False, "platform": "onliner", "url": url,
                 "error": "нет products[] в ответе", "kind": "api_form_mismatch"}
+    rates = fx_rates()  # один раз на сбор, не по офферу (эгресс-кэш)
     offers = []
     for p in products:
         key = p.get("key") or p.get("id")
@@ -269,7 +444,6 @@ def collect_onliner(query, page=1):
         price = (p.get("prices") or {}).get("price") or {}
         amount = _num(price.get("amount"))
         currency = (price.get("currency") or "BYN").upper()
-        rates = _fx_rates()
         price_byn = to_byn(amount, currency, rates) if currency != "BYN" else amount
         offers.append({
             "platform": "onliner",

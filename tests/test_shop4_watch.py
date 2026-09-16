@@ -45,7 +45,7 @@ WB_SNAP = {
 
 KUFAR_SNAP = {
     "ads": [{"ad_id": 1001, "ad_link": "https://www.kufar.by/item/1001",
-             "subject": "Кофемолка", "price_byn": 220, "company_ad": False,
+             "subject": "Кофемолка", "price_byn": "22000", "company_ad": False,
              "account_parameters": [{"p": "name", "v": "Юра"}],
              "paid_services": {"halva": False}}],
 }
@@ -63,7 +63,9 @@ def _shop_ddl():
 @pytest.fixture(autouse=True)
 def shop_db(monkeypatch):
     monkeypatch.setenv("SHOP_ENABLED", "1")
-    monkeypatch.delenv("SHOP_FX_RATES_JSON", raising=False)
+    # по умолчанию FX выключен явно ({} = пустой dict-выключатель);
+    # тесты, которым нужен курс, ставят свой SHOP_FX_RATES_JSON
+    monkeypatch.setenv("SHOP_FX_RATES_JSON", "{}")
     db_file = os.path.join(os.environ["DATABASE_PATH"], "fosved.db")
     conn = sqlite3.connect(db_file)
     for stmt in _shop_ddl():
@@ -112,7 +114,8 @@ def _add_product_with_wb_rate(monkeypatch, rate=None):
     if rate:
         monkeypatch.setenv("SHOP_FX_RATES_JSON", json.dumps({"RUB": rate}))
     else:
-        monkeypatch.delenv("SHOP_FX_RATES_JSON", raising=False)
+        # {} — явный выключатель конвертации (без egress и кэша)
+        monkeypatch.setenv("SHOP_FX_RATES_JSON", "{}")
     pid, details = sw.ensure_product("кофемолка")
     return pid
 
