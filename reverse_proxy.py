@@ -21,6 +21,11 @@ LLM_ROUTES_PREFIXES = [
     "/cron/backup",        # FO-001 db-backup: роут был только здесь — раньше уходил в mlog и молча 404 (нашли FO-042)
     "/cron/backup-forge",  # FO-042: git bundle bare-репозиториев FORGE
     "/cron/narad-tick",    # FO-047: такт нарядной очереди (исполнение через /chain/step)
+    "/cron/shop-tick",             # SHOP-4 (#172): такт вотчлиста — без этого Render-cron ловил молчаливый 404 от mlog (ловим живым деплоем)
+    "/cron/cleanup-tool-output",   # FO-016: чистка tool-output — тот же класс пропуска
+    "/cron/consolidate-memory",    # консолидация памяти — тот же класс пропуска
+    "/scheduler/golden-evals",     # golden-эвалы по крону — тот же класс пропуска
+    "/shop/dossier/",              # SHOP-5 (#172): GET HTML-досье по HMAC-токену ?t= (клик из inline-кнопки). ВАЖНО: префикс со слэшем — POST /shop/dossier (внутренний, без auth) остаётся публично недостижим; POST /shop/product|watch|watch-list дёргает только mlog на 127.0.0.1:4000
     "/news/stats",         # read-only counters, used by the smoke script,
     "/scheduler/morning-brief",   # cron-accessible
     "/scheduler/lz-daily",        # cron-accessible
