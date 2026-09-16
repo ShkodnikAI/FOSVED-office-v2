@@ -126,6 +126,34 @@ def stub_url():
     srv.shutdown()
 
 
+class _StubNoRobots(BaseHTTPRequestHandler):
+    """Хост БЕЗ robots.txt: /robots.txt → 404, страница /page → 200."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/page"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(PAGE_HTML.encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"404")
+
+
+@pytest.fixture()
+def stub_norobots_url():
+    srv = HTTPServer(("127.0.0.1", 0), _StubNoRobots)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
 def _env_with_private():
     return dict(os.environ, FOSVED_MCP_WEB_ALLOW_PRIVATE="1",
                 WEB_MIN_INTERVAL="0")
@@ -190,6 +218,19 @@ def test_robots_disallow_is_refused(stub_url):
         d = result_data(m.call("fetch_page", {"url": f"{stub_url}/private"}))
         assert d["ok"] is False and d["kind"] == "robots_disallow"
         assert _Stub.hits.get("/private", 0) == 0  # запрос НЕ ушёл на страницу
+    finally:
+        m.close()
+
+
+def test_robots_missing_404_allows_with_note(stub_norobots_url):
+    """Урок SHOP-3: непарсенный robotparser в 3.12 даёт can_fetch=False —
+    404 robots должен РАЗРЕШАТЬ с note, а не запрещать весь хост."""
+    m = McpProc(_env_with_private())
+    try:
+        m.initialize()
+        d = result_data(m.call("fetch_page", {"url": f"{stub_norobots_url}/page"}))
+        assert d["ok"] is True, d
+        assert "robots_note" in d and "404" in d["robots_note"]
     finally:
         m.close()
 

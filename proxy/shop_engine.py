@@ -273,11 +273,11 @@ def stop_flags(offer, history_prices=None, product_specs=None):
             "code": "anomaly_price",
             "note": f"цена {rp} BYN ниже 60% медианы истории ({round(med, 2)} BYN)",
         })
-    if offer.get("seller_deals") in (None, 0):
+    if offer.get("seller_deals") in (None, 0) and not offer.get("seller_official"):
         flags.append({
             "code": "seller_no_history",
             "note": "продавец без истории сделок (или данных о нём нет) — осторожно",
-        })
+        })  # официальный/платформенный продавец (seller_official) не флагается
     if offer.get("return_ok") is not None and not offer.get("return_ok"):
         flags.append({"code": "no_returns", "note": "возврат невозможен"})
     offer_specs = offer.get("specs")
