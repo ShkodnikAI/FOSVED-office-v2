@@ -361,6 +361,23 @@ def cron_narad_tick():
         return jsonify({"ok": False, "error": str(e)[:300]}), 500
 
 
+# ── SHOP-4: такт вотчлиста цен/скидок (диспатч #172) ─────────────────────
+# 4 раза/сутки: сбор WB/Kufar по активным вотчам (дисциплина SHOP-2),
+# оценка целей (цена/настоящая скидка/наличие) → алерты владельцу.
+# Kill-switch SHOP_ENABLED=0 выключает такт полностью.
+@app.route("/cron/shop-tick", methods=["GET"])
+def cron_shop_tick():
+    secret = request.args.get("secret", "")
+    if secret != os.environ.get("CRON_SECRET", ""):
+        return "Forbidden", 403
+    from proxy.shop_watch import tick_shop_watches
+    try:
+        result = tick_shop_watches()
+        return jsonify(result)
+    except Exception as e:  # noqa: BLE001 — крон должен видеть ошибку, а не 500-стек
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+
 # ── FO-042 B: выгрузка состояния FORGE (наряд #149) ──────────────────────
 # Выборка forge_projects / открытых задач / гейтов без решения / открытых
 # замечаний → JSON-файл на постоянном диске → документом владельцу.
