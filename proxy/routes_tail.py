@@ -378,6 +378,211 @@ def cron_shop_tick():
         return jsonify({"ok": False, "error": str(e)[:300]}), 500
 
 
+# ── SHOP-5: досье товара — команды /товар /вотч + три формата (#172) ─────
+# UX единым блоком: mlog webhook дергает POST /shop/* (chat_id из телеграма),
+# питон-слой делает срез → рендеры → отправку владельцу. HTML-досье
+# открывается по HMAC-токену (?t=), кликабельно из inline-кнопки.
+def _shop_dossier_dir():
+    d = os.path.join(str(DB_PATH) if DB_PATH else "/tmp", "shop_dossiers")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _shop_send_dossier(snapshot, chat_id):
+    """Постер PNG + HTML-caption + inline-кнопки «Купить» одним сообщением.
+
+    PNG гиперссылок не несёт — кликабельность дают caption-ссылки,
+    URL-кнопки и полное HTML-досье на вебе (#172, решение владельца).
+    """
+    from proxy.shop_dossier import (build_inline_buttons, render_caption,
+                                    render_poster)
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(),
+                        f"shop-poster-{snapshot['product']['id']}.png")
+    render_poster(snapshot, path)
+    caption = render_caption(snapshot)
+    markup = build_inline_buttons(snapshot)
+    from proxy.telegram import _tg_send_photo
+    _tg_send_photo(chat_id, path, caption=caption, parse_mode="HTML",
+                   reply_markup=markup)
+    # текст-формат А следом: полная выжимка без лимита caption
+    from proxy.shop_dossier import render_text
+    from proxy.telegram import _tg_send_message
+    _tg_send_message(chat_id, render_text(snapshot))
+    return True
+
+
+@app.route("/shop/product", methods=["POST"])
+def shop_product_endpoint():
+    """Команда /товар: создать товар, снять срез, прислать досье."""
+    d = request.get_json(force=True, silent=True) or {}
+    query = str(d.get("query", "")).strip()
+    chat_id = str(d.get("chat_id", "")).strip()
+    profile = d.get("profile", "default")
+    if not query:
+        return jsonify({"ok": False, "error": "query обязателен"}), 400
+    from proxy.shop_watch import enabled
+    if not enabled():
+        return jsonify({"ok": False, "kind": "disabled"}), 200
+    from proxy.shop_watch import ensure_product
+    pid, details = ensure_product(query, title=d.get("title"))
+    from proxy.shop_dossier import build_snapshot
+    snapshot = build_snapshot(pid, profile=profile)
+    if snapshot.get("dossier_id") and chat_id:
+        _shop_send_dossier(snapshot, chat_id)
+    return jsonify({"ok": True, "product_id": pid,
+                    "dossier_id": snapshot.get("dossier_id"),
+                    "collect": {k: (v.get("ok") if isinstance(v, dict) else v)
+                                for k, v in (details or {}).items()}})
+
+
+def _parse_watch_args(args):
+    """Парсинг аргументов /вотч: «250» | «скидка 15» | «наличие» | смесь.
+
+    Возвращает (target_price_byn, discount_pct, alert_in_stock, unknown).
+    Токен-разбор: число → цель BYN; «скидка N» → порог скидки;
+    «наличие» → алерт на появление; остальное — unknown (в ответ).
+    """
+    target, discount, stock, unknown = None, None, False, []
+    tokens = str(args or "").strip().split()
+    i = 0
+    while i < len(tokens):
+        t = tokens[i].lower().lstrip(",")
+        if t in ("скидка", "скидку", "скидки") and i + 1 < len(tokens):
+            try:
+                discount = float(tokens[i + 1].replace(",", "."))
+            except ValueError:
+                unknown.append(tokens[i + 1])
+            i += 2
+            continue
+        if t in ("наличие", "наличию", "сток"):
+            stock = True
+            i += 1
+            continue
+        try:
+            target = float(t.replace(",", "."))
+        except ValueError:
+            unknown.append(tokens[i])
+        i += 1
+    return target, discount, stock, unknown
+
+
+@app.route("/shop/watch", methods=["POST"])
+def shop_watch_endpoint():
+    """Команда /вотч: поставить последний/указанный товар на отслеживание.
+
+    args-строка из mlog: «250» (цель), «скидка 15», «наличие», пусто —
+    список активных вотчей. Ответ reply — готовый текст владельцу.
+    """
+    d = request.get_json(force=True, silent=True) or {}
+    from proxy.shop_watch import enabled
+    if not enabled():
+        return jsonify({"ok": False, "reply": "SHOP выключен (SHOP_ENABLED=0)."})
+    args = str(d.get("args", "") or "").strip()
+    chat_id = str(d.get("chat_id", "") or "").strip()
+    from proxy.core import _query
+    if not args:
+        from proxy.shop_watch import list_watches
+        watches = list_watches()
+        if not watches:
+            return jsonify({"ok": True, "reply":
+                            "Вотчей нет. Схема: /товар <запрос>, затем "
+                            "/вотч <цель BYN | скидка N | наличие>."})
+        lines = ["Активные вотчи:"]
+        for w in watches:
+            goal = []
+            if w.get("target_price_byn") is not None:
+                goal.append(f"цель ≤{w['target_price_byn']:g} BYN")
+            if w.get("discount_pct") is not None:
+                goal.append(f"скидка ≥{w['discount_pct']:g}%")
+            if w.get("alert_in_stock"):
+                goal.append("появление в наличии")
+            lines.append(f"#{w['id']}. {w.get('title', '?')} — "
+                         + (", ".join(goal) or "сбор цен"))
+        return jsonify({"ok": True, "reply": "\n".join(lines), "watches": watches})
+    target, discount, stock, unknown = _parse_watch_args(args)
+    if target is None and discount is None and not stock:
+        return jsonify({"ok": False, "reply":
+                        f"Не понял цель «{args}». Примеры: /вотч 250 — "
+                        "алерт при цене ≤250 BYN; /вотч скидка 15; /вотч наличие."})
+    if unknown:
+        log.warning("shop /вотч: нераспознанные токены: %s", unknown)
+    pid = d.get("product_id")
+    if not pid:
+        row = _query("SELECT id FROM shop_products ORDER BY id DESC LIMIT 1",
+                     fetch=True)
+        pid = row[0]["id"] if row else None
+    if not pid:
+        return jsonify({"ok": False, "reply": "Товаров нет — сначала /товар <запрос>."})
+    from proxy.shop_watch import add_watch
+    wid = add_watch(int(pid), target_price_byn=target, discount_pct=discount,
+                    alert_in_stock=stock)
+    prow = _query("SELECT title FROM shop_products WHERE id=?", (pid,), fetch=True)
+    title = prow[0]["title"] if prow else f"#{pid}"
+    goal = []
+    if target is not None:
+        goal.append(f"цена ≤{target:g} BYN")
+    if discount is not None:
+        goal.append(f"настоящая скидка ≥{discount:g}%")
+    if stock:
+        goal.append("появление в наличии")
+    return jsonify({"ok": True, "watch_id": wid, "product_id": int(pid),
+                    "reply": f"Следить за «{title}»: " + ", ".join(goal) +
+                             ". Проверяю 4 раза/сутки, события — сюда."})
+
+
+@app.route("/shop/watches", methods=["POST", "GET"])
+def shop_watches_endpoint():
+    """Команда /вотч (без аргументов): список активных вотчей."""
+    from proxy.shop_watch import list_watches
+    watches = list_watches()
+    return jsonify({"ok": True, "watches": watches})
+
+
+@app.route("/shop/dossier", methods=["POST"])
+def shop_dossier_endpoint():
+    """Досье JSON-ом: текст + caption + кнопки + URL HTML (без отправки)."""
+    d = request.get_json(force=True, silent=True) or {}
+    pid = d.get("product_id")
+    if not pid:
+        return jsonify({"ok": False, "error": "product_id обязателен"}), 400
+    from proxy.shop_dossier import (build_inline_buttons, build_snapshot,
+                                    dossier_url, render_caption, render_text)
+    snapshot = build_snapshot(int(pid), profile=d.get("profile", "default"),
+                              target_price_byn=d.get("target_price_byn"))
+    if not snapshot.get("ok"):
+        return jsonify(snapshot), 404
+    return jsonify({"ok": True,
+                    "dossier_id": snapshot.get("dossier_id"),
+                    "text": render_text(snapshot),
+                    "caption": render_caption(snapshot),
+                    "reply_markup": build_inline_buttons(snapshot),
+                    "html_url": dossier_url(snapshot["dossier_id"]),
+                    "snapshot": snapshot})
+
+
+@app.route("/shop/dossier/<int:dossier_id>", methods=["GET"])
+def shop_dossier_page(dossier_id):
+    """Полное HTML-досье (кликабельные ссылки). Доступ — по HMAC-токену
+    ?t= (секрет API_SECRET); из inline-кнопки открывается в браузере."""
+    from proxy.shop_dossier import dossier_token, render_html
+    if request.args.get("t", "") != dossier_token(dossier_id):
+        return Response("<!DOCTYPE html><html lang='ru'><meta charset='utf-8'>"
+                        "<body style='font-family:sans-serif;padding:40px'>"
+                        "<h2>Доступ закрыт</h2>"
+                        "<p>Открывайте досье по кнопке из Telegram.</p></body>",
+                        status=403, mimetype="text/html")
+    row = _query("SELECT snapshot_json FROM shop_dossiers WHERE id=? AND "
+                 "format='snapshot'", (dossier_id,), fetch=True)
+    if not row:
+        return "Досье не найдено", 404
+    try:
+        snapshot = json.loads(row[0]["snapshot_json"])
+    except (ValueError, TypeError):
+        return "Досье повреждено", 500
+    return Response(render_html(snapshot), mimetype="text/html")
+
+
 # ── FO-042 B: выгрузка состояния FORGE (наряд #149) ──────────────────────
 # Выборка forge_projects / открытых задач / гейтов без решения / открытых
 # замечаний → JSON-файл на постоянном диске → документом владельцу.
