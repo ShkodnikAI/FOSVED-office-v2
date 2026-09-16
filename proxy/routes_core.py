@@ -294,7 +294,7 @@ def _miniapp_get_inner(doc_id):
         _chart_placeholder = raw[_cs:_ce]
         raw = raw[:_cs] + "GRAPHONECHARTPLACEHOLDER" + raw[_ce:]
     if raw and len(raw) > 100 and _has_enricher:
-        accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
+        accent = DEPT_COLORS.get(dept, {}).get("accent", "#A8321E")
         try:
             enriched_body = auto_enrich(raw, dept=dept, accent_color=accent)
             if _chart_placeholder:
@@ -343,7 +343,7 @@ body {{ font-family:var(--b,'IBM Plex Sans',system-ui,sans-serif); color:var(--i
         raw_fallback = r["raw_text"] or "Отчёт пуст"
         stored_html = f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://telegram.org/js/telegram-web-app.js"></script></head><body>
-<div style="padding:16px;font-family:sans-serif;color:#1e293b;white-space:pre-wrap">{html_lib_escape(raw_fallback)}</div>
+<div style="padding:16px;font-family:sans-serif;color:#1C1B18;white-space:pre-wrap">{html_lib_escape(raw_fallback)}</div>
 {action_bar}</body></html>'''
     # GRAPH-1: replace [[CHART]]/[[/CHART]] markers in stored HTML too
     stored_html = stored_html.replace('[[CHART]]', '<div class="report-chart">').replace('[[/CHART]]', '</div>')
@@ -496,7 +496,7 @@ def enrich_endpoint():
     d = request.get_json(force=True)
     raw_text = d.get("text", "")
     dept = d.get("dept", "admin")
-    accent = DEPT_COLORS.get(dept, {}).get("accent", "#6366f1")
+    accent = DEPT_COLORS.get(dept, {}).get("accent", "#A8321E")
     enriched = auto_enrich(raw_text, dept=dept, accent_color=accent)
     return jsonify({"enriched": enriched, "has_metrics": "metric-card" in enriched})
 

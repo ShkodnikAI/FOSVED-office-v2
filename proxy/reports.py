@@ -127,10 +127,10 @@ def _build_action_bar(dept, doc_id, existing_notes_html=""):
 <button class="action-btn danger" onclick="doAction('counter_forecast')"><span class="icon">⚡</span>Контр-прогноз</button>'''
         osp_menus = '''
 <div class="depth-menu" id="depthMenu">
-  <div class="depth-option" onclick="doDepth(1)"><div class="depth-dot" style="background:#94a3b8"></div><div><b>Быстрая оценка</b><br><span style="font-size:11px;color:#64748b">2-3 слоя</span></div></div>
-  <div class="depth-option" onclick="doDepth(2)"><div class="depth-dot" style="background:#3b82f6"></div><div><b>Стандартный</b><br><span style="font-size:11px;color:#64748b">5-7 слоёв, ACH</span></div></div>
-  <div class="depth-option" onclick="doDepth(3)"><div class="depth-dot" style="background:#f59e0b"></div><div><b>Глубокое</b><br><span style="font-size:11px;color:#64748b">8-10 слоёв, premortem</span></div></div>
-  <div class="depth-option" onclick="doDepth(4)"><div class="depth-dot" style="background:#dc2626"></div><div><b>Полное + Red Team</b><br><span style="font-size:11px;color:#64748b">12+ слоёв, контр-анализ</span></div></div>
+  <div class="depth-option" onclick="doDepth(1)"><div class="depth-dot" style="background:#6B6558"></div><div><b>Быстрая оценка</b><br><span style="font-size:11px;color:#6B6558">2-3 слоя</span></div></div>
+  <div class="depth-option" onclick="doDepth(2)"><div class="depth-dot" style="background:#3D6B2C"></div><div><b>Стандартный</b><br><span style="font-size:11px;color:#6B6558">5-7 слоёв, ACH</span></div></div>
+  <div class="depth-option" onclick="doDepth(3)"><div class="depth-dot" style="background:#9C6B0B"></div><div><b>Глубокое</b><br><span style="font-size:11px;color:#6B6558">8-10 слоёв, premortem</span></div></div>
+  <div class="depth-option" onclick="doDepth(4)"><div class="depth-dot" style="background:#A8321E"></div><div><b>Полное + Red Team</b><br><span style="font-size:11px;color:#6B6558">12+ слоёв, контр-анализ</span></div></div>
 </div>
 <div class="control-menu" id="controlMenu">
   <div class="control-option" onclick="doControl('daily')">📅 Ежедневно</div>
