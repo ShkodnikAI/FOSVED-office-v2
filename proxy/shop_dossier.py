@@ -129,6 +129,18 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
     offers.sort(key=lambda o: (o["rank_price"] is None,
                                o["rank_price"] if o["rank_price"] is not None else 0.0))
 
+    # офферы без цены: живой диагноз досье #2 (99 офф. без цены → пустое
+    # досье без единой ссылки). Не ранжируем, но ссылки не прячем —
+    # «прямые кликабельные ссылки» — требование владельца (#172).
+    unscored_ids = scored.get("unscored") or []
+    unscored_offers = []
+    for oid in unscored_ids[:20]:
+        row = _query("SELECT url, platform FROM shop_offers WHERE id=?",
+                     (oid,), fetch=True)
+        if row:
+            unscored_offers.append({"id": oid, "platform": row[0]["platform"],
+                                    "url": canonical_url(row[0]["url"])})
+
     best_id = (scored.get("verdict") or {}).get("best_offer_id")
     history_best, median_best = [], None
     if best_id is not None:
@@ -149,6 +161,8 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
         "verdict": scored.get("verdict"),
         "badges": scored.get("badges") or {},
         "unscored": scored.get("unscored") or [],
+        "unscored_total": len(unscored_ids),
+        "unscored_offers": unscored_offers,
         "offers": offers,
         "history_best": history_best,
         "median_best": median_best,
@@ -171,14 +185,40 @@ def _fmt_price(v, suffix=" BYN"):
     return ("?" if v is None else f"{v:g}") + suffix
 
 
+def verdict_display(snapshot):
+    """(score_str, text) — честный фолбэк, когда вердикта нет.
+
+    Живой урок досье #2: без цен движок отдаёт verdict=None, рендеры
+    печатали «?/100 — » — выглядит как сломанный счётчик. Печатаем
+    честную причину: цены не получены (сколько офферов касается) либо
+    предложения не собраны.
+    """
+    v = snapshot.get("verdict") or {}
+    score = v.get("score")
+    text = v.get("text") or ""
+    if score is None:
+        n = snapshot.get("unscored_total")
+        if n is None:
+            n = len(snapshot.get("unscored") or [])
+        if n:
+            text = ("цены не получены — ранжирование отложено "
+                    f"(офф. без цены BYN: {n})")
+        elif snapshot.get("offers") or snapshot.get("unscored_offers"):
+            text = "предложения есть, но без цены BYN — вердикт не строим"
+        else:
+            text = ("предложения не собраны — повторите /товар "
+                    "или поставьте вотч")
+        return "—", text
+    return f"{score:g}", text
+
+
 def render_text(snapshot):
     """Формат А «текст»: выжимка в сообщении (критерии, топ-офферы,
     вердикт, стоп-флаги). ≤3800 симв (tg_send_long-лимит)."""
     lines = [f"Досье: {snapshot['product'].get('title', '?')}",
              f"профиль {snapshot['profile']} · {snapshot['generated_at']}"]
-    verdict = snapshot.get("verdict")
-    if verdict:
-        lines.append(f"Вердикт: {verdict.get('score', '?')}/100 — {verdict.get('text', '')}")
+    score_str, vtext = verdict_display(snapshot)
+    lines.append(f"Вердикт: {score_str}/100 — {vtext}")
     badge_parts = []
     by_id = {o["id"]: o for o in snapshot["offers"]}
     for key, oid in snapshot["badges"].items():
@@ -188,29 +228,39 @@ def render_text(snapshot):
                                f"{_fmt_price(o['rank_price'])}")
     if badge_parts:
         lines.append("Бейджи: " + "; ".join(badge_parts))
-    lines.append("Топ предложений (дешевле — первым):")
-    for i, o in enumerate(snapshot["offers"][:5], 1):
-        stock = "в наличии" if o["in_stock"] else "нет"
-        disc = ""
-        h = o.get("honest") or {}
-        if h.get("honest_pct") is not None and h["honest_pct"] >= 10:
-            disc = f", настоящая −{h['honest_pct']}%"
-        if h.get("is_fake"):
-            disc = ", СКИДКА ФЕЙКОВАЯ"
-        inst = ", рассрочка" if o["installment_ok"] else ""
-        lines.append(f"{i}. {o['platform']} — {_fmt_price(o['rank_price'])} "
-                     f"({stock}{disc}{inst})")
-        lines.append(f"   {o['url']}")
+    if snapshot["offers"]:
+        lines.append("Топ предложений (дешевле — первым):")
+        for i, o in enumerate(snapshot["offers"][:5], 1):
+            stock = "в наличии" if o["in_stock"] else "нет"
+            disc = ""
+            h = o.get("honest") or {}
+            if h.get("honest_pct") is not None and h["honest_pct"] >= 10:
+                disc = f", настоящая −{h['honest_pct']}%"
+            if h.get("is_fake"):
+                disc = ", СКИДКА ФЕЙКОВАЯ"
+            inst = ", рассрочка" if o["installment_ok"] else ""
+            lines.append(f"{i}. {o['platform']} — {_fmt_price(o['rank_price'])} "
+                         f"({stock}{disc}{inst})")
+            lines.append(f"   {o['url']}")
+    elif snapshot.get("unscored_offers"):
+        # цены нет — но ссылки владельцу нужны даже в худшем случае
+        lines.append("Ссылки на собранные предложения (без цены):")
+        for u in snapshot["unscored_offers"][:5]:
+            lines.append(f"   {u['platform']}: {u['url']}")
     flags = [f["note"] for o in snapshot["offers"] for f in o["stop_flags"]]
     if flags:
         lines.append("Осторожно:")
         for f in dict.fromkeys(flags):
             lines.append(f"⚠ {f}")
-    if snapshot["unscored"]:
-        lines.append(f"Без цены (не ранжированы): {len(snapshot['unscored'])} офф.")
+    n = snapshot.get("unscored_total")
+    if n is None:
+        n = len(snapshot["unscored"])
+    if n:
+        lines.append(f"Без цены (не ранжированы): {n} офф.")
     if snapshot["median_best"] is not None:
         lines.append(f"Медиана истории лучшего: {_fmt_price(snapshot['median_best'])}")
-    elif snapshot["history_best"] is not None and len(snapshot["history_best"]) < 3:
+    elif snapshot["offers"] and snapshot["history_best"] is not None \
+            and len(snapshot["history_best"]) < 3:
         lines.append("История копится — честная скидка появится через 1–2 недели.")
     if snapshot.get("dossier_id"):
         lines.append(f"Полное досье: {dossier_url(snapshot['dossier_id'])}")
@@ -224,12 +274,12 @@ def render_text(snapshot):
 def render_caption(snapshot):
     """HTML-caption под постером: вердикт + ссылка лучшего оффера +
     ссылка на полное досье. ≤1000 симв (лимит sendPhoto)."""
-    v = snapshot.get("verdict") or {}
+    v_score, v_text = verdict_display(snapshot)
     title = snapshot["product"].get("title", "?")
     lines = [f"<b>Досье: {title}</b>",
-             f"Вердикт: <b>{v.get('score', '?')}/100</b> — {v.get('text', '')}"]
+             f"Вердикт: <b>{v_score}/100</b> — {v_text}"]
     best = next((o for o in snapshot["offers"]
-                 if o["id"] == v.get("best_offer_id")), None)
+                 if o["id"] == (snapshot.get("verdict") or {}).get("best_offer_id")), None)
     if best is None and snapshot["offers"]:
         best = snapshot["offers"][0]
     if best:
@@ -335,13 +385,13 @@ def render_poster(snapshot, out_path):
               fill=MUTED, font=f_small)
     draw.line([60, 156, POSTER_W - 60, 156], fill=LINE, width=2)
 
-    # вердикт: балл крупно + текст
-    v = snapshot.get("verdict") or {}
-    score_txt = f"{v.get('score', 0):g}"
+    # вердикт: балл крупно + текст (без цен — честный фолбэк, досье #2)
+    score_str, v_text = verdict_display(snapshot)
+    score_txt = score_str
     draw.text((60, 196), score_txt, fill=STAMP, font=f_big)
     draw.text((60 + (230 if len(score_txt) < 4 else 320), 226), "/ 100",
               fill=MUTED, font=f_head)
-    verdict_txt = esc(v.get("text"))
+    verdict_txt = esc(v_text)
     if len(verdict_txt) > 46:
         verdict_txt = verdict_txt[:45] + "…"
     draw.text((60, 340), verdict_txt, fill=INK, font=f_head)
@@ -427,7 +477,7 @@ def render_html(snapshot):
          .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
          .replace('"', "&quot;"))
     title = e(snapshot["product"].get("title"))
-    v = snapshot.get("verdict") or {}
+    v_score, v_text = verdict_display(snapshot)
     rows = []
     for o in snapshot["offers"]:
         gs = o.get("group_scores") or {}
@@ -453,6 +503,19 @@ def render_html(snapshot):
     badges_html = " · ".join(
         f'<span class="badge badge-fact">{e(_BADGE_LABELS.get(k, k))}</span>'
         for k in snapshot["badges"])
+    # офферы без цены: таблица ссылок (досье #2 — пустая страница недопустима)
+    unscored_rows = "".join(
+        f'<tr><td><a href="{e(u["url"])}" rel="noopener">{e(u["platform"])}</a></td>'
+        f'<td class="muted">цена не получена — не ранжирован</td></tr>'
+        for u in (snapshot.get("unscored_offers") or []))
+    hidden = (snapshot.get("unscored_total") or 0) - len(snapshot.get("unscored_offers") or [])
+    unscored_note = (f'<p class="meta">…и ещё {hidden} офф. — полный список '
+                     'появится после среза с ценами.</p>' if hidden > 0 else "")
+    unscored_block = (f'''<div class="card"><b>Собрано, но без цены BYN
+(не ранжированы)</b><table>
+<tr><th>Источник</th><th>Статус</th></tr>
+{unscored_rows}
+</table>{unscored_note}</div>''' if unscored_rows else "")
     return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Досье: {title}</title><style>
 :root{{--ink:#1C1B18;--paper:#EFEAE0;--paper-raised:#FBF8F2;--line:rgba(28,27,24,.14);
@@ -476,14 +539,15 @@ a{{color:var(--stamp);text-decoration:none}} a:hover{{text-decoration:underline}
 <h1>Досье: {title}</h1>
 <div class="meta">{e(snapshot['generated_at'])} · профиль {e(snapshot['profile'])} ·
 срез #{snapshot.get('dossier_id', '—')}</div>
-<div class="card"><span class="score">{v.get('score', '—')}</span>
+<div class="card"><span class="score">{v_score}</span>
 <span style="font-size:1.4rem"> / 100</span>
-<p style="margin-top:8px;font-size:1.1rem">{e(v.get('text'))}</p>
+<p style="margin-top:8px;font-size:1.1rem">{e(v_text)}</p>
 <p style="margin-top:8px">{badges_html}</p></div>
 <div class="card"><table>
 <tr><th>Оффер (дешевле — первым)</th><th>Реальная цена</th><th>Наличие</th><th>Честная скидка</th><th>Балл</th><th>Группы</th></tr>
 {''.join(rows)}
 </table></div>
+{unscored_block}
 <div class="card"><b>Как читать</b><p class="meta">«Реальная цена» — цена с учётом
 способа оплаты и доставки (rank_price). «Честная скидка» — процент к медиане
 истории цен, не к зачёркнутой «старой цене»; фейк — когда зачёркнутая выше

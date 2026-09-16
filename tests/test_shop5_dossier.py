@@ -375,3 +375,39 @@ def test_render_yaml_and_deps_have_pillow():
     assert "Pillow" in reqs
     docker = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "fonts-dejavu-core" in docker
+
+
+# ── живой кейс владельца (досье #2): ни одной цены BYN ──────────────────
+def _seed_unpriced_product():
+    """Продукт, все офферы без цены (WB-цены в RUB без курса, 2026-09-16)."""
+    _query("INSERT INTO shop_products (title, query_text) VALUES (?, ?)",
+           ("Боксеры мужские", "боксеры"))
+    pid = _query("SELECT id FROM shop_products ORDER BY id DESC LIMIT 1",
+                 fetch=True)[0]["id"]
+    for platform, code, url in (("wb", "1", WB_URL),
+                                ("kufar", "1001", KUFAR_URL)):
+        _query("INSERT INTO shop_offers (product_id, platform, platform_code, "
+               "url, price_byn, in_stock) VALUES (?, ?, ?, ?, NULL, 1)",
+               (pid, platform, code, url))
+    return pid
+
+
+def test_zero_priced_dossier_is_honest_and_clickable(shop_db, tmp_path):
+    pid = _seed_unpriced_product()
+    snap = sd.build_snapshot(pid, save=False)
+    assert snap["verdict"] is None
+    assert snap["unscored_total"] == 2
+    assert [u["platform"] for u in snap["unscored_offers"]] == ["wb", "kufar"]
+    text = sd.render_text(snap)
+    assert "Вердикт: —/100" in text
+    assert "цены не получены" in text
+    assert "Топ предложений" not in text
+    assert "История копится" not in text
+    assert "kufar.by/item/1001" in text  # ссылки не спрятаны даже без цен
+    caption = sd.render_caption(snap)
+    assert "—/100" in caption and "цены не получены" in caption
+    html = sd.render_html(snap)
+    assert "не ранжированы" in html and "kufar.by/item/1001" in html
+    poster_path = tmp_path / "poster.png"
+    sd.render_poster(snap, str(poster_path))
+    assert poster_path.exists()

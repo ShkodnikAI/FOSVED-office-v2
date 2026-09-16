@@ -3,9 +3,13 @@
 
 Снапшоты — по ЖИВЫМ ответам, снятым из песочницы 2026-09-16 (см. докстринг
 proxy/shop_collectors.py): WB v4 (sizes[].price в копейках, feedbacks,
-supplier*) и Kufar search-api v2 (price_byn, paid_services.halva,
-account_parameters). Onliner — форма по памяти (оборонительный парсер +
+supplier*) и Kufar search-api v2 (price_byn/price_usd — СТРОКИ В КОПЕЙКАХ
+(сверка iPhone 16 Pro: 250000 коп = 2500 BYN = 82546¢), paid_services.halva,
+account_parameters; лестница биграмм для полнословных фраз).
+Onliner — форма по памяти (оборонительный парсер +
 kind:"api_form_mismatch"). 21vek — честный каркас not_implemented_live.
+FX: env SHOP_FX_RATES_JSON → кэш system_settings → egress НБРБ/er-api →
+устаревший кэш → аварийные константы (fx_rates()).
 
 Хранилище: DDL извлекается прямо из app.mlog (гвард SHOP-1) и исполняется
 в тестовой БД DATABASE_PATH — upsert/история проверяются на живой схеме.
@@ -15,6 +19,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -62,13 +67,13 @@ KUFAR_SNAPSHOT = {
     "ads": [
         {"ad_id": 1085316386,
          "ad_link": "https://www.kufar.by/item/1085316386?utm_source=test",
-         "subject": "Кофемолка Bosch", "price_byn": 300, "price_usd": 99,
+         "subject": "Кофемолка Bosch", "price_byn": "30000", "price_usd": "9912",
          "currency": "BYR", "company_ad": False,
          "account_parameters": [{"p": "name", "v": "Юрий"}],
          "paid_services": {"halva": True}},
         {"ad_id": 1085316387,
          "ad_link": "https://www.kufar.by/item/1085316387",
-         "subject": "Кофемолка новая", "price_byn": 210,
+         "subject": "Кофемолка новая", "price_byn": "21000",
          "currency": "BYR", "company_ad": True,
          "account_parameters": [{"p": "name", "v": "ТехноМагазин"}],
          "paid_services": {"halva": False}},
@@ -132,6 +137,27 @@ def stub_transport(monkeypatch):
     monkeypatch.setattr(sc, "FETCH_JSON_FN", fake_fetch)
 
 
+@pytest.fixture(autouse=True)
+def fx_env(monkeypatch):
+    """Фиксированный курс для модуля: сбор детерминирован, FX-egress
+    из тестов не дёргается (в FX-тестах переопределяется)."""
+    monkeypatch.setenv("SHOP_FX_RATES_JSON", '{"RUB": 0.034}')
+
+
+@pytest.fixture()
+def fx_clean():
+    """Чистый kv system_settings для FX-тестов (таблица — общая с mlog)."""
+    _query("CREATE TABLE IF NOT EXISTS system_settings "
+           "(key TEXT PRIMARY KEY, value TEXT)")
+    _query("DELETE FROM system_settings WHERE key='shop_fx_rates'")
+    yield
+    _query("DELETE FROM system_settings WHERE key='shop_fx_rates'")
+
+
+def _no_net(tool, args):
+    raise AssertionError("сеть не должна зваться")
+
+
 # ── canonical_url ───────────────────────────────────────────────────────
 def test_canonical_url_strips_tracking():
     u = sc.canonical_url("https://www.kufar.by/item/1?utm_source=t&gclid=x&id=2")
@@ -165,7 +191,9 @@ def test_wb_collector_parses_live_form():
 
 
 def test_wb_without_rates_is_honest():
-    res = sc.collect_wb("кофемолка", rates=None)
+    # пустой rates = конвертации нет (валюта вне курса) → честный None;
+    # неявный rates=None теперь тянет fx_rates() (env/кэш/egress/константы)
+    res = sc.collect_wb("кофемолка", rates={})
     assert res["ok"] is True
     assert res["offers"][0]["price_byn"] is None  # RUB без курса → не выдумываем
     assert res["offers"][0]["currency_note"] == "RUB"
@@ -185,6 +213,7 @@ def test_kufar_collector_parses_live_form():
     o = res["offers"][0]
     assert o["platform_code"] == "1085316386"
     assert o["url"] == "https://www.kufar.by/item/1085316386"  # utm снят
+    # копейки строкой: "30000" → 300.00 BYN (живая шкала)
     assert o["price_byn"] == 300.0
     assert o["installment_ok"] == 1  # halva=True
     assert o["seller_name"] == "Юрий"
@@ -263,7 +292,7 @@ def test_kufar_offer_without_price_skips_history_row():
         r = sc.refresh_product(pid, "kufar", "кофемолка")
         assert r["ok"] is True and r["history_rows"] == 1  # только у второго
     finally:
-        KUFAR_SNAPSHOT["ads"][0]["price_byn"] = 300
+        KUFAR_SNAPSHOT["ads"][0]["price_byn"] = "30000"
 
 
 def test_score_product_end_to_end():
@@ -279,3 +308,96 @@ def test_score_product_end_to_end():
     # бейдж «дешевле всех» указывает на реальный оффер из БД
     ids = {o["id"] for o in scored["offers"]}
     assert scored["badges"]["cheapest"] in ids
+
+
+# ── Kufar: копейки + лестница биграмм (живой диагноз досье #2) ──────────
+def test_kufar_price_scale_is_kopecks():
+    assert sc._kufar_kop("250000") == 2500.0  # iPhone 16 Pro, живая сверка
+    assert sc._kufar_kop(30000) == 300.0
+    assert sc._kufar_kop("0") is None  # торг/договорная — цены нет
+    assert sc._kufar_kop(None) is None
+    assert sc._kufar_kop("мусор") is None
+
+
+def test_kufar_bigram_fallback_when_full_query_empty(monkeypatch):
+    import urllib.parse as up
+
+    def fake(tool, args):
+        url = args.get("url", "")
+        q = up.parse_qs(up.urlsplit(url).query).get("query", [""])[0]
+        if q in ("мужские облегающие боксеры", "мужские облегающие"):
+            return {"ok": True, "data": {"ads": []}}
+        if q == "облегающие боксеры":
+            return {"ok": True, "data": {"ads": [{
+                "ad_id": 5, "ad_link": "https://www.kufar.by/item/5",
+                "subject": "Боксеры", "price_byn": "5000"}]}}
+        return {"ok": True, "data": {"ads": []}}
+
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
+    res = sc.collect_kufar("мужские облегающие боксеры", size=5)
+    assert res["ok"] is True and len(res["offers"]) == 1
+    assert res["query_used"] == "облегающие боксеры"
+    assert res["offers"][0]["price_byn"] == 50.0  # 5000 копеек
+
+
+def test_kufar_no_fallback_when_ads_present(monkeypatch):
+    monkeypatch.setattr(
+        sc, "FETCH_JSON_FN",
+        lambda t, a: {"ok": True, "data": {"ads": KUFAR_SNAPSHOT["ads"]}})
+    res = sc.collect_kufar("кофемолка")
+    assert res["ok"] is True and "query_used" not in res
+
+
+# ── FX: env → кэш → НБРБ → er-api → устаревший кэш → константы ──────────
+NBRB_SNAPSHOT = [
+    {"Cur_Abbreviation": "RUB", "Cur_Scale": 100, "Cur_OfficialRate": 3.45},
+    {"Cur_Abbreviation": "USD", "Cur_Scale": 1, "Cur_OfficialRate": 3.05},
+]
+
+
+def test_fx_env_override_wins(monkeypatch, fx_clean):
+    monkeypatch.setenv("SHOP_FX_RATES_JSON", '{"RUB": 0.05}')
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", _no_net)
+    assert sc.fx_rates() == {"RUB": 0.05}
+
+
+def test_fx_nbrb_fetched_and_cached(monkeypatch, fx_clean):
+    monkeypatch.delenv("SHOP_FX_RATES_JSON", raising=False)
+    calls = []
+
+    def fake(tool, args):
+        calls.append(args.get("url", ""))
+        return {"ok": True, "data": NBRB_SNAPSHOT}
+
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
+    rates = sc.fx_rates()
+    assert rates["RUB"] == pytest.approx(0.0345, abs=1e-6)
+    assert rates["USD"] == pytest.approx(3.05, abs=1e-6)
+    assert any("nbrb.by" in u for u in calls)
+    row = _query("SELECT value FROM system_settings WHERE key='shop_fx_rates'",
+                 fetch=True)
+    assert row and json.loads(row[0]["value"])["source"] == "nbrb"
+
+
+def test_fx_fresh_cache_skips_network(monkeypatch, fx_clean):
+    monkeypatch.delenv("SHOP_FX_RATES_JSON", raising=False)
+    sc._fx_cache_write({"RUB": 0.034}, "test")
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", _no_net)
+    assert sc.fx_rates() == {"RUB": 0.034}
+
+
+def test_fx_stale_cache_on_egress_failure(monkeypatch, fx_clean):
+    monkeypatch.delenv("SHOP_FX_RATES_JSON", raising=False)
+    sc._setting_set(sc.FX_CACHE_KEY, json.dumps(
+        {"rates": {"RUB": 0.034}, "source": "test",
+         "fetched_at": time.time() - 7 * 3600}))
+    monkeypatch.setattr(sc, "FETCH_JSON_FN",
+                        lambda t, a: {"ok": False, "kind": "network"})
+    assert sc.fx_rates() == {"RUB": 0.034}
+
+
+def test_fx_builtin_constants_last_resort(monkeypatch, fx_clean):
+    monkeypatch.delenv("SHOP_FX_RATES_JSON", raising=False)
+    monkeypatch.setattr(sc, "FETCH_JSON_FN",
+                        lambda t, a: {"ok": False, "kind": "network"})
+    assert sc.fx_rates() == sc.FX_FALLBACK
