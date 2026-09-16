@@ -275,23 +275,30 @@ def tool_fetch_page(args):
     except (TypeError, ValueError):
         max_chars = 20000
     refresh = bool(args.get("refresh"))
+    # SHOP-6 (#172): raw_html=true — отдать исходный HTML без вычистки
+    # script/style (JSON-LD schema.org живёт в script-тегах, text-режим
+    # его теряет). Кэш-ключ отдельный.
+    raw_html = bool(args.get("raw_html"))
+    cache_key = ("raw:" + url) if raw_html else ("page:" + url)
     if not refresh:
-        cached = _cache_get("page:" + url)
+        cached = _cache_get(cache_key)
         if cached:
             return dict(cached, cached=True)
     ok, data = http_get(url)
     if not ok:
         return data
+    content = data["raw"][:max_chars] if raw_html \
+        else _html_to_text(data["raw"])[:max_chars]
     payload = {
         "ok": True, "url": data["url"], "status": data["status"],
         "content_type": data["content_type"],
         "title": _extract_title(data["raw"]),
-        "content": _html_to_text(data["raw"])[:max_chars],
+        "content": content,
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if data.get("robots_note"):
         payload["robots_note"] = data["robots_note"]
-    _cache_put("page:" + url, payload)
+    _cache_put(cache_key, payload)
     return payload
 
 

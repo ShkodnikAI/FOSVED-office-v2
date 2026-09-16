@@ -34,8 +34,11 @@ os.environ.setdefault('OWNER_TELEGRAM_ID', '555000')
 os.environ.setdefault('DATABASE_PATH', '/tmp/fosved-shop5-test')
 os.environ.setdefault('ZAI_API_KEY', 'fake-key')
 
-from proxy.core import _query, app  # noqa: E402
+from proxy.core import _query, app  # noqa: E402 — app захватываем при импорте
+# (test_security перезагружает proxy.core — from-import внутри fixture вернул
+# бы новый Flask-объект без роутов routes_tail; привязка к импорту спасает)
 from proxy import shop_dossier as sd  # noqa: E402
+import llm_proxy  # noqa: E402,F401 — регистрация роутов routes_tail на app
 
 WB_URL = "https://www.wildberries.ru/catalog/414389121/detail.aspx?utm_source=test"
 KUFAR_URL = "https://www.kufar.by/item/1001?utm_medium=x"
