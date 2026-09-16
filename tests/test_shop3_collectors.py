@@ -3,11 +3,13 @@
 
 Снапшоты — по ЖИВЫМ ответам, снятым из песочницы 2026-09-16 (см. докстринг
 proxy/shop_collectors.py): WB v4 (sizes[].price в копейках, feedbacks,
-supplier*) и Kufar search-api v2 (price_byn/price_usd — СТРОКИ В КОПЕЙКАХ
-(сверка iPhone 16 Pro: 250000 коп = 2500 BYN = 82546¢), paid_services.halva,
-account_parameters; лестница биграмм для полнословных фраз).
-Onliner — форма по памяти (оборонительный парсер +
-kind:"api_form_mismatch"). 21vek — честный каркас not_implemented_live.
+supplier*) и Onliner catalog (цены BYN строкой; форма по памяти —
+оборонительный парсер + kind:"api_form_mismatch").
+Kufar ВЫВЕДЕН из реестра по решению владельца 2026-09-16 — его парсер
+и снапшоты удалены; регресс «collect('kufar') → no_collector» остался.
+Ozon — каркас за антиботом (TLS-фингерпринт + JS-челлендж, живые пробы
+2026-09-16): транспортный отказ честно пробрасывается, форма не снята
+→ kind:"api_form_unknown". 21vek — честный каркас not_implemented_live.
 FX: env SHOP_FX_RATES_JSON → кэш system_settings → egress НБРБ/er-api →
 устаревший кэш → аварийные константы (fx_rates()).
 
@@ -63,23 +65,6 @@ WB_SNAPSHOT = {
     ],
 }
 
-KUFAR_SNAPSHOT = {
-    "ads": [
-        {"ad_id": 1085316386,
-         "ad_link": "https://www.kufar.by/item/1085316386?utm_source=test",
-         "subject": "Кофемолка Bosch", "price_byn": "30000", "price_usd": "9912",
-         "currency": "BYR", "company_ad": False,
-         "account_parameters": [{"p": "name", "v": "Юрий"}],
-         "paid_services": {"halva": True}},
-        {"ad_id": 1085316387,
-         "ad_link": "https://www.kufar.by/item/1085316387",
-         "subject": "Кофемолка новая", "price_byn": "21000",
-         "currency": "BYR", "company_ad": True,
-         "account_parameters": [{"p": "name", "v": "ТехноМагазин"}],
-         "paid_services": {"halva": False}},
-    ]
-}
-
 ONLINER_SNAPSHOT = {
     "products": [
         {"key": "kofemolka-bosch-tsm6", "name": "Кофемолка Bosch TSM6",
@@ -129,8 +114,10 @@ def stub_transport(monkeypatch):
         url = args.get("url", "")
         if "search.wb.ru" in url:
             return {"ok": True, "url": url, "status": 200, "data": WB_SNAPSHOT}
-        if "kufar" in url:
-            return {"ok": True, "url": url, "status": 200, "data": KUFAR_SNAPSHOT}
+        if "ozon.by" in url:
+            # живое поведение 2026-09-16: антибот → честный отказ транспорта
+            return {"ok": False, "url": url, "error": "антибот (тест): 307-петля",
+                    "kind": "transport"}
         if "onliner" in url:
             return {"ok": True, "url": url, "status": 200, "data": ONLINER_SNAPSHOT}
         return {"ok": False, "error": "неожиданный URL", "kind": "test"}
@@ -160,8 +147,8 @@ def _no_net(tool, args):
 
 # ── canonical_url ───────────────────────────────────────────────────────
 def test_canonical_url_strips_tracking():
-    u = sc.canonical_url("https://www.kufar.by/item/1?utm_source=t&gclid=x&id=2")
-    assert u == "https://www.kufar.by/item/1?id=2"
+    u = sc.canonical_url("https://www.ozon.by/product/1?utm_source=t&gclid=x&id=2")
+    assert u == "https://www.ozon.by/product/1?id=2"
     assert sc.canonical_url(
         "https://www.wildberries.ru/catalog/1/detail.aspx") == \
         "https://www.wildberries.ru/catalog/1/detail.aspx"
@@ -206,20 +193,37 @@ def test_wb_form_mismatch_is_loud(monkeypatch):
     assert res["ok"] is False and res["kind"] == "api_form_mismatch"
 
 
-# ── Kufar (живая форма) ─────────────────────────────────────────────────
-def test_kufar_collector_parses_live_form():
-    res = sc.collect_kufar("кофемолка")
-    assert res["ok"] is True and len(res["offers"]) == 2
-    o = res["offers"][0]
-    assert o["platform_code"] == "1085316386"
-    assert o["url"] == "https://www.kufar.by/item/1085316386"  # utm снят
-    # копейки строкой: "30000" → 300.00 BYN (живая шкала)
-    assert o["price_byn"] == 300.0
-    assert o["installment_ok"] == 1  # halva=True
-    assert o["seller_name"] == "Юрий"
-    assert o["seller_official"] == 0  # частник
-    o2 = res["offers"][1]
-    assert o2["installment_ok"] == 0 and o2["seller_official"] == 1  # компания
+# ── Ozon: каркас за антиботом (живые пробы 2026-09-16, см. модуль) ──────
+def test_ozon_transport_refusal_propagates_with_antibot_note(monkeypatch):
+    monkeypatch.setattr(sc, "FETCH_JSON_FN",
+                        lambda t, a: {"ok": False, "error": "fetch: 307 loop",
+                                      "kind": "transport"})
+    res = sc.collect_ozon("боксеры")
+    assert res["ok"] is False and res["kind"] == "transport"
+    assert "антибот Ozon" in res["error"] and "ozon.by" in res["url"]
+
+
+def test_ozon_silent_refusal_defaults_to_antibot_blocked(monkeypatch):
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", lambda t, a: {"ok": False, "error": ""})
+    res = sc.collect_ozon("боксеры")
+    assert res["ok"] is False and res["kind"] == "antibot_blocked"
+    assert res["error"].startswith("антибот Ozon")  # без слипшегося разделителя
+
+
+def test_ozon_transport_ok_but_form_unknown(monkeypatch):
+    """Если egress однажды пройдёт, но форма не снята — честный отказ,
+    парсер вслепую не пишем (дисциплина form-истины SHOP-3)."""
+    monkeypatch.setattr(sc, "FETCH_JSON_FN",
+                        lambda t, a: {"ok": True, "data": {"widgetStates": {}}})
+    res = sc.collect_ozon("боксеры")
+    assert res["ok"] is False and res["kind"] == "api_form_unknown"
+
+
+def test_kufar_removed_ozon_registered():
+    """Решение владельца 2026-09-16: Kufar выведен, Ozon в реестре."""
+    assert "ozon" in sc.COLLECTORS
+    res = sc.collect("kufar", "x")
+    assert res["ok"] is False and res["kind"] == "no_collector"
 
 
 # ── Onliner / 21vek (честные ограничения) ───────────────────────────────
@@ -285,67 +289,31 @@ def test_refresh_upserts_offers_and_history():
         WB_SNAPSHOT["products"][0]["sizes"][0]["price"]["product"] = 70400
 
 
-def test_kufar_offer_without_price_skips_history_row():
+def test_onliner_offer_without_price_skips_history_row(monkeypatch):
+    monkeypatch.setenv("SHOP_ONLINER_CATEGORY", "coffeegrinder")
     pid = _make_product()
-    KUFAR_SNAPSHOT["ads"][0]["price_byn"] = None
+    ONLINER_SNAPSHOT["products"][0]["prices"]["price"]["amount"] = None
     try:
-        r = sc.refresh_product(pid, "kufar", "кофемолка")
+        r = sc.refresh_product(pid, "onliner", "кофемолка")
         assert r["ok"] is True and r["history_rows"] == 1  # только у второго
     finally:
-        KUFAR_SNAPSHOT["ads"][0]["price_byn"] = "30000"
+        ONLINER_SNAPSHOT["products"][0]["prices"]["price"]["amount"] = "129.00"
 
 
-def test_score_product_end_to_end():
+def test_score_product_end_to_end(monkeypatch):
     """SHOP-1 + SHOP-3: сбор → БД → вердикт движка."""
+    monkeypatch.setenv("SHOP_ONLINER_CATEGORY", "coffeegrinder")
     pid = _make_product()
     sc.refresh_product(pid, "wb", "кофемолка", rates={"RUB": 0.034})
-    sc.refresh_product(pid, "kufar", "кофемолка")
+    sc.refresh_product(pid, "onliner", "кофемолка")
     res = sc.score_product(pid)
     assert res["ok"] is True
     scored = res["scored"]
-    assert len(scored["offers"]) == 4  # 2 WB + 2 Kufar, все с ценой
+    assert len(scored["offers"]) == 4  # 2 WB + 2 Onliner, все с ценой
     assert scored["verdict"] is not None and scored["verdict"]["text"]
     # бейдж «дешевле всех» указывает на реальный оффер из БД
     ids = {o["id"] for o in scored["offers"]}
     assert scored["badges"]["cheapest"] in ids
-
-
-# ── Kufar: копейки + лестница биграмм (живой диагноз досье #2) ──────────
-def test_kufar_price_scale_is_kopecks():
-    assert sc._kufar_kop("250000") == 2500.0  # iPhone 16 Pro, живая сверка
-    assert sc._kufar_kop(30000) == 300.0
-    assert sc._kufar_kop("0") is None  # торг/договорная — цены нет
-    assert sc._kufar_kop(None) is None
-    assert sc._kufar_kop("мусор") is None
-
-
-def test_kufar_bigram_fallback_when_full_query_empty(monkeypatch):
-    import urllib.parse as up
-
-    def fake(tool, args):
-        url = args.get("url", "")
-        q = up.parse_qs(up.urlsplit(url).query).get("query", [""])[0]
-        if q in ("мужские облегающие боксеры", "мужские облегающие"):
-            return {"ok": True, "data": {"ads": []}}
-        if q == "облегающие боксеры":
-            return {"ok": True, "data": {"ads": [{
-                "ad_id": 5, "ad_link": "https://www.kufar.by/item/5",
-                "subject": "Боксеры", "price_byn": "5000"}]}}
-        return {"ok": True, "data": {"ads": []}}
-
-    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
-    res = sc.collect_kufar("мужские облегающие боксеры", size=5)
-    assert res["ok"] is True and len(res["offers"]) == 1
-    assert res["query_used"] == "облегающие боксеры"
-    assert res["offers"][0]["price_byn"] == 50.0  # 5000 копеек
-
-
-def test_kufar_no_fallback_when_ads_present(monkeypatch):
-    monkeypatch.setattr(
-        sc, "FETCH_JSON_FN",
-        lambda t, a: {"ok": True, "data": {"ads": KUFAR_SNAPSHOT["ads"]}})
-    res = sc.collect_kufar("кофемолка")
-    assert res["ok"] is True and "query_used" not in res
 
 
 # ── FX: env → кэш → НБРБ → er-api → устаревший кэш → константы ──────────

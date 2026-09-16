@@ -327,13 +327,10 @@ def test_endpoint_product_full_flow(shop_db, client, monkeypatch):
                 "supplier": "Маг", "supplierId": 1, "supplierRating": 4.9,
                 "sizes": [{"price": {"basic": 100000, "product": 70000}}],
             }]}}
-        if "kufar" in url:
-            return {"ok": True, "data": {"ads": [{
-                "ad_id": 1001, "ad_link": "https://www.kufar.by/item/1001",
-                "subject": "Кофемолка", "price_byn": 220,
-                "company_ad": False,
-                "account_parameters": [{"p": "name", "v": "Юра"}],
-                "paid_services": {"halva": False}}]}}
+        if "ozon.by" in url:
+            # ozon — каркас за антиботом: честный отказ (как живой)
+            return {"ok": False, "error": "антибот (тест): 307-петля",
+                    "kind": "transport"}
         return {"ok": False, "error": "неожиданный URL", "kind": "test"}
     monkeypatch.setattr(sc, "FETCH_JSON_FN", fake_fetch)
 
@@ -379,7 +376,8 @@ def test_render_yaml_and_deps_have_pillow():
 
 # ── живой кейс владельца (досье #2): ни одной цены BYN ──────────────────
 def _seed_unpriced_product():
-    """Продукт, все офферы без цены (WB-цены в RUB без курса, 2026-09-16)."""
+    """Продукт, все офферы без цены. Платформа kufar в БД — REGRESS:
+    сборщик выведен (2026-09-16), но старые строки обязаны рендериться."""
     _query("INSERT INTO shop_products (title, query_text) VALUES (?, ?)",
            ("Боксеры мужские", "боксеры"))
     pid = _query("SELECT id FROM shop_products ORDER BY id DESC LIMIT 1",

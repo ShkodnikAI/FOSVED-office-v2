@@ -24,7 +24,8 @@ import os
 
 log = logging.getLogger("shop_watch")
 
-PLATFORMS_MVP = ("wb", "kufar")  # onliner/21vek — каркасы, не в такте
+PLATFORMS_MVP = ("wb", "ozon")  # ozon — каркас (антибот, см. shop_collectors);
+                                # onliner (нет слага) / 21vek — вне такта
 
 
 def enabled():

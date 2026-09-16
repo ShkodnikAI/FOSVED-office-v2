@@ -362,7 +362,7 @@ def cron_narad_tick():
 
 
 # ── SHOP-4: такт вотчлиста цен/скидок (диспатч #172) ─────────────────────
-# 4 раза/сутки: сбор WB/Kufar по активным вотчам (дисциплина SHOP-2),
+# 4 раза/сутки: сбор WB/Ozon по активным вотчам (дисциплина SHOP-2),
 # оценка целей (цена/настоящая скидка/наличие) → алерты владельцу.
 # Kill-switch SHOP_ENABLED=0 выключает такт полностью.
 @app.route("/cron/shop-tick", methods=["GET"])
@@ -416,7 +416,7 @@ def _shop_send_dossier(snapshot, chat_id):
 def shop_product_endpoint():
     """Команда /товар: создать товар, снять срез, прислать досье.
 
-    query — поисковый запрос (сбор WB/Kufar, SHOP-3) ИЛИ URL
+    query — поисковый запрос (сбор WB/Ozon, SHOP-3) ИЛИ URL
     (сайты компаний/производителей — generic-сбор SHOP-6).
     """
     d = request.get_json(force=True, silent=True) or {}

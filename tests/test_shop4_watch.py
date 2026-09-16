@@ -43,11 +43,15 @@ WB_SNAP = {
     }]
 }
 
-KUFAR_SNAP = {
-    "ads": [{"ad_id": 1001, "ad_link": "https://www.kufar.by/item/1001",
-             "subject": "Кофемолка", "price_byn": "22000", "company_ad": False,
-             "account_parameters": [{"p": "name", "v": "Юра"}],
-             "paid_services": {"halva": False}}],
+PLATFORMS_REAL = tuple(sw.PLATFORMS_MVP)  # до фикстурных подмен (регресс внизу)
+
+ONLINER_SNAP = {
+    "products": [{
+        "key": "kofemolka-sm-200", "name": "Кофемолка SM-200",
+        "full_name": "Кофемолка SM-200",
+        "prices": {"price": {"amount": "220.00", "currency": "BYN"},
+                   "offers_count": 3},
+    }]
 }
 
 
@@ -81,13 +85,23 @@ def shop_db(monkeypatch):
     for t in ("shop_price_history", "shop_offers", "shop_sellers",
               "shop_products", "shop_watches"):
         _query(f"DELETE FROM {t}")
-    # транспорт: WB 700.00 RUB → без курса price_byn=None; Kufar 220 BYN
+    # транспорт: WB 700.00 RUB → без курса price_byn=None; Onliner 220 BYN.
+    # КУФАР ВЫВЕДЕН (решение владельца 2026-09-16): такт ходит по
+    # PLATFORMS_MVP=("wb","ozon"), ozon — каркас за антиботом (отказ).
+    # Для конвейерных тестов второй РАБОЧЕЙ площадкой подставляем onliner
+    # (реальный парсер) через подмену PLATFORMS_MVP.
+    monkeypatch.setenv("SHOP_ONLINER_CATEGORY", "coffeegrinder")
+    monkeypatch.setattr(sw, "PLATFORMS_MVP", ("wb", "onliner"))
+
     def fake_fetch(tool, args):
         url = args.get("url", "")
         if "search.wb.ru" in url:
             return {"ok": True, "data": WB_SNAP}
-        if "kufar" in url:
-            return {"ok": True, "data": KUFAR_SNAP}
+        if "ozon.by" in url:
+            return {"ok": False, "error": "антибот (тест): 307-петля",
+                    "kind": "transport"}
+        if "onliner" in url:
+            return {"ok": True, "data": ONLINER_SNAP}
         return {"ok": False, "error": "неожиданный URL", "kind": "test"}
     monkeypatch.setattr(sc, "FETCH_JSON_FN", fake_fetch)
     yield
@@ -107,7 +121,7 @@ def capture_send(monkeypatch, sent):
     return sent
 
 
-# WB без курса → price None; чтобы rank_price считался, Kufar-цена работает.
+# WB без курса → price None; чтобы rank_price считался, Onliner-цена работает.
 # Для target-теста нужен оффер с ценой: даём курс через env-снимок.
 
 def _add_product_with_wb_rate(monkeypatch, rate=None):
@@ -125,7 +139,7 @@ def test_ensure_product_creates_and_collects(monkeypatch):
     row = _query("SELECT * FROM shop_products WHERE id=?", (pid,), fetch=True)
     assert row[0]["query_text"] == "кофемолка"
     offers = _query("SELECT * FROM shop_offers WHERE product_id=?", (pid,), fetch=True)
-    assert len(offers) == 2  # WB + Kufar
+    assert len(offers) == 2  # WB + Onliner
     prices = sorted(o["price_byn"] for o in offers)
     assert prices == pytest.approx([700.0 * 0.034, 220.0], abs=0.01)
 
@@ -197,18 +211,18 @@ def test_in_stock_transition_alert(monkeypatch, sent):
     # такт 1: всё в наличии → состояние True зафиксировано, алерта нет
     r1 = sw.tick_shop_watches()
     assert r1["alerts"] == 0
-    # такт 2: WB распродан, Kufar снят с показа; оффер Kufar в БД тоже
+    # такт 2: WB распродан, Onliner снял с показа; оффер Onliner в БД тоже
     # помечаем out (пустая выдача не удаляет офферы — обновления нет)
     WB_SNAP["products"][0]["totalQuantity"] = 0
-    saved_ads = KUFAR_SNAP["ads"]
-    KUFAR_SNAP["ads"] = []
-    _query("UPDATE shop_offers SET in_stock=0 WHERE platform='kufar'")
+    saved_products = ONLINER_SNAP["products"]
+    ONLINER_SNAP["products"] = []
+    _query("UPDATE shop_offers SET in_stock=0 WHERE platform='onliner'")
     try:
         r2 = sw.tick_shop_watches()
         assert r2["alerts"] == 0
         # такт 3: товар вернулся → переход in → алерт
         WB_SNAP["products"][0]["totalQuantity"] = 5
-        KUFAR_SNAP["ads"] = saved_ads
+        ONLINER_SNAP["products"] = saved_products
         r3 = sw.tick_shop_watches()
         assert r3["alerts"] == 1 and "в наличии" in sent[-1]
         # такт 4: всё ещё в наличии → молчание
@@ -216,7 +230,7 @@ def test_in_stock_transition_alert(monkeypatch, sent):
         assert r4["alerts"] == 0
     finally:
         WB_SNAP["products"][0]["totalQuantity"] = 5
-        KUFAR_SNAP["ads"] = saved_ads
+        ONLINER_SNAP["products"] = saved_products
 
 
 def test_kill_switch_silences_everything(monkeypatch, sent):
@@ -240,6 +254,12 @@ def test_transport_down_tick_survives(monkeypatch, sent):
     # сбор упал, но скоринг по сохранённым в БД офферам жив → алерт по цели
     assert r["ok"] is True and r["alerts"] == 1
     assert "цель" in sent[0]
+
+
+def test_platforms_mvp_kufar_out_ozon_in():
+    """Решение владельца 2026-09-16: Kufar выведен из такта, Ozon в такте
+    (каркас за антиботом — отказ честный, такт живёт)."""
+    assert PLATFORMS_REAL == ("wb", "ozon")
 
 
 def test_render_yaml_has_shop_cron_and_switch():

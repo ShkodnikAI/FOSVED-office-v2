@@ -13,12 +13,15 @@
     supplier/supplierId/supplierRating; наличие = totalQuantity;
     curr=byn игнорируется RU-кластером → цены RUB, BYN через fx_rates()
     (первый живой прогон: без FX все 100 офферов WB ушли в unscored);
-  - api.kufar.by → 200: price_byn/price_usd — СТРОКИ В КОПЕЙКАХ
-    (сверка 2026-09-16: iPhone 16 Pro price_byn="250000" = 2500 BYN и
-    price_usd="82546" = $825.46 — шкалы сходятся; предыдущая версия
-    считала поле BYN-числом — завышение в 100 раз). "0" — цены нет.
-    Полнословная фраза («… и … размер L-XL …») матчится в ноль →
-    лестница биграмм; query_used — какой запрос реально сработал;
+  - Kufar ВЫВЕДЕН из реестра по решению владельца (2026-09-16). Старые
+    kufar-строки в БД не трогаем: досье/скоринг рендерят их как есть
+    (платформа для движка — строка), такт их больше не освежает;
+  - Ozon (ozon.by) — ЗАКРЫТ АНТИБОТОМ (живые пробы из песочницы,
+    см. докстринг collect_ozon): любой путь → 307-петля (?__rr=1,2 →
+    403 abt_data) для честного клиента; с TLS-имперсонацией robots.txt
+    → 200, но поисковые API → 403 + JS-челлендж. Каркас: транспортный
+    вызов остаётся живым (заработает при egress-решении), отказ честный
+    kind:"antibot_blocked";
   - FX fx_rates(): env SHOP_FX_RATES_JSON → свежий кэш system_settings
     (6 ч) → живой egress НБРБ (полный дневной список, periodicity=0;
     точечные /rates/RUB?paramMode=1 отдают 404 — проверено) → резерв
@@ -319,95 +322,41 @@ def collect_wb(query, page=1, rates=None):
     return {"ok": True, "platform": "wb", "url": url, "offers": offers}
 
 
-# ── Kufar ───────────────────────────────────────────────────────────────
-def _kufar_kop(x):
-    """Kufar отдаёт price_byn/price_usd СТРОКАМИ В КОПЕЙКАХ (живая сверка
-    2026-09-16: iPhone 16 Pro price_byn="250000" → 2500 BYN, price_usd=
-    "82546" → $825.46 — шкалы сходятся; см. докстринг модуля). "0" —
-    цены нет (торг/договорная). Нечисловое → None без исключений."""
-    v = _num(x)
-    if v is None or v <= 0:
-        return None
-    return round(v / 100.0, 2)
+# ── Ozon ────────────────────────────────────────────────────────────────
+def collect_ozon(query, page=1):
+    """Ozon (ozon.by) — поисковый API за антиботом; каркас.
 
-
-def _kufar_bigrams(query):
-    """Первые биграммы запроса (макс 3) для лестницы фолбэка."""
-    toks = str(query or "").split()
-    return [" ".join(toks[i:i + 2])
-            for i in range(min(3, max(0, len(toks) - 1)))]
-
-
-def _kufar_fetch(query, size):
-    """Один транспортный вызов search-api v2. (ok, ads|error, kind, url)."""
-    base = os.environ.get(
-        "SHOP_KUFAR_BASE",
-        "https://api.kufar.by/search-api/v2/search/rendered-paginated")
-    url = base + "?" + urllib.parse.urlencode({"query": query, "size": str(size)})
-    data = FETCH_JSON_FN("fetch_json", {"url": url})
-    _audit("kufar", f"search:{query}", "ok" if data.get("ok") else "refused")
-    if not data.get("ok"):
-        return {"ok": False, "error": data.get("error"),
-                "kind": data.get("kind", "transport"), "url": url}
-    ads = (data.get("data") or {}).get("ads")
-    if not isinstance(ads, list):
-        return {"ok": False, "url": url, "error": "нет ads[] в ответе",
-                "kind": "api_form_mismatch"}
-    return {"ok": True, "url": url, "ads": ads}
-
-
-def collect_kufar(query, size=20):
-    """Поиск Kufar (search-api v2). Цены — копейки строкой → BYN.
-
-    Лестница запроса (живой диагноз досье #2): полнословная фраза
-    матчится в ноль → пробуем первые биграммы, пока не найдём ads;
-    query_used — какой запрос реально сработал (для аудита/тестов).
+    Живые пробы из песочницы 2026-09-16 (form-истина, не память):
+      - честный клиент (urllib/curl, UA браузера): ЛЮБОЙ путь
+        www.ozon.by|ozon.ru → 307-петля (?__rr=1 → ?__rr=2 → 403 +
+        cookie abt_data) — TLS-фингерпринт-слой антибота;
+      - с TLS-имперсонацией (curl_cffi chrome): robots.txt → 200, но
+        composer-api / entrypoint-api / mobile / search / sitemap →
+        403 + JS-челлендж (cdn2.ozone.ru/s3/abt-challenge) — нужен
+        реальный браузерный JS, из датацентра не проходит;
+      - api-seller.ozon.ru жив, но требует Client-Id/Api-Key продавца
+        и поиск по всему маркетплейсу не умеет (только свои товары).
+    Вывод: прямой egress закрыт на уровне JS-челленджа. Транспортный
+    вызов ниже оставлен живым: когда появится egress-решение (резидент-
+    проки/браузерный контур), сбор начнёт отвечать без правок здесь;
+    форма ответа снимется первым же прогоном (сейчас честный
+    kind:"api_form_unknown" — парсер вслепую не пишем).
     """
-    res = _kufar_fetch(query, size)
-    if res.get("ok") and not res.get("ads"):
-        for bq in _kufar_bigrams(query):
-            res2 = _kufar_fetch(bq, size)
-            if res2.get("ok") and res2.get("ads"):
-                res = {**res2, "query_used": bq}
-                _audit("kufar", f"bigram_fallback:{bq}", "ok")
-                break
-    if not res.get("ok"):
-        return {"ok": False, "platform": "kufar", "error": res.get("error"),
-                "kind": res.get("kind", "transport"), "url": res.get("url")}
-    ads = res["ads"]
-    offers = []
-    for a in ads:
-        ad_id = a.get("ad_id")
-        if ad_id is None:
-            continue
-        seller_name = None
-        for prm in a.get("account_parameters") or []:
-            if prm.get("p") == "name":
-                seller_name = prm.get("v")
-                break
-        paid = a.get("paid_services") or {}
-        price_byn = _kufar_kop(a.get("price_byn"))
-        offers.append({
-            "platform": "kufar",
-            "platform_code": str(ad_id),
-            "url": canonical_url(a.get("ad_link") or f"https://www.kufar.by/item/{ad_id}"),
-            "title": a.get("subject"),
-            "price_byn": price_byn,
-            "old_price_byn": None,
-            "in_stock": 1,  # объявление активно
-            "installment_ok": 1 if paid.get("halva") else 0,  # рассрочка «Халва»
-            "rating": None,
-            "reviews_count": None,
-            "seller_name": seller_name,
-            "seller_platform_code": a.get("account_id"),
-            "seller_rating": None,
-            "seller_deals": None,
-            "seller_official": 1 if a.get("company_ad") else 0,
-        })
-    out = {"ok": True, "platform": "kufar", "url": res["url"], "offers": offers}
-    if res.get("query_used"):
-        out["query_used"] = res["query_used"]
-    return out
+    url = ("https://www.ozon.by/api/composer-api.bx/page/json/v2?url="
+           + urllib.parse.quote(f"/search/?text={query}&page={page}", safe=""))
+    data = FETCH_JSON_FN("fetch_json", {"url": url})
+    _audit("ozon", f"search:{query}", "ok" if data.get("ok") else "refused")
+    if not data.get("ok"):
+        note = ("антибот Ozon: TLS-фингерпринт (307-петля) + JS-челлендж на "
+                "поисковых API; egress-решение — см. приёмку #172")
+        base = (data.get("error") or "").strip()
+        return {"ok": False, "platform": "ozon", "url": url,
+                "error": f"{base} | {note}" if base else note,
+                "kind": data.get("kind", "antibot_blocked")}
+    return {"ok": False, "platform": "ozon", "url": url,
+            "error": "транспорт прошёл, но форма ответа composer-api не снята — "
+                     "нужен первый живой прогон с решённым egress",
+            "kind": "api_form_unknown"}
 
 
 # ── Onliner ─────────────────────────────────────────────────────────────
@@ -475,7 +424,7 @@ def collect_21vek(query):
 
 COLLECTORS = {
     "wb": collect_wb,
-    "kufar": collect_kufar,
+    "ozon": collect_ozon,
     "onliner": collect_onliner,
     "21vek": collect_21vek,
 }
