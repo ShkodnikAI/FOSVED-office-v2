@@ -307,20 +307,29 @@ INTEGRATIONS_REGISTRY = [
 
 # ──────────────────────────── DEPT COLORS & NAMES ────────────────────────────
 DEPT_COLORS = {
-    'yana': {'start': '#293133', 'end': '#1a2024', 'accent': '#3d4a4d'},
-    'osp': {'start': '#b91c1c', 'end': '#7f1d1d', 'accent': '#dc2626'},
-    'lz': {'start': '#0e7490', 'end': '#164e63', 'accent': '#0891b2'},
-    'expert': {'start': '#3730a3', 'end': '#1e1b4b', 'accent': '#4f46e5'},
-    'marketing': {'start': '#c2410c', 'end': '#7c2d12', 'accent': '#ea580c'},
-    'finance': {'start': '#15803d', 'end': '#14532d', 'accent': '#16a34a'},
-    'legal': {'start': '#475569', 'end': '#1e293b', 'accent': '#64748b'},
-    'dev': {'start': '#1d4ed8', 'end': '#1e3a8a', 'accent': '#2563eb'},
-    'design': {'start': '#be185d', 'end': '#831843', 'accent': '#ec4899'},
-    'qa': {'start': '#4d7c0f', 'end': '#365314', 'accent': '#65a30d'},
-    'visual': {'start': '#7e22ce', 'end': '#581c87', 'accent': '#a855f7'},
-    'engineering': {'start': '#44403c', 'end': '#292524', 'accent': '#78716c'},
-    'kavalnya': {'start': '#b45309', 'end': '#78350f', 'accent': '#d97706'},
-    'admin': {'start': '#1e40af', 'end': '#1e3a5f', 'accent': '#3b82f6'},
+    # FO-045 не заметил этот словарь — он в proxy/core.py, а не в
+    # report_css.txt/reports.py, которые чистились явно. До этой правки
+    # тут жила старая радужная палитра (индиго/розовый/фиолетовый),
+    # с «Диспетчерской» никак не связанная — заголовок отчёта выглядел
+    # чужеродно на фоне уже приведённого к общему стилю тела.
+    #
+    # Сама SPA (miniapp/index.html) отделы цветом вообще не различает —
+    # только текстом, единая спокойная палитра. Следуем тому же
+    # принципу здесь: один акцент (штамп-алый), экономно, не радуга.
+    'yana': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'osp': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'lz': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'expert': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'marketing': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'finance': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'legal': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'dev': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'design': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'qa': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'visual': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'engineering': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'kavalnya': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
+    'admin': {'start': '#1C1B18', 'end': '#050608', 'accent': '#A8321E'},
 }
 
 DEPT_NAMES = {
@@ -541,7 +550,7 @@ except Exception as _e:
     _has_enricher = False
 
 
-def auto_enrich(text, dept='yana', accent_color='#6366f1'):
+def auto_enrich(text, dept='yana', accent_color='#A8321E'):
     """Safe wrapper — returns raw text if enricher unavailable."""
     if _auto_enrich_fn is None:
         return text or ''
