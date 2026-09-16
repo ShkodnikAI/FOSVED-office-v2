@@ -141,34 +141,37 @@ def validate_url(url):
 
 # ── robots.txt ───────────────────────────────────────────────────────────
 def robots_allowed(scheme, netloc, url):
-    """True (можно), False (Disallow), либо True + note «robots недоступен».
+    """(allowed, note). Нет правил (404/сеть) → (True, note) — can_fetch НЕ дёргаем.
 
-    netloc (host[:port]) — ключ кэша robots: разные порты одного хоста —
-    разные сервисы со своими robots.txt.
+    Урок живого смоука SHOP-3: у непарсенного RobotFileParser can_fetch в
+    Python 3.12 возвращает False (а не «разрешено по умолчанию») → 404 на
+    robots.txt ошибочно запрещал весь хост. Поэтому состояние правил —
+    явное: rules=None означает «проверки не было», разрешаем с note;
+    иначе вердикт can_fetch. netloc (host[:port]) — ключ кэша: разные
+    порты = разные сервисы со своими robots.txt.
     """
     now = time.time()
     cached = _ROBOTS.get(netloc)
     if cached and now - cached[0] < 3600:
-        rp = cached[1]
+        rules, note = cached[1], cached[2]
     else:
+        rules, note = None, None
         rp = RobotFileParser()
         robots_url = f"{scheme}://{netloc}/robots.txt"
-        ok_fetch = False
         try:
             req = urllib.request.Request(robots_url, headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=min(_cfg()["timeout"], 5)) as r:
                 rp.parse(r.read().decode("utf-8", errors="replace").splitlines())
-            ok_fetch = True
+                rp.last_checked = time.time()  # страховка сверх parse()
+            rules = rp
         except urllib.error.HTTPError:
-            ok_fetch = True   # 404 на robots = разрешено всё, стандарт
-        except Exception:
-            ok_fetch = False  # сеть/таймаут — трактуем как «robots недоступен»
-        rp.available = True
-        _ROBOTS[netloc] = (now, rp if ok_fetch else None)
-        rp = _ROBOTS[netloc][1]
-    if rp is None:
-        return True, "robots недоступен — пропускаем проверку (стандартная практика)"
-    if not rp.can_fetch("*", url):
+            note = "robots.txt отсутствует (404) — проверка пропущена"
+        except Exception as e:
+            note = f"robots.txt недоступен ({e}) — проверка пропущена"
+        _ROBOTS[netloc] = (now, rules, note)
+    if rules is None:
+        return True, note
+    if not rules.can_fetch("*", url):
         return False, None
     return True, None
 
@@ -217,7 +220,7 @@ def http_get(url):
         return False, {"ok": False, "error": err[0], "kind": err[1]}
     scheme = urlsplit(url).scheme
     netloc = urlsplit(url).netloc
-    allowed, note = robots_allowed(scheme, netloc, url)
+    allowed, robots_note = robots_allowed(scheme, netloc, url)
     if not allowed:
         return False, {"ok": False, "error": "robots.txt запрещает этот URL",
                        "kind": "robots_disallow", "url": url}
@@ -244,6 +247,7 @@ def http_get(url):
     return True, {
         "raw": raw.decode("utf-8", errors="replace"),
         "status": status, "url": final_url, "content_type": ctype,
+        "robots_note": robots_note,
     }
 
 
@@ -285,6 +289,8 @@ def tool_fetch_page(args):
         "content": _html_to_text(data["raw"])[:max_chars],
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if data.get("robots_note"):
+        payload["robots_note"] = data["robots_note"]
     _cache_put("page:" + url, payload)
     return payload
 
@@ -310,6 +316,8 @@ def tool_fetch_json(args):
         "data": parsed,
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if data.get("robots_note"):
+        payload["robots_note"] = data["robots_note"]
     _cache_put("json:" + url, payload)
     return payload
 
