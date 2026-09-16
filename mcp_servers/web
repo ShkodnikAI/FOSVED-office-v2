@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""FOSVED office MCP server: web (SHOP-2, диспатч #172).
+
+Office-owned stdio MCP server — транспорт до страниц и JSON API
+маркетплейсов (WB/Onliner/21vek/Kufar) и сайтов компаний/производителей
+для SHOP-3 (сборщики) и SHOP-6 (generic URL-dossier). Диалект: legacy MCP
+(newline-delimited JSON-RPC 2.0 over stdio), контракт зеркалит
+mcp_servers/markets → github (тот же паттерн, проверенный в проде).
+
+Тулзы v1 (транспорт, без извлечения смысла — это SHOP-3/SHOP-6):
+  fetch_page(url, max_chars?, refresh?)  — HTML → текст (<title>, тело),
+                                           сборщики постеров/досье
+  fetch_json(url, refresh?)              — JSON API карточек/прайсов
+
+Дисциплина сбора (красные линии #172):
+  - robots.txt уважается: Disallow → ok:false kind:"robots_disallow";
+    robots недоступен (404/таймаут) → разрешаем с note (стандартная
+    практика), никаких антибот-агрессий;
+  - rate-limit на хост: не чаще WEB_MIN_INTERVAL сек (по умолчанию 3)
+    между запросами к одному домену; кэш в памяти (TTL 900с, ≤128
+    записей) — повторный вызов сеть не бьёт, поле "cached": true;
+  - таймаут WEB_TIMEOUT (15с), шапка ответа ≤ WEB_MAX_BYTES (2МБ),
+    текст обрезается до max_chars (по умолчанию 20000);
+  - SSRF-гейт: только http/https; хост резолвится, приватные/loopback/
+    link-local/reserved адреса запрещены (на Render мы в общем облаке —
+    169.254.169.254 и внутренние сервисы не наши для чтения). Лазейка
+    FOSVED_MCP_WEB_ALLOW_PRIVATE=1 — ТОЛЬКО для локальных тестов,
+    в render.yaml не включается;
+  - User-Agent честный: FOSVED-Office-MCP-web/1.0 (+репо офиса).
+
+ВАЖНО — честная оговорка (как у markets): сеть песочницы, где писался
+этот файл, не пропускает внешние сайты. Протокол и вся дисциплина
+(robots/rate-limit/кэш/SSRF/обрезки/ошибки) проверены тестами против
+локального HTTP-сервера; реальные ответы площадок покажет первый живой
+прогон после деплоя — форма разбора (title/текст/JSON) в коде консервативна.
+
+Инцидент-политика та же: тулзы НИКОГДА не бросают —
+ошибка возвращается как {"ok": false, "error": ..., "kind": ...}.
+Весь вывод — недоверенные данные (taint UserInput, №268): mlog-мост
+McpWebCall обязан прогонять через redact() до промптов.
+
+Stdout — ТОЛЬКО JSON-RPC; stderr — диагностика; shutdown — stdin close.
+"""
+import html as html_mod
+import ipaddress
+import json
+import os
+import re
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
+from urllib.robotparser import RobotFileParser
+
+SERVER_NAME = "fosved-web"
+SERVER_VERSION = "1.0.0"
+
+UA = "FOSVED-Office-MCP-web/1.0 (+https://github.com/ShkodnikAI/FOSVED-office-v2)"
+
+TOOLS = [
+    {"name": "fetch_page",
+     "description": "HTML-страница → текст: title + очищенное тело (теги/скрипты сняты). Параметры: url (обяз.), max_chars (опц., по умолчанию 20000), refresh (опц., обойти кэш)",
+     "inputSchema": {"type": "object", "properties": {
+         "url": {"type": "string"}, "max_chars": {"type": "integer"},
+         "refresh": {"type": "boolean"}},
+         "required": ["url"]}},
+    {"name": "fetch_json",
+     "description": "JSON API (карточки товаров, прайсы, статусы). Параметры: url (обяз.), refresh (опц., обойти кэш)",
+     "inputSchema": {"type": "object", "properties": {
+         "url": {"type": "string"}, "refresh": {"type": "boolean"}},
+         "required": ["url"]}},
+]
+
+# ── конфиг из env ────────────────────────────────────────────────────────
+def _cfg():
+    return {
+        "timeout": float(os.environ.get("WEB_TIMEOUT", "15") or 15),
+        "min_interval": float(os.environ.get("WEB_MIN_INTERVAL", "3") or 0),
+        "cache_ttl": float(os.environ.get("WEB_CACHE_TTL", "900") or 0),
+        "max_bytes": int(os.environ.get("WEB_MAX_BYTES", str(2 * 1024 * 1024))),
+        "allow_private": os.environ.get("FOSVED_MCP_WEB_ALLOW_PRIVATE", "") == "1",
+    }
+
+_CACHE = {}          # url → (ts, payload) — память процесса, RAM-бюджет офиса
+_CACHE_MAX = 128
+_LAST_HIT = {}       # host → ts последнего запроса
+_ROBOTS = {}         # host → (ts, RobotFileParser|None)
+
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def respond(msg_id, result):
+    send({"jsonrpc": "2.0", "id": msg_id, "result": result})
+
+
+def respond_error(msg_id, code, message):
+    send({"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}})
+
+
+# ── SSRF-гейт ────────────────────────────────────────────────────────────
+def _ip_is_forbidden(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return True  # неразбираемое — считаем опасным
+    return (a.is_private or a.is_loopback or a.is_link_local
+            or a.is_reserved or a.is_multicast or a.is_unspecified)
+
+
+def validate_url(url):
+    """http/https + запрет приватных хостов. Возвращает (ok, error/kind)."""
+    try:
+        parts = urlsplit(str(url or ""))
+    except ValueError:
+        return None, ("URL не разбирается", "bad_url")
+    if parts.scheme not in ("http", "https"):
+        return None, ("разрешены только http/https", "bad_scheme")
+    host = parts.hostname
+    if not host:
+        return None, ("в URL нет хоста", "bad_url")
+    if _cfg()["allow_private"]:
+        return host, None
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
+        if _ip_is_forbidden(host):
+            return None, (f"хост {host} — приватный адрес запрещён", "ssrf")
+        return host, None
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as e:
+        return None, (f"хост {host} не резолвится: {e}", "dns")
+    for info in infos:
+        if _ip_is_forbidden(info[4][0]):
+            return None, (f"хост {host} резолвится в приватный адрес — запрещено", "ssrf")
+    return host, None
+
+
+# ── robots.txt ───────────────────────────────────────────────────────────
+def robots_allowed(scheme, netloc, url):
+    """True (можно), False (Disallow), либо True + note «robots недоступен».
+
+    netloc (host[:port]) — ключ кэша robots: разные порты одного хоста —
+    разные сервисы со своими robots.txt.
+    """
+    now = time.time()
+    cached = _ROBOTS.get(netloc)
+    if cached and now - cached[0] < 3600:
+        rp = cached[1]
+    else:
+        rp = RobotFileParser()
+        robots_url = f"{scheme}://{netloc}/robots.txt"
+        ok_fetch = False
+        try:
+            req = urllib.request.Request(robots_url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=min(_cfg()["timeout"], 5)) as r:
+                rp.parse(r.read().decode("utf-8", errors="replace").splitlines())
+            ok_fetch = True
+        except urllib.error.HTTPError:
+            ok_fetch = True   # 404 на robots = разрешено всё, стандарт
+        except Exception:
+            ok_fetch = False  # сеть/таймаут — трактуем как «robots недоступен»
+        rp.available = True
+        _ROBOTS[netloc] = (now, rp if ok_fetch else None)
+        rp = _ROBOTS[netloc][1]
+    if rp is None:
+        return True, "robots недоступен — пропускаем проверку (стандартная практика)"
+    if not rp.can_fetch("*", url):
+        return False, None
+    return True, None
+
+
+def _throttle(host):
+    """Минимальный интервал между запросами к хосту. Возвращает None или отказ."""
+    interval = _cfg()["min_interval"]
+    if interval <= 0:
+        return None
+    now = time.monotonic()
+    last = _LAST_HIT.get(host)
+    if last is not None:
+        wait = interval - (now - last)
+        if wait > 0:
+            if wait > 10.0:
+                return f"хост {host} запрашивается слишком часто (подождите {int(wait)}с)"
+            time.sleep(wait)
+    _LAST_HIT[host] = time.monotonic()
+    return None
+
+
+def _cache_get(url):
+    ttl = _cfg()["cache_ttl"]
+    if ttl <= 0:
+        return None
+    hit = _CACHE.get(url)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    return None
+
+
+def _cache_put(url, payload):
+    if _cfg()["cache_ttl"] <= 0:
+        return
+    if len(_CACHE) >= _CACHE_MAX:
+        _CACHE.pop(next(iter(_CACHE)))
+    _CACHE[url] = (time.time(), payload)
+
+
+def http_get(url):
+    """GET с дисциплиной. Возвращает (ok, dict): dict содержит raw/status/url
+    или {ok:false, error, kind}. Никогда не бросает."""
+    cfg = _cfg()
+    host, err = validate_url(url)
+    if err:
+        return False, {"ok": False, "error": err[0], "kind": err[1]}
+    scheme = urlsplit(url).scheme
+    netloc = urlsplit(url).netloc
+    allowed, note = robots_allowed(scheme, netloc, url)
+    if not allowed:
+        return False, {"ok": False, "error": "robots.txt запрещает этот URL",
+                       "kind": "robots_disallow", "url": url}
+    limited = _throttle(host)
+    if limited:
+        return False, {"ok": False, "error": limited, "kind": "rate_limited", "url": url}
+    req = urllib.request.Request(
+        url, headers={"User-Agent": UA, "Accept-Encoding": "identity"})
+    try:
+        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as r:
+            raw = r.read(cfg["max_bytes"] + 1)
+            status = r.status
+            final_url = r.geturl()
+            ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip()
+    except urllib.error.HTTPError as e:
+        return False, {"ok": False, "error": f"HTTP {e.code}: {e.reason}",
+                       "kind": f"http_{e.code}", "url": url}
+    except Exception as e:  # URLError/timeout/socket — громкий текст, не падение
+        return False, {"ok": False, "error": f"сеть недоступна: {e}", "kind": "network", "url": url}
+    if len(raw) > cfg["max_bytes"]:
+        return False, {"ok": False,
+                       "error": f"ответ больше {cfg['max_bytes']} байт — обрезан, повтори с более узким URL",
+                       "kind": "too_large", "url": url}
+    return True, {
+        "raw": raw.decode("utf-8", errors="replace"),
+        "status": status, "url": final_url, "content_type": ctype,
+    }
+
+
+def _extract_title(body):
+    m = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
+    return html_mod.unescape(m.group(1)).strip() if m else ""
+
+
+def _html_to_text(body):
+    txt = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", body)
+    txt = re.sub(r"(?s)<!--.*?-->", " ", txt)
+    txt = re.sub(r"(?i)<(br|/p|/div|/li|/tr|/h[1-6])[^>]*>", "\n", txt)
+    txt = re.sub(r"<[^>]+>", " ", txt)
+    txt = html_mod.unescape(txt)
+    txt = re.sub(r"[ \t\r\f\v]+", " ", txt)
+    txt = re.sub(r"\n\s*\n+", "\n", txt)
+    return txt.strip()
+
+
+def tool_fetch_page(args):
+    url = str(args.get("url") or "")
+    max_chars = args.get("max_chars") or 20000
+    try:
+        max_chars = max(200, min(int(max_chars), 100000))
+    except (TypeError, ValueError):
+        max_chars = 20000
+    refresh = bool(args.get("refresh"))
+    if not refresh:
+        cached = _cache_get("page:" + url)
+        if cached:
+            return dict(cached, cached=True)
+    ok, data = http_get(url)
+    if not ok:
+        return data
+    payload = {
+        "ok": True, "url": data["url"], "status": data["status"],
+        "content_type": data["content_type"],
+        "title": _extract_title(data["raw"]),
+        "content": _html_to_text(data["raw"])[:max_chars],
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _cache_put("page:" + url, payload)
+    return payload
+
+
+def tool_fetch_json(args):
+    url = str(args.get("url") or "")
+    refresh = bool(args.get("refresh"))
+    if not refresh:
+        cached = _cache_get("json:" + url)
+        if cached:
+            return dict(cached, cached=True)
+    ok, data = http_get(url)
+    if not ok:
+        return data
+    try:
+        parsed = json.loads(data["raw"])
+    except ValueError:
+        return {"ok": False,
+                "error": f"ответ не JSON (начало): {data['raw'][:200]}",
+                "kind": "not_json", "url": data["url"]}
+    payload = {
+        "ok": True, "url": data["url"], "status": data["status"],
+        "data": parsed,
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    _cache_put("json:" + url, payload)
+    return payload
+
+
+TOOL_FUNCS = {
+    "fetch_page": tool_fetch_page,
+    "fetch_json": tool_fetch_json,
+}
+
+
+def main():
+    for raw in sys.stdin:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue  # спека: сервер молчит на мусоре во входе
+        method = msg.get("method")
+        msg_id = msg.get("id")
+        params = msg.get("params") or {}
+
+        if method == "initialize":
+            respond(msg_id, {
+                "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            })
+        elif method == "notifications/initialized":
+            pass  # notification: никогда не отвечаем
+        elif method == "tools/list":
+            respond(msg_id, {"tools": TOOLS})
+        elif method == "tools/call":
+            name = params.get("name", "")
+            args = params.get("arguments") or {}
+            func = TOOL_FUNCS.get(name)
+            if not func:
+                respond_error(msg_id, -32602, f"Unknown tool: {name}")
+                continue
+            try:
+                result = func(args)
+                text = json.dumps(result, ensure_ascii=False)
+                respond(msg_id, {"content": [{"type": "text", "text": text}],
+                                 "isError": False})
+            except Exception as e:  # громкая диагностика, не падение сервера
+                respond(msg_id, {"content": [{"type": "text", "text": str(e)}],
+                                 "isError": True})
+        elif method == "ping":
+            respond(msg_id, {})
+        elif msg_id is not None:
+            respond_error(msg_id, -32601, f"Method not found: {method}")
+
+
+if __name__ == "__main__":
+    main()

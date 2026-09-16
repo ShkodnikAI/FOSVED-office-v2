@@ -2152,6 +2152,36 @@ pattern McpFsCall(tool: String, args_json: String, purpose: String) -> Dict {
   return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе (вне песочницы?)" }
 }
 
+pattern McpWebServerCmd() -> String {
+  return "mcp_servers/web"
+}
+
+// Единый вызов web-MCP (SHOP-2, #172): транспорт до страниц и JSON API
+// маркетплейсов (WB/Onliner/21vek/Kufar) и сайтов производителей для
+// SHOP-3/SHOP-6. Тот же контракт, что github/fs: { ok, body, note }.
+// Отказы транспорта приходят как {"ok":false,"kind":"robots_disallow"|
+// "rate_limited"|"http_4xx"|"network"|"ssrf"|...} (тулзы не бросают).
+pattern McpWebCall(tool: String, args_json: String, purpose: String) -> Dict {
+  let _ = McpAudit("web", tool, purpose, "attempt")
+  let out = try mcp_call(McpWebServerCmd(), [], tool, args_json)
+  if to_string(out) == "()" then {
+    let _ = McpAudit("web", tool, purpose, "error")
+    return { ok: false, body: "", note: "MCP-сервер web недоступен (гейт ядра/сбой/таймаут). Fallback: сделать руками." }
+  }
+  let parsed = try parse_json(to_string(out))
+  if to_string(parsed) == "()" then {
+    let _ = McpAudit("web", tool, purpose, "error")
+    return { ok: false, body: redact(to_string(out), "secrets"), note: "ответ сервера не JSON" }
+  }
+  if to_string(json_get(parsed, "ok", "false")) == "true" then {
+    let _ = McpAudit("web", tool, purpose, "ok")
+    return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
+  }
+  let _ = McpAudit("web", tool, purpose, "refused")
+  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе (robots/rate-limit/сеть?)" }
+}
+
 // ── /issue <owner/repo> <заголовок и текст> — открыть issue через MCP ──
 pattern McpHandleIssue(query: String, chat_id: String) -> String {
   let parts = split(query, " ")
