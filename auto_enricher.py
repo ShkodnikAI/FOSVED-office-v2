@@ -42,15 +42,15 @@ def extract_metrics(text):
             # Цвет по контексту
             context = (label + ' ' + value).lower()
             if any(w in context for w in ['дефицит', 'убыт', 'потер', 'снижен', 'упал', 'минус', '-']):
-                color = '#dc2626'  # красный
+                color = '#A8321E'  # --bad/stamp
             elif any(w in context for w in ['рост', 'прибыл', 'увелич', 'плюс', '+']):
-                color = '#16a34a'  # зелёный
+                color = '#3D6B2C'  # --ok
             elif any(w in context for w in ['прогноз', 'ожид', 'план', 'оценк']):
-                color = '#d97706'  # жёлтый
+                color = '#9C6B0B'  # --warn
             elif any(w in context for w in ['долг', 'расход', 'затрат', 'стоимост']):
-                color = '#ea580c'  # оранжевый
+                color = '#9C6B0B'  # --warn (расход/стоимость)
             else:
-                color = '#2563eb'  # синий
+                color = '#6B6558'  # --muted (по умолчанию)
 
             metrics.append({'label': label, 'value': value, 'color': color})
             if len(metrics) >= 6:
@@ -81,7 +81,9 @@ def render_metrics_html(metrics):
 # STEP 2: КАРТОЧКИ из bullet-списков
 # ═══════════════════════════════════════════
 
-CARD_COLORS = ['#6366f1', '#0891b2', '#d97706', '#dc2626', '#16a34a', '#7c3aed', '#be185d', '#0e7490']
+# Была ротация из 8 разных цветов — та же декоративная радуга, теперь
+# один акцент «Диспетчерской», как и везде в этом файле.
+CARD_COLORS = ['#A8321E']
 
 def convert_bullet_to_cards(text):
     """
@@ -137,10 +139,10 @@ def detect_comparison(text):
     Превращает в side-by-side блоки
     """
     pairs = [
-        (r'[Нн]арратив', r'[Рр]еальность', '✗ Нарратив', '✓ Реальность', '#fef2f2', '#f0fdf4'),
-        (r'[Пп]люс[ыы]', r'[Мм]инус[ыы]', '✓ Плюсы', '✗ Минусы', '#f0fdf4', '#fef2f2'),
-        (r'[Зз]а\b', r'[Пп]ротив', '✓ За', '✗ Против', '#f0fdf4', '#fef2f2'),
-        (r'[Пп]олучи[лт]', r'[Пп]отеря[лт]', 'Получили', 'Потеряли', '#f0fdf4', '#fef2f2'),
+        (r'[Нн]арратив', r'[Рр]еальность', '✗ Нарратив', '✓ Реальность', 'rgba(168,50,30,.10)', 'rgba(61,107,44,.12)'),  # --bad-soft, --ok-soft
+        (r'[Пп]люс[ыы]', r'[Мм]инус[ыы]', '✓ Плюсы', '✗ Минусы', 'rgba(61,107,44,.12)', 'rgba(168,50,30,.10)'),  # --ok-soft, --bad-soft
+        (r'[Зз]а\b', r'[Пп]ротив', '✓ За', '✗ Против', 'rgba(61,107,44,.12)', 'rgba(168,50,30,.10)'),  # --ok-soft, --bad-soft
+        (r'[Пп]олучи[лт]', r'[Пп]отеря[лт]', 'Получили', 'Потеряли', 'rgba(61,107,44,.12)', 'rgba(168,50,30,.10)'),  # --ok-soft, --bad-soft
     ]
 
     result = text
@@ -151,11 +153,11 @@ def detect_comparison(text):
             left_text = match.group(1).strip()
             right_text = match.group(2).strip()
             compare_html = f'''<div class="compare-grid">
-  <div class="compare-box rich" style="background:{bg_left};border:1px solid #bbf7d0">
+  <div class="compare-box rich" style="background:{bg_left};border:1px solid #3D6B2C">
     <div class="compare-title">{title_left}</div>
     <div class="compare-body">{left_text}</div>
   </div>
-  <div class="compare-box rich" style="background:{bg_right};border:1px solid #fecaca">
+  <div class="compare-box rich" style="background:{bg_right};border:1px solid #A8321E">
     <div class="compare-title">{title_right}</div>
     <div class="compare-body">{right_text}</div>
   </div>
@@ -380,6 +382,24 @@ def format_tables(text, accent_color):
 def markdown_to_html(text):
     """Базовая конвертация markdown → HTML"""
     result = text
+    # Заголовки — построчно, ДО разбивки на параграфы (иначе <h*> попадёт
+    # внутрь <p>, невалидная вложенность). MULTILINE, с якорем на начало
+    # строки — иначе '#' внутри обычного текста (хэштеги, число #0) тоже
+    # попадёт под замену.
+    #
+    # ## и ### уже обрабатывает format_sections() (STEP 5, выше по
+    # конвейеру auto_enrich, строка ~507) — со своей стилизацией под
+    # accent_color отдела. Дублировать здесь нельзя: получится либо
+    # двойная обработка, либо (как было при первой попытке фикса)
+    # рассинхрон — эта функция ищет чистый '##', а он к этому моменту
+    # уже стал '<h2 class="section-title"...>', регулярка не совпадает.
+    result = re.sub(r'^###### (.+)$', r'<h6>\1</h6>', result, flags=re.MULTILINE)
+    result = re.sub(r'^##### (.+)$', r'<h5>\1</h5>', result, flags=re.MULTILINE)
+    result = re.sub(r'^#### (.+)$', r'<h4>\1</h4>', result, flags=re.MULTILINE)
+    result = re.sub(r'^# (.+)$', r'<h1>\1</h1>', result, flags=re.MULTILINE)
+    # Горизонтальная линия — ровно '---' на отдельной строке (не задеть
+    # диапазоны вида "2023---2024" или дефисы внутри текста).
+    result = re.sub(r'^---$', r'<hr>', result, flags=re.MULTILINE)
     # Bold
     result = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', result)
     # Italic
@@ -390,6 +410,12 @@ def markdown_to_html(text):
     result = re.sub(r'\n\n+', '</p>\n<p>', result)
     result = '<p>' + result + '</p>'
     result = result.replace('<p></p>', '')
+    # Заголовки (свои и от format_sections, с атрибутами class/style) и
+    # <hr> не должны оказаться внутри <p> — убрать обёртку, если она
+    # замкнулась вокруг ровно одного блочного элемента. [^>]* — чтобы
+    # совпасть и с голым <h2>, и с <h2 class="..." style="...">.
+    result = re.sub(r'<p>\s*(<h[1-6][^>]*>.*?</h[1-6]>)\s*</p>', r'\1', result, flags=re.DOTALL)
+    result = re.sub(r'<p>\s*(<hr[^>]*>)\s*</p>', r'\1', result)
     return result
 
 
@@ -408,9 +434,9 @@ def render_osint_results(osint_data):
 
     # Metrics
     metrics_html = f'''<div class="metrics-grid" style="grid-template-columns:1fr 1fr 1fr">
-  <div class="metric-card"><div class="metric-value" style="color:#16a34a">{found}</div><div class="metric-label">Найдено</div></div>
-  <div class="metric-card"><div class="metric-value" style="color:#d97706">{maybe}</div><div class="metric-label">Под вопросом</div></div>
-  <div class="metric-card"><div class="metric-value" style="color:#64748b">{total}</div><div class="metric-label">Просканировано</div></div>
+  <div class="metric-card"><div class="metric-value" style="color:#3D6B2C">{found}</div><div class="metric-label">Найдено</div></div>
+  <div class="metric-card"><div class="metric-value" style="color:#9C6B0B">{maybe}</div><div class="metric-label">Под вопросом</div></div>
+  <div class="metric-card"><div class="metric-value" style="color:#6B6558">{total}</div><div class="metric-label">Просканировано</div></div>
 </div>\n'''
 
     # Categorize platforms
@@ -421,10 +447,14 @@ def render_osint_results(osint_data):
             categories[cat] = []
         categories[cat].append(p)
 
+    # Та же болезнь, что была в DEPT_COLORS (proxy/core.py) — декоративная
+    # радуга по категориям, с «Диспетчерской» не связанная. SPA категории
+    # цветом не различает вообще, только текстом — тот же принцип здесь:
+    # один акцент, не десять.
     CAT_COLORS = {
-        'social': '#ec4899', 'professional': '#2563eb', 'tech': '#16a34a',
-        'media': '#7c3aed', 'messaging': '#0891b2', 'commerce': '#ea580c',
-        'gaming': '#6366f1', 'forum': '#64748b', 'darknet': '#dc2626', 'other': '#94a3b8'
+        'social': '#A8321E', 'professional': '#A8321E', 'tech': '#A8321E',
+        'media': '#A8321E', 'messaging': '#A8321E', 'commerce': '#A8321E',
+        'gaming': '#A8321E', 'forum': '#A8321E', 'darknet': '#A8321E', 'other': '#A8321E'
     }
     CAT_NAMES = {
         'social': 'Соцсети', 'professional': 'Проф. сети', 'tech': 'Tech',
@@ -434,7 +464,7 @@ def render_osint_results(osint_data):
 
     cats_html = ''
     for cat, platforms in sorted(categories.items(), key=lambda x: -len(x[1])):
-        color = CAT_COLORS.get(cat, '#94a3b8')
+        color = CAT_COLORS.get(cat, '#A8321E')
         name = CAT_NAMES.get(cat, cat)
         links = ', '.join([f'<a href="{p["url"]}" style="color:{color}">{p["name"]}</a>' for p in platforms[:5]])
         conf_avg = sum(p.get('confidence', 0) for p in platforms) / len(platforms) if platforms else 0
@@ -442,19 +472,19 @@ def render_osint_results(osint_data):
         cats_html += f'''<div class="info-card" style="border-left:4px solid {color}">
   <div class="info-card-title" style="color:{color}">{name} ({len(platforms)})</div>
   <div class="info-card-body">{links}</div>
-  <div style="font-size:11px;color:#94a3b8;margin-top:4px">Confidence: {conf_avg:.0f}%</div>
+  <div style="font-size:11px;color:#6B6558;margin-top:4px">Confidence: {conf_avg:.0f}%</div>
 </div>\n'''
 
     # Uncertain
     uncertain_html = ''
     if osint_data.get('uncertain'):
         uncertain_items = ', '.join([p['name'] for p in osint_data['uncertain'][:10]])
-        uncertain_html = f'''<div class="info-card" style="border-left:4px solid #d97706">
-  <div class="info-card-title" style="color:#d97706">Под вопросом ({maybe})</div>
+        uncertain_html = f'''<div class="info-card" style="border-left:4px solid #9C6B0B">
+  <div class="info-card-title" style="color:#9C6B0B">Под вопросом ({maybe})</div>
   <div class="info-card-body">{uncertain_items}</div>
 </div>\n'''
 
-    return f'''<h2 class="section-title" style="border-bottom:2px solid #0891b2">OSINT: 840+ платформ</h2>
+    return f'''<h2 class="section-title" style="border-bottom:2px solid #A8321E">OSINT: 840+ платформ</h2>
 {metrics_html}
 {cats_html}
 {uncertain_html}'''
@@ -464,7 +494,7 @@ def render_osint_results(osint_data):
 # ГЛАВНАЯ ФУНКЦИЯ
 # ═══════════════════════════════════════════
 
-def auto_enrich(text, dept='yana', accent_color='#6366f1'):
+def auto_enrich(text, dept='yana', accent_color='#A8321E'):
     """
     Полный pipeline обогащения.
     Вход: plain markdown от LLM.
