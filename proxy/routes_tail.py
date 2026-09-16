@@ -414,7 +414,11 @@ def _shop_send_dossier(snapshot, chat_id):
 
 @app.route("/shop/product", methods=["POST"])
 def shop_product_endpoint():
-    """Команда /товар: создать товар, снять срез, прислать досье."""
+    """Команда /товар: создать товар, снять срез, прислать досье.
+
+    query — поисковый запрос (сбор WB/Kufar, SHOP-3) ИЛИ URL
+    (сайты компаний/производителей — generic-сбор SHOP-6).
+    """
     d = request.get_json(force=True, silent=True) or {}
     query = str(d.get("query", "")).strip()
     chat_id = str(d.get("chat_id", "")).strip()
@@ -424,7 +428,10 @@ def shop_product_endpoint():
     from proxy.shop_watch import enabled
     if not enabled():
         return jsonify({"ok": False, "kind": "disabled"}), 200
-    from proxy.shop_watch import ensure_product
+    from proxy.shop_generic import is_url
+    if is_url(query):
+        return _shop_product_url(query, chat_id, profile)
+    from proxy.shop_watch import ensure_product  # noqa: E402 — ленивый импорт
     pid, details = ensure_product(query, title=d.get("title"))
     from proxy.shop_dossier import build_snapshot
     snapshot = build_snapshot(pid, profile=profile)
@@ -434,6 +441,39 @@ def shop_product_endpoint():
                     "dossier_id": snapshot.get("dossier_id"),
                     "collect": {k: (v.get("ok") if isinstance(v, dict) else v)
                                 for k, v in (details or {}).items()}})
+
+
+def _shop_product_url(url, chat_id, profile):
+    """/товар <URL>: generic-сбор SHOP-6 → срез → досье владельцу."""
+    from proxy.core import _query
+    from proxy.shop_generic import collect_url
+    row = _query("SELECT id FROM shop_products WHERE query_text=? ORDER BY id "
+                 "DESC LIMIT 1", (url,), fetch=True)
+    pid = row[0]["id"] if row else None
+    if not pid:
+        _query("INSERT INTO shop_products (title, query_text) VALUES (?, ?)",
+               (url, url))
+        pid = _query("SELECT id FROM shop_products WHERE query_text=? ORDER BY "
+                     "id DESC LIMIT 1", (url,), fetch=True)[0]["id"]
+    collected = collect_url(pid, url)
+    if not collected.get("ok"):
+        return jsonify({"ok": False, "kind": collected.get("kind"),
+                        "error": collected.get("error"),
+                        "product_id": pid})
+    # название товара уточняем из извлечённого (jsonld/og/ai)
+    title = (collected["offer"].get("name") or "").strip()
+    if title:
+        _query("UPDATE shop_products SET title=? WHERE id=?",
+               (title[:200], pid))
+    from proxy.shop_dossier import build_snapshot
+    snapshot = build_snapshot(pid, profile=profile)
+    if snapshot.get("dossier_id") and chat_id:
+        _shop_send_dossier(snapshot, chat_id)
+    return jsonify({"ok": True, "product_id": pid,
+                    "dossier_id": snapshot.get("dossier_id"),
+                    "collect": {"web": True,
+                                "vote_agree": collected["vote"].get("agree"),
+                                "sources": collected["vote"]["clusters"]}})
 
 
 def _parse_watch_args(args):
