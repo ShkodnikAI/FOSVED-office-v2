@@ -136,6 +136,13 @@ def test_stop_flags_quiet_when_data_is_clean():
     assert stop_flags(o, [100.0, 110.0, 120.0], {"material": "cotton"}) == []
 
 
+def test_stop_flags_official_seller_without_deals_is_not_flagged():
+    # платформенная/официальная продажа: сделок нет в API, но флаг шумел бы
+    o = {"price_byn": 105.0, "seller_deals": None, "seller_official": 1}
+    codes = {f["code"] for f in stop_flags(o, [100.0, 110.0, 120.0])}
+    assert "seller_no_history" not in codes
+
+
 # ── score_offers ─────────────────────────────────────────────────────
 
 OFFERS = [
