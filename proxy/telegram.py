@@ -185,8 +185,13 @@ def _tg_download_file(file_path):
     return None
 
 
-def _tg_send_photo(chat_id, photo_path, caption=None):
-    """Send a photo via Telegram Bot API using multipart upload."""
+def _tg_send_photo(chat_id, photo_path, caption=None, parse_mode=None, reply_markup=None):
+    """Send a photo via Telegram Bot API using multipart upload.
+
+    SHOP-5 (#172): parse_mode (HTML-caption с кликабельными ссылками) и
+    reply_markup (inline URL-кнопки «Купить») — опциональны, старые
+    вызовы без них работают как раньше.
+    """
     if not TELEGRAM_BOT_TOKEN:
         log.warning("TELEGRAM_BOT_TOKEN not set, cannot send photo")
         return None
@@ -196,6 +201,10 @@ def _tg_send_photo(chat_id, photo_path, caption=None):
             payload = {'chat_id': chat_id}
             if caption:
                 payload['caption'] = caption[:1000]
+            if parse_mode:
+                payload['parse_mode'] = parse_mode
+            if reply_markup:
+                payload['reply_markup'] = reply_markup
             resp = http_requests.post(url, data=payload, files={'photo': f}, timeout=60)
         resp.raise_for_status()
         data = resp.json()

@@ -3897,6 +3897,61 @@ mlogserver {
       return respond("200 ok")
     }
 
+    // ── SHOP-5 (#172): /товар /вотч — досье товара + вотчлист ──────
+    // UX единым блоком: питон-плоскость (/shop/*) сама снимает срез,
+    // отправляет постер PNG + caption-ссылки + inline-кнопки «Купить»
+    // и текст-выжимку; mlog даёт ack и пересылает только отказы.
+    // Схема: /товар <запрос> → досье; /вотч [цель|скидка N|наличие] → слежение.
+    if text == "/товар" then {
+      let _ = SendTelegramReply(chat_id, "Usage: /товар <запрос> — соберу досье с площадок (WB, Kufar). Затем /вотч <цель BYN | скидка N | наличие> — поставлю на слежение 4 раза/сутки.")
+      return respond("200 ok")
+    }
+    if starts_with(text, "/товар ") then {
+      let rest_p = trim(substring(text, 7.0, length(text)))
+      let _ = RecordUserMessage(chat_id, "shop", text)
+      let _ = SendTelegramReply(chat_id, "Собираю досье по «" + rest_p + "» — WB/Kufar, минута.")
+      let resp_p = try http_post("http://127.0.0.1:4000/shop/product", json_encode({query: rest_p, chat_id: chat_id}), "application/json", 45.0)
+      if to_string(resp_p) == "()" then {
+        let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость недоступна (llm_proxy не отвечает).")
+      } else {
+        let parsed_p = try parse_json(resp_p)
+        if to_string(parsed_p) == "()" then {
+          let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость вернула нечитаемый ответ.")
+        } else {
+          if to_string(json_get(parsed_p, "ok", "")) != "True" and to_string(json_get(parsed_p, "ok", "")) != "true" then {
+            let _ = SendTelegramReply(chat_id, "ОТКАЗ: досье не собрано: " + to_string(json_get(parsed_p, "error", "нет деталей")))
+          }
+        }
+      }
+      return respond("200 ok")
+    }
+    if starts_with(text, "/вотч") then {
+      let rest_w = ""
+      if length(text) > 6.0 then { let rest_w = trim(substring(text, 6.0, length(text))) }
+      let _ = RecordUserMessage(chat_id, "shop", text)
+      let resp_w = try http_post("http://127.0.0.1:4000/shop/watch", json_encode({args: rest_w, chat_id: chat_id}), "application/json", 20.0)
+      if to_string(resp_w) == "()" then {
+        let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость недоступна (llm_proxy не отвечает).")
+      } else {
+        let parsed_w = try parse_json(resp_w)
+        if to_string(parsed_w) == "()" then {
+          let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость вернула нечитаемый ответ.")
+        } else {
+          let reply_w = to_string(json_get(parsed_w, "reply", ""))
+          if reply_w != "" then {
+            let _ = SendTelegramReply(chat_id, reply_w)
+          } else {
+            if to_string(json_get(parsed_w, "ok", "")) == "True" or to_string(json_get(parsed_w, "ok", "")) == "true" then {
+              let _ = SendTelegramReply(chat_id, "Вотч поставлен. Проверка 4 раза/сутки, события — в личку.")
+            } else {
+              let _ = SendTelegramReply(chat_id, "ОТКАЗ: " + to_string(json_get(parsed_w, "error", "нет деталей")))
+            }
+          }
+        }
+      }
+      return respond("200 ok")
+    }
+
     // /forge-export — FO-042 B.2 (наряд #149): выгрузка состояния FORGE
     // (проекты, открытые задачи, гейты без решения, открытые замечания)
     // JSON-файлом документом. Та же выкладка, что идёт с утренним брифом.

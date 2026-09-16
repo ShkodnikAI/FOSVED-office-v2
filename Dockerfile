@@ -3,6 +3,7 @@ FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y \
     ca-certificates git python3 python3-pip curl nodejs npm \
     tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-jpn tesseract-ocr-kor \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /office
