@@ -111,7 +111,6 @@ DB_PATH = os.environ.get("DATABASE_PATH", "./data")
 Path(DB_PATH).mkdir(parents=True, exist_ok=True)
 DB_FILE = os.path.join(DB_PATH, "fosved.db")
 
-BASE_DIR = Path(__file__).parent
 LIB_DIR = BASE_DIR / "library"
 CFG_DIR = BASE_DIR / "config"
 
