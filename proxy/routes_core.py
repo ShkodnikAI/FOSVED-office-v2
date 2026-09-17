@@ -418,6 +418,19 @@ def miniapp_note():
            (d.get("doc_id", ""), d.get("note_text", ""), datetime.utcnow().isoformat()))
     return jsonify({"status": "ok"})
 
+def _save_generated_report(dept, title, query, raw_text):
+    """Создаёт новую запись miniapp_responses для результата кнопки action-bar
+    (Журналист/Погружение/Контр-прогноз/Кризис-протокол). html оставляем
+    пустым — _miniapp_get_inner сам обогатит raw_text через auto_enrich
+    при первом открытии, тем же путём, что и обычные отчёты."""
+    new_doc_id = f"doc-{time.time()}"
+    _query(
+        "INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (new_doc_id, dept, title, query, raw_text, "", "medium", datetime.utcnow().isoformat())
+    )
+    return new_doc_id
+
+
 @app.post("/webhook/miniapp-action")
 def miniapp_action():
     """Handle Mini App action bar button clicks (Journalist, Depth, Control, Counter)."""
@@ -442,7 +455,9 @@ def miniapp_action():
 1000-1500 слов. Заголовок — яркий, журналистский."""
         messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": prompt + "\n\nИсходный отчёт:\n" + raw}]
         result = call_llm("osp", messages)
-        return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "journalist"})
+        reply = result.get("reply", "")
+        new_id = _save_generated_report(dept, f"Журналистская версия: {title}", "journalist", reply)
+        return jsonify({"status": "ok", "reply": reply, "action": "journalist", "doc_id": new_id})
     
     elif action.startswith("deepen_to_"):
         level = action.split("_")[-1]
@@ -452,7 +467,9 @@ def miniapp_action():
         instruction = depth_map.get(level, "Стандартный анализ.")
         messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": instruction + "\n\nПредыдущий анализ:\n" + raw + "\n\nУглуби до уровня " + level}]
         result = call_llm("osp", messages)
-        return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "deepen", "level": level})
+        reply = result.get("reply", "")
+        new_id = _save_generated_report(dept, f"Углублено (ур. {level}): {title}", "deepen", reply)
+        return jsonify({"status": "ok", "reply": reply, "action": "deepen", "level": level, "doc_id": new_id})
     
     elif action.startswith("control_"):
         freq = action.split("_", 1)[1]
@@ -470,7 +487,9 @@ def miniapp_action():
 - Формат: ACH с минимум 3 контр-гипотезами"""
         messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": prompt + "\n\nИсходный анализ:\n" + raw}]
         result = call_llm("osp", messages)
-        return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "counter_forecast"})
+        reply = result.get("reply", "")
+        new_id = _save_generated_report(dept, f"Контр-прогноз: {title}", "counter_forecast", reply)
+        return jsonify({"status": "ok", "reply": reply, "action": "counter_forecast", "doc_id": new_id})
     
     elif action == "archive":
         _query("UPDATE miniapp_responses SET archived=1 WHERE id=?", (doc_id,))
@@ -486,7 +505,9 @@ def miniapp_action():
 - Формат: структурированный отчёт с заголовками"""
         messages = [{"role": "system", "content": get_dept_prompt("osp")}, {"role": "user", "content": prompt + "\n\nОтчёт:\n" + raw}]
         result = call_llm("osp", messages)
-        return jsonify({"status": "ok", "reply": result.get("reply", ""), "action": "crisis_protocol"})
+        reply = result.get("reply", "")
+        new_id = _save_generated_report(dept, f"Кризис-протокол: {title}", "crisis_protocol", reply)
+        return jsonify({"status": "ok", "reply": reply, "action": "crisis_protocol", "doc_id": new_id})
     
     return jsonify({"status": "error", "msg": f"unknown action: {action}"}), 400
 

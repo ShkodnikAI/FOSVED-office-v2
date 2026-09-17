@@ -181,7 +181,24 @@ function addNote(){{
   fetch('/miniapp/note',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{doc_id:docId,note_text:text}})}});
 }}
 function doAction(action){{
-  fetch('/webhook/miniapp-action',{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer '+_apiSecret}},body:JSON.stringify({{action:action,doc_id:docId}})}}).then(function(r){{if(r.ok)alert(action+' выполнен');else alert('Ошибка: '+r.status)}}).catch(function(){{alert('Сетевая ошибка')}});
+  var btn = event && event.target ? event.target.closest('.action-btn') : null;
+  if(btn){{ btn.disabled = true; btn.style.opacity = '0.5'; }}
+  fetch('/webhook/miniapp-action',{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer '+_apiSecret}},body:JSON.stringify({{action:action,doc_id:docId}})}})
+    .then(function(r){{ return r.json().then(function(data){{ return {{ok:r.status, data:data}}; }}); }})
+    .then(function(res){{
+      if(btn){{ btn.disabled = false; btn.style.opacity = ''; }}
+      if(res.ok !== 200){{ alert('Ошибка: ' + (res.data.msg || res.ok)); return; }}
+      // Действия вроде archive/control не создают новый отчёт — просто
+      // подтверждение. Journalist/deepen/counter_forecast/crisis_protocol
+      // создают новую страницу с реальным текстом — открываем её, а не
+      // молчим об уже потраченном вызове модели.
+      if(res.data.doc_id){{
+        location.href = '/miniapp/' + res.data.doc_id;
+      }} else {{
+        alert(action + ' выполнен');
+      }}
+    }})
+    .catch(function(){{ if(btn){{ btn.disabled = false; btn.style.opacity = ''; }} alert('Сетевая ошибка'); }});
 }}
 function toggleMenu(id){{
   var m=document.getElementById(id);
