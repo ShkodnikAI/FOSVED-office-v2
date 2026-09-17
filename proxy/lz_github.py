@@ -63,8 +63,25 @@ def categorize_platform(site_name):
 
 
 def scan_osint(username, level='basic', timeout=120, tor=False, sites=None):
-    """Scan username across 840+ platforms via Aliens Eye."""
-    cmd = ['aliens_eye', username, '--format', 'json', '--plain', '-l', level]
+    """Scan username across platforms via Aliens Eye.
+
+    ИСПРАВЛЕНО (было полностью нерабочим с момента внедрения — наряд
+    писался под старую версию библиотеки, интерфейс с тех пор изменился
+    дважды, независимо друг от друга):
+
+    1. `--format json --plain` НЕ печатает JSON в stdout — это
+       декоративный ASCII-баннер вне зависимости от флагов (проверено
+       исполнением). Реальный путь получения результата — файл через
+       `--output <папка>`, не stdout. `--json-stdout` тоже не даёт
+       чистый JSON при обычном запуске — не полагаемся на stdout вообще.
+    2. Формат самого JSON-файла — не плоский {"results": [...]}, как
+       предполагал наряд, а вложенный:
+       {"variations": {"<username>": {"sites": {"<site>": {...}}}}}
+       — sites это словарь, ключ = имя сайта, не список объектов.
+    """
+    scan_dir = Path(f"/tmp/osint_{username}_{int(time.time() * 1000)}")
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    cmd = ['aliens_eye', username, '--plain', '-l', level, '--output', str(scan_dir)]
     if tor:
         cmd.extend(['--tor'])
     if sites:
@@ -79,37 +96,55 @@ def scan_osint(username, level='basic', timeout=120, tor=False, sites=None):
         if result.returncode != 0:
             return {'error': f'Aliens Eye exited with code {result.returncode}', 'stderr': result.stderr[:500]}
 
-        data = json.loads(result.stdout)
-        results_list = data.get('results', [])
-        found = [p for p in results_list if p.get('status') == 'Found']
-        maybe = [p for p in results_list if p.get('status') == 'Maybe']
+        # Файл называется <username>_<level>_<timestamp>.json — timestamp
+        # заранее неизвестен, ищем по маске в директории именно этого скана
+        # (своя папка на вызов — исключает коллизию между параллельными
+        # сканами разных пользователей).
+        json_files = list(scan_dir.glob(f"{username}_{level}_*.json"))
+        if not json_files:
+            return {'error': 'Aliens Eye не создал файл результата', 'stderr': result.stderr[:500]}
+
+        with open(json_files[0], encoding='utf-8') as f:
+            data = json.load(f)
+
+        variation = (data.get('variations') or {}).get(username, {})
+        sites_dict = variation.get('sites', {})
+
+        found = [(name, s) for name, s in sites_dict.items() if s.get('status') == 'Found']
+        maybe = [(name, s) for name, s in sites_dict.items() if s.get('status') == 'Maybe']
+        summary = data.get('scan_summary', {})
 
         return {
             'username': username,
             'found': len(found),
             'maybe': len(maybe),
-            'total_scanned': len(results_list),
-            'scan_time': data.get('elapsed', '?'),
+            'total_scanned': summary.get('total_sites_scanned', len(sites_dict)),
+            'scan_time': '?',
             'platforms': [{
-                'name': p.get('site', ''),
-                'url': p.get('url', ''),
-                'confidence': p.get('confidence', 0),
-                'category': categorize_platform(p.get('site', ''))
-            } for p in found],
+                'name': name,
+                'url': s.get('url', ''),
+                'confidence': s.get('confidence', 0),
+                'category': categorize_platform(name)
+            } for name, s in found],
             'uncertain': [{
-                'name': p.get('site', ''),
-                'url': p.get('url', ''),
-                'confidence': p.get('confidence', 0)
-            } for p in maybe],
+                'name': name,
+                'url': s.get('url', ''),
+                'confidence': s.get('confidence', 0)
+            } for name, s in maybe],
         }
     except subprocess.TimeoutExpired:
         return {'error': f'Timeout after {timeout}s', 'username': username}
-    except json.JSONDecodeError:
-        return {'error': 'Failed to parse Aliens Eye output', 'raw': result.stdout[:500]}
+    except (json.JSONDecodeError, OSError) as e:
+        return {'error': f'Failed to read Aliens Eye output: {e}'}
     except FileNotFoundError:
         return {'error': 'aliens_eye binary not found. Install: pip3 install aliens-eye'}
-    except Exception as e:
-        return {'error': str(e)}
+    finally:
+        # Убрать за собой — файлы результатов накапливались бы иначе.
+        try:
+            import shutil
+            shutil.rmtree(scan_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 # ══════════════════════════════════════════════════════════════════════
 
