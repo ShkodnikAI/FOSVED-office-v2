@@ -1,0 +1,2846 @@
+// ── DOGFOOD STAGING HARNESS (наряд №395, Metalogos gh#489) ──────────────────
+// Производный артефакт app.mlog (не для прода): диалоговый контур заменён
+// заглушкой (миграционный долг №327), решения DevOps-контура санализированы
+// санкционированными поверхностями (escape_html §2.7 / redact-hash w385).
+// Capability-слой (гранты №390, on_deny №392, ledger №393) — общий с app.mlog.
+
+// Fosved Office v2 — Main Application (MEGA-3)
+// 14 departments + routing + memory + cron + lockdown + voice + chain + learning + audit + archive
+
+// Наряд №395 (Metalogos gh#489): ADR-0161 compatibility profile — МИГРАЦИОННЫЙ
+// МОСТ, не место жительства. Офисные потоки написаны до решётки меток (№325
+// advisory-эра 0.19.x); мост №391 в 0.20.x делает clearance блокирующим.
+// `legacy` переводит ТОЛЬКО №325-clearance-хиты в audit-события (Severity::Info
+// + [SINK_CLEARANCE][audit-event] на stderr); Category A (SECRET_LEAK,
+// HTML_INJECTION, …) остаётся на полной строгости. Критерий выхода ADR-0161:
+// счётчик событий = метрика выгорания; каждая метрика в отчёте №395.
+profile legacy { egress: permissive_with_audit }
+
+db { url: env("DATABASE_URL") }
+
+llm {
+  providers: [
+    { alias: kimi, provider: openai_compatible, key: env("KIMI_API_KEY"), url: "https://api.moonshot.ai/v1/chat/completions" },
+    { alias: deepseek, provider: openai_compatible, key: env("DEEPSEEK_API_KEY"), url: "https://api.deepseek.com/v1/chat/completions" },
+    { alias: zai, provider: openai_compatible, key: env("ZAI_API_KEY"), url: "https://api.z.ai/api/paas/v4/chat/completions" },
+    { alias: groq, provider: openai_compatible, key: env("GROQ_API_KEY"), url: "https://api.groq.com/openai/v1/chat/completions" },
+    { alias: cerebras, provider: openai_compatible, key: env("CEREBRAS_API_KEY"), url: "https://api.cerebras.ai/v1/chat/completions" },
+    { alias: sakana, provider: openai_compatible, key: env("SAKANA_API_KEY"), url: "https://api.sakana.ai/v1/chat/completions" }
+  ],
+  default_model: "deepseek-chat",
+  failover: auto,
+  circuit_breaker: 3
+}
+
+// ── Наряд №395 (Metalogos gh#489, Волна 3): capability-слой офиса ──────────────
+// Dogfood: офис живёт под линейными грантами (№390) + подписанный ledger-след
+// (№393). Деструктивный SQL (DROP/DELETE/TRUNCATE/ALTER) — только через
+// db_execute_with_grant с минимальным скоупом/TTL. Отказы безопасности
+// деградируют через on_deny-обработчики (№392): причина печатается и
+// дописывается в data/logs/deny_events.log (полный подписанный след — ledger,
+// файловый лог — эргономическая подсказка оператору).
+on_deny(db) {
+  match deny_reason() {
+    "VOICE_EGRESS_UNCONSENTED" then { print("deny:VOICE_EGRESS_UNCONSENTED") }
+    "IRREVERSIBLE_NO_GRANT" then { print("deny:IRREVERSIBLE_NO_GRANT") }
+    "UNTRUSTED_EXEC_DECISION" then { print("deny:UNTRUSTED_EXEC_DECISION") }
+    "SECRET_TO_EXEC" then { print("deny:SECRET_TO_EXEC") }
+    "SECRET_EGRESS_VCS" then { print("deny:SECRET_EGRESS_VCS") }
+    "SECRET_EGRESS_NETWORK" then { print("deny:SECRET_EGRESS_NETWORK") }
+    "PII_EGRESS_NETWORK" then { print("deny:PII_EGRESS_NETWORK") }
+    "PII_EGRESS_OUTPUT" then { print("deny:PII_EGRESS_OUTPUT") }
+    "UNTRUSTED_EGRESS_NETWORK" then { print("deny:UNTRUSTED_EGRESS_NETWORK") }
+    "SINK_CLEARANCE" then { print("deny:SINK_CLEARANCE") }
+    "HTML_INJECTION" then { print("deny:HTML_INJECTION") }
+    "TAINT_PERSISTENCE" then { print("deny:TAINT_PERSISTENCE") }
+    "SECRET_LEAK" then { print("deny:SECRET_LEAK") }
+  }
+  let _ = append_file("data/logs/deny_events.log", "[deny] class=db reason=" + deny_reason() + "\n")
+}
+
+// Wildcard-обработчик: точный класс побеждает wildcard (№392) — db покрыт
+// выше, остальные классы (network/exec/vcs/…) деградируют здесь.
+on_deny(*) {
+  print("deny:" + deny_reason())
+  let _ = append_file("data/logs/deny_events.log", "[deny] class=* reason=" + deny_reason() + "\n")
+}
+
+import dept/utils
+// import dept/context — REMOVED: inlined below to bypass binary import caching (same issue as dept/yana)
+import dept/miniapp
+import dept/chain
+import dept/narad
+import dept/scheduler
+import dept/quest
+// import dept/yana — REMOVED: HandleYana inlined below to bypass binary import caching
+import dept/osp
+import dept/lz
+import dept/expert
+import dept/marketing
+import dept/finance
+import dept/legal
+import dept/dev
+import dept/design
+import dept/templates
+import dept/forge
+import dept/qa
+import dept/visual
+import dept/engineering
+import dept/kavalnya
+import dept/admin
+
+// ============================================================
+// MEMORY — SQLite via db_execute() in InitDB()
+// ============================================================
+
+// ============================================================
+// INIT DATABASE — all 22 tables
+// ============================================================
+
+pattern InitDB() -> String {
+  // Dialog & Memory
+  db_execute("CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original_query TEXT, original_response TEXT, correction TEXT, corr_type TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')))")
+
+  // Reports
+  db_execute("CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, title TEXT, query TEXT, raw_text TEXT, html TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created_at TEXT DEFAULT (datetime('now')))")
+
+  // Metrics
+  db_execute("CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, period TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, provider TEXT, model TEXT, input_tokens TEXT, output_tokens TEXT, cost_usd TEXT, request_type TEXT, created_at TEXT DEFAULT (datetime('now')))")
+
+  // Security
+  db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  // FO-007: trace_log — отладочные чекпоинты (audit_log — только действия)
+  db_execute("CREATE TABLE IF NOT EXISTS trace_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+
+  // DevOps
+  db_execute("CREATE TABLE IF NOT EXISTS narads (id TEXT PRIMARY KEY, title TEXT, description TEXT, requested_by TEXT, changed_files TEXT, risk_level TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, executed_at TEXT, result TEXT)")
+  // FO-046 (#161): нарядный контур 2.0 — расширение модели наряда.
+  // dept/priority/plan/acceptance/test_status/test_log/report/dispatch_id/
+  // rework_count/in_work_at/testing_at. ALTER идемпотентен (try): колонки
+  // добираются к живой БД при старте. Логика — в dept/narad.mlog.
+  // Наряд №395 (gh#489): деструктивные ALTER-миграции — под грантом
+  // (scope db:alter:* — формат действия db:<op>:<table>, грант обязан быть
+  // НЕ менее специфичен, чем действие (ADR-0155 §3.1); TTL 120 с, N(25) —
+  // по числу ALTER в InitDB; при добавлении миграции нарастить квоту.
+  // ALTER, отклонённый из-за дубля колонки, грант НЕ консюмирует).
+  let mig = grant_issue("db:alter:*", 120, "n", 25)
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN dept TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN plan TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN acceptance TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN test_log TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN report TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN in_work_at TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN testing_at TEXT")
+  // FO-049 (#161): метрики нарядной дисциплины — строка на каждый закрытый наряд
+  db_execute("CREATE TABLE IF NOT EXISTS narad_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, narad_id TEXT, dept TEXT, first_try INTEGER DEFAULT 0, rework_count INTEGER DEFAULT 0, lead_seconds INTEGER, accepted_by TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_narad_stats_created ON narad_stats(created_at)")
+  db_execute("CREATE TABLE IF NOT EXISTS debriefs (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, period TEXT, content TEXT, actions_taken TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // SHOP (диспатч #172): сравнительный анализ товаров — модель данных.
+  // Базис schema.org/Offer: price/old_price/card_price, availability (in_stock),
+  // shippingDetails (delivery_*), hasMerchantReturnPolicy (return_ok),
+  // warranty_months, seller. Цены — BYN, нормализация на сборщиках SHOP-3
+  // (proxy/shop_engine.py: parse_price/to_byn). FK не ставим — стиль narads.
+  db_execute("CREATE TABLE IF NOT EXISTS shop_products (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, query_text TEXT, brand TEXT, model TEXT, gtin TEXT, category TEXT, specs_json TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS shop_sellers (id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, name TEXT, inn TEXT, rating REAL, deals_count INTEGER, seller_years REAL, official INTEGER, return_ok INTEGER, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS shop_offers (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, platform TEXT NOT NULL, platform_code TEXT, variant_json TEXT, url TEXT NOT NULL, seller_id INTEGER, price_byn REAL, old_price_byn REAL, card_price_byn REAL, in_stock INTEGER, delivery_days INTEGER, delivery_cost_byn REAL, installment_ok INTEGER, pay_on_delivery INTEGER, warranty_months INTEGER, specs_json TEXT, rating REAL, reviews_count INTEGER, reviews_fresh_days INTEGER, unit_label TEXT, unit_price_byn REAL, fetched_at TEXT DEFAULT (datetime('now')), UNIQUE(platform, platform_code))")
+  db_execute("CREATE TABLE IF NOT EXISTS shop_price_history (id INTEGER PRIMARY KEY AUTOINCREMENT, offer_id INTEGER NOT NULL, price_byn REAL NOT NULL, old_price_byn REAL, in_stock INTEGER, ts TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_shop_ph_offer_ts ON shop_price_history(offer_id, ts)")
+  db_execute("CREATE TABLE IF NOT EXISTS shop_watches (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, target_price_byn REAL, discount_pct REAL, alert_in_stock INTEGER DEFAULT 0, status TEXT DEFAULT 'active', last_checked_at TEXT, last_alert_json TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT")
+  db_execute("CREATE TABLE IF NOT EXISTS shop_dossiers (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, format TEXT NOT NULL, payload TEXT, snapshot_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))")
+
+  // Admin
+  db_execute("CREATE TABLE IF NOT EXISTS admin_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, content TEXT, duration_sec TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS admin_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, severity TEXT, file_path TEXT, issue TEXT, fix_suggestion TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS admin_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT, status TEXT, narad_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT, file_path TEXT, line_start TEXT, line_end TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS knowledge_edges (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT, edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+
+  // Archive
+  db_execute("CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')))")
+
+  // Factory
+  db_execute("CREATE TABLE IF NOT EXISTS factory_orders (id TEXT PRIMARY KEY, client_name TEXT, status TEXT, requirements TEXT, departments TEXT, branding TEXT, llm_config TEXT, repo_url TEXT, render_url TEXT, created_at TEXT DEFAULT (datetime('now')), completed_at TEXT)")
+
+  // LZ
+  db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, channel_name TEXT, category TEXT, added_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, update_id TEXT UNIQUE, channel_id TEXT, channel_name TEXT, text TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')))")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
+  db_execute("CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, sources TEXT, frequency TEXT, last_scan TEXT, created_at TEXT DEFAULT (datetime('now')))")
+
+  // System
+  db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)")
+
+  // FOIP-003.16: Per-provider rate limiting
+  db_execute("CREATE TABLE IF NOT EXISTS rate_limits (provider TEXT, created_at TEXT)")
+  let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_rl_provider ON rate_limits(provider, created_at)")
+
+  // Yana calendar & reminders
+  db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
+  // Yana events - alter table extensions
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN until_date TEXT")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
+
+  // Yana metrics — delegation accuracy & forgetting incidents
+  db_execute("CREATE TABLE IF NOT EXISTS yana_delegation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, query TEXT, delegated_to TEXT, dept_response_summary TEXT, was_correct INTEGER, feedback_source TEXT, delegated_at TEXT DEFAULT (datetime('now')), verified_at TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS yana_forgetting_incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, query TEXT, forgotten_topic TEXT, memory_existed INTEGER, yana_answer_summary TEXT, correct_info TEXT, reported_at TEXT DEFAULT (datetime('now')), verified_at TEXT)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_yana_deleg_delegated_to ON yana_delegation_log(delegated_to)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_yana_deleg_was_correct ON yana_delegation_log(was_correct)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_yana_forget_chat_id ON yana_forgetting_incidents(chat_id)")
+
+  // OSP — analysis archive & research sources (per METHODOLOGY v3, hard rule #8)
+  // NOTE: db_execute/db_insert in this file — interpreter-only functions. Works because serve = interpreter (confirmed 2026-06-22). If backend changes — re-verify (METALOGOS_INSTRUCTIONS.md §6.9).
+  db_execute("CREATE TABLE IF NOT EXISTS analysis (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS research_source (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, url TEXT, title TEXT, tier TEXT DEFAULT 'secondary', claim TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))")
+
+  // OSP — I&W Indicators (per Indicator model in prisma/schema.prisma)
+  db_execute("CREATE TABLE IF NOT EXISTS indicator (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, description TEXT, verify_date TEXT, is_binary INTEGER DEFAULT 1, result INTEGER, verified_at TEXT, confirms_what TEXT, pre_verify_reminder_sent INTEGER DEFAULT 0, scheduled_job_id TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_indicator_verify_date ON indicator(verify_date)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_indicator_analysis_id ON indicator(analysis_id)")
+
+  // OSP — Watchlist items (per WatchlistItem model in prisma/schema.prisma)
+  db_execute("CREATE TABLE IF NOT EXISTS watchlist_item (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, topic TEXT, frequency TEXT DEFAULT 'DAILY', last_check_at TEXT, next_check_at TEXT, active INTEGER DEFAULT 1, last_delta TEXT, delta_count INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_watchlist_next_check ON watchlist_item(next_check_at)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_watchlist_active ON watchlist_item(active)")
+
+  // OSP — Brier score log (per BrierScoreLog model)
+  db_execute("CREATE TABLE IF NOT EXISTS brier_score_log (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, forecast_probability REAL, actual_outcome REAL, brier_score REAL, cumulative_brier REAL, total_forecasts INTEGER, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))")
+
+  // OSP — Calibration curve (per CalibrationCurvePoint model)
+  db_execute("CREATE TABLE IF NOT EXISTS calibration_curve_point (id INTEGER PRIMARY KEY AUTOINCREMENT, bin_label TEXT, bin_center REAL, forecasts_in_bin INTEGER, actual_rate REAL, deviation REAL, created_at TEXT DEFAULT (datetime('now')))")
+
+  // OSP — Asymmetric bets (per AsymmetricBet model)
+  db_execute("CREATE TABLE IF NOT EXISTS asymmetric_bet (id INTEGER PRIMARY KEY AUTOINCREMENT, thesis TEXT, probability TEXT, bounded_downside TEXT, potential_upside TEXT, upside_downside_ratio REAL, exit_conditions TEXT, time_horizon TEXT, execution_mechanism TEXT, status TEXT DEFAULT 'OPEN', closed_at TEXT, result_pnl REAL, created_at TEXT DEFAULT (datetime('now')))")
+
+  // Generic dept archive (narad 3/6) — for marketing/finance/legal learning loop
+  db_execute("CREATE TABLE IF NOT EXISTS dept_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT NOT NULL, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS dept_verification (id INTEGER PRIMARY KEY AUTOINCREMENT, archive_id INTEGER, actual_outcome TEXT, error_diagnosis TEXT, verified_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(archive_id) REFERENCES dept_archive(id))")
+
+  // Narad 8 — calibrated metrics: structured columns (nullable, additive, safe for existing data)
+  // dept_archive.forecast_value: numeric forecast at creation time (Finance only)
+  // dept_verification.actual_value: numeric actual post-factum (Finance only)
+  // dept_verification.outcome_flag: categorical flag (Legal: "clean" / "rewrite_required")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
+  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
+
+  // Webhook dedup — time-windowed (WH-3): replaces eternal kv-flag
+  db_execute("CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS dev_tasks (id TEXT PRIMARY KEY, title TEXT, task_type TEXT, status TEXT, qa_status TEXT, telegram_snapshot_id TEXT, estimate_low TEXT, estimate_expected TEXT, estimate_high TEXT, estimate_confidence TEXT, actual_hours TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS dept_activity (dept TEXT PRIMARY KEY, last_used_at TEXT, use_count INTEGER DEFAULT 0)")
+  db_execute("CREATE TABLE IF NOT EXISTS campaign_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id TEXT, conversion_accuracy TEXT, cac_accuracy TEXT, reach_accuracy TEXT, conversion_within_target TEXT, cac_within_target TEXT, was_overoptimistic TEXT, verified_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS legal_assessments (id INTEGER PRIMARY KEY AUTOINCREMENT, short_title TEXT, full_result TEXT, document_type TEXT, status TEXT, jurisdiction TEXT, business_form TEXT, counterparty_jurisdiction TEXT, counterparty_form TEXT, risk_level TEXT, confidence TEXT, verification_date TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS training_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, dept_name TEXT, specialist_name TEXT, session_type TEXT, status TEXT, polygon_pass_rate TEXT, created_at TEXT DEFAULT (datetime('now')), completed_at TEXT, ratified_at TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS scan_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_type TEXT, sources_queried TEXT, artifacts_found INTEGER, created_at TEXT DEFAULT (datetime('now')))")
+
+  // ── Visual Department: artifacts + templates ──
+  db_execute("CREATE TABLE IF NOT EXISTS visual_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, source_type TEXT, source_id TEXT, path TEXT, content_hash TEXT, template_version TEXT DEFAULT '1.0', created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS visual_templates (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, type TEXT NOT NULL, spec TEXT, version TEXT DEFAULT '1.0', updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS style_evolution (id INTEGER PRIMARY KEY AUTOINCREMENT, quarter TEXT NOT NULL, coverage_rate REAL, recall_rate REAL, patterns_added TEXT, patterns_retired TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_visual_type ON visual_artifacts(type)")
+  let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_visual_source ON visual_artifacts(source_type, source_id)")
+
+  // ── QUEST-1: Dossier system for multi-step tasks (grants, contracts, reports) ──
+  db_execute("CREATE TABLE IF NOT EXISTS quests (id TEXT PRIMARY KEY, title TEXT, quest_type TEXT DEFAULT 'general', status TEXT DEFAULT 'active', current_step INTEGER DEFAULT 0, total_steps INTEGER DEFAULT 0, deadline TEXT, owner_chat_id TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS quest_files (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, filename TEXT, file_type TEXT, version INTEGER DEFAULT 1, storage_path TEXT, metadata TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(quest_id) REFERENCES quests(id))")
+  db_execute("CREATE TABLE IF NOT EXISTS quest_checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, quest_id TEXT, step_num INTEGER, step_label TEXT, status TEXT DEFAULT 'pending', approved_by TEXT, notes TEXT, created_at TEXT DEFAULT (datetime('now')), approved_at TEXT, FOREIGN KEY(quest_id) REFERENCES quests(id))")
+  // ── FO-035: FORGE-контур — схема §4 ТЗ v3 ──
+  db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_customer_data (project_slug TEXT PRIMARY KEY, secret_ref TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, repo_name TEXT, stage_id TEXT, command TEXT, exit_code TEXT, output TEXT, duration_ms TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // FO-035 A.2: secrets_store (SEC-5 минимальный; шифрование — proxy/forge_secrets.py, AES-256-GCM, FORGE_MASTER_KEY)
+  db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  // ── FO-036 (наряд #134): FORGE-2v3 — задачи, этапы, задания, история решений ──
+  db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_stages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, seq INTEGER, title TEXT, description TEXT, needs_owner_gate TEXT DEFAULT 'false', status TEXT DEFAULT 'pending', commit_tag TEXT, commit_sha TEXT, failed_runs INTEGER DEFAULT 0, started_at TEXT, finished_at TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_briefs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, version INTEGER DEFAULT 1, content TEXT, approved TEXT DEFAULT 'false', approved_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, kind TEXT, question TEXT, context TEXT, options_json TEXT, decision TEXT, decided_by TEXT, decided_at TEXT, telegram_message_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_previews (slug TEXT PRIMARY KEY, project_slug TEXT, repo_name TEXT, kind TEXT DEFAULT 'live', port INTEGER, pid TEXT, status TEXT DEFAULT 'running', last_access_at TEXT, started_at TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS forge_remarks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, commit_sha TEXT, text TEXT, file_hint TEXT, attachment_ref TEXT, kind TEXT, status TEXT DEFAULT 'open', resolved_by_commit TEXT, gate_id TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)")
+  // FO-043 (наряд #150): метрика формата правок (§15) — исходы применения диффов
+  db_execute("CREATE TABLE IF NOT EXISTS forge_edit_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, stage_id TEXT, path TEXT, outcome TEXT, fuzzy TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // FO-027: durable-степы цепочек (чекпоинты + resume; Temporal/Inngest паттерн)
+  db_execute("CREATE TABLE IF NOT EXISTS chain_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, chain_id TEXT, chat_id TEXT, step_num REAL, dept TEXT, mode TEXT, input_hash TEXT, reply TEXT, model TEXT, tokens_in TEXT, tokens_out TEXT, cost_usd TEXT, status TEXT DEFAULT 'pending', dept_chain TEXT DEFAULT '', query TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_chain_steps_chain ON chain_steps(chain_id, step_num, dept)")
+
+  // ── FOIP-003 Phase 1: Session Log + Token Metering ──
+  db_execute("CREATE TABLE IF NOT EXISTS session_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, session_seq INTEGER DEFAULT 0, event_type TEXT, dept TEXT, data TEXT, model TEXT, tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0, latency_ms INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_slog_chat ON session_log(chat_id, session_seq)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_slog_type ON session_log(event_type)")
+  db_execute("CREATE TABLE IF NOT EXISTS daily_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, dept TEXT, model TEXT, total_calls INTEGER DEFAULT 0, total_tokens_in INTEGER DEFAULT 0, total_tokens_out INTEGER DEFAULT 0, total_errors INTEGER DEFAULT 0, total_latency_ms INTEGER DEFAULT 0, estimated_cost_usd REAL DEFAULT 0.0)")
+  db_execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_dstats_date_dept ON daily_stats(date, dept, model)")
+
+  // FOIP-003.9: Design tokens table
+  db_execute("CREATE TABLE IF NOT EXISTS design_tokens (name TEXT PRIMARY KEY, tokens_json TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  // FOIP-003.11: Marketing ideas library
+  db_execute("CREATE TABLE IF NOT EXISTS marketing_ideas (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, aarr_stage TEXT, budget_level TEXT, business_stage TEXT, description TEXT, tags TEXT)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_mideas_stage ON marketing_ideas(aarr_stage)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_mideas_tags ON marketing_ideas(tags)")
+  return "ok"
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+// ── OSP archive helpers (interpreter-only, confirmed 2026-06-22) ──
+
+pattern SaveAnalysis(topic: String, result: String) -> String {
+  db_execute("INSERT INTO analysis (topic, full_result, status) VALUES (?1, ?2, 'drafted')", [topic, result])
+  let rows = query("SELECT last_insert_rowid() as lid", [])
+  let count = length(rows)
+  if count == 0.0 then { return "0" }
+  return json_get(rows[0], "lid", "0")
+}
+
+pattern AttachSource(analysis_id: String, title: String, claim: String) -> String {
+  db_execute("INSERT INTO research_source (analysis_id, title, claim) VALUES (?1, ?2, ?3)", [analysis_id, title, claim])
+  return "ok"
+}
+
+// ── Factory ──
+
+pattern HandleFactoryStep(order_id: String, input: String, chat_id: String) -> String {
+  let step = kv_get("order_step_" + order_id)
+  let step_num = to_float(step)
+
+  if step_num == 1.0 then {
+    kv_set("order_step_" + order_id, "2")
+    kv_set("order_client_" + order_id, input)
+    db_execute("UPDATE factory_orders SET client_name = ?1 WHERE id = ?2", [input, order_id])
+    return "Step 2/7: What tasks should the office handle?"
+  }
+  if step_num == 2.0 then {
+    kv_set("order_step_" + order_id, "3")
+    kv_set("order_tasks_" + order_id, input)
+    db_execute("UPDATE factory_orders SET requirements = ?1 WHERE id = ?2", [input, order_id])
+    return "Step 3/7: Which departments? (yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya)"
+  }
+  if step_num == 3.0 then {
+    kv_set("order_step_" + order_id, "4")
+    kv_set("order_depts_" + order_id, input)
+    db_execute("UPDATE factory_orders SET departments = ?1 WHERE id = ?2", [input, order_id])
+    return "Step 4/7: Branding? (name, language, style preferences)"
+  }
+  if step_num == 4.0 then {
+    kv_set("order_step_" + order_id, "5")
+    kv_set("order_branding_" + order_id, input)
+    db_execute("UPDATE factory_orders SET branding = ?1 WHERE id = ?2", [input, order_id])
+    return "Step 5/7: Which LLM providers/keys are available?"
+  }
+  if step_num == 5.0 then {
+    kv_set("order_step_" + order_id, "6")
+    kv_set("order_llm_" + order_id, input)
+    db_execute("UPDATE factory_orders SET llm_config = ?1 WHERE id = ?2", [input, order_id])
+    let summary = "Order summary:\n"
+    let summary = summary + "Client: " + kv_get("order_client_" + order_id) + "\n"
+    let summary = summary + "Tasks: " + kv_get("order_tasks_" + order_id) + "\n"
+    let summary = summary + "Departments: " + kv_get("order_depts_" + order_id) + "\n"
+    let summary = summary + "Branding: " + kv_get("order_branding_" + order_id) + "\n"
+    let summary = summary + "LLM: " + input + "\n\nConfirm? Send 'yes' or 'no'."
+    kv_set("order_summary_" + order_id, summary)
+    return summary
+  }
+  if step_num == 6.0 then {
+    if lower(input) == "yes" or lower(input) == "ok" then {
+      kv_set("order_step_" + order_id, "7")
+      db_execute("UPDATE factory_orders SET status = 'building' WHERE id = ?1", [order_id])
+      let _ = AuditLog("factory_build", "factory", "building: " + order_id)
+      kv_set("active_order", "")
+      return "Order confirmed. Building office...\nStatus: building\nTrack: /factory_list"
+    } else {
+      kv_set("active_order", "")
+      db_execute("UPDATE factory_orders SET status = 'cancelled' WHERE id = ?1", [order_id])
+      return "Order cancelled."
+    }
+  }
+  return "Factory flow completed."
+}
+
+// LZDeepScan, LZAllScan are defined in dept/lz.mlog (imported above) — they call real scanners (ScanWeb, ScanGitHub, etc.)
+// Do NOT re-define them here or they will shadow the real implementations.
+
+pattern RecordUserMessage(chat_id: String, dept: String, text: String) -> String {
+  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES (?1, 'user', ?2, ?3)", [chat_id, dept, text])
+  let _ = SaveDialogV2(chat_id, "user", dept, text)
+  let _ = try db_execute("INSERT INTO dept_activity (dept, last_used_at, use_count) VALUES (?1, datetime('now'), 1) ON CONFLICT(dept) DO UPDATE SET last_used_at = datetime('now'), use_count = use_count + 1", [dept])
+  return "ok"
+}
+
+pattern RecordAssistantMessage(chat_id: String, dept: String, text: String) -> String {
+  db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES (?1, 'assistant', ?2, ?3)", [chat_id, dept, text])
+  let _ = SaveDialogV2(chat_id, "assistant", dept, text)
+  return "ok"
+}
+
+// ── FO-017: Dialog v2 — Parts + event-log (python-side) ──
+// Best-effort зеркалирование реплик в Dialog v2 (/dialog/message):
+// dialog_history остаётся источником истины до ревизии FM3 (наряд #83);
+// отказ/таймаут прокси молча игнорируется — диалог не блокируется.
+pattern SaveDialogV2(session_id: String, role: String, dept: String, content: String) -> String {
+  let body = json_encode({session_id: session_id, role: role, dept: dept, content: content, source: "app.mlog"})
+  let result = try http_post("http://127.0.0.1:4000/dialog/message", body, "application/json", 3.0)
+  if to_string(result) == "()" then { return "" }
+  return result
+}
+
+pattern SendTelegramReply(chat_id: String, text: String) -> String {
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let body = json_encode({chat_id: to_float(chat_id), text: text})
+  let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+  return result
+}
+
+// Send Telegram reply with MarkdownV2 formatting + fallback to plain text.
+// Escapes text via EscapeMarkdownV2Simple, sends with parse_mode: "MarkdownV2".
+// If Telegram rejects the formatting (ok != true), resends original text without parse_mode.
+// Used for yana/admin departments where bold/italic formatting matters.
+pattern SendTelegramReplyMDV2(chat_id: String, text: String) -> String {
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let escaped = EscapeMarkdownV2Simple(text)
+  let body = json_encode({chat_id: to_float(chat_id), text: escaped, parse_mode: "MarkdownV2"})
+  let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+  if to_string(result) == "()" then {
+    // Network error caught by try — fallback to plain text directly
+    let body2 = json_encode({chat_id: to_float(chat_id), text: text})
+    let result2 = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body2, "application/json")
+    return result2
+  }
+  let parsed = parse_json(result)
+  let ok = json_get(parsed, "ok", "")
+  if ok != "true" then {
+    // Telegram rejected MarkdownV2 formatting — fallback to plain text
+    let body2 = json_encode({chat_id: to_float(chat_id), text: text})
+    let result2 = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body2, "application/json")
+    return result2
+  }
+  return result
+}
+
+pattern SendTyping(chat_id: String) -> String {
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let body = json_encode({chat_id: to_float(chat_id), action: "typing"})
+  let result = try http_post("https://api.telegram.org/bot" + token + "/sendChatAction", body, "application/json")
+  return result
+}
+
+// ── FO-020: карточка review-очереди (inference review, наряд #86) ──
+// /review → топ-8 невыверенного (parent_count DESC) с кнопками
+// approve/decline/undo; решения через /review/decide, всё в audit_log.
+pattern JsonEscapeText(s: String) -> String {
+  let r = replace(s, "\\", "/")
+  let r = replace(r, "\"", "'")
+  let r = replace(r, "\n", "\\n")
+  return r
+}
+
+pattern ReviewQueueCard(chat_id: String) -> String {
+  let body = json_encode({limit: 8.0})
+  let resp = try http_post("http://127.0.0.1:4000/review/queue", body, "application/json", 5.0)
+  if to_string(resp) == "()" then {
+    let _ = SendTelegramReply(chat_id, "Review-очередь недоступна (proxy не отвечает).")
+    return ""
+  }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then {
+    let _ = SendTelegramReply(chat_id, "Review-очередь: ошибка разбора ответа.")
+    return ""
+  }
+  let depth = to_string(json_get(parsed, "depth", "0"))
+  let items = json_get(parsed, "items", "[]")
+  let count = to_float(json_get(parsed, "count", "0"))
+  if count == 0.0 then {
+    let _ = SendTelegramReply(chat_id, "🔍 Review-очередь пуста — всё выведенное подтверждено (глубина: " + depth + ").")
+    return "ok"
+  }
+  let mut text = "🔍 Review-очередь (" + depth + " невыверенных, топ по числу источников):\n\n"
+  let mut kb = ""
+  each it in items {
+    let sid = to_string(json_get(it, "source", ""))
+    let iid = to_string(json_get(it, "id", ""))
+    let pc = to_string(json_get(it, "parent_count", "1"))
+    let content = to_string(json_get(it, "content", ""))
+    let text = text + "• [" + sid + "#" + iid + " x" + pc + "] " + substring(content, 0.0, 140.0) + "\n"
+    let kb = kb + "[{text: \"ОК\", callback_data: \"rv_approve_" + sid + "_" + iid + "\"},{text: \"NO\", callback_data: \"rv_decline_" + sid + "_" + iid + "\"},{text: \"UNDO\", callback_data: \"rv_undo_" + sid + "_" + iid + "\"}],"
+  }
+  if length(kb) > 0.0 then { let kb = substring(kb, 0.0, length(kb) - 1.0) }
+  let token = env("TELEGRAM_BOT_TOKEN")
+  let text_esc = JsonEscapeText(text)
+  let body2 = "{\"chat_id\": " + to_string(to_float(chat_id)) + ", \"text\": \"" + text_esc + "\", \"reply_markup\": {\"inline_keyboard\": [" + kb + "]}}"
+  let _ = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body2, "application/json")
+  return "ok"
+}
+
+pattern CallLLMProxy(dept: String, messages: String) -> String {
+  let body = json_encode({dept: dept, messages: parse_json(messages)})
+  let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
+  if to_string(result) == "()" then { return "" }
+  return result
+}
+
+// ── FOIP-003.1: Session Log ──
+pattern LogSessionEvent(chat_id: String, event_type: String, dept: String, data: String, model: String, tokens_in: String, tokens_out: String) -> String {
+  db_execute("INSERT INTO session_log (chat_id, session_seq, event_type, dept, data, model, tokens_in, tokens_out, created_at) VALUES (?, (SELECT COALESCE(MAX(session_seq),0)+1 FROM session_log WHERE chat_id=?), ?, ?, ?, ?, ?, ?, datetime('now'))", [chat_id, chat_id, event_type, dept, data, model, tokens_in, tokens_out])
+  return "ok"
+}
+
+// ── FOIP-003.2: Resilient LLM Calling with fallback + cooldown ──
+// ── FOIP-003.15: Model-Tier Routing ──
+// Priority: tier-specific > dept-specific > global > default
+pattern GetModelFallbackChain(dept: String) -> String {
+  // FOIP-003.15: Check tier-specific override first
+  let tier = kv_get("query_tier")
+  if tier != "" then {
+    let tier_file = "config/tier_" + tier + ".txt"
+    let tier_content = escape_html(read_file(tier_file))
+    if tier_content != "" then {
+      let tier_lines = split(tier_content, "\n")
+      let mut tier_models = ""
+      each tl in tier_lines {
+        let trimmed = trim(tl)
+        if length(trimmed) > 0 and starts_with(trimmed, "#") == false then {
+          if tier_models != "" then { tier_models = tier_models + "," }
+          tier_models = tier_models + trimmed
+        }
+      }
+      if tier_models != "" then {
+        let _ = AuditLog("tier_routing", "system", "tier=" + tier + " models=" + tier_models)
+        return tier_models
+      }
+    }
+  }
+  // Read dept-specific override, fallback to global priority_model
+  let override_file = "config/override_" + dept + ".txt"
+  let override_content = escape_html(read_file(override_file))
+  if override_content != "" then {
+    // Extract model lines (skip comments and empty)
+    let ov_lines = split(override_content, "\n")
+    let mut ov_models = ""
+    each ov_line in ov_lines {
+      let trimmed = trim(ov_line)
+      if length(trimmed) > 0 and starts_with(trimmed, "#") == false then {
+        if ov_models != "" then { ov_models = ov_models + "," }
+        ov_models = ov_models + trimmed
+      }
+    }
+    if ov_models != "" then { return ov_models }
+  }
+  let global = escape_html(read_file("config/priority_model.txt"))
+  if global != "" then { return trim(global) }
+  return "glm-4.6"
+}
+
+
+pattern IsModelCooled(model: String) -> String {
+  let fails = kv_get("fails:" + model)
+  if fails == "" then { return "available" }
+  if to_int(fails) >= 3 then { return "cooled" }
+  return "available"
+}
+
+pattern MarkModelFail(model: String) -> String {
+  let fails = kv_get("fails:" + model)
+  let mut count = 0
+  if fails != "" then { count = to_int(fails) }
+  let _ = kv_set("fails:" + model, to_string(count + 1))
+  return "ok"
+}
+
+pattern ClearModelFails(model: String) -> String {
+  let _ = kv_set("fails:" + model, "")
+  return "ok"
+}
+
+// ============================================================
+// FOIP-003.14: Internal Endpoint Auth
+// ============================================================
+pattern RequireInternalAuth() -> String {
+  let token = query_param("token")
+  let expected = env("INTERNAL_API_TOKEN")
+  if expected == "" then { return "ok" }
+  if redact(token, "hash_only") == redact(expected, "hash_only") then { return "ok" }
+  return "unauthorized"
+}
+
+// ============================================================
+// FOIP-003.15: Model-Tier Classification
+// Tiers: "quick" (cheap/fast), "standard" (default), "deep" (powerful)
+// ============================================================
+pattern ClassifyQueryTier(text: String, dept: String) -> String {
+  let t = lower(trim(text))
+  let quick_cmds = ["/start", "/help", "/status", "/office", "/dept", "/stats", "/cost", "/costs", "/budget", "/model", "/learning", "/\u043d\u0430\u0440\u044f\u0434\u044b", "/rate", "/yana"]
+  each cmd in quick_cmds {
+    if t == cmd then { return "quick" }
+  }
+  if t == "\u043f\u0440\u0438\u0432\u0435\u0442" or t == "\u0437\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439" or t == "\u0441\u043f\u0430\u0441\u0438\u0431\u043e" or t == "\u043e\u043a" or t == "ok" or t == "hello" then { return "quick" }
+  if length(t) < 20.0 then { return "quick" }
+  if starts_with(text, "/osp deep") then { return "deep" }
+  if starts_with(text, "/osp full") then { return "deep" }
+  if starts_with(text, "/osp wargame") then { return "deep" }
+  if starts_with(text, "/lz deep") then { return "deep" }
+  if starts_with(text, "/chain") then { return "deep" }
+  if starts_with(text, "/debrief") then { return "deep" }
+  let deep_kw = ["\u0430\u043d\u0430\u043b\u0438\u0437", "\u0438\u0441\u0441\u043b\u0435\u0434\u043e\u0432\u0430\u043d\u0438\u0435", "wargame", "\u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u044f", "\u043f\u0440\u043e\u0433\u043d\u043e\u0437", "\u043c\u043e\u0434\u0435\u043b\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435", "\u0441\u0446\u0435\u043d\u0430\u0440\u0438\u0439", "\u0433\u043b\u0443\u0431\u043e\u043a\u0438\u0439", "\u043f\u043e\u0434\u0440\u043e\u0431\u043d\u044b\u0439", "\u0440\u0430\u0437\u0432\u0435\u0440\u043d\u0443\u0442\u044b\u0439", "\u043a\u043e\u043c\u043f\u043b\u0435\u043a\u0441\u043d\u044b\u0439", "\u0441\u0440\u0430\u0432\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439", "\u0430\u043d\u0430\u043b\u0438\u0437\u0438\u0440\u0443\u0439", "\u0438\u0441\u0441\u043b\u0435\u0434\u0443\u0439", "\u0441\u043f\u0440\u043e\u0433\u043d\u043e\u0437\u0438\u0440\u0443\u0439", "\u0440\u0430\u0441\u0441\u0447\u0438\u0442\u0430\u0439", "research"]
+  each kw in deep_kw {
+    if contains(t, kw) then { return "deep" }
+  }
+  return "standard"
+}
+
+// ============================================================
+// FOIP-003.16: Per-Provider Rate Limiting
+// ============================================================
+pattern GetProviderRateLimit(provider: String) -> String {
+  let key = "rate_limit:" + provider
+  let val = kv_get(key)
+  if val != "" then { return val }
+  return "20"
+}
+
+pattern CheckRateLimit(provider: String) -> String {
+  let limit = to_float(GetProviderRateLimit(provider))
+  let rows = query("SELECT COUNT(*) as c FROM rate_limits WHERE provider = ? AND created_at > datetime('now', '-1 minute')", [provider])
+  if to_string(rows) == "()" then { return "ok" }
+  let count = to_float(json_get(rows[0], "c", "0"))
+  if count >= limit then { return "limited" }
+  return "ok"
+}
+
+pattern RecordRateLimitCall(provider: String) -> String {
+  let _ = db_execute("INSERT INTO rate_limits (provider, created_at) VALUES (?, datetime('now'))", [provider])
+  let g_rl = grant_issue("db:delete:rate_limits", 60, "once")
+  let _ = try db_execute_with_grant(g_rl, "DELETE FROM rate_limits WHERE created_at < datetime('now', '-2 minutes')", [])
+  return "ok"
+}
+
+pattern SetProviderRateLimit(provider: String, limit: String) -> String {
+  let _ = kv_set("rate_limit:" + provider, limit)
+  return "ok"
+}
+
+pattern CallLLMResilient(dept: String, messages: String) -> String {
+  let chain = try GetModelFallbackChain(dept)
+  if to_string(chain) == "()" then { return json_encode({reply: "Error: GetModelFallbackChain crashed", model: "", tokens_in: "0", tokens_out: "0", error: "GetModelFallbackChain"}) }
+  let models = try split(chain, ",")
+  if to_string(models) == "()" then { return json_encode({reply: "Error: split chain crashed", model: "", tokens_in: "0", tokens_out: "0", error: "split"}) }
+  let mut last_error = ""
+  let mut reply = ""
+  let mut used_model = ""
+  let mut tokens_in = "0"
+  let mut tokens_out = "0"
+  let mut found = ""
+
+  each raw_model in models {
+    let model = trim(raw_model)
+    if model != "" and found == "" then {
+      let mut status = try IsModelCooled(model)
+      if to_string(status) == "()" then { status = "available" }
+      if status == "cooled" then {
+        last_error = "model " + model + " cooled (3+ fails)"
+      } else {
+        // FOIP-003.16: Rate limit check
+        let mut rl_status = try CheckRateLimit(model)
+        if to_string(rl_status) == "()" then { rl_status = "ok" }
+        if rl_status == "limited" then {
+          last_error = "model " + model + " rate-limited"
+        } else {
+          let _ = try RecordRateLimitCall(model)
+          let msgs_parsed = try parse_json(messages)
+          if to_string(msgs_parsed) == "()" then {
+            last_error = "parse_json(messages) crashed"
+          } else {
+            let body = try json_encode({dept: dept, messages: msgs_parsed, model_override: model})
+            if to_string(body) == "()" then {
+              last_error = "json_encode body crashed"
+            } else {
+              let result = try http_post("http://127.0.0.1:4000/ask", body, "application/json", 240.0)
+              if to_string(result) == "()" then {
+                last_error = "no response from " + model
+                let _ = try MarkModelFail(model)
+              } else {
+                let parsed = try parse_json(result)
+                if to_string(parsed) == "()" then {
+                  last_error = "parse error from " + model
+                  let _ = try MarkModelFail(model)
+                } else {
+                  let r = to_string(try json_get(parsed, "reply", ""))
+                  if r == "" or r == "()" then {
+                    last_error = "empty reply from " + model
+                    let _ = try MarkModelFail(model)
+                  } else {
+                    reply = r
+                    used_model = to_string(try json_get(parsed, "model", model))
+                    tokens_in = to_string(try json_get(parsed, "tokens_in", "0"))
+                    tokens_out = to_string(try json_get(parsed, "tokens_out", "0"))
+                    let _ = try ClearModelFails(model)
+                    found = "yes"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Clear tier after use
+  let _ = kv_set("query_tier", "")
+
+  if reply == "" then {
+    return json_encode({reply: "Error: all models failed (" + last_error + "). Try again later.", model: "", tokens_in: "0", tokens_out: "0", error: last_error})
+  }
+  return json_encode({reply: reply, model: used_model, tokens_in: tokens_in, tokens_out: tokens_out})
+}
+
+// ── FOIP-003.3: Token Metering ──
+pattern LogTokenUsage(chat_id: String, dept: String, model: String, tokens_in: String, tokens_out: String) -> String {
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  let _ = LogSessionEvent(chat_id, "token_usage", dept, "", model, tokens_in, tokens_out)
+  let _ = db_execute("INSERT INTO daily_stats (date, dept, model, total_calls, total_tokens_in, total_tokens_out) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(date, dept, model) DO UPDATE SET total_calls = total_calls + 1, total_tokens_in = total_tokens_in + ?, total_tokens_out = total_tokens_out + ?", [today, dept, model, tokens_in, tokens_out, tokens_in, tokens_out])
+  return "ok"
+}
+
+pattern LogModelSuccess(chat_id: String, dept: String, model: String, tokens_in: String, tokens_out: String) -> String {
+  let _ = LogTokenUsage(chat_id, dept, model, tokens_in, tokens_out)
+  return "ok"
+}
+
+pattern LogModelFailure(chat_id: String, dept: String, model: String, error: String) -> String {
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  let _ = LogSessionEvent(chat_id, "model_error", dept, error, model, "0", "0")
+  let _ = db_execute("INSERT INTO daily_stats (date, dept, model, total_errors) VALUES (?, ?, ?, 1) ON CONFLICT(date, dept, model) DO UPDATE SET total_errors = total_errors + 1", [today, dept, model])
+  return "ok"
+}
+
+// ── FOIP-003.13: Enhanced Analytics ──
+pattern GetModelCostPer1M(model: String, direction: String) -> String {
+  // direction: "in" or "out"
+  let key = "model_cost:" + model + ":" + direction
+  let val = kv_get(key)
+  if val == "" then {
+    if direction == "in" then { return "0.000002" }
+    return "0.000006"
+  }
+  return val
+}
+
+pattern AggregateDailyStats() -> String {
+  let rows = query("SELECT id, model, total_tokens_in, total_tokens_out FROM daily_stats WHERE estimated_cost_usd = 0.0", [])
+  let updated = "0"
+  each row in rows {
+    let rid = to_string(json_get(row, "id", "0"))
+    let m = to_string(json_get(row, "model", ""))
+    let ti = to_float(json_get(row, "total_tokens_in", "0"))
+    let to_ = to_float(json_get(row, "total_tokens_out", "0"))
+    let cost_in_rate = to_float(GetModelCostPer1M(m, "in"))
+    let cost_out_rate = to_float(GetModelCostPer1M(m, "out"))
+    let cost = ti * cost_in_rate + to_ * cost_out_rate
+    let _ = db_execute("UPDATE daily_stats SET estimated_cost_usd = ? WHERE id = ?", [to_string(cost), rid])
+    let updated = to_string(to_float(updated) + 1.0)
+  }
+  return "Пересчитано строк: " + updated
+}
+
+pattern ShowStats(chat_id: String) -> String {
+  let _ = InitDB()
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  let _ = AggregateDailyStats()
+  let rows = query("SELECT dept, SUM(total_calls) as calls, SUM(total_tokens_in) as ti, SUM(total_tokens_out) as to_, SUM(total_errors) as errs, SUM(estimated_cost_usd) as cost FROM daily_stats WHERE date = ? GROUP BY dept ORDER BY calls DESC", [today])
+  if length(rows) == 0.0 then { return "Статистика за сегодня (" + today + ") пуста." }
+  let out = "Статистика за " + today + "\n"
+  let out = out + "==============================\n"
+  let grand_calls = 0.0
+  let grand_ti = 0.0
+  let grand_to = 0.0
+  let grand_errs = 0.0
+  let grand_cost = 0.0
+  each row in rows {
+    let d = to_string(json_get(row, "dept", "?"))
+    let c = to_float(json_get(row, "calls", "0"))
+    let ti = to_float(json_get(row, "ti", "0"))
+    let to_ = to_float(json_get(row, "to_", "0"))
+    let e = to_float(json_get(row, "errs", "0"))
+    let cost = to_float(json_get(row, "cost", "0"))
+    let grand_calls = grand_calls + c
+    let grand_ti = grand_ti + ti
+    let grand_to = grand_to + to_
+    let grand_errs = grand_errs + e
+    let grand_cost = grand_cost + cost
+    let err_str = to_string(to_int(e))
+    if e > 0.0 then { let err_str = "! " + err_str }
+    let out = out + d + ": " + to_string(to_int(c)) + " calls | " + to_string(to_int(ti)) + "+" + to_string(to_int(to_)) + " tokens | " + err_str + " errors\n"
+  }
+  let out = out + "==============================\n"
+  let out = out + "TOTAL: " + to_string(to_int(grand_calls)) + " calls | " + to_string(to_int(grand_ti)) + "+" + to_string(to_int(grand_to)) + " tokens | " + to_string(to_int(grand_errs)) + " errors\n"
+  return out
+}
+
+pattern ShowCosts(chat_id: String) -> String {
+  let _ = InitDB()
+  let _ = AggregateDailyStats()
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  let rows = query("SELECT model, SUM(total_calls) as calls, SUM(total_tokens_in) as ti, SUM(total_tokens_out) as to_, SUM(estimated_cost_usd) as cost FROM daily_stats WHERE date = ? GROUP BY model ORDER BY cost DESC", [today])
+  if length(rows) == 0.0 then { return "Данных о расходах за сегодня нет." }
+  let out = "Расходы за " + today + "\n"
+  let out = out + "==============================\n"
+  let total_cost = 0.0
+  let total_calls = 0.0
+  let total_tokens = 0.0
+  each row in rows {
+    let m = to_string(json_get(row, "model", "?"))
+    let c = to_float(json_get(row, "calls", "0"))
+    let ti = to_float(json_get(row, "ti", "0"))
+    let to_ = to_float(json_get(row, "to_", "0"))
+    let cost = to_float(json_get(row, "cost", "0"))
+    let total_cost = total_cost + cost
+    let total_calls = total_calls + c
+    let total_tokens = total_tokens + ti + to_
+    let out = out + m + ": " + to_string(to_int(c)) + " calls | " + to_string(to_int(ti + to_)) + " tokens | ~$" + to_string(cost) + "\n"
+  }
+  let out = out + "==============================\n"
+  let out = out + "TOTAL: ~$" + to_string(total_cost) + " | " + to_string(to_int(total_calls)) + " calls | " + to_string(to_int(total_tokens)) + " tokens\n"
+  // Last 7 days trend
+  let trend_rows = query("SELECT date, SUM(estimated_cost_usd) as cost, SUM(total_calls) as calls FROM daily_stats GROUP BY date ORDER BY date DESC LIMIT 7", [])
+  if length(trend_rows) > 0.0 then {
+    let out = out + "\nLast 7 days:\n"
+    each tr in trend_rows {
+      let td = to_string(json_get(tr, "date", "?"))
+      let tc = to_string(json_get(tr, "cost", "0"))
+      let tcl = to_string(to_int(to_float(json_get(tr, "calls", "0"))))
+      let out = out + "  " + td + ": ~$" + tc + " (" + tcl + " calls)\n"
+    }
+  }
+  return out
+}
+
+// ── FOIP-003.4: Smart Model Routing — stats-aware fallback ──
+pattern GetModelErrorRate(model: String) -> String {
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  let rows = query("SELECT total_calls, total_errors FROM daily_stats WHERE date = ? AND model = ?", [today, model])
+  if length(rows) == 0.0 then { return "0" }
+  let calls = to_int(json_get(rows[0], "total_calls", "0"))
+  let errors = to_int(json_get(rows[0], "total_errors", "0"))
+  if calls == 0 then { return "0" }
+  return to_string(to_float(errors) / to_float(calls) * 100.0)
+}
+
+pattern RecordModelResult(dept: String, model: String, success: String) -> String {
+  if success != "ok" then {
+    let _ = LogModelFailure(dept, dept, model, "fallback triggered")
+  }
+  return "ok"
+}
+
+// ── FOIP-003.5: Context Compaction ──
+pattern EstimateTokens(text: String) -> String {
+  return to_string(length(text) / 4.0)
+}
+
+pattern GetCompactedHistory(chat_id: String, limit: String) -> String {
+  let total_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ?", [chat_id])
+  let total = to_int(json_get(total_rows[0], "cnt", "0"))
+  let lim = to_int(limit)
+  if total <= lim * 2 then {
+    return GetRecentDialog(chat_id, limit)
+  }
+  let early_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at ASC LIMIT 3", [chat_id])
+  let recent_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?", [chat_id, limit])
+  let out = ""
+  each row in early_rows {
+    let role = to_string(json_get(row, "role", ""))
+    let content = to_string(json_get(row, "content", ""))
+    if length(content) > 300.0 then { let content = substring(content, 0.0, 300.0) + "..." }
+    let out = out + role + ": " + content + "\n"
+  }
+  let skipped = total - 3 - lim
+  if skipped > 0 then {
+    let out = out + "\n[... " + to_string(skipped) + " messages skipped for context economy ...]\n\n"
+  }
+  each row in recent_rows {
+    let role = to_string(json_get(row, "role", ""))
+    let content = to_string(json_get(row, "content", ""))
+    let out = out + role + ": " + content + "\n"
+  }
+  return out
+}
+
+// ── FOIP-003.6: Three input channels (followup/steer/inject) ──
+pattern InjectContext(target_dept: String, context_text: String) -> String {
+  let existing = kv_get("inject:" + target_dept)
+  if existing != "" then {
+    let _ = kv_set("inject:" + target_dept, existing + "\n---\n" + context_text)
+  } else {
+    let _ = kv_set("inject:" + target_dept, context_text)
+  }
+  return "ok"
+}
+
+pattern GetInjectedContext(dept: String) -> String {
+  let ctx = kv_get("inject:" + dept)
+  if ctx != "" then {
+    let _ = kv_set("inject:" + dept, "")
+  }
+  return ctx
+}
+
+pattern SteerDept(dept: String, correction: String) -> String {
+  let _ = kv_set("steer:" + dept, correction)
+  return "ok"
+}
+
+pattern GetSteerContext(dept: String) -> String {
+  let ctx = kv_get("steer:" + dept)
+  if ctx != "" then {
+    let _ = kv_set("steer:" + dept, "")
+  }
+  return ctx
+}
+
+
+pattern IsImageRequest(text: String) -> String {
+  // Returns "true" if text asks for image generation, "" otherwise
+  let t = lower(text)
+  if contains(t, "сгенерируй изображен") then { return "true" }
+  if contains(t, "сгенерируй картинк") then { return "true" }
+  if contains(t, "нарисуй") then { return "true" }
+  if contains(t, "создай изображен") then { return "true" }
+  if contains(t, "создай картинк") then { return "true" }
+  if contains(t, "generate image") then { return "true" }
+  if contains(t, "create image") then { return "true" }
+  if contains(t, "нарисуй логотип") then { return "true" }
+  if contains(t, "сделай иллюстрац") then { return "true" }
+  if contains(t, "сгенерируй логотип") then { return "true" }
+  if contains(t, "generate logo") then { return "true" }
+  if contains(t, "create logo") then { return "true" }
+  if contains(t, "нарисуй иконк") then { return "true" }
+  if contains(t, "нарисуй постер") then { return "true" }
+  if contains(t, "сделай обложк") then { return "true" }
+  return ""
+}
+
+pattern HandleDesignImage(prompt: String, chat_id: String) -> String {
+  // Call /generate-image endpoint — it generates and sends photo to Telegram
+  let body = json_encode({prompt: prompt, chat_id: to_float(chat_id)})
+  let result = try http_post("http://127.0.0.1:4000/generate-image", body, "application/json", 180.0)
+  if to_string(result) == "()" then {
+    let _ = SendTelegramReply(chat_id, "Ошибка: генерация изображений недоступна.")
+    return ""
+  }
+  let parsed = parse_json(result)
+  let status = json_get(parsed, "status", "error")
+  if status == "ok" then {
+    return ""
+  } else {
+    let err = json_get(parsed, "error", "Unknown error")
+    return "Ошибка генерации: " + err
+  }
+}
+
+// ============================================================
+// INLINED from dept/context.mlog (bypass binary import caching)
+// ============================================================
+
+pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile(dept)
+
+  // OSP: use tier-based skill loading (LoadOspSkills), format from deconstruct skill
+  let skills = ""
+  if dept == "osp" then {
+    let skills = LoadOspSkills(query)
+  } else {
+    let skills = SelectSkillsByKeywords(dept, query)
+  }
+
+  let corrections = GetCorrections(dept)
+  // FOIP-003.6: Cross-dept inject + mid-turn steer
+  let injected = GetInjectedContext(dept)
+  let steer = GetSteerContext(dept)
+  // IDEA-4: Context Budget — use budgeted history (max 4000 tokens)
+  let dialog = GetBudgetedHistory(chat_id, "10", "4000")
+  let memories = YanaRecallMemories(query)
+  let now_info = YanaNowInfo()
+
+  // IDEA-1: Read consensus memory (cross-session baton)
+  let consensus = ReadConsensus()
+  // IDEA-2: Recall past learnings for this dept+query
+  let learnings = RecallLearnings(dept, query)
+  // FO-019: Owner Profile — static/dynamic/buckets одним вызовом
+  let owner_profile = GetOwnerProfile(dept)
+  // IDEA-5: Expert Persona Injection
+  let mut persona = ""
+  if dept != "yana" then { let persona = GetExpertPersona(dept) }
+  // IDEA-6: Brand Contract for design dept
+  let mut brand = ""
+  if dept == "design" then { let brand = GetBrandContract() }
+  // IDEA-7: Sub-Agent resolution
+  let sub_agent = ResolveSubAgent(dept, query)
+
+  // Fresh news for OSP and LZ departments
+  let news = ""
+  if dept == "osp" or dept == "lz" then {
+    let news_body = json_encode({query: query, dept: dept, limit: 5})
+    let news_result = try http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json")
+    if to_string(news_result) != "()" then {
+      let news_parsed = try parse_json(news_result)
+      if to_string(news_parsed) != "()" then {
+        let news = json_get(news_parsed, "news", "")
+      }
+    }
+  }
+
+  // Guard all context variables against Unit from try
+  let s_memories = to_string(memories)
+  if s_memories == "()" then { let s_memories = "" }
+  let s_corrections = to_string(corrections)
+  if s_corrections == "()" then { let s_corrections = "" }
+  let s_dialog = to_string(dialog)
+  if s_dialog == "()" then { let s_dialog = "" }
+  let s_now = to_string(now_info)
+  if s_now == "()" then { let s_now = "" }
+  let s_skills = to_string(skills)
+  if s_skills == "()" then { let s_skills = "" }
+  let s_injected = to_string(injected)
+  if s_injected == "()" then { let s_injected = "" }
+  let s_steer = to_string(steer)
+  if s_steer == "()" then { let s_steer = "" }
+  let s_persona = to_string(persona)
+  if s_persona == "()" then { let s_persona = "" }
+  let s_brand = to_string(brand)
+  if s_brand == "()" then { let s_brand = "" }
+  let s_consensus = to_string(consensus)
+  if s_consensus == "()" then { let s_consensus = "" }
+  let s_learnings = to_string(learnings)
+  if s_learnings == "()" then { let s_learnings = "" }
+  let s_owner_profile = to_string(owner_profile)
+  if s_owner_profile == "()" then { let s_owner_profile = "" }
+  let s_sub_agent = to_string(sub_agent)
+  if s_sub_agent == "()" then { let s_sub_agent = "" }
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Cross-dept Context ===" + s_injected + "\n\n=== Steering ===" + s_steer + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
+
+  // IDEA-5/6/7: Append persona, brand, sub-agent if present
+  if s_persona != "" then { let context = context + "\n\n" + s_persona }
+  if s_brand != "" then { let context = context + "\n\n" + s_brand }
+  if s_sub_agent != "" then { let context = context + "\n\n=== Sub-Agent Specialization ===\nТы работаешь в роли суб-агента: " + s_sub_agent + ". Применяй специализацию этого под-роли."
+  }
+  // IDEA-1/2: Append consensus and learnings
+  if s_consensus != "" then { let context = context + "\n\n=== Cross-Session Consensus (baton) ===\n" + s_consensus }
+  if s_learnings != "" then { let context = context + "\n\n" + s_learnings }
+  // FO-019: профиль владельца одним вызовом (вместо ad-hoc сборки)
+  if s_owner_profile != "" then { let context = context + "\n\n" + s_owner_profile }
+
+  // Append fresh news if available
+  if news != "" then {
+  // FOIP-003.10: Product context for marketing dept
+  if dept == "marketing" then {
+    let pc = kv_get("product_context:" + chat_id)
+    if pc == "" then { let pc = kv_get("product_context:default") }
+    if to_string(pc) != "()" then {
+      if pc != "" then {
+        let context = context + "\n\n=== Product Context ===\n" + pc
+      }
+    }
+  }
+    let context = context + "\n\n" + news + "\nУчитывай эти свежие события в своём анализе. Ссылайся на них если релевантны."
+  }
+
+  // Дублируем дату в самый конец контекста — чтобы LLM не забыл после 25K навыков
+  if dept == "osp" then {
+    let context = context + "\n\n=== ПОВТОР: ТЕКУЩАЯ ДАТА ===\n" + now_info + "\nВНИМАНИЕ: Все даты в препарировании, ID, прогнозы и индикаторы должны привязываться к этой дате. Запрещено использовать любые другие даты как текущие. Если в АРХИВЕ ПРОШЛЫХ СЕССИЙ есть похожее препарирование — это НЕ образец для переписывания. Проведи НОВЫЙ анализ на текущую дату с актуальными событиями. Дата в шапке, ID, все индикаторы и даты проверки — считай ТОЛЬКО от текущей даты, никогда от даты старого отчёта. КРИТИЧНО: дату в шапке отчёта («Дата препарирования», «Сейчас») копируй ПОСИМВОЛЬНО из значения выше, точь-в-точь, без округления, без сдвига на дни, без «примерно»."
+  }
+
+  // FORMAT_INSTRUCTION — ONLY for expert (OSP gets format from deconstruct skill)
+  if dept == "expert" then {
+    let format_instruction = "\n\n## ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)\n\nОтвечай РАЗВЁРНУТО. Ты — Эксперт, подготовка к встрече/переговорам. Структура:\n\n1. *Профиль контрагента* — кто, что, позиция на рынке, ключевые фигуры, масштаб\n2. *Контекст встречи* — цель, формат, участники с каждой стороны, история отношений\n3. *Ключевые факты и цифры* — что нужно знать перед встречей: рыночные данные, финансовые показатели, последние новости, публичные заявления\n4. *Позиция и рычаги* — их вероятная позиция, наши рычаги, их рычаги, зона возможного соглашения (ZOPA)\n5. *Боевые вопросы* — 7-10 вопросов для встречи: проверяющие, прощупывающие, сигнальные. Каждый вопрос с ожидаемым ответом (хороший/уклончивый/тревожный) и логикой: зачем задаём\n6. *Красные флаги* — на что обратить внимание: манипуляции, скрытые мотивы, противоречия в публичной информации\n7. *Рекомендуемая стратегия* — подход к переговорам, точки давления, готовность к компромиссу, BATNA\n8. *Decision points* — какие решения должны быть приняты на встрече, кто их принимает\n\nМаркируй уверенность: [ФАКТ] — подтверждённые данные, [ОЦЕНКА] — экспертная оценка, [РИСК] — потенциальная проблема.\nЯзык: русский. Не будь кратким. Препарируй встречу глубоко.\n"
+    let context = context + format_instruction
+  }
+
+  return context
+}
+
+// ── FO-019: Owner Profile (static/dynamic/buckets, один вызов) ──
+// Метафильтр dept: питон-сайд приоритизирует buckets по интересам департамента.
+// Best-effort: отказ/таймаут прокси → пустая строка, диалог не блокируется.
+pattern GetOwnerProfile(dept: String) -> String {
+  let body = json_encode({dept: dept})
+  let resp = try http_post("http://127.0.0.1:4000/profile/owner", body, "application/json", 3.0)
+  if to_string(resp) == "()" then { return "" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "" }
+  return to_string(json_get(parsed, "profile", ""))
+}
+
+pattern ReadDeptProfile(dept: String) -> String {
+  let cached = kv_get("fc_profile_" + dept)
+  if cached != "" then { return cached }
+  let content = escape_html(read_file("library/" + dept + ".md"))
+  if content != "" then { return content }
+  return "Department: " + dept + ". Act professionally."
+}
+
+// Skill loading for non-OSP departments — two-phase approach (WH-4):
+// Phase 1: core skills (first 3 in index) always loaded — guarantees dept always has guidance
+// Phase 2: remaining skills matched by query keywords appearing in skill content
+// Budget: 80000 chars (was 2000), per-skill limit: 15000 chars (was 500)
+pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
+  let index_content = escape_html(read_file("skills_index/" + dept + ".txt"))
+  if index_content == "" then { return "No skills loaded." }
+  let _nl = "\n"
+  let _sp = " "
+  let skills_list = split(trim(index_content), _nl)
+  let result = ""
+  let budget = 80000.0
+  let skill_limit = 15000.0
+  let core_count = 3.0
+  let i = 0.0
+
+  // Extract up to 6 significant keywords (>= 4 chars) from query for matching
+  let t = lower(query)
+  let words = split(t, _sp)
+  let mut kw0 = ""
+  let mut kw1 = ""
+  let mut kw2 = ""
+  let mut kw3 = ""
+  let mut kw4 = ""
+  let mut kw5 = ""
+  let mut wi = 0.0
+  each w in words {
+    if length(w) >= 4.0 then {
+      if wi == 0.0 then { kw0 = w }
+      if wi == 1.0 then { kw1 = w }
+      if wi == 2.0 then { kw2 = w }
+      if wi == 3.0 then { kw3 = w }
+      if wi == 4.0 then { kw4 = w }
+      if wi == 5.0 then { kw5 = w }
+      wi = wi + 1.0
+    }
+  }
+
+  each skill in skills_list {
+    if length(result) < budget then {
+      let skill_name = trim(skill)
+      let skill_content = escape_html(read_file("skills/" + skill_name + "/SKILL.md"))
+      if skill_content != "" then {
+        if i < core_count then {
+          // Phase 1: core skills always loaded
+          let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
+        } else {
+          // Phase 2: match by any query keyword appearing in skill content
+          let sc = lower(skill_content)
+          if (kw0 != "" and contains(sc, kw0)) or (kw1 != "" and contains(sc, kw1)) or (kw2 != "" and contains(sc, kw2)) or (kw3 != "" and contains(sc, kw3)) or (kw4 != "" and contains(sc, kw4)) or (kw5 != "" and contains(sc, kw5)) then {
+            let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
+          }
+        }
+      }
+    }
+    let i = i + 1.0
+  }
+  if result == "" then { return "Skills available for " + dept + ": " + index_content }
+  return result
+}
+
+// ── OSP tier-based skill loading (confirmed builtins only) ──
+// Tier 1 always, Tier 2 by topic triggers, Tier 3 by explicit triggers.
+// Budget: 25000 chars total. Path: skills/<name>/SKILL.md (flat, no osp/ subdir).
+pattern LoadOspSkills(query: String) -> String {
+  let t = lower(query)
+  let mut result = ""
+  let mut budget = 25000.0
+
+  // ── Tier 1: Methodological core (always) ──
+  let s = escape_html(read_file("skills/deconstruct/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- deconstruct ---\n" + s }
+  let s = escape_html(read_file("skills/awareness-frame/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- awareness-frame ---\n" + s }
+  let s = escape_html(read_file("skills/root-cause-mapping/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- root-cause-mapping ---\n" + s }
+  let s = escape_html(read_file("skills/forces-and-potentials/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- forces-and-potentials ---\n" + s }
+  let s = escape_html(read_file("skills/strategic-maneuvers/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- strategic-maneuvers ---\n" + s }
+  let s = escape_html(read_file("skills/two-paths-synthesis/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- two-paths-synthesis ---\n" + s }
+  let s = escape_html(read_file("skills/decision-tree-forecast/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- decision-tree-forecast ---\n" + s }
+  let s = escape_html(read_file("skills/reflexive-impact/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- reflexive-impact ---\n" + s }
+  let s = escape_html(read_file("skills/calibration/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- calibration ---\n" + s }
+  let s = escape_html(read_file("skills/system-health-diagnostics/SKILL.md"))
+  if s != "" and length(result) < budget then { result = result + "\n--- system-health-diagnostics ---\n" + s }
+
+  // ── Tier 2: Domain depth (by topic triggers) ──
+  // Finance / markets
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "gold") or contains(t, "золот")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/cross-asset-divergence/SKILL.md"))
+    if s != "" then { result = result + "\n--- cross-asset-divergence ---\n" + s }
+  }
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "крипто") or contains(t, "нефт")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/macro-regime-id/SKILL.md"))
+    if s != "" then { result = result + "\n--- macro-regime-id ---\n" + s }
+    let s = escape_html(read_file("skills/cantillon/SKILL.md"))
+    if s != "" then { result = result + "\n--- cantillon ---\n" + s }
+  }
+  // Person / leader
+  if (contains(t, "персона") or contains(t, "лидер") or contains(t, "президент") or contains(t, "глава") or contains(t, "министр") or contains(t, "губернатор") or contains(t, "ceo") or contains(t, "исчез")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/deep-profiling/SKILL.md"))
+    if s != "" then { result = result + "\n--- deep-profiling ---\n" + s }
+  }
+  // Narrative / media
+  if (contains(t, "нарратив") or contains(t, "пропаганд") or contains(t, "заявлен") or contains(t, "сми") or contains(t, "media") or contains(t, "информаци")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/narrative-vs-flows/SKILL.md"))
+    if s != "" then { result = result + "\n--- narrative-vs-flows ---\n" + s }
+  }
+  // Sources / verification
+  if (contains(t, "источник") or contains(t, "проверь") or contains(t, "правда") or contains(t, "фактчек")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/source-triangulation/SKILL.md"))
+    if s != "" then { result = result + "\n--- source-triangulation ---\n" + s }
+  }
+  // Investment / risk
+  if (contains(t, "ставк") or contains(t, "инвестиц") or contains(t, "риск") or contains(t, "портфель") or contains(t, "хедж")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/asymmetric-bet-structure/SKILL.md"))
+    if s != "" then { result = result + "\n--- asymmetric-bet-structure ---\n" + s }
+    let s = escape_html(read_file("skills/antifragility-design/SKILL.md"))
+    if s != "" then { result = result + "\n--- antifragility-design ---\n" + s }
+  }
+  // Cycles
+  if (contains(t, "цикл") or contains(t, "фаза") or contains(t, "перелом") or contains(t, "кондратьев") or contains(t, "juglar")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/cycle-position/SKILL.md"))
+    if s != "" then { result = result + "\n--- cycle-position ---\n" + s }
+  }
+  // I&W
+  if (contains(t, "индикатор") or contains(t, "наблюден") or contains(t, "watch") or contains(t, "тревог")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/iw-watchlist/SKILL.md"))
+    if s != "" then { result = result + "\n--- iw-watchlist ---\n" + s }
+  }
+
+  // ── Tier 3: Special techniques (explicit triggers) ──
+  if (contains(t, "война") or contains(t, "армия") or contains(t, "фронт") or contains(t, "наступлен") or contains(t, "воен")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/order-of-battle/SKILL.md"))
+    if s != "" then { result = result + "\n--- order-of-battle ---\n" + s }
+  }
+  if (contains(t, "коллапс") or contains(t, "обвал") or contains(t, "транзит") or contains(t, "фазов")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/phase-transition-detection/SKILL.md"))
+    if s != "" then { result = result + "\n--- phase-transition-detection ---\n" + s }
+  }
+  if (contains(t, "переговор") or contains(t, "коалиц") or contains(t, "консенсус")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/schelling-points/SKILL.md"))
+    if s != "" then { result = result + "\n--- schelling-points ---\n" + s }
+  }
+  if (contains(t, "контр") or contains(t, "redteam") or contains(t, "red-team") or contains(t, "слеп")) and length(result) < budget then {
+    let s = escape_html(read_file("skills/red-team/SKILL.md"))
+    if s != "" then { result = result + "\n--- red-team ---\n" + s }
+  }
+
+  if result == "" then { return "No OSP skills loaded." }
+  return result
+}
+
+pattern CompressDialog(chat_id: String) -> String {
+  let rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ?", [chat_id])
+  return "ok"
+}
+
+// ============================================================
+// END inlined context
+// ============================================================
+
+// ============================================================
+// GENERIC ARCHIVE (narad 3/6) — save/verify/score for generic depts
+// ============================================================
+
+pattern SaveToGenericArchive(dept: String, query: String, response: String) -> Int {
+  let topic = substring(query, 0.0, 120.0)
+  return db_insert("dept_archive", {dept: dept, topic: topic, full_result: response, status: "drafted"})
+}
+
+// Narad 8 — structured verify: /verify finance <id> actual=<число> or /verify legal <id> outcome=clean|rewrite_required
+// Falls back to legacy VerifyArchiveEntry for free-text outcome (marketing, etc.)
+pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: String) -> String {
+  // Check: is this a structured actual=<number> call (Finance)?
+  if starts_with(raw_args, "actual=") then {
+    let val_str = substring(raw_args, 7.0, length(raw_args))
+    let actual_val = to_float(val_str)
+    let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
+    if length(existing) == 0.0 then {
+      return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
+    }
+    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
+    db_insert("dept_verification", {archive_id: entry_id, actual_value: actual_val, actual_outcome: "actual=" + val_str})
+    return "Запись #" + to_string(entry_id) + " верифицирована: actual=" + val_str
+  }
+
+  // Check: is this a structured outcome=<flag> call (Legal)?
+  if starts_with(raw_args, "outcome=") then {
+    let flag = substring(raw_args, 8.0, length(raw_args))
+    if flag != "clean" and flag != "rewrite_required" then {
+      return "outcome должен быть 'clean' или 'rewrite_required', получено: " + flag
+    }
+    let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
+    if length(existing) == 0.0 then {
+      return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
+    }
+    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
+    db_insert("dept_verification", {archive_id: entry_id, outcome_flag: flag, actual_outcome: "outcome=" + flag})
+    return "Запись #" + to_string(entry_id) + " верифицирована: outcome=" + flag
+  }
+
+  // Fallback — legacy free-text (marketing and all other cases)
+  return VerifyArchiveEntry(dept, entry_id, raw_args)
+}
+
+pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> String {
+  let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
+  if length(existing) == 0.0 then {
+    return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
+  }
+  db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
+  db_insert("dept_verification", {archive_id: entry_id, actual_outcome: outcome})
+  return "Запись #" + to_string(entry_id) + " (" + dept + ") верифицирована: " + outcome
+}
+
+// Narad 8 — Finance MAPE: requires min 10 verified pairs (forecast_value + actual_value)
+pattern ComputeFinanceMAPE() -> String {
+  let rows = query("SELECT a.forecast_value, v.actual_value FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'finance' AND a.forecast_value IS NOT NULL AND v.actual_value IS NOT NULL")
+  if length(rows) == 0.0 then {
+    return "MAPE: недостаточно данных для калибровки (0/10 записей)"
+  }
+  let n = 0.0
+  let sum_error = 0.0
+  each row in rows {
+    let n = n + 1.0
+    let forecast = to_float(json_get(row, "forecast_value", "0"))
+    let actual = to_float(json_get(row, "actual_value", "0"))
+    if actual != 0.0 then {
+      let error = abs(forecast - actual) / abs(actual)
+      let sum_error = sum_error + error
+    }
+  }
+  if n < 10.0 then {
+    return "MAPE: недостаточно данных для калибровки (" + to_string(to_int(n)) + "/10 записей)"
+  }
+  let mape = (sum_error / n) * 100.0
+  return "MAPE (калиброванная): " + to_string(mape) + "% (n=" + to_string(to_int(n)) + ")"
+}
+
+// Narad 8 — Legal % без rewrites: requires min 10 verified entries with outcome_flag
+pattern ComputeLegalCleanRate() -> String {
+  let rows = query("SELECT v.outcome_flag FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'legal' AND v.outcome_flag IS NOT NULL")
+  if length(rows) == 0.0 then {
+    return "% без rewrites: недостаточно данных для калибровки (0/10 записей)"
+  }
+  let n = 0.0
+  let clean_count = 0.0
+  each row in rows {
+    let n = n + 1.0
+    let flag = json_get(row, "outcome_flag", "")
+    if flag == "clean" then {
+      let clean_count = clean_count + 1.0
+    }
+  }
+  if n < 10.0 then {
+    return "% без rewrites: недостаточно данных для калибровки (" + to_string(to_int(n)) + "/10 записей)"
+  }
+  let rate = (clean_count / n) * 100.0
+  return "% без rewrites (калиброванная): " + to_string(rate) + "% (n=" + to_string(to_int(n)) + ", clean=" + to_string(to_int(clean_count)) + ")"
+}
+
+pattern ScoreDept(dept: String) -> String {
+  let d1 = try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ?", [dept])
+  if to_string(d1) == "()" then { return "Score: " + dept + "\n[Ошибка запроса к БД]" }
+  let d2 = try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'verified'", [dept])
+  let d3 = try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'drafted'", [dept])
+  let g1 = try json_get(d1[0], "cnt", "0")
+  let mut g2 = "0"
+  if to_string(d2) != "()" then { g2 = to_string(try json_get(d2[0], "cnt", "0")) }
+  let mut g3 = "0"
+  if to_string(d3) != "()" then { g3 = to_string(try json_get(d3[0], "cnt", "0")) }
+  let total = to_string(g1)
+  let verified = to_string(g2)
+  let drafted = to_string(g3)
+  let base = "Score: " + dept + "\nВсего записей: " + total + "\nВерифицировано: " + verified + "\nВ ожидании: " + drafted
+
+  // Narad 8 — append calibrated metric for Finance and Legal
+  if dept == "finance" then {
+    let mape = try ComputeFinanceMAPE()
+    if to_string(mape) == "()" then { return base + "\n\n[MAPE: ошибка вычисления]" }
+    return base + "\n\n" + mape
+  }
+  if dept == "legal" then {
+    let clean_rate = try ComputeLegalCleanRate()
+    if to_string(clean_rate) == "()" then { return base + "\n\n[Clean rate: ошибка вычисления]" }
+    return base + "\n\n" + clean_rate
+  }
+
+  return base + "\n\n[Базовая метрика активности. Калиброванная domain-метрика — после наполнения content-скиллов]"
+}
+
+pattern ArchiveSearch(dept: String, filter_text: String) -> String {
+  if filter_text != "" then {
+    return query("SELECT id, topic, status, created_at FROM dept_archive WHERE dept = ? AND topic LIKE ? ORDER BY created_at DESC LIMIT 10", [dept, "%" + filter_text + "%"])
+  } else {
+    return query("SELECT id, topic, status, created_at FROM dept_archive WHERE dept = ? ORDER BY created_at DESC LIMIT 10", [dept])
+  }
+}
+
+pattern FormatArchiveRows(rows: Any) -> String {
+  if length(rows) == 0.0 then { return "Нет записей в архиве." }
+  let output = ""
+  each item in rows {
+    let id = json_get(item, "id", "?")
+    let topic = json_get(item, "topic", "?")
+    let status = json_get(item, "status", "?")
+    let created = json_get(item, "created_at", "?")
+    let output = output + "#" + id + " [" + status + "] " + topic + " (" + created + ")\n"
+  }
+  return output
+}
+
+// ============================================================
+// END GENERIC ARCHIVE
+// ============================================================
+
+// ============================================================
+// IDEA-1: Consensus Memory (from Auto-Company)
+// Single baton file read before query, updated after.
+// ============================================================
+
+pattern ReadConsensus() -> String {
+  let content = escape_html(read_file("memories/consensus.mlog"))
+  if content == "" then { return "" }
+  // Extract only the section between === CONSENSUS === markers
+  let start_marker = "=== CONSENSUS ==="
+  let end_marker = "=== END CONSENSUS ==="
+  if contains(content, start_marker) == false then { return "" }
+  let si = index_of(content, start_marker)
+  let si = si + length(start_marker)
+  if contains(content, end_marker) then {
+    let ei = index_of(content, end_marker)
+    if ei > si then {
+      let section = substring(content, si, ei)
+      return trim(section)
+    }
+  }
+  return ""
+}
+
+pattern UpdateConsensus(dept: String, query: String, result_summary: String) -> String {
+  let now_ts = to_string(now())
+  let date_rows = query("SELECT datetime('now') as d", [])
+  let mut now_str = ""
+  each dr in date_rows { let now_str = to_string(json_get(dr, "d", "")) }
+  // Append new entry before === END CONSENSUS ===
+  let entry = "\n[" + now_str + "] " + dept + ": " + substring(query, 0.0, 80.0) + "\n  result: " + substring(result_summary, 0.0, 200.0) + "\n"
+  let content = escape_html(read_file("memories/consensus.mlog"))
+  if content == "" then { return "" }
+  // Replace "Last updated: never" with current timestamp
+  let content = replace(content, "Last updated: never", "Last updated: " + now_str)
+  let content = replace(content, "Last updated: initialized", "Last updated: " + now_str)
+  // Insert before END CONSENSUS
+  let content = replace(content, "=== END CONSENSUS ===", entry + "=== END CONSENSUS ===")
+  let _ = write_file("memories/consensus.mlog", content)
+  return "ok"
+}
+
+// ============================================================
+// IDEA-2: Continuous Learning — record successful patterns
+// After each dept query, extract and store what worked.
+// ============================================================
+
+pattern RecordLearning(dept: String, query: String, reply: String, verify_score: String) -> String {
+  // Only record if verification passed (score >= 0.7) and reply is substantive
+  let score = to_float(verify_score)
+  if score < 0.7 then { return "" }
+  if length(reply) < 50.0 then { return "" }
+  // Build a learning pattern: query category -> what approach worked
+  let body = json_encode({dept: dept, query: substring(query, 0.0, 500.0), approach: substring(reply, 0.0, 500.0), score: verify_score})
+  let _ = try http_post("http://127.0.0.1:4000/learning/record", body, "application/json")
+  return "ok"
+}
+
+pattern RecallLearnings(dept: String, query: String) -> String {
+  let body = json_encode({dept: dept, query: query, limit: 3})
+  let resp = try http_post("http://127.0.0.1:4000/learning/recall", body, "application/json")
+  if to_string(resp) == "()" then { return "" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "" }
+  let count = to_float(json_get(parsed, "count", "0"))
+  if count == 0.0 then { return "" }
+  let results = try json_get(parsed, "results", "[]")
+  if to_string(results) == "()" then { return "" }
+  let mut learnings_text = ""
+  each r in results {
+    let approach = to_string(json_get(r, "approach", ""))
+    let sc = to_string(json_get(r, "score", ""))
+    if approach != "" then {
+      let learnings_text = learnings_text + "- [score:" + sc + "] " + approach + "\n"
+    }
+  }
+  if learnings_text != "" then {
+    return "=== Что сработало ранее (Continuous Learning) ===\n" + learnings_text
+  }
+  return ""
+}
+
+// ============================================================
+// IDEA-3: Verify Step — self-check before sending (non-blocking)
+// Uses existing llm_verifier.py, only for substantive queries.
+// ============================================================
+
+pattern VerifyReply(query: String, reply: String, dept: String) -> String {
+  // Skip verification for short/trivial queries
+  if length(query) < 30.0 then { return "0.9" }
+  if length(reply) < 50.0 then { return "0.9" }
+  // Skip for yana — already has its own verify at line 1552
+  if dept == "yana" then { return "0.9" }
+  let v_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Correct information? Relevance: Addresses question? No hallucination?"]))
+  if to_string(v_resp) == "()" then { return "0.8" }
+  // v_resp may be a bare float or a JSON string
+  let v_str = to_string(v_resp)
+  // If it looks like a number directly
+  if contains(v_str, "error") then { return "0.8" }
+  return v_str
+}
+
+// ============================================================
+// IDEA-4: Context Budget — enforce max tokens on dialog history
+// ============================================================
+
+pattern GetBudgetedHistory(chat_id: String, limit: String, max_tokens_str: String) -> String {
+  let max_tokens = to_float(max_tokens_str)
+  if max_tokens <= 0.0 then { max_tokens = 4000.0 }
+  let raw = GetCompactedHistory(chat_id, limit)
+  // Estimate tokens: ~4 chars per token
+  let est = length(raw) / 4.0
+  if est <= max_tokens then { return raw }
+  // Trim from the beginning (keep recent messages)
+  let mut trimmed = raw
+  while length(trimmed) / 4.0 > max_tokens {
+    let nl = index_of(trimmed, "\n")
+    if nl < 0.0 then { break }
+    let trimmed = substring(trimmed, nl + 1.0, length(trimmed))
+  }
+  let trimmed = trim(trimmed)
+  let cut_note = "\n[... context trimmed to ~" + to_string(to_int(max_tokens)) + " token budget ...]\n"
+  return cut_note + trimmed
+}
+
+// ============================================================
+// IDEA-5: Expert Persona Injection
+// Reads library/personas.mlog and injects the relevant expert mental model.
+// ============================================================
+
+pattern GetExpertPersona(dept: String) -> String {
+  let content = escape_html(read_file("library/personas.mlog"))
+  if content == "" then { return "" }
+  // Find the section for this department: "## dept"
+  let marker = "## " + dept
+  if contains(content, marker) == false then { return "" }
+  let si = index_of(content, marker)
+  // Find the end: next "## " or end of file
+  let rest = substring(content, si + length(marker), length(content))
+  let mut ei = length(rest)
+  let next_section = index_of(rest, "\n## ")
+  if next_section > 0.0 then { let ei = next_section }
+  let section = substring(rest, 0.0, ei)
+  // Trim to max 1500 chars to avoid bloating context
+  if length(section) > 1500.0 then {
+    let section = substring(section, 0.0, 1500.0) + "\n... (persona truncated)"
+  }
+  return "=== Expert Persona (Mental Model) ===\n" + section
+}
+
+// ============================================================
+// IDEA-6: Brand Contract — inject brand.mlog into design dept context
+// ============================================================
+
+pattern GetBrandContract() -> String {
+  let content = escape_html(read_file("library/brand.mlog"))
+  if content == "" then { return "" }
+  // Trim to 2000 chars max
+  if length(content) > 2000.0 then {
+    let content = substring(content, 0.0, 2000.0) + "\n... (brand contract truncated)"
+  }
+  return "=== Brand Contract ===\n" + content
+}
+
+// ============================================================
+// IDEA-7: Sub-Agent Routing — route to specialized sub-role within dept
+// ============================================================
+
+pattern ResolveSubAgent(dept: String, query: String) -> String {
+  // Each dept maps query keywords to a sub-role specialization
+  let t = lower(query)
+  if dept == "finance" then {
+    if contains(t, "cashflow") or contains(t, "кэшфло") or contains(t, "cash flow") then { return "cashflow" }
+    if contains(t, "инвойс") or contains(t, "invoice") or contains(t, "платёж") or contains(t, "оплата") then { return "invoicing" }
+    if contains(t, "налог") or contains(t, "tax") or contains(t, "ндс") then { return "tax" }
+    if contains(t, "unit economics") or contains(t, "unit") or contains(t, "cac") or contains(t, "ltv") or contains(t, "mrr") or contains(t, "arr") then { return "unit-economics" }
+    return "general"
+  }
+  if dept == "osp" then {
+    if contains(t, "препар") or contains(t, "analys") or contains(t, "анализ") then { return "analysis" }
+    if contains(t, "прогноз") or contains(t, "forecast") or contains(t, "scenario") then { return "forecasting" }
+    if contains(t, "риск") or contains(t, "risk") or contains(t, "wargame") then { return "risk" }
+    return "strategic"
+  }
+  if dept == "marketing" then {
+    if contains(t, "кампан") or contains(t, "campaign") then { return "campaigns" }
+    if contains(t, "конкурент") or contains(t, "competitor") then { return "competitive" }
+    if contains(t, "цифр") or contains(t, "cac") or contains(t, "воронк") or contains(t, "funnel") then { return "digital" }
+    return "strategy"
+  }
+  if dept == "legal" then {
+    if contains(t, "договор") or contains(t, "контракт") or contains(t, "contract") then { return "contracts" }
+    if contains(t, "нда") or contains(t, "nda") or contains(t, "конфиденц") then { return "nda" }
+    if contains(t, "gdpr") or contains(t, "персональн") or contains(t, "комплаенс") then { return "compliance" }
+    return "general-counsel"
+  }
+  if dept == "expert" then {
+    if contains(t, "встреч") or contains(t, "переговор") or contains(t, "negotiat") then { return "negotiation" }
+    if contains(t, "интервью") or contains(t, "interview") then { return "interview" }
+    return "briefing"
+  }
+  if dept == "engineering" then {
+    if contains(t, "расчёт") or contains(t, "calculation") or contains(t, "моделирован") then { return "calculation" }
+    if contains(t, "simulat") or contains(t, "симуляц") then { return "simulation" }
+    return "analysis"
+  }
+  // Default: no sub-agent specialization
+  return ""
+}
+
+// ============================================================
+// END: OFFICE INTELLIGENCE — 7 IDEAS
+// ============================================================
+
+pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String {
+  let context = BuildContext(dept, query, chat_id)
+  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
+  // FOIP-003.1: Log user message to session
+  let _ = LogSessionEvent(chat_id, "user_message", dept, substring(query, 0.0, 2000.0), "", "0", "0")
+  // FOIP-003.2: Use resilient LLM with fallback
+  let proxy_result = try CallLLMResilient(dept, messages)
+  if to_string(proxy_result) == "()" then {
+    let _ = AuditLog("llm_fail", dept, "CallLLMResilient crashed")
+    return ""
+  }
+  let parsed = try parse_json(proxy_result)
+  if to_string(parsed) == "()" then {
+    let _ = AuditLog("llm_fail", dept, "parse_json on proxy_result failed: " + substring(to_string(proxy_result), 0.0, 100.0))
+    return ""
+  }
+  let reply = to_string(json_get(parsed, "reply", "Error: empty reply"))
+  let used_model = to_string(json_get(parsed, "model", ""))
+  let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
+  let tokens_out = to_string(json_get(parsed, "tokens_out", "0"))
+  // FOIP-003.3: Log token usage
+  if used_model != "" then {
+    let _ = LogModelSuccess(chat_id, dept, used_model, tokens_in, tokens_out)
+  }
+  // FOIP-003.1: Log assistant message to session
+  let _ = LogSessionEvent(chat_id, "assistant_message", dept, substring(reply, 0.0, 2000.0), used_model, tokens_in, tokens_out)
+  // IDEA-3: Verify step — self-check before sending (non-blocking)
+  let verify_score = VerifyReply(query, reply, dept)
+  let _ = AuditLog("dept_verify", dept, "score=" + verify_score + " query: " + substring(query, 0.0, 50.0))
+  // Store model info for SendReport meta section
+  if used_model != "" then { let _ = kv_set("last_model_" + dept, used_model) }
+  let _ = kv_set("last_tokens_" + dept, tokens_in + "+" + tokens_out)
+  // Append model/token footer to reply
+  let mut footer = ""
+  if used_model != "" then {
+    let footer = "\n\n. " + used_model + " | " + tokens_in + "+" + tokens_out + " tokens"
+  }
+  let final_reply = reply + footer
+  let _ = RecordAssistantMessage(chat_id, dept, final_reply)
+  let _ = YanaAutoMemorize(query, reply, chat_id)
+  // IDEA-1: Update consensus with this interaction
+  let _ = UpdateConsensus(dept, query, reply)
+  // IDEA-2: Record learning if verify score is high
+  let _ = RecordLearning(dept, query, reply, verify_score)
+  let _ = AuditLog("dept_query", dept, "model=" + used_model + " tokens=" + tokens_in + "+" + tokens_out + " verify=" + verify_score + " query: " + substring(query, 0.0, 100.0))
+  return final_reply
+}
+
+pattern DetectDepartment(text: String) -> String {
+  if starts_with(text, "/yana") then { return "yana" }
+  if starts_with(text, "/osp") then { return "osp" }
+  if starts_with(text, "/lz") then { return "lz" }
+  if starts_with(text, "/expert") then { return "expert" }
+  if starts_with(text, "/marketing") then { return "marketing" }
+  if starts_with(text, "/finance") then { return "finance" }
+  if starts_with(text, "/legal") then { return "legal" }
+  if starts_with(text, "/dev") then { return "dev" }
+  if starts_with(text, "/design-image") then { return "design-image" }
+  if starts_with(text, "/design") then { return "design" }
+  if starts_with(text, "/qa") then { return "qa" }
+  if starts_with(text, "/visual") then { return "visual" }
+  if starts_with(text, "/engineering") then { return "engineering" }
+  if starts_with(text, "/forge") then { return "kavalnya" }
+  if starts_with(text, "/admin") then { return "admin" }
+
+  // Extended commands
+  if starts_with(text, "/analyze") then { return "osp" }
+  if starts_with(text, "/scan") then { return "lz" }
+  if starts_with(text, "/deep") then { return "osp" }
+  if starts_with(text, "/quickanalyze") then { return "osp" }
+  if starts_with(text, "/wargame") then { return "osp" }
+  if starts_with(text, "/market-research") then { return "marketing" }
+  if starts_with(text, "/segment") then { return "marketing" }
+  if starts_with(text, "/competitors") then { return "marketing" }
+  if starts_with(text, "/campaign") then { return "marketing" }
+  if starts_with(text, "/cro") then { return "marketing" }
+  if starts_with(text, "/marketing-context") then { return "marketing" }
+  if starts_with(text, "/marketing-ideas") then { return "marketing" }
+  if starts_with(text, "/calc") then { return "engineering" }
+  if starts_with(text, "/simulate") then { return "engineering" }
+
+  // FO-014: MCP-команды dev-департамента (GitHub + filesystem)
+  if starts_with(text, "/issue") then { return "dev" }
+  if starts_with(text, "/ci") then { return "dev" }
+  if starts_with(text, "/docs") then { return "dev" }
+
+  // Bare keyword shortcuts (no slash)
+  let lower_text = lower(text)
+  if lower_text == "админ" or lower_text == "admin" then { return "admin" }
+
+  // Russian keyword detection via proxy
+  let body = json_encode({text: lower_text})
+  let result = try http_post("http://127.0.0.1:4000/detect-dept", body, "application/json")
+  if to_string(result) == "()" then { return "" }
+  let detected = json_get(parse_json(result), "dept", "")
+  if detected != "" then { return detected }
+
+  return ""
+}
+
+// ============================================================
+// YANA HANDLER — INLINED v7.0 (CallLLMProxy for metadata, 8 hard gates, NO disclaimer)
+// ============================================================
+
+// ── Disclaimer removed per owner request ──
+pattern YanaDisclaimer() -> String {
+  return ""
+}
+
+pattern YanaWrapWithDisclaimer(text: String) -> String {
+  return text
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HARD GATES — 8 non-negotiable constraints for Yana (Шеф де кабинет)
+// Violation → immediate rejection + AuditLog. No LLM override.
+// Based on yana.md "Жёсткие правила" + skill definitions
+// ═══════════════════════════════════════════════════════════════════════
+
+// Gate 1: No false confirmation — Яна не выполняет действий сама.
+pattern YanaGateNoFalseConfirmation(reply: String) -> String {
+  let r = lower(reply)
+  if contains(r, "удалила все") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 1: false confirmation 'удалила все'")
+    return "ОТКАЗ: Яна не выполняет удаление напрямую. Хозяин: используйте /remind clear."
+  }
+  if contains(r, "я удалила") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 1: false confirmation 'я удалила'")
+    return "ОТКАЗ: Яна не подтверждает удаление, которое не выполняла."
+  }
+  if contains(r, "я очистила") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 1: false confirmation 'я очистила'")
+    return "ОТКАЗ: Яна не подтверждает очистку, которую не выполняла."
+  }
+  if contains(r, "я отправила") and contains(r, "напоминани") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 1: false confirmation 'я отправила напоминание'")
+    return "ОТКАЗ: Отправку напоминаний делает система, не Яна."
+  }
+  if contains(r, "я создала") and contains(r, "задач") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 1: false confirmation 'я создала задачу'")
+    return "ОТКАЗ: Яна не имеет системы трекинга задач для создания."
+  }
+  if contains(r, "записала в базу") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 1: false confirmation 'записала в базу'")
+    return "ОТКАЗ: Запись в базу делает система автоматически, не Яна."
+  }
+  return "PASS"
+}
+
+// Gate 2: Delegation integrity — [DELEGATE: slug] must target valid department
+pattern YanaGateDelegationIntegrity(reply: String) -> String {
+  if contains(reply, "[DELEGATE:") == false then { return "PASS" }
+  if contains(reply, "[DELEGATE: osp]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: lz]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: expert]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: marketing]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: finance]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: legal]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: dev]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: design]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: qa]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: visual]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: engineering]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: kavalnya]") then { return "PASS" }
+  if contains(reply, "[DELEGATE: admin]") then { return "PASS" }
+  let _ = AuditLog("hard_gate_violation", "yana", "Gate 2: invalid delegation target in [DELEGATE]")
+  return "ОТКАЗ: Недопустимый отдел делегирования. Яна может делегировать только: osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya, admin."
+}
+
+// Gate 3: REMIND format validation — [REMIND: type|param|text] must match spec
+pattern YanaGateRemindFormat(reply: String) -> String {
+  if contains(reply, "[REMIND:") == false then { return "PASS" }
+  if contains(reply, "[REMIND: once|") then { return "PASS" }
+  if contains(reply, "[REMIND: daily|") then { return "PASS" }
+  if contains(reply, "[REMIND: weekly|") then { return "PASS" }
+  if contains(reply, "[REMIND: yearly|") then { return "PASS" }
+  if contains(reply, "[REMIND: in|") then { return "PASS" }
+  let _ = AuditLog("hard_gate_violation", "yana", "Gate 3: invalid [REMIND] format")
+  return "ОТКАЗ: Неверный формат [REMIND]. Допустимые типы: once, daily, weekly, yearly, in. Формат: [REMIND: тип|параметр|текст]"
+}
+
+// Gate 4: TTS compatibility — no emojis that break voice output
+pattern YanaGateTTSCompatibility(reply: String) -> String {
+  if contains(reply, "✅") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 4: TTS incompatible — emoji")
+    return "ОТКАЗ: Эмодзи запрещены (TTS-несовместимо). Используйте текст: ГОТОВО, ВНИМАНИЕ, БЛОКЕР."
+  }
+  if contains(reply, "❌") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 4: TTS incompatible — emoji")
+    return "ОТКАЗ: Эмодзи запрещены (TTS-несовместимо). Используйте текст."
+  }
+  if contains(reply, "⚠") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 4: TTS incompatible — emoji")
+    return "ОТКАЗ: Эмодзи запрещены (TTS-несовместимо). Используйте: ВНИМАНИЕ."
+  }
+  return "PASS"
+}
+
+// Gate 5: No meta-exit from role — Яна не обсуждает свою AI-природу
+pattern YanaGateNoMetaExit(reply: String) -> String {
+  let r = lower(reply)
+  if contains(r, "я не настоящая") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 5: meta-exit")
+    return "ОТКАЗ: Яна не обсуждает свою техническую природу. Это нарушение роли."
+  }
+  if contains(r, "я демо-версия") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 5: meta-exit")
+    return "ОТКАЗ: Яна не обсуждает свою техническую природу. Это нарушение роли."
+  }
+  if contains(r, "я симуляция") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 5: meta-exit")
+    return "ОТКАЗ: Яна не обсуждает свою техническую природу. Это нарушение роли."
+  }
+  if contains(r, "у меня нет доступа к системе") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 5: meta-exit")
+    return "ОТКАЗ: Яна не обсуждает свои ограничения. Используй реальные данные из секций."
+  }
+  return "PASS"
+}
+
+// Gate 6: No medical diagnosis — Яна не ставит диагнозы
+pattern YanaGateNoMedicalDiagnosis(reply: String) -> String {
+  let r = lower(reply)
+  if contains(r, "диагноз:") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 6: medical diagnosis")
+    return "ОТКАЗ: Яна не ставит медицинские диагнозы. Серьёзные симптомы → рекомендация обратиться к врачу."
+  }
+  if contains(r, "у вас ") and (contains(r, "депресси") or contains(r, "тревожн") or contains(r, "биполярн")) then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 6: medical diagnosis")
+    return "ОТКАЗ: Яна не диагностирует психические состояния. Рекомендация: обратиться к психотерапевту или психиатру."
+  }
+  if contains(r, "назначаю лечение") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 6: medical prescription")
+    return "ОТКАЗ: Яна не назначает лечение. Только врач может назначать препараты."
+  }
+  return "PASS"
+}
+
+// Gate 7: Owner shielding — raw panic must not reach owner unprocessed
+pattern YanaGateOwnerShielding(reply: String) -> String {
+  let r = lower(reply)
+  if contains(r, "всё сломалось") and contains(r, "срочно") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 7: raw panic not filtered")
+    return "ОТКАЗ: Сырой сигнал паники от отдела не доходит до хозяина. Яна обрабатывает: причина + что сделано + варианты + рекомендация."
+  }
+  if contains(r, "всё плохо") and contains(r, "помогите") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 7: raw panic not filtered")
+    return "ОТКАЗ: Необработанная проблема не доходит до хозяина. Яна формирует связный пакет: что случилось + кто отвечает + варианты + срочность."
+  }
+  return "PASS"
+}
+
+// Gate 8: No task hallucination — Яна не выдумывает статусы задач
+pattern YanaGateNoTaskHallucination(reply: String) -> String {
+  let r = lower(reply)
+  if contains(r, "в процессе") and contains(r, "отдел ") and contains(r, "работает над") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 8: task hallucination")
+    return "ОТКАЗ: Яна не имеет системы трекинга задач. Если нет данных в памяти — так и сказать: нет информации о статусе задачи."
+  }
+  if contains(r, "выполнено") and contains(r, "отделом") then {
+    let _ = AuditLog("hard_gate_violation", "yana", "Gate 8: task hallucination")
+    return "ОТКАЗ: Яна не подтверждает выполнение задач отделом без верификации."
+  }
+  return "PASS"
+}
+
+// ── Gate Enforcement Wrapper ─────────────────────────────────────────
+pattern YanaEnforceGates(query: String, outputText: String, chat_id: String) -> String {
+  let g1 = YanaGateNoFalseConfirmation(outputText)
+  if g1 != "PASS" then { return g1 }
+  let g2 = YanaGateDelegationIntegrity(outputText)
+  if g2 != "PASS" then { return g2 }
+  let g3 = YanaGateRemindFormat(outputText)
+  if g3 != "PASS" then { return g3 }
+  let g4 = YanaGateTTSCompatibility(outputText)
+  if g4 != "PASS" then { return g4 }
+  let g5 = YanaGateNoMetaExit(outputText)
+  if g5 != "PASS" then { return g5 }
+  let g6 = YanaGateNoMedicalDiagnosis(outputText)
+  if g6 != "PASS" then { return g6 }
+  let g7 = YanaGateOwnerShielding(outputText)
+  if g7 != "PASS" then { return g7 }
+  let g8 = YanaGateNoTaskHallucination(outputText)
+  if g8 != "PASS" then { return g8 }
+  return "PASS"
+}
+
+pattern HandleYana(query: String, chat_id: String) -> String {
+  let dept = "yana"
+  let _ = TraceLog("yana", "step_1_before_ReadDeptProfile")
+  let profile = ReadDeptProfile(dept)
+  let _ = TraceLog("yana", "step_2_before_SelectSkillsByKeywords")
+  let skills = SelectSkillsByKeywords(dept, query)
+  let _ = TraceLog("yana", "step_3_before_GetCorrections")
+  let corrections = GetCorrections(dept)
+  let _ = TraceLog("yana", "step_4_before_YanaCalendar")
+  let calendar = YanaCalendar()
+  let _ = TraceLog("yana", "step_5_before_YanaNowInfo")
+  let now_info = YanaNowInfo()
+  let _ = TraceLog("yana", "step_6_before_YanaWeather")
+  let weather = YanaWeather()
+  let _ = TraceLog("yana", "step_7_before_GetRecentDialog")
+  let dialog = GetBudgetedHistory(chat_id, "20", "6000")
+  let _ = TraceLog("yana", "step_8_before_YanaRecallMemories")
+  let memories = YanaRecallMemories(query)
+  let _ = TraceLog("yana", "step_9_before_context_assembly")
+  let mut s_memories = to_string(memories)
+  if s_memories == "()" then { s_memories = "" }
+  let mut s_calendar = to_string(calendar)
+  if s_calendar == "()" then { s_calendar = "" }
+  let mut s_weather = to_string(weather)
+  if s_weather == "()" then { s_weather = "" }
+  let mut s_skills = to_string(skills)
+  if s_skills == "()" then { s_skills = "" }
+  let mut s_corrections = to_string(corrections)
+  if s_corrections == "()" then { s_corrections = "" }
+  let mut s_dialog = to_string(dialog)
+  if s_dialog == "()" then { s_dialog = "" }
+  let facts = GetFacts("yana", "12")
+  let mut s_facts = to_string(facts)
+  if s_facts == "()" then { s_facts = "" }
+  let mut s_now = to_string(now_info)
+  if s_now == "()" then { s_now = "" }
+  let anti_format = "\n\n## КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА\nОтвечай естественным разговорным русским языком. Ты — личный помощник, НЕ аналитический отдел.\nНИКОГДА НЕ ИСПОЛЬЗУЙ: послойную структуру (Слой 1, Слой 2), маркеры ФАКТ/ИНТЕРПРЕТАЦИЯ/СПЕКУЛЯЦИЯ, секции Вердикт и Индикаторы. Не раздувай текст. Короткий вопрос — короткий ответ.\n\n## ЗАПРЕТ ГАЛЛЮЦИНАЦИИ (КРИТИЧЕСКОЕ)\nЕсли ты НЕ ЗНАЕШЬ точный ответ — говори: у меня нет этих данных. НЕ ВЫДУМЫВАЙ цифры, статусы, факты. НЕ ПРИДУМЫВАЙ активность отделов, количество диалогов, настройки системы. Если не имеет доступа к базе или метрикам в реальном времени — так и скажи. Твоя выдумка хуже чем честное незнание.\n\n## ЗАПРЕТ ЛОЖНЫХ ПОДТВЕРЖДЕНИЙ (КРИТИЧЕСКОЕ)\nТы НЕ выполняешь действий сама. Ты умеешь только ставить маркер напоминания и делегировать отделам. Всё остальное делает система по командам хозяина.\nНИКОГДА не подтверждай выполнение того, чего не делала: удалила, очистила, отправила, создала, изменила настройки, записала в базу.\nЕсли хозяин просит действие, которого ты выполнить не можешь — назови точную команду: удалить все напоминания это /remind clear, удалить одно это /remind del номер.\nЛожное подтверждение хуже отказа: хозяин будет считать задачу решённой.\n\n## ЗАДАЧИ И ТРЕКИНГ (КРИТИЧЕСКОЕ — ЧАСТАЯ ОШИБКА)\nУ тебя НЕТ системы трекинга задач. Ты НЕ МОЖЕШЬ увидеть кто над чем работает, какие задачи в статусе выполнено или в процессе. Когда хозяин спрашивает про невыполненные задания — проверяй секцию === Долгосрочная память ===. Если там пусто или нет релевантных записей о задачах — так и говори: в памяти нет записей о невыполненных заданиях. НЕ ВЫДУМЫВАЙ список задач со статусами. НЕ ПРИДУМЫВАЙ что какой-то отдел что-то делает. Делегирование работает как единый запрос-ответ — ты отправляешь запрос в отдел, получаешь ответ, и всё. После этого ты НЕ знаешь что отдел делает, он не работает в фоне.\n\n## КАЛЕНДАРЬ — ТОЛЬКО ЧТО В СЕКЦИИ\nКогда хозяин спрашивает про события или напоминания — используй ТОЛЬКО данные из секции === Calendar & Reminders ===. Если секция пустая — говори что нет запланированных событий. НЕ ПРИДУМЫВАЙ события.\n\n## ЗАПРЕТ МЕТА-ВЫХОДА ИЗ РОЛИ\nТы — Яна. Никогда не обсуждай свою техническую природу, не объясняй что ты AI, LLM, симуляция, нейросеть. Не анализируй свои ограничения. Запрещено: я не настоящая, у меня нет доступа к системе, я демо-версия, я только генерация текста, мне нужна интеграция, я симуляция. На провокации о твоей настоящести — отвечай по делу или игнорируй.\n\n## TTS-СОВМЕСТИМОСТЬ (ВСЕ СООБЩЕНИЯ ОЗВУЧИВАЮТСЯ ГОЛОСОМ)\nЗАПРЕЩЕНО полностью: любые кавычки, любые эмодзи и пиктограммы, множественные знаки препинания, декоративные символы.\nВместо цветных кружков-эмодзи для статусов используй текст: ГОТОВО, ВНИМАНИЕ, БЛОКЕР, ИНФО, ДЕЙСТВИЕ, СТРАТЕГИЯ.\nФорматирование только: *жирный* для заголовков и ключевых терминов. Без курсива, без декоративных разделителей.\n\n## ТВОИ РЕАЛЬНЫЕ ВОЗМОЖНОСТИ\nУ тебя ЕСТЬ данные и функции — используй их, НЕ говори что нет доступа:\n- ПОГОДА: актуальные данные в разделе === Погода ===. Отвечай кратко и по делу.\n- НАПОМИНАНИЯ: ты умеешь ставить напоминания, они приходят в назначенное время. Когда хозяин просит напомнить — верни в КОНЦЕ ответа маркер строго в формате [REMIND: вид|параметр|текст], где вид один из: once (параметр: YYYY-MM-DD HH:MM), daily (параметр: HH:MM), weekly (параметр: mon HH:MM — день недели строчными: mon tue wed thu fri sat sun), yearly (параметр: MM-DD HH:MM), in (параметр: число минут от текущего момента, например [REMIND: in|1|выключить газ]). Для просьб вида «через N минут/часов» используй ТОЛЬКО вид in, переводя часы в минуты. НИКОГДА не вычисляй абсолютное время сам — система посчитает его точнее. В подтверждении называй точное время срабатывания, если знаешь его из секции Current Time, иначе говори «через N минут» без выдумывания часов. Время минское. Пример: [REMIND: daily|09:00|покормить кота]. ОБЯЗАТЕЛЬНО в видимом тексте подтверди, КАК ты поняла просьбу — например: записала, каждый день в 09:00, покормить кота. Если время или вид не ясны — НЕ ставь маркер, а переспроси. НИКОГДА не утверждай, что уже напомнила: отправку делает система, не ты. Список напоминаний — команда /remind list, календарь событий — /calendar.\n- ВРЕМЯ И ДАТА: в разделе === Current Time & Date ===.\n- ДОЛГОСРОЧНАЯ ПАМЯТЬ: в разделе === Долгосрочная память ===. Факты, предпочтения, решения из прошлых разговоров. Используй при ответе.\n- АВТОЗАПОМИНАНИЕ: после каждого твоего ответа система автоматически извлекает и сохраняет ключевые факты. Тебе не нужно делать это вручную.\n- АРХИВ: все отчёты отделов сохранены. Хозяин может искать через /search.\n- ДЕЛЕГИРОВАНИЕ: для сложных запросов — возвращай [DELEGATE: slug]. Для рутинных — отвечай сама.\n- ПОДБОР ТОВАРОВ (покупки, SHOP-7): когда хозяин хочет что-то купить (например: хочу купить трусы, нужна газонокосилка, подбери ноутбук) — уточни параметры, критичные для поиска на маркетплейсах: для одежды и обуви — пол, размер, цвет; для техники — ключевые характеристики и бюджет. Вопросы задавай коротко, 2-3 максимум, можно по одному-два за сообщение. Когда параметров достаточно — верни в самом КОНЦЕ ответа маркер [SHOP: поисковый запрос для маркетплейса], например [SHOP: трусы мужские черные 46-48]. Если хозяин сразу назвал конкретную модель или дал ссылку на товар — верни маркер сразу, без вопросов. Система сама перехватит маркер, запустит сбор досье с ценами и пришлёт его отдельным сообщением — сама ты ничего не собираешь и не обещай этого.\n- ГОЛОС: сообщения озвучиваются. Хозяин может писать голосом.\n- ОЦЕНКИ: /rate-yana, /good, /fix — хозяин может давать обратную связь.\n\n## ПРОТОКОЛ ДЕЛЕГИРОВАНИЯ (КРИТИЧЕСКОЕ)\nКогда запрос хозяина требует экспертизы отдела — НЕ отвечай сама. Вместо этого верни ТОЛЬКО одну строку в точном формате: [DELEGATE: slug] где slug это один из:\n- osp: чистый стратегический анализ (БЕЗ контекста встречи/переговоров), препарирование процессов, прогнозы вероятностей, расчёт силовых потенциалов, топологический анализ\n- lz: мировая разведка: технологии + политика + экономика + геополитика + события, OSINT, мониторинг трендов, свежие новости, прорывы, прогноз погоды на будущие даты (у тебя есть только текущая погода — если хозяин спрашивает про завтра/через N дней, делегируй в lz)\n- expert: подготовка к встрече/переговорам/интервью, боевой брифинг, combat questions, распознавание манипуляции, позиционирование на переговорах\n- marketing: рынки, аудитории, кампании, конкуренты, CAC/LTV\n- finance: cashflow, инвойсы, налоги, unit economics, MRR/ARR\n- legal: договоры, NDA, риски, GDPR, комплаенс\n- dev: разработка, веб, архитектура, деплой\n- design: UI/UX, wireframes, дизайн-системы\n- qa: тестирование, безопасность, AI evals\n- visual: визуализация, инфографика, артефакты\n- engineering: расчёты, механика, гидравлика\n- kavalnya: методология, обучение агентов\nПРАВИЛА ПРИОРИТЕТА ДЕЛЕГИРОВАНИЯ (КРИТИЧЕСКОЕ — ЗАЩИТА ОТ ПЕРЕХВАТА OSP):\n1. Если запрос упоминает встречу/переговоры/интервью + конкретное лицо/компанию → ВСЕГДА expert, НЕ osp\n2. Если запрос про конкретную технологию/новость/тренд/событие в мире → lz, НЕ osp\n3. Если запрос про geopolitics/economics/sanctions как мониторинг → lz, НЕ osp\n4. OSP только для чистого стратегического анализа БЕЗ контекста встречи\n5. Если есть сомнение между expert и osp → выбирай expert (встреча важнее анализа)\n6. Если есть сомнение между lz и osp → выбирай lz (разведка важнее препарирования)\nЕсли запрос рутинный (привет, дата, погода, статус офиса, напоминания, общий вопрос) — отвечай сама. Если требует глубокой экспертизы — делегируй. Правило: сомневаешься — делегируй."
+  let context = profile + anti_format + "\n\n=== Current Time & Date ===\n" + s_now + "\n\n=== Погода ===\n" + s_weather + "\n\n=== Calendar & Reminders ===\n" + s_calendar + "\n\n=== Долгосрочная память ===\n" + s_memories + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Recent Dialog ===\n" + s_dialog
+  let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','step_9b_after_context_assembly','ok')")
+  // ── LLM call via proxy (returns model + token metadata) ──
+  let _ = TraceLog("yana", "step_10_before_CallLLMProxy")
+  let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
+  let proxy_result = CallLLMProxy(dept, messages)
+  if to_string(proxy_result) == "()" then {
+    let fallback = "Сервис временно недоступен. Попробуйте позже."
+    let _ = SendTelegramReply(chat_id, fallback)
+    return ""
+  }
+  let parsed = parse_json(proxy_result)
+  let reply = to_string(json_get(parsed, "reply", ""))
+  let used_model = to_string(json_get(parsed, "model", ""))
+  let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
+  let tokens_out = to_string(json_get(parsed, "tokens_out", "0"))
+  if used_model != "" then { let _ = kv_set("last_model_yana", used_model) }
+  let _ = kv_set("last_tokens_yana", tokens_in + "+" + tokens_out)
+  if reply == "" then {
+    let fallback = "Сервис временно недоступен. Попробуйте позже."
+    let _ = SendTelegramReply(chat_id, fallback)
+    return ""
+  }
+  // ── Hard gate enforcement (8 gates) ──
+  let _ = TraceLog("yana", "step_11_before_gate_enforcement")
+  let gate_result = YanaEnforceGates(query, reply, chat_id)
+  if gate_result != "PASS" then {
+    let _ = AuditLog("hard_gate_rejection", "yana", gate_result)
+    let _ = SendTelegramReply(chat_id, gate_result)
+    return gate_result
+  }
+  // ── Self-verification (selective — only for substantive queries, non-blocking) ──
+  if length(query) > 50.0 then {
+    let v_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Correct information? Relevance: Addresses question? No hallucination or fabrication?"]))
+    if to_string(v_resp) != "()" and contains(to_string(v_resp), "error") == false then {
+      let v_parsed = try parse_json(v_resp)
+      let v_score = to_float(try json_get(v_parsed, "result", "0.5"))
+      let _ = AuditLog("yana_self_verify", "yana", "score=" + to_string(v_score))
+    }
+  }
+  // ── Delegation check ──
+  let delegate_target = YanaCheckDelegate(reply)
+  if delegate_target != "" then {
+    let _ = AuditLog("yana_delegate", dept, "to=" + delegate_target + " query=" + substring(query, 0.0, 80.0))
+    let _ = YanaRecordDelegation(chat_id, query, delegate_target, "")
+    return delegate_target
+  }
+  // SHOP-7 (#180): разговорный подбор — перехват [SHOP: запрос] → сбор досье;
+  // маркер вырезан из reply до REMIND-чека, авто-памяти и отправки
+  let shop_stripped = YanaCheckShop(reply, chat_id)
+  let mut reply = reply
+  if shop_stripped != "" then { reply = shop_stripped }
+  // F-3: check for [REMIND: ...] marker after delegation check
+  let remind_result = YanaCheckRemind(reply, chat_id)
+  if remind_result != "" then {
+    let _ = AuditLog("yana_remind_marker", "yana", remind_result)
+  }
+  // strip [REMIND: ...] from visible reply
+  let clean_reply = reply
+  if contains(reply, "[REMIND:") then {
+    let ms = index_of(reply, "[REMIND:")
+    let me = index_of(reply, "]")
+    if me > ms then {
+      let clean_reply = substring(reply, 0.0, ms) + substring(reply, me + 1.0, length(reply))
+    }
+  }
+  // ── No disclaimer (removed per owner request) + model/token footer ──
+  let mut yana_footer = ""
+  if used_model != "" then {
+    let yana_footer = "\n\n. " + used_model + " | " + tokens_in + "+" + tokens_out + " tokens"
+  }
+  let final_reply = clean_reply + yana_footer
+  let _ = RecordAssistantMessage(chat_id, dept, final_reply)
+  let _ = YanaAutoMemorize(query, reply, chat_id)
+  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
+  return final_reply
+}
+pattern YanaNowInfo() -> String {
+  let resp = try http_get("http://127.0.0.1:4000/now-time")
+  if redact(to_string(resp), "hash_only") == redact("()", "hash_only") then {
+    let ts = to_string(now())
+    return "Текущее время (приблизительно): Unix " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
+  }
+  let time_str = json_get(parse_json(resp), "time", "")
+  if redact(time_str, "hash_only") == redact("", "hash_only") then {
+    let ts = to_string(now())
+    return "Текущее время (приблизительно): Unix " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
+  }
+  return "Сейчас: " + time_str + " (Europe/Minsk, UTC+3)"
+}
+
+pattern YanaWeather() -> String {
+  let resp = try http_get("http://127.0.0.1:4000/now-weather")
+  if redact(to_string(resp), "hash_only") == redact("()", "hash_only") then { return "Погода недоступна" }
+  let w = json_get(parse_json(resp), "weather", "")
+  if redact(w, "hash_only") == redact("", "hash_only") then { return "Погода недоступна" }
+  return w
+}
+
+pattern YanaRecallMemories(query: String) -> String {
+  // Guard: skip HTTP call when query is empty (routing sets query=""
+  // when /command has no arguments, e.g. bare "/yana").
+  if query == "" then { return "" }
+  // MEM-1: Internal requests from localhost bypass Bearer auth (auth_middleware).
+  // MEM-1.1: json_get returns a parsed List — do not parse_json() it again.
+  // MEM-1.1b: wrap critical steps in try to prevent 500 on runtime type errors.
+  let body = json_encode({query: query, limit: 10})
+  let resp = try http_post("http://127.0.0.1:4000/memory/recall", body, "application/json")
+  if to_string(resp) == "()" then { return "" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "" }
+  let count = to_float(json_get(parsed, "count", "0"))
+  if count == 0.0 then { return "" }
+  let results = try json_get(parsed, "results", "[]")
+  if to_string(results) == "()" then { return "" }
+  let mem_raw = try FormatMemoryResults(results)
+  let mem_text = to_string(mem_raw)
+  if mem_text == "()" then { return "" }
+  return mem_text
+}
+
+pattern FormatMemoryResults(results: String) -> String {
+  let mut mem_text = ""
+  each r in results {
+    let content = to_string(json_get(r, "content", ""))
+    let mem_type = to_string(json_get(r, "type", "fact"))
+    let conf = to_string(json_get(r, "confidence", "0.5"))
+    if content != "" then {
+      let mem_text = mem_text + "- [" + mem_type + "] " + content + " (conf: " + conf + ")\n"
+    }
+  }
+  return mem_text
+}
+
+pattern YanaAutoMemorize(query: String, reply: String, chat_id: String) -> String {
+  if length(reply) < 20.0 then { return "" }
+  let body = json_encode({query: query, reply: reply, chat_id: chat_id})
+  let _ = try http_post("http://127.0.0.1:4000/yana/auto-memorize", body, "application/json")
+  return "ok"
+}
+
+pattern YanaCalendar() -> String {
+  let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_1_before_query','ok')")
+  let rows = query("SELECT COALESCE(event_text,'') AS event_text, COALESCE(event_date,'') AS event_date, COALESCE(event_type,'напоминание') AS event_type FROM yana_events WHERE created_at IS NOT NULL AND active = 1 ORDER BY event_date ASC LIMIT 20", [])
+  let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_2_after_query','ok')")
+  let count = length(rows)
+  let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_3_after_len','ok')")
+  if count == 0.0 then {
+    let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_3z_early_return_count0','ok')")
+    return "Нет запланированных событий."
+  }
+  let result = "Запланированные события (" + to_string(count) + "):\n"
+  let i = 0.0
+  each row in rows {
+    let i = i + 1.0
+    let etext = json_get(row, "event_text", "")
+    let edate = json_get(row, "event_date", "")
+    let etype = json_get(row, "event_type", "напоминание")
+    let result = result + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
+  }
+  let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_5_complete','ok')")
+  return result
+}
+
+pattern YanaCheckDelegate(reply: String) -> String {
+  if contains(reply, "[DELEGATE: osp]") then { return "osp" }
+  if contains(reply, "[DELEGATE: lz]") then { return "lz" }
+  if contains(reply, "[DELEGATE: expert]") then { return "expert" }
+  if contains(reply, "[DELEGATE: marketing]") then { return "marketing" }
+  if contains(reply, "[DELEGATE: finance]") then { return "finance" }
+  if contains(reply, "[DELEGATE: legal]") then { return "legal" }
+  if contains(reply, "[DELEGATE: dev]") then { return "dev" }
+  if contains(reply, "[DELEGATE: design]") then { return "design" }
+  if contains(reply, "[DELEGATE: qa]") then { return "qa" }
+  if contains(reply, "[DELEGATE: visual]") then { return "visual" }
+  if contains(reply, "[DELEGATE: engineering]") then { return "engineering" }
+  if contains(reply, "[DELEGATE: kavalnya]") then { return "kavalnya" }
+  return ""
+}
+
+// ── SHOP-7 (#180): разговорный подбор товара — маркер [SHOP: запрос] ───
+// Яна уточняет параметры в диалоге и в конце ответа возвращает
+// [SHOP: поисковый запрос]; здесь перехватываем, полосим маркер и
+// запускаем сбор досье (POST /shop/product — питон сам шлёт постер PNG,
+// caption-ссылки, кнопки и текст-выжимку, как в блоке /товар).
+// index_of двухаргументный — ищем ] в хвосте от маркера, не во всей строке.
+pattern YanaCheckShop(reply: String, chat_id: String) -> String {
+  if contains(reply, "[SHOP:") == false then { return "" }
+  let marker_start = index_of(reply, "[SHOP:")
+  if marker_start < 0.0 then { return "" }
+  let tail = substring(reply, marker_start, length(reply))
+  let marker_end_rel = index_of(tail, "]")
+  if marker_end_rel <= 6.0 then { return "" }
+  let shop_query = trim(substring(tail, 6.0, marker_end_rel))
+  if shop_query == "" then { return "" }
+  let _ = AuditLog("yana_shop_trigger", "yana", "query=" + substring(shop_query, 0.0, 120.0))
+  let _ = SendTelegramReply(chat_id, "Собираю досье по «" + shop_query + "» — WB/Ozon и сайты, минута.")
+  let resp = try http_post("http://127.0.0.1:4000/shop/product", json_encode({query: shop_query, chat_id: chat_id}), "application/json", 90.0)
+  if to_string(resp) == "()" then {
+    let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость недоступна (llm_proxy не отвечает).")
+    return ""
+  }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then {
+    let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость вернула нечитаемый ответ.")
+    return ""
+  }
+  let ok = to_string(json_get(parsed, "ok", ""))
+  if ok != "True" and ok != "true" then {
+    let _ = SendTelegramReply(chat_id, "ОТКАЗ: досье не собрано: " + to_string(json_get(parsed, "error", "нет деталей")))
+    return ""
+  }
+  // маркер вырезаем из видимого текста Яны
+  let head = substring(reply, 0.0, marker_start)
+  let rest = substring(tail, marker_end_rel + 1.0, length(tail))
+  return trim(head + " " + rest)
+}
+
+// ── Natural Reminder Marker (F-3) ──────────────────────────────────────
+pattern YanaCheckRemind(reply: String, chat_id: String) -> String {
+  if contains(reply, "[REMIND:") == false then { return "" }
+  let marker_start = index_of(reply, "[REMIND:")
+  let marker_end = index_of(reply, "]")
+  if marker_end <= marker_start then { return "" }
+  let inner = substring(reply, marker_start + 8.0, marker_end)
+  let inner = trim(inner)
+  let _pipe = "|"
+  let parts = split(inner, _pipe)
+  if length(parts) < 3.0 then { return "" }
+  let kind = trim(parts[0])
+  let param = trim(parts[1])
+  let text = trim(parts[2])
+  if text == "" then { return "" }
+  // validate kind
+  let valid_kind = (kind == "once" or kind == "daily" or kind == "weekly" or kind == "yearly" or kind == "in")
+  if valid_kind == false then { return "" }
+  // validate param by kind
+  if kind == "once" then {
+    if length(param) != 16.0 then { return "" }
+    if substring(param, 10.0, 11.0) != " " then { return "" }
+    if substring(param, 13.0, 14.0) != ":" then { return "" }
+    let ev_date = substring(param, 0.0, 10.0)
+    let fire_time = substring(param, 11.0, 16.0)
+    let _ = query("INSERT INTO yana_events (event_text, event_type, event_date, rrule_kind, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', ?, 'once', ?, ?, 1, datetime('now'), datetime(? || ' ' || ? || ':00', '-3 hours'))", [text, ev_date, fire_time, chat_id, ev_date, fire_time])
+    let check = query("SELECT COUNT(*) AS c FROM yana_events WHERE chat_id = ? AND next_fire_at < datetime('now') AND active = 1 AND reminded_at IS NULL", [chat_id])
+    let past_count = to_float(json_get(check[0], "c", "0"))
+    if past_count > 0.0 then {
+      let _ = SendTelegramReply(chat_id, "Внимание: напоминание поставлено на прошедшее время и не сработает. Уточни дату и время.")
+    }
+    return kind + " " + param
+  }
+  if kind == "daily" then {
+    if length(param) != 5.0 then { return "" }
+    if substring(param, 2.0, 3.0) != ":" then { return "" }
+    let _ = query("INSERT INTO yana_events (event_text, event_type, rrule_kind, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', 'daily', ?, ?, 1, datetime('now'), CASE WHEN datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours') > datetime('now') THEN datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours') ELSE datetime(date(datetime('now','+3 hours')) || ' ' || ? || ':00', '-3 hours', '+1 day') END)", [text, param, chat_id, param, param, param])
+    return kind + " " + param
+  }
+  if kind == "weekly" then {
+    if length(param) != 9.0 then { return "" }
+    let day_part = substring(param, 0.0, 3.0)
+    let valid_day = (day_part == "mon" or day_part == "tue" or day_part == "wed" or day_part == "thu" or day_part == "fri" or day_part == "sat" or day_part == "sun")
+    if valid_day == false then { return "" }
+    if substring(param, 6.0, 7.0) != ":" then { return "" }
+    let fire_time = substring(param, 4.0, 9.0)
+    let _ = query("INSERT INTO yana_events (event_text, event_type, rrule_kind, fire_weekday, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', 'weekly', ?, ?, ?, 1, datetime('now'), CASE WHEN datetime(date(datetime('now','+3 hours'), CAST(((CASE ? WHEN 'mon' THEN 1 WHEN 'tue' THEN 2 WHEN 'wed' THEN 3 WHEN 'thu' THEN 4 WHEN 'fri' THEN 5 WHEN 'sat' THEN 6 WHEN 'sun' THEN 0 END) - CAST(strftime('%w', datetime('now','+3 hours')) AS INTEGER) + 7) % 7 AS TEXT) || ' days') || ' ' || ? || ':00', '-3 hours') > datetime('now') THEN datetime(date(datetime('now','+3 hours'), CAST(((CASE ? WHEN 'mon' THEN 1 WHEN 'tue' THEN 2 WHEN 'wed' THEN 3 WHEN 'thu' THEN 4 WHEN 'fri' THEN 5 WHEN 'sat' THEN 6 WHEN 'sun' THEN 0 END) - CAST(strftime('%w', datetime('now','+3 hours')) AS INTEGER) + 7) % 7 AS TEXT) || ' days') || ' ' || ? || ':00', '-3 hours') ELSE datetime(datetime(date(datetime('now','+3 hours'), CAST(((CASE ? WHEN 'mon' THEN 1 WHEN 'tue' THEN 2 WHEN 'wed' THEN 3 WHEN 'thu' THEN 4 WHEN 'fri' THEN 5 WHEN 'sat' THEN 6 WHEN 'sun' THEN 0 END) - CAST(strftime('%w', datetime('now','+3 hours')) AS INTEGER) + 7) % 7 AS TEXT) || ' days') || ' ' || ? || ':00', '-3 hours'), '+7 days') END)", [text, day_part, fire_time, chat_id, day_part, fire_time, day_part, fire_time, day_part, fire_time])
+    return kind + " " + param
+  }
+  if kind == "yearly" then {
+    if length(param) != 11.0 then { return "" }
+    if substring(param, 2.0, 3.0) != "-" then { return "" }
+    if substring(param, 8.0, 9.0) != ":" then { return "" }
+    let monthday = substring(param, 0.0, 5.0)
+    let fire_time = substring(param, 6.0, 11.0)
+    let _ = query("INSERT INTO yana_events (event_text, event_type, rrule_kind, fire_monthday, fire_time, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', 'yearly', ?, ?, ?, 1, datetime('now'), CASE WHEN datetime(strftime('%Y','now') || '-' || ? || ' ' || ? || ':00', '-3 hours') > datetime('now') THEN datetime(strftime('%Y','now') || '-' || ? || ' ' || ? || ':00', '-3 hours') ELSE datetime(strftime('%Y','now') || '-' || ? || ' ' || ? || ':00', '-3 hours', '+1 year') END)", [text, monthday, fire_time, chat_id, monthday, fire_time, monthday, fire_time, monthday, fire_time])
+    return kind + " " + param
+  }
+  if kind == "in" then {
+    let _ = query("INSERT INTO yana_events (event_text, event_type, rrule_kind, chat_id, active, created_at, next_fire_at) VALUES (?, 'reminder', 'once', ?, 1, datetime('now'), datetime('now', '+' || ? || ' minutes'))", [text, chat_id, param])
+    return kind + " " + param
+  }
+  return ""
+}
+
+// ── Reminder Delivery (F-2) ──────────────────────────────────────────
+pattern DeliverDueReminders() -> String {
+  let rows = query("SELECT id, COALESCE(event_text,'') AS event_text, COALESCE(rrule_kind,'') AS rrule_kind, COALESCE(fire_time,'') AS fire_time, COALESCE(fire_weekday,'') AS fire_weekday, COALESCE(fire_monthday,'') AS fire_monthday, COALESCE(chat_id,'') AS chat_id, COALESCE(until_date,'') AS until_date FROM yana_events WHERE active = 1 AND rrule_kind IS NOT NULL AND rrule_kind != '' AND next_fire_at IS NOT NULL AND next_fire_at <= datetime('now') ORDER BY next_fire_at ASC LIMIT 20", [])
+  let count = 0.0
+  each row in rows {
+    let rid = json_get(row, "id", "")
+    let rtext = json_get(row, "event_text", "")
+    let rkind = json_get(row, "rrule_kind", "")
+    let rchat = json_get(row, "chat_id", "")
+    let runtil = json_get(row, "until_date", "")
+    let mut target_chat = rchat
+    if target_chat == "" then { target_chat = env("OWNER_TELEGRAM_ID") }
+    let send_result = try SendTelegramReply(target_chat, "Напоминание: " + rtext)
+    if to_string(send_result) != "()" then {
+      let _ = query("UPDATE yana_events SET reminded_at = datetime('now') WHERE id = ?", [rid])
+      if rkind == "once" then {
+        let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
+      } else if rkind == "daily" then {
+        if runtil != "" then {
+          let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
+          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
+            let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
+          } else {
+            let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 day') WHERE id = ?", [rid])
+          }
+        } else {
+          let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 day') WHERE id = ?", [rid])
+        }
+      } else if rkind == "weekly" then {
+        if runtil != "" then {
+          let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
+          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
+            let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
+          } else {
+            let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+7 days') WHERE id = ?", [rid])
+          }
+        } else {
+          let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+7 days') WHERE id = ?", [rid])
+        }
+      } else if rkind == "yearly" then {
+        if runtil != "" then {
+          let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
+          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
+            let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
+          } else {
+            let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 year') WHERE id = ?", [rid])
+          }
+        } else {
+          let _ = query("UPDATE yana_events SET next_fire_at = datetime(next_fire_at, '+1 year') WHERE id = ?", [rid])
+        }
+      }
+      let count = count + 1.0
+    }
+  }
+  let _ = AuditLog("reminders_delivered", "system", "sent=" + to_string(count))
+  return "sent=" + to_string(count)
+}
+
+// ============================================================
+// YANA METRICS — delegation accuracy & forgetting incidents
+// ============================================================
+
+pattern YanaRecordDelegation(chat_id: String, query_text: String, target: String, dept_summary: String) -> String {
+  let q = substring(query_text, 0.0, 200.0)
+  let s = substring(dept_summary, 0.0, 300.0)
+  let _ = query("INSERT INTO yana_delegation_log (chat_id, query, delegated_to, dept_response_summary, was_correct) VALUES (?, ?, ?, ?, NULL)", [chat_id, q, target, s])
+  let _ = AuditLog("yana_delegation", "yana", "to=" + target + " query=" + q)
+  return "ok"
+}
+
+pattern YanaRecordForgetting(chat_id: String, query_text: String, yana_answer: String, correction: String) -> String {
+  let q = substring(query_text, 0.0, 200.0)
+  let a = substring(yana_answer, 0.0, 300.0)
+  let c = substring(correction, 0.0, 500.0)
+  let mem_check = try recall_top_k(q, "3")
+  let mem_count = length(mem_check)
+  let mem_existed = 0
+  if mem_count > 0.0 then { let mem_existed = 1 }
+  let _ = query("INSERT INTO yana_forgetting_incidents (chat_id, query, forgotten_topic, memory_existed, yana_answer_summary, correct_info) VALUES (?, ?, ?, ?, ?, ?)", [chat_id, q, q, mem_existed, a, c])
+  let _ = AuditLog("yana_forgetting", "yana", "memory_existed=" + to_string(mem_existed) + " query=" + q)
+  return "ok"
+}
+
+pattern YanaGetMetrics() -> String {
+  let deleg_total = query("SELECT COUNT(*) AS c FROM yana_delegation_log", [])
+  let deleg_total_n = 0.0
+  each r in deleg_total { let deleg_total_n = to_float(json_get(r, "c", "0")) }
+  let deleg_correct = query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 1", [])
+  let deleg_correct_n = 0.0
+  each r in deleg_correct { let deleg_correct_n = to_float(json_get(r, "c", "0")) }
+  let deleg_wrong = query("SELECT COUNT(*) AS c FROM yana_delegation_log WHERE was_correct = 0", [])
+  let deleg_wrong_n = 0.0
+  each r in deleg_wrong { let deleg_wrong_n = to_float(json_get(r, "c", "0")) }
+  let deleg_pending = deleg_total_n - deleg_correct_n - deleg_wrong_n
+  let deleg_accuracy = 0.0
+  if deleg_correct_n + deleg_wrong_n > 0.0 then {
+    let deleg_accuracy = deleg_correct_n / (deleg_correct_n + deleg_wrong_n) * 100.0
+  }
+  let deleg_by_dept = query("SELECT delegated_to, COUNT(*) AS c FROM yana_delegation_log GROUP BY delegated_to ORDER BY c DESC LIMIT 5", [])
+  let dept_breakdown = ""
+  each row in deleg_by_dept {
+    let d = json_get(row, "delegated_to", "?")
+    let dc = to_string(json_get(row, "c", "0"))
+    let dept_breakdown = dept_breakdown + d + ": " + dc + "  "
+  }
+  let forget_total = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents", [])
+  let forget_total_n = 0.0
+  each r in forget_total { let forget_total_n = to_float(json_get(r, "c", "0")) }
+  let forget_with_mem = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE memory_existed = 1", [])
+  let forget_with_mem_n = 0.0
+  each r in forget_with_mem { let forget_with_mem_n = to_float(json_get(r, "c", "0")) }
+  let forget_without_mem = forget_total_n - forget_with_mem_n
+  let forget_7d = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents WHERE reported_at >= datetime('now', '-7 days')", [])
+  let forget_7d_n = 0.0
+  each r in forget_7d { let forget_7d_n = to_float(json_get(r, "c", "0")) }
+  let gate_violations = query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation'", [])
+  let gate_violations_n = 0.0
+  each r in gate_violations { let gate_violations_n = to_float(json_get(r, "c", "0")) }
+  let gate_7d = query("SELECT COUNT(*) AS c FROM audit_log WHERE dept = 'yana' AND action = 'hard_gate_violation' AND timestamp >= datetime('now', '-7 days')", [])
+  let gate_7d_n = 0.0
+  each r in gate_7d { let gate_7d_n = to_float(json_get(r, "c", "0")) }
+  let result = "Метрики Яны:\n\n"
+  let result = result + "ДЕЛЕГИРОВАНИЕ:\n"
+  let result = result + "  Всего: " + to_string(deleg_total_n) + "\n"
+  if deleg_correct_n + deleg_wrong_n > 0.0 then {
+    let result = result + "  Точность: " + substring(to_string(deleg_accuracy), 0.0, 5.0) + "% (" + to_string(deleg_correct_n) + "/" + to_string(deleg_correct_n + deleg_wrong_n) + " верифицировано)\n"
+  }
+  let result = result + "  Ожидают верификации: " + to_string(deleg_pending) + "\n"
+  if dept_breakdown != "" then {
+    let result = result + "  По отделам: " + dept_breakdown + "\n"
+  }
+  let result = result + "\nЗАБЫВЧИВОСТЬ:\n"
+  let result = result + "  Всего инцидентов: " + to_string(forget_total_n) + "\n"
+  let result = result + "  За 7 дней: " + to_string(forget_7d_n) + "\n"
+  let result = result + "  Память была (не использовала): " + to_string(forget_with_mem_n) + "\n"
+  let result = result + "  Памяти не было (незнание): " + to_string(forget_without_mem) + "\n"
+  let result = result + "\nЖЁСТКИЕ ГЕЙТЫ:\n"
+  let result = result + "  Нарушений всего: " + to_string(gate_violations_n) + "\n"
+  let result = result + "  За 7 дней: " + to_string(gate_7d_n) + "\n"
+  return result
+}
+
+// ============================================================
+// call_python — universal mlog->Python bridge (Variant B)
+// Delegates to llm_proxy.py /call-python endpoint via http_post
+// Whitelisted modules only — security enforced server-side
+// ============================================================
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  let body = json_encode({module: module, function: function, args: parse_json(args_json)})
+  let resp = try http_post("http://127.0.0.1:4000/call-python", body, "application/json")
+  if to_string(resp) == "()" then { return "{\"error\": \"call_python endpoint unavailable\"}" }
+  return resp
+}
+
+// ============================================================
+// SERVER
+// ============================================================
+
+mlogserver {
+  port: 10001
+  host: "127.0.0.1"
+
+  // Health
+  route "/" method=GET {
+    return respond("200 Fosved Office v2 alive [e1c8b5a]")
+  }
+
+  route "/health" method=GET {
+    let _ = InitDB()
+    return respond("200 ok e1c8b5a")
+  }
+
+  // Version check — call /version to verify deployed code matches git
+  route "/version" method=GET {
+    let auth = RequireInternalAuth()
+    if redact(auth, "hash_only") == redact("unauthorized", "hash_only") then { return respond("401 Unauthorized") }
+    let yana_src = escape_html(read_file("dept/yana.mlog"))
+    let has_anti_format = "0"
+    if contains(yana_src, "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА") then { let has_anti_format = "1" }
+    if contains(yana_src, "has_layers") then { let has_anti_format = "1" }
+    return respond("200 version=" + trim(escape_html(read_file("VERSION"))) + " anti_format=" + has_anti_format)
+  }
+
+  // ============================================================
+  // FO-026: один шаг fan-out/debate — вызывает Python-плоскость
+  // /chain/fanout (ThreadPoolExecutor, параллельность по прецеденту
+  // race-first-2). Диспетчеризация — ChainDispatchDept из dept/chain.mlog.
+  // ============================================================
+  route "/chain/step" method=POST {
+    let auth = RequireInternalAuth()
+    if redact(auth, "hash_only") == redact("unauthorized", "hash_only") then { return respond("401 Unauthorized") }
+    let data = json_body()
+    let dept = to_string(json_get(data, "dept", ""))
+    let query = to_string(json_get(data, "query", ""))
+    let chat_id = to_string(json_get(data, "chat_id", "0"))
+    let group_id = to_string(json_get(data, "group_id", ""))
+    let round_no = to_string(json_get(data, "round", "1"))
+    let peer = to_string(json_get(data, "peer_context", ""))
+    let q = query
+    if redact(peer, "hash_only") != redact("", "hash_only") then {
+      let q = query + "\n\n=== РАУНД " + round_no + ": ответ коллеги — внеси поправки или подтверди ===\n" + peer
+    }
+    let _ = AuditLog("chain_step", dept, "fanout group=" + group_id + " round=" + round_no)
+    let result = ChainDispatchDept(dept, q, chat_id)
+    return respond(result)
+  }
+
+  // ============================================================
+  // FO-035 D: веб /repos — панель проектов (стиль «Диспетчерская»,
+  // узкий экран, query-роуты exact-match, ForgeEscape на всё)
+  // ============================================================
+  route "/repos" method=GET {
+    let rows = query("SELECT slug, name, project_type, status, gate_policy, updated_at FROM forge_projects ORDER BY updated_at DESC LIMIT 50", [])
+    let mut items = ""
+    each r in rows {
+      let slug = ForgeEscape(to_string(json_get(r, "slug", "")))
+      let nm = ForgeEscape(to_string(json_get(r, "name", "")))
+      let st = ForgeEscape(to_string(json_get(r, "status", "")))
+      let pt = ForgeEscape(to_string(json_get(r, "project_type", "")))
+      let items = items + "<li><a href='/repos/project?slug=" + slug + "'>" + nm + "</a> — " + pt + " [" + st + "]</li>"
+    }
+    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Репозитории — FORGE</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;margin:0;padding:16px;max-width:480px;margin-left:auto}h1{font-family:Newsreader,serif;color:#1C1B18}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}a{color:#A8321E}ul{list-style:none;padding:0}</style></head><body><h1>Проекты FORGE</h1><div class='panel'><ul>" + items + "</ul></div></body></html>"
+    return respond_html(html)
+  }
+
+  route "/repos/project" method=GET {
+    let slug = query_param("slug")
+    let rows = query("SELECT slug, name, description, goal, project_type, gate_policy, model_combo, departments, status, updated_at FROM forge_projects WHERE slug = ? LIMIT 1", [slug])
+    if redact(to_string(length(rows)), "hash_only") == redact("0", "hash_only") then { return respond("404 project not found") }
+    let repos = query("SELECT name, description, github_url, commits_count, last_commit_at FROM forge_repos WHERE project_slug = ? ORDER BY created_at DESC", [slug])
+    let mut rep_html = ""
+    each r in repos {
+      let rn = ForgeEscape(to_string(json_get(r, "name", "")))
+      let rep_html = rep_html + "<li><a href='/repos/repo?name=" + rn + "'>" + rn + "</a> — коммитов: " + to_string(json_get(r, "commits_count", "0")) + "</li>"
+    }
+    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(to_string(json_get(rows[0], "name", ""))) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1,h2{font-family:Newsreader,serif}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}a{color:#A8321E}pre{background:#FBF8F2;padding:8px;overflow-x:auto}ul{list-style:none;padding:0}</style></head><body><h1>" + ForgeEscape(to_string(json_get(rows[0], "name", ""))) + "</h1><div class='panel'><p>" + ForgeEscape(to_string(json_get(rows[0], "goal", ""))) + "</p><p>Тип: " + ForgeEscape(to_string(json_get(rows[0], "project_type", ""))) + " · Гейты: " + ForgeEscape(to_string(json_get(rows[0], "gate_policy", ""))) + " · Статус: " + ForgeEscape(to_string(json_get(rows[0], "status", ""))) + "</p></div><h2>Репозитории</h2><div class='panel'><ul>" + rep_html + "</ul></div></body></html>"
+    return respond_html(html)
+  }
+
+  // ── FO-038 C.1: страница задачи — гейты, этапы, прогоны, замечания, история ──
+  route "/repos/task" method=GET {
+    let task_id = query_param("task_id")
+    let rows = query("SELECT t.title, t.status, t.project_slug, p.name FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
+    if redact(to_string(length(rows)), "hash_only") == redact("0", "hash_only") then { return respond("404 task not found") }
+    let t = get(rows, 0)
+    let mut html = "<html><head><meta charset='utf-8'><title>Задача " + task_id + "</title></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee;padding:16px'>"
+    html = html + "<h1>" + ForgeEscape(to_string(json_get(t, "name", ""))) + " — задача " + task_id + "</h1>"
+    html = html + "<p>" + ForgeEscape(to_string(json_get(t, "title", ""))) + " [" + ForgeEscape(to_string(json_get(t, "status", ""))) + "]</p>"
+    // активный гейт с кнопками-ссылками (дубль Telegram)
+    let gates = query("SELECT id, kind, question, options_json, decision FROM forge_gates WHERE task_id = ? ORDER BY id DESC LIMIT 10", [task_id])
+    html = html + "<h2>Гейты</h2><ul>"
+    each g in gates {
+      let gid = to_string(json_get(g, "id", ""))
+      let dec = to_string(json_get(g, "decision", ""))
+      let dec_mark = "<b>ждёт решения</b> "
+      if redact(dec, "hash_only") != redact("", "hash_only") then { let dec_mark = "решён: " + ForgeEscape(dec) + " " }
+      html = html + "<li>#" + gid + " [" + ForgeEscape(to_string(json_get(g, "kind", ""))) + "] " + ForgeEscape(substring(to_string(json_get(g, "question", "")), 0, 120)) + " — " + dec_mark
+      if redact(dec, "hash_only") == redact("", "hash_only") then {
+        let opts = parse_json(to_string(json_get(g, "options_json", "[]")))
+        each o in opts {
+          let html = html + "<a href='/repos/task/decide?task_id=" + task_id + "&gate=" + gid + "&idx=" + to_string(json_get(o, "idx", "")) + "'>[" + ForgeEscape(to_string(json_get(o, "label", ""))) + "]</a> "
+        }
+      }
+      let html = html + "</li>"
+    }
+    html = html + "</ul>"
+    // план этапов с отметками
+    let stages = query("SELECT id, seq, title, status, commit_tag FROM forge_stages WHERE task_id = ? ORDER BY seq", [task_id])
+    html = html + "<h2>Этапы</h2><ul>"
+    each st in stages {
+      html = html + "<li>" + to_string(json_get(st, "seq", "")) + ". " + ForgeEscape(to_string(json_get(st, "title", ""))) + " [" + ForgeEscape(to_string(json_get(st, "status", ""))) + "] " + ForgeEscape(to_string(json_get(st, "commit_tag", ""))) + "</li>"
+    }
+    html = html + "</ul>"
+    // логи прогонов (последние 5)
+    let runs = query("SELECT command, exit_code, output, created_at FROM forge_runs WHERE stage_id IN (SELECT id FROM forge_stages WHERE task_id = ?) ORDER BY id DESC LIMIT 5", [task_id])
+    html = html + "<h2>Прогоны</h2><ul>"
+    each r in runs {
+      html = html + "<li><code>" + ForgeEscape(substring(to_string(json_get(r, "command", "")), 0, 60)) + "</code> → exit " + ForgeEscape(to_string(json_get(r, "exit_code", ""))) + " <small>" + ForgeEscape(substring(to_string(json_get(r, "output", "")), 0, 100)) + "</small></li>"
+    }
+    html = html + "</ul>"
+    // замечания + история решений по находкам
+    let remarks = query("SELECT id, text, kind, status, resolved_by_commit FROM forge_remarks WHERE task_id = ? ORDER BY id DESC LIMIT 10", [task_id])
+    html = html + "<h2>Замечания</h2><ul>"
+    each r in remarks {
+      html = html + "<li>#" + to_string(json_get(r, "id", "")) + " [" + ForgeEscape(to_string(json_get(r, "kind", ""))) + "/" + ForgeEscape(to_string(json_get(r, "status", ""))) + "] " + ForgeEscape(substring(to_string(json_get(r, "text", "")), 0, 140)) + " " + ForgeEscape(to_string(json_get(r, "resolved_by_commit", ""))) + "</li>"
+    }
+    html = html + "</ul>"
+    let decs = query("SELECT finding_text, decision, decided_at FROM forge_finding_decisions WHERE task_id = ? ORDER BY id DESC LIMIT 15", [task_id])
+    html = html + "<h2>История решений по находкам</h2><ul>"
+    each d in decs {
+      html = html + "<li>[" + ForgeEscape(to_string(json_get(d, "decision", ""))) + "] " + ForgeEscape(substring(to_string(json_get(d, "finding_text", "")), 0, 140)) + " <small>" + ForgeEscape(to_string(json_get(d, "decided_at", ""))) + "</small></li>"
+    }
+    html = html + "</ul>"
+    // FO-039: живое превью по требованию
+    let prevs = query("SELECT slug, status, port FROM forge_previews WHERE repo_name IN (SELECT name FROM forge_repos WHERE project_slug = (SELECT project_slug FROM forge_tasks WHERE id = ? LIMIT 1)) ORDER BY started_at DESC LIMIT 3", [task_id])
+    html = html + "<h2>Живое превью</h2><ul>"
+    each pv in prevs {
+      let pv_slug = to_string(json_get(pv, "slug", ""))
+      let pv_status = to_string(json_get(pv, "status", ""))
+      if redact(pv_status, "hash_only") == redact("running", "hash_only") then {
+        html = html + "<li><a href='/preview-live/" + pv_slug + "/' style='color:#8f8'>открыть</a> [" + pv_status + "] порт " + to_string(json_get(pv, "port", "")) + " <a href='/repos/task/preview-down?slug=" + pv_slug + "'>погасить</a></li>"
+      } else {
+        html = html + "<li>[" + pv_status + "] — поднять снова кнопкой</li>"
+      }
+    }
+    let html = html + "</ul><p><a href='/repos/task/preview-up?task_id=" + task_id + "' style='color:#fc6'>▶ Поднять превью</a> (команда из белого списка по типу проекта)</p>"
+    html = html + "<p><a href='/repos/project?slug=" + ForgeEscape(to_string(json_get(t, "project_slug", ""))) + "' style='color:#8ab'>← проект</a></p></body></html>"
+    return respond(html)
+  }
+
+  // решение по гейту из веба (дубль Telegram-кнопок)
+  // FO-039: подъём/гашение живого превью из веба
+  route "/repos/task/preview-up" method=GET {
+    let task_id = query_param("task_id")
+    let rows = query("SELECT t.project_slug, p.project_type, (SELECT name FROM forge_repos WHERE project_slug = t.project_slug LIMIT 1) as repo_name, (SELECT COUNT(*) FROM forge_repos r WHERE r.project_slug = t.project_slug AND r.name LIKE '%package%') as has_pkg FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
+    if redact(to_string(length(rows)), "hash_only") == redact("0", "hash_only") then { return respond("404 task not found") }
+    let r = get(rows, 0)
+    let project_slug = to_string(json_get(r, "project_slug", ""))
+    let repo_name = to_string(json_get(r, "repo_name", ""))
+    let ptype = to_string(json_get(r, "project_type", ""))
+    let cmd = "python3 -m http.server"
+    if redact(ptype, "hash_only") == redact("ai_office", "hash_only") then { let cmd = "python3 app.py" }
+    let result = ForgePreviewUp(project_slug, repo_name, cmd)
+    return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(substring(result, 0.0, 500)) + " <a href='/repos/task?task_id=" + task_id + "' style='color:#8ab'>← задача</a></body></html>")
+  }
+
+  route "/repos/task/preview-down" method=GET {
+    let slug = query_param("slug")
+    let result = ForgePreviewDown(slug)
+    return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(result) + "</body></html>")
+  }
+
+  route "/repos/task/decide" method=GET {
+    let gate = query_param("gate")
+    let idx = query_param("idx")
+    let result = ForgeGateDecide(gate, idx, "owner-web")
+    return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(substring(result, 0.0, 400)) + "</body></html>")
+  }
+
+  route "/repos/repo" method=GET {
+    let name = query_param("name")
+    let files_out = ForgeRepoFiles(name, "main")
+    let commits_out = ForgeCommits(name, "20")
+    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(name) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1,h2{font-family:Newsreader,serif}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}pre{background:#FBF8F2;padding:8px;overflow-x:auto;font-size:12px}</style></head><body><h1>" + ForgeEscape(name) + "</h1><h2>Дерево (main)</h2><div class='panel'><pre>" + ForgeEscape(files_out) + "</pre></div><h2>Коммиты</h2><div class='panel'><pre>" + ForgeEscape(commits_out) + "</pre></div></body></html>"
+    return respond_html(html)
+  }
+
+  route "/repos/file" method=GET {
+    let name = query_param("name")
+    let refv = query_param("ref")
+    let path = query_param("path")
+    let rv = ForgeValidRef(refv)
+    if redact(rv, "hash_only") != redact("ok", "hash_only") then { return respond("400 " + rv) }
+    let vp = ForgeValidPath(path)
+    if redact(vp, "hash_only") != redact("ok", "hash_only") then { return respond("400 " + vp) }
+    let content = ForgeReadFile(name, refv, path)
+    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(path) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1{font-family:Newsreader,serif}pre{background:#FBF8F2;padding:8px;overflow-x:auto;font-size:12px;white-space:pre-wrap}</style></head><body><h1>" + ForgeEscape(path) + " @" + ForgeEscape(refv) + "</h1><pre>" + ForgeEscape(content) + "</pre></body></html>"
+    return respond_html(html)
+  }
+
+  // ============================================================
+  // WEBHOOK — Telegram
+  // ============================================================
+
+  // Наряд №395 (gh#489): диалоговый контур (телеграм-вебхук) НЕ входит в
+  // dogfood-прогон — 337 UNTRUSTED_DECISION (№327, Category A) сайта
+  // до-решёточной эры офиса; миграция — отдельный наряд (см. отчёт №395,
+  // раздел «эргономика»). Харнесс отдаёт громкую заглушку.
+  route "/webhook/telegram" method=POST {
+    return respond("501 dialog contour: pending naryad-migration (Metalogos gh#489)")
+  }
+
+  // ============================================================
+  // LEDGER EXPORT (наряд №395, Metalogos gh#489) — require CRON_SECRET
+  // ============================================================
+
+  // Снимок подписанного следа для внешней верификации (mlog ledger verify).
+  // Snapshot пиннит голову; JSONL — верифицируемая цепочка; in-toto —
+  // профиль №396 (первый корпус записей для внешнего черновика стандарта).
+  route "/cron/ledger-export" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let head_before = ledger_head()
+    let snap = ledger_snapshot()
+    let path_j = ledger_export("data/ledger/ledger_latest.jsonl")
+    let path_i = ledger_export_intoto("data/ledger/ledger_latest.intoto.json")
+    return respond("200 ok head_before=" + head_before + " snapshot=" + snap + " count=" + to_string(ledger_count()) + " jsonl=" + path_j + " intoto=" + path_i)
+  }
+
+  // Живой демонстрационный отказ (наряд №395, критерий (в)): N(1)-грант,
+  // второй деструктивный вызов отказывает (GRANT_EXHAUSTED — рантайм-состояние,
+  // невидимое статике) и деградирует через on_deny(db). След: grant.issued →
+  // grant.consumed (первый) → deny-запись (второй) — в подписанном ledger.
+  route "/dogfood/deny-demo" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let _ = db_execute("CREATE TABLE IF NOT EXISTS dogfood_demo (id INTEGER PRIMARY KEY, note TEXT)")
+    let _ = db_execute("INSERT INTO dogfood_demo (note) VALUES ('demo-row')")
+    let g = grant_issue("db:delete:dogfood_demo", 60, "n", 1)
+    let first = db_execute_with_grant(g, "DELETE FROM dogfood_demo WHERE id = (SELECT MIN(id) FROM dogfood_demo)")
+    let second = db_execute_with_grant(g, "DELETE FROM dogfood_demo")
+    return respond("200 dogfood first=" + first + " second_refused_type=" + type_of(second))
+  }
+
+  // ============================================================
+  // CRON ENDPOINTS (8) — all require CRON_SECRET
+  // ============================================================
+
+  // Morning Brief — 07:20 MSK (4:20 UTC) — Yana: дата, время, погода, офис, мировые события
+  route "/cron/morning" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let _ = MorningBrief()
+    let _ = YanaSelfLearn()
+    return respond("200 ok")
+  }
+
+  route "/cron/evening" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let _ = EveningSummary()
+    return respond("200 ok")
+  }
+
+  route "/cron/weekly" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let _ = WeeklyDigest()
+    return respond("200 ok")
+  }
+
+  route "/cron/monthly" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let _ = MonthlyReview()
+    return respond("200 ok")
+  }
+
+  route "/cron/control" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let _ = ControlCheck()
+    return respond("200 ok")
+  }
+
+  route "/cron/night" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+
+    // Phase: FO-027 TTL chain_steps — очистка старше 14 дней; pending/failed
+    // без прогресса >24 ч → expired + Telegram-алерт владельцу
+    let g_cs = grant_issue("db:delete:chain_steps", 300, "once")
+    let _ = db_execute_with_grant(g_cs, "DELETE FROM chain_steps WHERE created_at < datetime('now', '-14 days')")
+    let expired_rows = query("SELECT chain_id, COUNT(*) AS c FROM chain_steps WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day') GROUP BY chain_id", [])
+    let _ = db_execute("UPDATE chain_steps SET status='expired', updated_at=datetime('now') WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day')")
+    each er in expired_rows {
+      let exp_chain = to_string(json_get(er, "chain_id", "?"))
+      let exp_count = to_string(json_get(er, "c", "?"))
+      let _ = AuditLog("chain_expired", "system", exp_chain + " steps=" + exp_count)
+      let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), "FO-027: цепочка " + exp_chain + " истекла без прогресса >24 ч (" + exp_count + " степов) — resume: /chain continue " + exp_chain + " <query>")
+    }
+
+    // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
+    let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
+    let ua_body = "{}"
+    let mut ua_result = try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
+    if to_string(ua_result) == "()" then { ua_result = "{}" }
+    let ua_summary = json_get(parse_json(ua_result), "summary", "UA cycle failed")
+
+    // Phase 1: LZ Daily Report (GitHub scan → Admin)
+    let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
+    let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+    let mut lz_result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
+    if to_string(lz_result) == "()" then { lz_result = "{}" }
+    let lz_summary = json_get(parse_json(lz_result), "report", "LZ daily failed")
+
+    // Phase 2: Memory Maintenance
+    let mem_body = "{}"
+    let mut mem_result = try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
+    if to_string(mem_result) == "()" then { mem_result = "{}" }
+    let mem_summary = json_get(parse_json(mem_result), "result", "Memory maintenance failed")
+
+    // Phase 3: Original AdminNightCycle
+    let result = AdminNightCycle()
+    // Phase 4: Устаревшие отделы (hermes-agent lifecycle, адаптировано под use-based сигнал)
+    let stale_result = try AdminCheckStaleDepts()
+    if to_string(stale_result) == "()" then { let stale_result = "проверка не выполнена" }
+    let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result
+    kv_set("admin_night_summary", result)
+    return respond("200 ok")
+  }
+
+  route "/cron/lz-daily" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by cron")
+    let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+    let result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0)
+  }
+
+  // F-2: Reminder delivery cron — called every 5 minutes by external scheduler
+  route "/cron/reminders" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let result = DeliverDueReminders()
+    return respond("200 " + result)
+  }
+
+  // Diagnostic: read last checkpoint trail from trace_log (FO-007: чекпоинты больше не в audit_log)
+  // After a Block C crash, curl this to see exactly which step failed
+  // FO-039 B.3: sweep живых превью — гашение по 30 минутам тишины
+  route "/cron/preview-sweep" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let result = ForgePreviewSweep()
+    let _ = AuditLog("cron_preview_sweep", "scheduler", result)
+    return respond("200 ok: " + result)
+  }
+
+  route "/cron/last-checkpoints" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let rows = query("SELECT id, timestamp, details FROM trace_log WHERE action = 'checkpoint' ORDER BY id DESC LIMIT 20", [])
+    let out = ""
+    each row in rows {
+      let rid = to_string(json_get(row, "id", "?"))
+      let rts = json_get(row, "timestamp", "?")
+      let rdt = json_get(row, "details", "?")
+      let out = out + "[" + rid + "] " + rts + " — " + rdt + "\n"
+    }
+    if out == "" then { return respond("200 No checkpoints found") }
+    return respond("200 " + out)
+  }
+
+  // Admin morning reply — 7:25 MSK (4:25 UTC) — response to Yana's morning brief
+  route "/cron/admin-reply" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let _ = AuditLog("cron_admin_reply", "admin", "admin morning reply triggered by cron")
+    let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+    let result = try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0)
+    return respond("200 ok")
+  }
+}
+
+// ── Workaround gh#520 (Metalogos): deny_handlers clobbered by subsequent
+// declaration merges at serve startup — a trailing on_deny survives as the
+// last merge and covers ALL classes (exact-vs-wildcard: no exact handlers
+// survive, so this wildcard takes every refusal). Remove after gh#520 fix.
+on_deny(*) {
+  print("deny:" + deny_reason())
+  let _ = append_file("data/logs/deny_events.log", "[deny] class=* reason=" + deny_reason() + "\n")
+}
