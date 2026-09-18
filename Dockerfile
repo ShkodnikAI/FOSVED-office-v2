@@ -15,7 +15,7 @@ WORKDIR /office
 COPY requirements.txt /office/requirements.txt
 RUN pip3 install -r requirements.txt --break-system-packages
 
-# Metalogos v0.19.0 — WH-1: force cache invalidation to ensure latest binary
+# Metalogos v0.20.0 (wave-3 capability layer, main 29de25a) — WH-1: force cache invalidation
 COPY bin/mlog /usr/local/bin/mlog
 RUN chmod +x /usr/local/bin/mlog && /usr/local/bin/mlog --version
 
