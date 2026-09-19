@@ -160,6 +160,13 @@ button,input{font-family:inherit;color:inherit;font-size:15px}button{-webkit-tap
 .skill-ico{flex:0 0 auto;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;background:var(--surface2);font-size:12px}
 .skill-title{font-size:13px;font-weight:500}
 .skill-meta{font-size:11px;color:var(--muted);margin-top:2px;word-break:break-all}
+/* FORGE-UI-8 (#201): Интеграции — поиск, группы со счётчиками, точка on/off */
+.int-row{display:flex;align-items:center;gap:10px;min-height:50px;padding:9px 14px;border-bottom:1px solid var(--line);width:100%;text-align:left}
+.int-row:last-child{border-bottom:none}
+.int-dot{flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:var(--line-strong)}
+.int-dot.on{background:var(--green)}
+.int-name{font-size:14px;font-weight:500}
+.int-status{margin-left:auto;font-family:var(--m);font-size:10.5px;color:var(--muted)}
 .group{border:1px solid var(--line);border-radius:3px;overflow:hidden;margin:14px 0;background:var(--surface)}
 .srow{display:flex;align-items:center;justify-content:space-between;min-height:52px;padding:10px 14px;border-bottom:1px solid var(--line);width:100%;text-align:left}.srow:last-child{border-bottom:none}
 .bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:8px}.bar>i{display:block;height:100%;background:var(--ink)}
@@ -358,7 +365,8 @@ button,input{font-family:inherit;color:inherit;font-size:15px}button{-webkit-tap
 <section class="screen" data-tab="integrations"><div class="scroll">
 <div class="eyebrow"><button type="button" data-go="more" style="color:var(--red);font-family:var(--m);font-size:12px">‹ назад</button></div>
 <div class="h1">Интеграции и ключи</div>
-<p class="lead">Модели и сервисы, подключённые к офису. Значение ключа никогда не показывается целиком.</p>
+<p class="lead">Модели и сервисы, подключённые к офису. Значение ключа никогда не показывается — даже частично.</p>
+<div class="search" style="margin:12px 0 0"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg><input type="text" id="intSearch" placeholder="Найти интеграцию…" autocomplete="off"></div>
 <div id="integrationsList" style="margin-top:14px"><div class="empty">Загружаю…</div></div>
 </div></section>
 <section class="screen" data-tab="telemetry"><div class="scroll">
@@ -532,10 +540,15 @@ await loadChatQuick();
 document.getElementById("chatForm").addEventListener("submit",function(e){e.preventDefault();sendChat()});
 async function api(path,opts){opts=opts||{};var ctrl=new AbortController();var t=setTimeout(function(){ctrl.abort()},opts.timeout||20000);var h={"Content-Type":"application/json"};if(_apiSecret)h["Authorization"]="Bearer "+_apiSecret;try{var res=await fetch((API_BASE||"")+path,{method:opts.method||(opts.body?"POST":"GET"),headers:h,body:opts.body?JSON.stringify(opts.body):undefined,signal:ctrl.signal});clearTimeout(t);if(!res.ok)throw new Error("HTTP "+res.status);var ct=res.headers.get("content-type")||"";return ct.indexOf("json")>=0?res.json():res.text()}catch(err){clearTimeout(t);throw err}}
 async function sendDept(dept,text,file){try{var data;try{data=await api("/dept/"+dept,{method:"POST",body:{action:"brief",task:text,file:file&&file.name},timeout:90000})}catch(e1){data=await api("/chat",{method:"POST",body:{dept:dept,message:text,file:file&&file.name},timeout:90000})}setLive(true);return (typeof data==="string"?data:null)||(data&&(data.text||data.reply||data.content))||"Принято."}catch(e){setLive(false);return "Не достучался до API: "+e.message+(file?" Файл «"+file.name+"» отмечен, отправлю при связи.":"")}}
-function openIntSheet(key,label,source){document.getElementById("intSheetTitle").textContent=esc(label);document.getElementById("intSheetSub").textContent=source==="none"?"Пока не подключено.":source==="db"?"Задано через это приложение.":"Задано в окружении сервера.";document.getElementById("intSheetInput").value="";document.getElementById("intSheetDelete").style.display=source==="db"?"":"none";document.getElementById("intSheetSave").setAttribute("data-key",key);document.getElementById("intSheetDelete").setAttribute("data-key",key);document.getElementById("intSheet").classList.add("on")}
+function openIntSheet(key,label,source){document.getElementById("intSheetTitle").textContent=esc(label);
+var connected=source!=="none";
+document.getElementById("intSheetSub").textContent=connected?(source==="db"?"Задано через это приложение.":"Задано в окружении сервера."):"Пока не подключено.";
+var inp=document.getElementById("intSheetInput");inp.value="";inp.placeholder=connected?"••••••••":"Вставь ключ";
+document.getElementById("intSheetDelete").hidden=!connected;
+document.getElementById("intSheetSave").setAttribute("data-key",key);document.getElementById("intSheetDelete").setAttribute("data-key",key);document.getElementById("intSheet").classList.add("on")}
 document.getElementById("intSheetCancel").addEventListener("click",function(){document.getElementById("intSheet").classList.remove("on")});
-document.getElementById("intSheetSave").addEventListener("click",async function(){var key=this.getAttribute("data-key");var val=document.getElementById("intSheetInput").value.trim();if(!val){toast("Введи значение");return}this.textContent="Сохраняю…";try{var r=await api("/api/integrations/"+encodeURIComponent(key),{method:"POST",body:{value:val}});if(r&&r.status==="ok"){toast("Сохранено: "+(r.masked||""));document.getElementById("intSheet").classList.remove("on");loaded.integrations=false;loadScreen("integrations")}else{toast((r&&r.message)||"Не удалось сохранить")}}catch(e){toast("Ошибка: "+e.message)}this.textContent="Сохранить"});
-document.getElementById("intSheetDelete").addEventListener("click",async function(){var key=this.getAttribute("data-key");try{await api("/api/integrations/"+encodeURIComponent(key),{method:"DELETE"});toast("Значение убрано");document.getElementById("intSheet").classList.remove("on");loaded.integrations=false;loadScreen("integrations")}catch(e){toast("Ошибка: "+e.message)}});
+document.getElementById("intSheetSave").addEventListener("click",async function(){var key=this.getAttribute("data-key");var val=document.getElementById("intSheetInput").value.trim();if(!val){toast("Введи значение");return}this.textContent="Сохраняю…";try{var r=await api("/api/integrations/"+encodeURIComponent(key),{method:"POST",body:{value:val}});if(r&&r.status==="ok"){toast("Сохранено — статус обновлён");document.getElementById("intSheet").classList.remove("on");await refreshIntegrations()}else{toast((r&&r.message)||"Не удалось сохранить")}}catch(e){toast("Ошибка: "+e.message)}this.textContent="Сохранить"});
+document.getElementById("intSheetDelete").addEventListener("click",async function(){var key=this.getAttribute("data-key");try{await api("/api/integrations/"+encodeURIComponent(key),{method:"DELETE"});toast("Значение убрано");document.getElementById("intSheet").classList.remove("on");await refreshIntegrations()}catch(e){toast("Ошибка: "+e.message)}});
 async function refresh(){try{await api("/api/dashboard");setLive(true)}catch(e){setLive(false)}}
 function fmtK(n){if(n==null)return "—";if(n>=1e6)return (n/1e6).toFixed(1)+"M";if(n>=1e3)return (n/1e3).toFixed(1)+"K";return String(n)}
 function svgBarsTokenDays(rows){
@@ -842,6 +855,31 @@ await api("/api/forge/projects/"+encodeURIComponent(projOpenSlug)+"/skills",{met
 haptic("light");toast("Скил добавлен");
 await openProject(projOpenSlug);
 }catch(e){toast("Не удалось: "+e.message)}}
+/* FORGE-UI-8 (#201): Интеграции — группы со счётчиками из реестра, живой поиск,
+статус «подключён/не задан» вместо маски (значение не показывается даже частично);
+после сохранения/удаления — перечитывание списка, не страницы */
+var intData=[];var intMasterKey=true;var intQuery="";
+function renderIntegrations(){
+var q=intQuery.toLowerCase();
+var list=intData.filter(function(x){return !q||String(x.label).toLowerCase().indexOf(q)>=0||String(x.id).toLowerCase().indexOf(q)>=0});
+var models=list.filter(function(x){return x.kind==="model"});
+var services=list.filter(function(x){return x.kind!=="model"});
+var nM=intData.filter(function(x){return x.kind==="model"}).length;
+var nS=intData.length-nM;
+function row(x){return '<button class="int-row" type="button" data-int-key="'+esc(x.id)+'" data-int-label="'+esc(x.label)+'" data-int-source="'+esc(x.source)+'"><span class="int-dot '+(x.connected?"on":"")+'"></span><span class="int-name">'+esc(x.label)+'</span><span class="int-status">'+(x.connected?"подключён":"не задан")+"</span></button>"}
+var html="";
+if(models.length)html+='<div class="sec" style="margin-top:6px"><h2 style="font-size:14px">Модели ('+nM+")</h2></div><div class=\"group\">"+models.map(row).join("")+"</div>";
+if(services.length)html+='<div class="sec"><h2 style="font-size:14px">Сервисы ('+nS+")</h2></div><div class=\"group\">"+services.map(row).join("")+"</div>";
+if(!intMasterKey)html+='<div class="empty" style="text-align:left;padding:14px 0">Шифрование ключей не настроено на сервере (нет SECRETS_MASTER_KEY) — сохранить новое значение отсюда пока нельзя, но всё заданное через окружение работает.</div>';
+if(!list.length)html=intQuery?'<div class="empty">Ничего не нашлось.</div>':'<div class="empty">Список пуст.</div>';
+document.getElementById("integrationsList").innerHTML=html}
+async function refreshIntegrations(){
+try{
+var ig=await api("/api/integrations");
+intData=ig.integrations||[];intMasterKey=!!ig.master_key_configured;
+}catch(e){/* оставляем последний список */}
+renderIntegrations()}
+document.getElementById("intSearch").addEventListener("input",function(){intQuery=this.value.trim();renderIntegrations()});
 async function loadScreen(tab){
 if(loaded[tab])return;
 if(tab==="chat"){
@@ -939,20 +977,8 @@ if(naradOpenId){openNarad(naradOpenId)}
 }catch(e){document.getElementById("naradsList").innerHTML='<div class="empty">Нет связи с API.</div>';document.getElementById("naradFilters").innerHTML=""}
 }
 if(tab==="integrations"){
-try{
-var ig=await api("/api/integrations");
-var list=ig.integrations||[];
-var box=document.getElementById("integrationsList");
-var models=list.filter(function(x){return x.kind==="model"});
-var services=list.filter(function(x){return x.kind!=="model"});
-function row(x){var st=x.connected?"ok":"warn";var stLabel=x.connected?(x.masked||"подключено"):"не подключено";return '<button class="srow" type="button" data-int-key="'+esc(x.id)+'" data-int-label="'+esc(x.label)+'" data-int-source="'+esc(x.source)+'"><span>'+esc(x.label)+'</span><span class="stampmark '+st+'" style="font-size:9.5px">'+esc(stLabel)+'</span></button>'}
-var html="";
-if(models.length){html+='<div class="sec" style="margin-top:6px"><h2 style="font-size:14px">Модели</h2></div><div class="group">'+models.map(row).join("")+"</div>"}
-if(services.length){html+='<div class="sec"><h2 style="font-size:14px">Сервисы</h2></div><div class="group">'+services.map(row).join("")+"</div>"}
-if(!ig.master_key_configured){html+='<div class="empty" style="text-align:left;padding:14px 0">Шифрование ключей не настроено на сервере (нет SECRETS_MASTER_KEY) — сохранить новое значение отсюда пока нельзя, но всё заданное через окружение работает.</div>'}
-box.innerHTML=html||'<div class="empty">Список пуст.</div>';
+await refreshIntegrations();
 loaded.integrations=true;
-}catch(e){document.getElementById("integrationsList").innerHTML='<div class="empty">Нет связи с API.</div>'}
 }
 }
 var inp=document.getElementById("apiBaseInput");inp.value=API_BASE;inp.addEventListener("change",function(){var v=this.value.trim().replace(/\/$/,"");localStorage.setItem("FOSVED_API",v);toast("Адрес сохранён")});
