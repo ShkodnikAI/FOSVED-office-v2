@@ -816,15 +816,15 @@ pattern EstimateTokens(text: String) -> String {
   return to_string(length(text) / 4.0)
 }
 
-pattern GetCompactedHistory(chat_id: String, limit: String) -> String {
-  let total_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ?", [chat_id])
+pattern GetCompactedHistory(chat_id: String, limit: String, dept: String) -> String {
+  let total_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ? AND dept = ?", [chat_id, dept])
   let total = to_int(json_get(total_rows[0], "cnt", "0"))
   let lim = to_int(limit)
   if total <= lim * 2 then {
-    return GetRecentDialog(chat_id, limit)
+    return GetRecentDialog(chat_id, limit, dept)
   }
-  let early_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at ASC LIMIT 3", [chat_id])
-  let recent_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?", [chat_id, limit])
+  let early_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? AND dept = ? ORDER BY created_at ASC LIMIT 3", [chat_id, dept])
+  let recent_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? AND dept = ? ORDER BY created_at DESC LIMIT ?", [chat_id, dept, limit])
   let out = ""
   each row in early_rows {
     let role = to_string(json_get(row, "role", ""))
@@ -936,7 +936,7 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
   let injected = GetInjectedContext(dept)
   let steer = GetSteerContext(dept)
   // IDEA-4: Context Budget — use budgeted history (max 4000 tokens)
-  let dialog = GetBudgetedHistory(chat_id, "10", "4000")
+  let dialog = GetBudgetedHistory(chat_id, "10", "4000", dept)
   let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
 
@@ -1485,10 +1485,10 @@ pattern VerifyReply(query: String, reply: String, dept: String) -> String {
 // IDEA-4: Context Budget — enforce max tokens on dialog history
 // ============================================================
 
-pattern GetBudgetedHistory(chat_id: String, limit: String, max_tokens_str: String) -> String {
+pattern GetBudgetedHistory(chat_id: String, limit: String, max_tokens_str: String, dept: String) -> String {
   let max_tokens = to_float(max_tokens_str)
   if max_tokens <= 0.0 then { max_tokens = 4000.0 }
-  let raw = GetCompactedHistory(chat_id, limit)
+  let raw = GetCompactedHistory(chat_id, limit, dept)
   // Estimate tokens: ~4 chars per token
   let est = length(raw) / 4.0
   if est <= max_tokens then { return raw }
@@ -1895,7 +1895,7 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let _ = TraceLog("yana", "step_6_before_YanaWeather")
   let weather = YanaWeather()
   let _ = TraceLog("yana", "step_7_before_GetRecentDialog")
-  let dialog = GetBudgetedHistory(chat_id, "20", "6000")
+  let dialog = GetBudgetedHistory(chat_id, "20", "6000", "yana")
   let _ = TraceLog("yana", "step_8_before_YanaRecallMemories")
   let memories = YanaRecallMemories(query)
   let _ = TraceLog("yana", "step_9_before_context_assembly")
