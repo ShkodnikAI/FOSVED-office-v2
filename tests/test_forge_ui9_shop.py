@@ -210,8 +210,11 @@ def test_settings_endpoints_roundtrip():
 # ── Блок D. Архив — решение зафиксировано ────────────────────────────────
 
 def test_archive_deferred_honestly():
+    # FORGE-UI-13 (#216): обещанный под-наряд реализован — строка ведёт на
+    # реальный экран архива закупок, заглушка-тост удалена.
     assert 'id="shopArchiveRow"' in INDEX
-    assert 'Вынесено в отдельный под-наряд' in INDEX
+    assert 'openShopArchive' in INDEX
+    assert 'id="shopArchWrap"' in INDEX
 
 
 def test_ui9_frontend_statics():

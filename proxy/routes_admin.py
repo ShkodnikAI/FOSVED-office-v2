@@ -835,6 +835,60 @@ def api_shop_settings_set():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.get("/api/shop/dossiers")
+def api_shop_dossiers():
+    """FORGE-UI-13 (#216): список досье закупок из shop_dossiers (схема не
+    меняется, только чтение). Фильтры: year/month/day (по created_at) и q —
+    текстовый поиск по product_id, названию/запросу товара (shop_products)
+    и содержимому snapshot_json. Краткие карточки: id, короткое название,
+    дата, признак «на контроль» (активный shop_watches по product_id) и
+    url — кликабельная ссылка на полное досье (существующий рендер
+    /shop/dossier/<id>?t=HMAC, proxy/shop_dossier.dossier_url)."""
+    try:
+        q = (request.args.get("q") or "").strip()
+        year = (request.args.get("year") or "").strip()
+        month = (request.args.get("month") or "").strip()
+        day = (request.args.get("day") or "").strip()
+        where = ["d.format='snapshot'"]
+        params = []
+        if year.isdigit():
+            where.append("CAST(strftime('%Y', d.created_at) AS INTEGER)=?")
+            params.append(int(year))
+        if month.isdigit():
+            where.append("CAST(strftime('%m', d.created_at) AS INTEGER)=?")
+            params.append(int(month))
+        if day.isdigit():
+            where.append("CAST(strftime('%d', d.created_at) AS INTEGER)=?")
+            params.append(int(day))
+        if q:
+            like = f"%{q}%"
+            where.append("(CAST(d.product_id AS TEXT) LIKE ? OR d.snapshot_json LIKE ? "
+                         "OR COALESCE(p.title,'') LIKE ? OR COALESCE(p.query_text,'') LIKE ?)")
+            params += [like, like, like, like]
+        rows = _query(
+            "SELECT d.id, d.product_id, d.created_at, COALESCE(p.title,'') AS title, "
+            "COALESCE(p.query_text,'') AS qtext "
+            "FROM shop_dossiers d LEFT JOIN shop_products p ON p.id = d.product_id "
+            f"WHERE {' AND '.join(where)} ORDER BY d.id DESC LIMIT 200",
+            tuple(params), fetch=True) or []
+        try:
+            watched = {r["product_id"] for r in (
+                _query("SELECT product_id FROM shop_watches WHERE status='active'", fetch=True) or [])}
+        except Exception:  # noqa: BLE001 — вотч-таблицы нет в базе → признака нет
+            watched = set()
+        from proxy.shop_dossier import dossier_url
+        items = [{
+            "id": r["id"], "product_id": r["product_id"],
+            "title": (r["title"] or r["qtext"] or f"Товар #{r['product_id']}"),
+            "created": (r["created_at"] or "")[:16],
+            "on_watch": r["product_id"] in watched,
+            "url": dossier_url(r["id"]),
+        } for r in rows]
+        return jsonify({"status": "ok", "items": items})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.post("/api/shop/preview")
 def api_shop_preview():
     """FORGE-UI-9 (#202): реальный запрос закупки с выбранным профилем оценки.
