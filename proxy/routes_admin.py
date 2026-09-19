@@ -489,6 +489,87 @@ def api_dialog_search():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.get("/api/attention")
+def api_attention():
+    """FORGE-UI-5 (#198): сводка «Требует решения» — только чтение существующих
+    данных: открытые гейты forge_gates (decision IS NULL/''), открытые находки
+    admin_findings (status='open'), состояние блокировки system_lockdown (общая
+    kv system_settings), версия/хеш коммита из реальных данных сборки
+    (RENDER_GIT_COMMIT + файл VERSION — пин бинаря mlog)."""
+    try:
+        gates_count = 0
+        gates = []
+        try:
+            gc = _query("SELECT COUNT(*) AS c FROM forge_gates WHERE decision IS NULL OR decision = ''", fetch=True)
+            gates_count = int(gc[0]["c"]) if gc else 0
+            g_rows = _query("SELECT id, kind, question FROM forge_gates WHERE decision IS NULL OR decision = '' ORDER BY id DESC LIMIT 20", fetch=True) or []
+            gates = [{"id": g["id"], "kind": g["kind"] or "", "question": (g["question"] or "")[:200]} for g in g_rows]
+        except Exception as ge:  # noqa: BLE001 — нет таблицы → честный ноль, не 500
+            _log_error(f"attention: gates read failed: {ge}", source="api_attention", kind="input")
+        findings = 0
+        try:
+            fr = _query("SELECT COUNT(*) AS c FROM admin_findings WHERE status = 'open'", fetch=True)
+            findings = int(fr[0]["c"]) if fr else 0
+        except Exception as fe:  # noqa: BLE001
+            _log_error(f"attention: findings read failed: {fe}", source="api_attention", kind="input")
+        locked = False
+        try:
+            lr = _query("SELECT value FROM system_settings WHERE key = 'system_lockdown' LIMIT 1", fetch=True)
+            locked = bool(lr) and str(lr[0]["value"] or "").lower() == "true"
+        except Exception as le:  # noqa: BLE001
+            _log_error(f"attention: lockdown read failed: {le}", source="api_attention", kind="input")
+        commit = (os.environ.get("RENDER_GIT_COMMIT") or "")[:7]
+        version = ""
+        try:
+            vp = os.path.join(BASE_DIR, "VERSION")
+            if os.path.isfile(vp):
+                with open(vp, "r", encoding="utf-8") as fh:
+                    version = fh.read().strip()[:7]
+        except Exception as ve:  # noqa: BLE001
+            _log_error(f"attention: version read failed: {ve}", source="api_attention", kind="input")
+        return jsonify({
+            "status": "ok",
+            "gates": gates, "gates_total": gates_count, "findings": findings,
+            "total": gates_count + findings,
+            "lockdown": locked, "version": version, "commit": commit,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/audit")
+def api_audit():
+    """FORGE-UI-5 (#198): последние записи журнала аудита — чтение существующей
+    таблицы audit_log (пишется существующей логикой, здесь ничего не меняем)."""
+    try:
+        rows = _query("SELECT timestamp, action, actor, dept, details FROM audit_log ORDER BY id DESC LIMIT 50", fetch=True) or []
+        items = [{"ts": r["timestamp"] or "", "action": r["action"] or "", "actor": r["actor"] or "",
+                  "dept": r["dept"] or "", "details": (r["details"] or "")[:160]} for r in rows]
+        return jsonify({"status": "ok", "items": items})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/archive-watches")
+def api_archive_watches():
+    """FORGE-UI-5 (#198): отчёты на контроле — существующий механизм kv
+    control_<doc_id> (system_settings — общая kv с Metalogos; запись идёт
+    существующими miniapp-действиями HandleMiniAppAction, value = freq|title).
+    Только чтение. Даты окончания контроля схема не предусматривает — показываем
+    freq как есть (пробел дат зафиксирован в отчёте наряда)."""
+    try:
+        rows = _query("SELECT key, value FROM system_settings WHERE key LIKE 'control|_%' ESCAPE '|'", fetch=True) or []
+        items = []
+        for r in rows:
+            doc_id = str(r["key"])[8:]
+            val = str(r["value"] or "")
+            freq, _, title = val.partition("|")
+            items.append({"doc_id": doc_id, "freq": freq, "title": title})
+        return jsonify({"status": "ok", "watches": items})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.post("/api/narads/<nid>/approve")
 def api_narad_approve(nid):
     try:
