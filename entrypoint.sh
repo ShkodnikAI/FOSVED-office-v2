@@ -124,4 +124,11 @@ python3 reverse_proxy.py &
 PROXY_PID=$!
 echo "Reverse proxy started (PID: $PROXY_PID)"
 
-wait $LLM_PID $MLOG_PID $PROXY_PID
+# 4. LZ Telegram Monitor (MON-1, #171)
+# Kill-switch: TG_MONITOR_ENABLED != "1" → процесс логает и завершается сам.
+# Полный чеклист владельца (api_id/hash, отдельный аккаунт) — issue #171.
+python3 telegram_monitor.py &
+TG_MONITOR_PID=$!
+echo "LZ Telegram monitor started (PID: $TG_MONITOR_PID)"
+
+wait $LLM_PID $MLOG_PID $PROXY_PID $TG_MONITOR_PID
