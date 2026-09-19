@@ -1583,6 +1583,8 @@ CALL_PYTHON_ALLOWED = {
     "llm_verifier": {"select", "score", "verify", "rank"},
     # FO-035 A.2: secrets_store (SEC-5 минимальный) — AES-256-GCM, FORGE_MASTER_KEY
     "forge_secrets": {"set", "get"},
+    # FORGE #221: детерминированные источники ЛЗ (arXiv/HN/GitHub) в общем пути /lz
+    "lz_sources": {"lz_api_scan"},
     # Data processing
     "json": {"dumps", "loads"},
     "statistics": {"mean", "median", "stdev", "variance"},
@@ -1638,7 +1640,13 @@ def call_python_endpoint():
 
     try:
         import importlib
-        mod = importlib.import_module(module_name)
+        try:
+            mod = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            # Whitelist-модули живут и в proxy/ (lz_sources — #221,
+            # forge_secrets — FO-035): резолв по пакету без расширения sys.path.
+            # Whitelist выше не расширяется — только резолв имени.
+            mod = importlib.import_module(f"proxy.{module_name}")
         func = getattr(mod, func_name)
         result = func(*args, **kwargs)
         _log_audit("call_python", {"module": module_name, "function": func_name}, "system")

@@ -315,7 +315,41 @@ pattern BuildLZContext(query: String, domain: String, chat_id: String) -> String
   let kb = LZWorldKB(domain)
   let watch = LZWatchRelevance(query)
   let recent = LZRecentArtifacts(domain, 5.0)
-  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent
+  let scan = LZApiScanContext(query, domain, chat_id)
+  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan
+}
+
+// ── FORGE (#221): детерминированные API-источники в общем пути /lz ──────
+// arXiv/HN/GitHub (proxy/lz_sources.py, lz_api_scan) раньше были недостижимы
+// из общего пути: контекст собирался только из статичного KB-ярлыка, вотча и
+// планового LZ Daily. Домены скана — явное решение наряда A.2, ADR-0003:
+// tech (все 3 источника) + economics (arXiv q-fin, HN VC/финтех, GitHub
+// финтех-репо); politics/geopolitics/events — источники нерелевантны, там
+// живой веб (LZTavilySearch, PR #219). Два класса данных работают
+// параллельно и не заменяют друг друга.
+pattern LZApiScanContext(query: String, domain: String, chat_id: String) -> String {
+  if domain != "tech" and domain != "economics" then { return "" }
+  let topic = LZExtractTopic(query)
+  if topic == "" then { return "" }
+  let resp = call_python("lz_sources", "lz_api_scan", json_encode([[topic], 6.0, "lz"]))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = try parse_json(resp)
+  if to_string(parsed) == "()" then { return "" }
+  let text = to_string(json_get(parsed, "result.text", ""))
+  if text == "" then {
+    return "APIscan: детерминированный скан (arXiv/HN/GitHub) не нашёл релевантных результатов по теме «" + topic + "»"
+  }
+  return "APIscan (тема: " + topic + "):\n" + text
+}
+
+// Тема для API-скана: короткий набор английских ключевых слов из свободного
+// текста запроса (arXiv/HN/GitHub плохо ищут по длинной русской фразе).
+// Fallback — усечённый исходный запрос: источники честно вернут пусто и
+// LZApiScanContext отразит это, молчаливой подмены данных нет.
+pattern LZExtractTopic(query: String) -> String {
+  let result = try call_llm("Extract 2-4 English search keywords from the query below for arXiv/HackerNews/GitHub search. Reply with the keywords separated by spaces, nothing else. Query: " + substring(query, 0.0, 400.0))
+  if to_string(result) == "()" then { return substring(query, 0.0, 120.0) }
+  return substring(result, 0.0, 120.0)
 }
 
 pattern LZWorldKB(domain: String) -> String {
