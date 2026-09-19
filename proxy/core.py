@@ -454,14 +454,26 @@ def init_db():
 
 def _query(sql, params=(), fetch=False):
     with db_lock:
+        c = None
         try:
             c = _db()
             cur = c.execute(sql, params)
             if fetch:
                 rows = cur.fetchall(); c.close(); return rows
             c.commit(); c.close()
-        except sqlite3.OperationalError as e:
-            if "no such table" in str(e):
+        except sqlite3.Error as e:
+            # LEAK-FIX (кейс 2026-09-19): при ошибке execute/commit соединение
+            # раньше не закрывалось. Питоновский traceback (pytest хранит его
+            # для отчёта) держит фрейм живым → открытое соединение с
+            # незакрытой транзакцией держало WRITE-лок навсегда, и одна
+            # транзитная блокировка каскадом валила всю сессию тестов.
+            # Теперь соединение закрывается на ЛЮБОЙ ошибке до raise.
+            if c is not None:
+                try:
+                    c.close()
+                except Exception:  # noqa: BLE001 — соединение уже мертво
+                    pass
+            if isinstance(e, sqlite3.OperationalError) and "no such table" in str(e):
                 return [] if fetch else None
             raise
 

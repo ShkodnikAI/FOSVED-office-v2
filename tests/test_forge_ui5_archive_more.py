@@ -54,11 +54,11 @@ def ui5_schema():
     _query("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)")
     _query("DELETE FROM forge_gates")
     _query("DELETE FROM admin_findings")
-    _query("DELETE FROM system_settings WHERE key LIKE 'control|_%' ESCAPE '|'")
+    _query("DELETE FROM system_settings WHERE key LIKE 'control|_%' ESCAPE '|' OR key = 'other_key'")
     yield
     _query("DELETE FROM forge_gates")
     _query("DELETE FROM admin_findings")
-    _query("DELETE FROM system_settings WHERE key LIKE 'control|_%' ESCAPE '|'")
+    _query("DELETE FROM system_settings WHERE key LIKE 'control|_%' ESCAPE '|' OR key = 'other_key'")
 
 
 # ── Блок A. Экран «Ещё» ──────────────────────────────────────────────────
