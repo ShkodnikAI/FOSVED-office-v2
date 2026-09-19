@@ -624,6 +624,89 @@ def api_forge_projects():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+# ── FORGE-UI-12 (#215): создание проекта FORGE из миниаппа ──────────────────
+# Тонкий route: SQL и валидация НЕ дублируются в Python — создание выполняет
+# существующий mlog-паттерн ForgeCreateProject (dept/forge.mlog — вставка
+# строки проекта со status='active') через мост
+# dept/forge_create_bridge.mlog (mlog run + FNP_* env). Python делает только
+# то, чего нет в mlog: HTTP-валидацию формы, транслитерацию slug и запуск моста.
+
+_FORGE_PROJECT_TYPES = ("site", "android", "ai_office")
+# Схема транслитерации: однобуквенные пары + многозначные (ж→zh, ч→ch, …);
+# ъ/ь — отбрасываются (жёсткое→жесткое, соль→sol).
+_TR_CYR = {ord(k): v for k, v in (
+    p.split(":") for p in (
+        "а:a б:b в:v г:g д:d е:e ж:zh з:z и:i й:y к:k л:l м:m н:n о:o п:p р:r "
+        "с:s т:t у:u ф:f х:h ц:c ч:ch ш:sh щ:sch ъ: ы:y ь: э:e ю:yu я:ya ё:yo "
+        "і:i ї:yi є:ie ґ:g ў:u"
+    ).split())
+}
+
+
+def _forge_slugify(name: str) -> str:
+    """Slug из названия: транслитерация кириллицы, дефисы, нижний регистр."""
+    s = (name or "").strip().lower().translate(_TR_CYR)
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s or "project"
+
+
+def _forge_bridge_run(slug: str, name: str, goal: str, customer: str, ptype: str):
+    """Запуск mlog-моста. Возвращает (ok, line) — строку ответа ForgeCreateProject."""
+    env = os.environ.copy()
+    env.update({"FNP_SLUG": slug, "FNP_NAME": name, "FNP_GOAL": goal,
+                "FNP_CUSTOMER": customer, "FNP_TYPE": ptype})
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.run(
+        ["./bin/mlog", "run", "dept/forge_create_bridge.mlog"],
+        capture_output=True, text=True, timeout=90, env=env, cwd=repo_root)
+    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    for raw in out.splitlines():
+        line = raw.strip()
+        if line.startswith("Проект создан:"):
+            return True, line
+        if line.startswith("ОТКАЗ:"):
+            return False, line
+    return False, (proc.stderr or proc.stdout or "мост не вернул ответа").strip()[-300:]
+
+
+@app.post("/api/forge/projects")
+def api_forge_project_create():
+    """FORGE-UI-12 (#215): короткая форма создания проекта (название, цель,
+    заказчик, тип). Запись делает только mlog-паттерн ForgeCreateProject —
+    здесь НЕТ INSERT. Slug генерируется из названия (транслитерация + дефисы),
+    коллизии гасятся суффиксом -2/-3 (финальный гарант — проверка slug внутри
+    ForgeCreateProject)."""
+    try:
+        d = request.get_json(force=True) or {}
+        name = str(d.get("name") or "").strip()
+        goal = str(d.get("goal") or "").strip()
+        customer = str(d.get("customer") or "").strip()
+        ptype = str(d.get("project_type") or "").strip()
+        if not name:
+            return jsonify({"status": "error", "message": "Введи название проекта"}), 400
+        if ptype not in _FORGE_PROJECT_TYPES:
+            return jsonify({"status": "error",
+                            "message": "project_type ∈ {site, android, ai_office}"}), 400
+        base = _forge_slugify(name)
+        slug = base
+        n = 1
+        while _query("SELECT 1 FROM forge_projects WHERE slug=? LIMIT 1", (slug,), fetch=True):
+            n += 1
+            slug = f"{base}-{n}"
+        try:
+            ok, line = _forge_bridge_run(slug, name, goal, customer, ptype)
+        except subprocess.TimeoutExpired:
+            _log_error(f"forge create bridge timeout: slug={slug}", source="api_forge_project_create", kind="input")
+            return jsonify({"status": "error", "message": "Создание превысило 90с — попробуй ещё раз"}), 504
+        if not ok:
+            return jsonify({"status": "error", "message": line}), 409
+        return jsonify({"status": "ok", "project": {"slug": slug, "name": name,
+                                                    "project_type": ptype}, "message": line})
+    except Exception as e:
+        _log_error(f"forge project create: {e}", source="api_forge_project_create", kind="input")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.get("/api/forge/projects/<slug>")
 def api_forge_project_detail(slug):
     """FORGE-UI-7 (#200): карточка проекта. Значения ключей проекта
