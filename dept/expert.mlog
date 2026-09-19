@@ -175,7 +175,18 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
     return ExpertUpdateBriefingStatus(bid, "debriefed")
   }
 
-  // ── Default: full Expert pipeline (LLM with automotive-enriched context) ──
+  // ── Deadline gate (правило №1 исходного профиля, восстановлено из
+  // v4.1 transition pack — было только текстом в промпте, не кодом,
+  // модель соблюдала правило мягче, чем оно сформулировано) ──
+  // "Не выдаёт брифинг без явного дедлайна встречи (без дедлайна —
+  // это не препарация, это исследование, идёт в Лабораторию)"
+  let has_deadline = ExpertDetectDeadline(query)
+  if has_deadline == false then {
+    let _ = RecordAssistantMessage(chat_id, dept, "[дедлайн не указан — уточняющий вопрос]")
+    return "Приняла тему. Прежде чем готовить боевой брифинг — когда встреча? Без срока это не препарация к конкретному разговору, а фоновое исследование, это лучше в Лабораторию Знаний (/lz).\n\nЕсли встреча всё же скоро — просто скажи когда (\"завтра\", \"через 2 часа\", \"в пятницу\"), и я запущу подготовку."
+  }
+
+  // ── Default: full Expert pipeline (LLM with domain-enriched context) ──
   let context = BuildExpertContext(query, chat_id)
   let disclaimer = ExpertDisclaimer()
   let llm_result = try call_llm(context, query)
@@ -184,7 +195,7 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
   let reply = to_string(llm_result)
   // ── LLM-Verifier: score + conditional best-of-2 for substantive queries ──
   if length(query) > 80.0 then {
-    let ev_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Factual correctness of automotive data? Completeness: All requested aspects covered? Actionability: Usable for meeting preparation?"]))
+    let ev_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Factual correctness of the domain data? Completeness: All requested aspects covered? Actionability: Usable for meeting preparation?"]))
     let mut ev_score = 0.5
     if to_string(ev_resp) != "()" and contains(to_string(ev_resp), "error") == false then {
       let ev_parsed = try parse_json(ev_resp)
@@ -251,13 +262,54 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
   let live_section = ""
   if live != "" then { let live_section = "\n\n=== Live Search ===\n" + live }
 
-  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Automotive Knowledge Base ===\n" + auto_kb + live_section + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Консолидированные факты ===\n" + facts + "\n\n=== Recent Dialog ===\n" + dialog
+  // Кросс-ссылки на КнowledgeArtifact (ЛЗ) и Analysis (ОСП) — из
+  // исходного профиля ("Cross-references с КnowledgeArtifact от
+  // Лаборатории знаний / с Analysis от ОСП, если тема покрыта"),
+  // не было реализовано вообще. Работает теперь, что таблица
+  // knowledge_artifacts реально существует (см. хотфикс #234).
+  let mut cross_section = ""
+  let la_rows = try query("SELECT title, domain, status, disruption_score FROM knowledge_artifacts WHERE title LIKE ? ORDER BY updated_at DESC LIMIT 3", ["%" + query + "%"])
+  if to_string(la_rows) != "()" and length(la_rows) > 0.0 then {
+    let mut lz_lines = ""
+    each row in la_rows {
+      let title = to_string(json_get(row, "title", ""))
+      let status = to_string(json_get(row, "status", ""))
+      let lz_lines = lz_lines + "- " + title + " (статус: " + status + ")\n"
+    }
+    let cross_section = cross_section + "\n\n=== Уже отслеживается Лабораторией Знаний ===\n" + lz_lines
+  }
+  let osp_rows = try query("SELECT topic, status FROM analysis WHERE topic LIKE ? ORDER BY created_at DESC LIMIT 3", ["%" + query + "%"])
+  if to_string(osp_rows) != "()" and length(osp_rows) > 0.0 then {
+    let mut osp_lines = ""
+    each row in osp_rows {
+      let topic = to_string(json_get(row, "topic", ""))
+      let status = to_string(json_get(row, "status", ""))
+      let osp_lines = osp_lines + "- " + topic + " (статус: " + status + ")\n"
+    }
+    let cross_section = cross_section + "\n\n=== Уже анализировалось ОСП ===\n" + osp_lines
+  }
+
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Automotive Knowledge Base ===\n" + auto_kb + live_section + cross_section + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Консолидированные факты ===\n" + facts + "\n\n=== Recent Dialog ===\n" + dialog
   return context
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // TIER-BASED SKILL LOADING (like OSP pattern)
 // ═══════════════════════════════════════════════════════════════════════
+pattern ExpertDetectDeadline(query: String) -> Bool {
+  let t = lower(query)
+  // Относительное время
+  if contains(t, "через ") and (contains(t, "час") or contains(t, "минут") or contains(t, "дн") or contains(t, "недел")) then { return true }
+  if contains(t, "завтра") or contains(t, "сегодня") or contains(t, "послезавтра") then { return true }
+  // Дни недели
+  if contains(t, "понедельник") or contains(t, "вторник") or contains(t, "сред") or contains(t, "четверг") or contains(t, "пятниц") or contains(t, "суббот") or contains(t, "воскресенье") then { return true }
+  // Явное указание встречи/дедлайна
+  if contains(t, "дедлайн") or contains(t, "deadline") or contains(t, "встреча в") or contains(t, "встреча через") or contains(t, "созвон") then { return true }
+  // Числовая дата (простая эвристика: точка/слэш рядом с годом — похоже на дату)
+  if contains(t, ".202") or contains(t, "/202") then { return true }
+  return false
+}
+
 pattern LoadExpertSkills(query: String) -> String {
   let t = lower(query)
   let result = ""
