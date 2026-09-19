@@ -20,6 +20,29 @@ services:
     # Render free tier: spins down after 15 min inactivity
     # Cron jobs below will keep it alive and collect data
 
+  # ── FO-050 (#182): стейджинг VM-пилота Metalogos (наряд №395) ─────────
+  # Харнесс dogfood_staging.mlog на бинаре mlog-020 (0.20.0 wave-3, main 29de25a):
+  # capability-слой (гранты №390, on_deny №392, ledger №393), диалоговый контур
+  # заглушен (миграционный долг №327). Прод (fosved-office-v2) не затронут.
+  # METALOGOS_SERVE_BACKEND=vm отложен: VM-компилятор 0.20.0 не знает date_now
+  # (баг апстрима Metalogos, repro в FO-050) — стейджинг стартует на интерпретаторе,
+  # флип одной строкой env после апгрейда бинаря.
+  - type: web
+    name: fosved-office-v2-staging
+    runtime: docker
+    plan: free
+    region: frankfurt
+    envVars:
+      - fromGroup: fosved-secrets
+      - key: DATABASE_URL
+        fromDatabase:
+          name: osp-db
+          property: connectionString
+      - key: MLOG_BIN
+        value: ./bin/mlog-020
+      - key: MLOG_ENTRY
+        value: dogfood_staging.mlog
+
   # ── Cron: Collect News (RSS + GDELT) — каждый час ──────────────────
   - type: cron
     name: collect-news
@@ -190,7 +213,9 @@ services:
       curl -sf "https://fosved-office-v2.onrender.com/health"
       || echo "keep-alive ping failed";
       curl -sf "https://fosved-office-v2.onrender.com/cron/narad-tick?secret=${CRON_SECRET}"
-      || echo "narad-tick failed — очередь нарядов не исполнена"
+      || echo "narad-tick failed — очередь нарядов не исполнена";
+      curl -sf "https://fosved-office-v2-staging.onrender.com/health"
+      || echo "staging keep-alive ping failed (FO-050)"
     envVars:
       - fromGroup: fosved-secrets
 
