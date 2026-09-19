@@ -283,12 +283,44 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
 
         if prov["format"] == "openai":
             reply = data["choices"][0]["message"]["content"]
+            finish_reason = data["choices"][0].get("finish_reason")
             t_in = data.get("usage", {}).get("prompt_tokens", 0)
             t_out = data.get("usage", {}).get("completion_tokens", 0)
         else:
             reply = data["content"][0]["text"]
+            finish_reason = data.get("stop_reason")
             t_in = data.get("usage", {}).get("input_tokens", 0)
             t_out = data.get("usage", {}).get("output_tokens", 0)
+
+        # Обрубленный по лимиту длины ответ для "глубоких" отделов — не
+        # принимаем как успех, тем же принципом, что пустой ответ (FO-022,
+        # ниже). Найдено по реальному инциденту (владелец, 2026-09-19):
+        # гонка провайдеров брала первого ЗАВЕРШИВШЕГОСЯ без проверки
+        # полноты — после введения обязательной энциклопедической глубины
+        # для Эксперта (правила №8/№9, PR #237) это стало реальным риском:
+        # более быстрый, но оборванный по max_tokens ответ выигрывал гонку
+        # у более медленного, но полного. openai formats: "length";
+        # anthropic: "max_tokens".
+        _deep_depts = {"yana", "admin", "osp", "lz", "expert", "engineering"}
+        if dept in _deep_depts and finish_reason in ("length", "max_tokens"):
+            _breaker.record_success(provider_name)  # сам провайдер жив, не штрафуем его circuit breaker
+            log.warning(f"LLM truncated: provider={provider_name} model={model} dept={dept} "
+                        f"finish_reason={finish_reason} reply_chars={len(reply)} — отклонено, не принято как успех")
+            _write_llm_trace({
+                "trace_id": _trace_id,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "gen_ai.system": provider_name,
+                "gen_ai.request.model": model,
+                "gen_ai.usage.input_tokens": t_in,
+                "gen_ai.usage.output_tokens": t_out,
+                "latency_ms": round((time.monotonic() - _trace_start) * 1000),
+                "dept": dept,
+                "ok": False,
+                "error": f"truncated: {finish_reason}",
+                "failure_bucket": "truncated",
+                "is_internal": is_internal,
+            })
+            return None
 
         # FO-022: пустой ответ = отказ (bucket empty), а не успех —
         # иначе цепь примет пустышку и клиент получит ничего.
