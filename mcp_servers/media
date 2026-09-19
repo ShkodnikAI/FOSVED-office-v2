@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""FOSVED office MCP server: media (MON-2/MON-3, диспатч #171).
+
+Office-owned stdio MCP server — YouTube/TikTok для Лаборатории Загадок.
+Диалект: legacy MCP (newline-delimited JSON-RPC 2.0 over stdio), контракт
+зеркалит mcp_servers/github (FO-014) и tests/fixtures/mcp_echo_server.py.
+
+Тулзы:
+  youtube_channel_videos(channel_id, max_results?)  — Data API v3 (YOUTUBE_API_KEY)
+  youtube_video_transcript(video_id)                — youtube-transcript-api
+      ⚠️ ХРУПКОСТЬ (честно): youtube-transcript-api — неофициальная библиотека
+      поверх внутренних эндпоинтов YouTube; ломается при их изменениях. Отказ
+      честный: {"ok": false, "error": ...}, никогда пустой список-как-успех.
+  tiktok_channel_videos(username)                   — публичный web-endpoint
+      ⚠️ НЕНАДЁЖНАЯ ОСНОВА принята владельцем осознанно (#171): без сигнатур
+      endpoint часто отвечает отказом. 3 сбоя подряд → запись в admin_findings.
+
+Безопасность:
+  - ключи из env YOUTUBE_API_KEY — НЕ из кода;
+  - base-URL переопределяются только в тестах (YOUTUBE_API_BASE/TIKTOK_API_BASE);
+  - весь вывод инструмента — недоверенные данные (№268): mlog-сторона обязана
+    прогонять через redact() до попадания в промпты;
+  - тулзы НИКОГДА не бросают — отказ как {"ok": false, "error": ...} в тексте
+    (isError=false), детали не теряются (mlog-try теряет [MCP_TOOL_ERROR]).
+
+Stdout — ТОЛЬКО JSON-RPC; stderr — диагностика; shutdown — stdin close.
+"""
+import json
+import os
+import sqlite3
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+SERVER_NAME = "fosved-media"
+SERVER_VERSION = "1.0.0"
+YOUTUBE_API_BASE = os.environ.get("YOUTUBE_API_BASE", "https://www.googleapis.com/youtube/v3")
+TIKTOK_API_BASE = os.environ.get("TIKTOK_API_BASE", "https://www.tiktok.com")
+DB_DIR = os.environ.get("DATABASE_PATH", "./data")
+TIKTOK_STATE_FILE = os.path.join(DB_DIR, "lz_tiktok_state.json")
+TIKTOK_FAIL_THRESHOLD = 3
+
+TOOLS = [
+    {"name": "youtube_channel_videos", "description": "Свежие видео канала: channel_id (UC...), max_results (опц., ≤50)",
+     "inputSchema": {"type": "object", "properties": {
+         "channel_id": {"type": "string"}, "max_results": {"type": "integer"}},
+         "required": ["channel_id"]}},
+    {"name": "youtube_video_transcript", "description": "Субтитры видео: video_id",
+     "inputSchema": {"type": "object", "properties": {
+         "video_id": {"type": "string"}}, "required": ["video_id"]}},
+    {"name": "tiktok_channel_videos", "description": "Свежие видео TikTok: username (без @)",
+     "inputSchema": {"type": "object", "properties": {
+         "username": {"type": "string"}}, "required": ["username"]}},
+]
+
+
+# ── Контракт «тулзы никогда не бросают» ───────────────────────────────────
+
+def _ok(payload):
+    return {"ok": True, **payload}
+
+
+def _fail(error):
+    return {"ok": False, "error": error}
+
+
+def _http_json(url, timeout=15):
+    req = urllib.request.Request(url, headers={"User-Agent": "fosved-media-mcp/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", errors="replace"))
+
+
+# ── MON-2: YouTube Data API v3 ────────────────────────────────────────────
+
+def youtube_channel_videos(args):
+    channel_id = str(args.get("channel_id", "")).strip()
+    if not channel_id:
+        return _fail("channel_id обязателен (формат UC...)")
+    max_results = min(int(args.get("max_results") or 10), 50)
+    key = os.environ.get("YOUTUBE_API_KEY", "")
+    if not key:
+        return _fail("YOUTUBE_API_KEY не задан (чеклист владельца #171: Google Cloud Console)")
+    try:
+        search_url = (f"{YOUTUBE_API_BASE}/search?"
+                      + urllib.parse.urlencode({
+                          "key": key, "channelId": channel_id, "part": "snippet",
+                          "order": "date", "type": "video", "maxResults": max_results}))
+        data = _http_json(search_url)
+        videos = []
+        for item in data.get("items", []):
+            vid = item.get("id", {}).get("videoId", "")
+            sn = item.get("snippet", {})
+            videos.append({
+                "video_id": vid,
+                "title": sn.get("title", ""),
+                "published_at": sn.get("publishedAt", ""),
+                "url": f"https://www.youtube.com/watch?v={vid}" if vid else "",
+            })
+        return _ok({"videos": videos, "count": len(videos)})
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        return _fail(f"YouTube API HTTP {e.code}: {detail}")
+    except Exception as e:  # noqa: BLE001 — контракт честной деградации
+        return _fail(f"YouTube API недоступен: {type(e).__name__}: {e}")
+
+
+def youtube_video_transcript(args):
+    video_id = str(args.get("video_id", "")).strip()
+    if not video_id:
+        return _fail("video_id обязателен")
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+    except ImportError:
+        return _fail("youtube-transcript-api не установлен (requirements.txt; "
+                     "неофициальная библиотека — хрупкость честно в docstring)")
+    try:
+        # API 1.x: get_transcript(video_id) -> [{text, duration, ...}]
+        segments = YouTubeTranscriptApi.get_transcript(video_id, languages=["ru", "en"])
+        text = " ".join(seg.get("text", "") for seg in segments)[:20000]
+        return _ok({"video_id": video_id, "segments": len(segments), "text": text})
+    except Exception as e:  # noqa: BLE001 — хрупкая основа, отказ честный
+        return _fail(f"субтитры недоступны: {type(e).__name__}: {e}")
+
+
+# ── MON-3: TikTok (публичный web-endpoint, осознанно ненадёжный) ──────────
+
+def _tiktok_state_load():
+    try:
+        with open(TIKTOK_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"consecutive_failures": 0}
+
+
+def _tiktok_state_save(state):
+    os.makedirs(os.path.dirname(TIKTOK_STATE_FILE), exist_ok=True)
+    with open(TIKTOK_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+
+
+def _tiktok_record_failure(reason):
+    """3 сбоя подряд → запись в admin_findings (MON-3, непереговорно)."""
+    state = _tiktok_state_load()
+    state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
+    state["last_error"] = reason[:300]
+    _tiktok_state_save(state)
+    if state["consecutive_failures"] >= TIKTOK_FAIL_THRESHOLD:
+        try:
+            conn = sqlite3.connect(os.path.join(DB_DIR, "fosved.db"), timeout=5.0)
+            conn.execute("PRAGMA busy_timeout = 5000")
+            with conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS admin_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "finding TEXT, dept TEXT, status TEXT, created_at TEXT DEFAULT (datetime('now')))")
+                conn.execute("INSERT INTO admin_findings (finding, dept, status) VALUES (?, ?, ?)",
+                             (f"TikTok недоступен {state['consecutive_failures']} подряд: {reason[:200]}",
+                              "lz", "open"))
+            conn.close()
+        except Exception as e:  # noqa: BLE001 — журнал не роняет тулзу
+            print(f"admin_findings write failed: {e}", file=sys.stderr)
+    return _fail(reason)
+
+
+def tiktok_channel_videos(args):
+    username = str(args.get("username", "")).strip().lstrip("@")
+    if not username:
+        return _fail("username обязателен (без @)")
+    try:
+        url = (f"{TIKTOK_API_BASE}/api/post/item_list/?"
+               + urllib.parse.urlencode({
+                   "aid": "1988", "count": 10, "secUid": "", "uniqueId": username}))
+        data = _http_json(url)
+        items = data.get("itemList") or []
+        if data.get("statusCode") not in (None, 0) and not items:
+            return _tiktok_record_failure(f"statusCode={data.get('statusCode')} (сигнатуры/антибот)")
+        videos = [{
+            "video_id": it.get("id", ""),
+            "desc": (it.get("desc") or "")[:500],
+            "stats_json": json.dumps({
+                "play": it.get("playCount"), "like": it.get("diggCount"),
+                "comment": it.get("commentCount"), "share": it.get("shareCount")}, ensure_ascii=False),
+            "url": f"https://www.tiktok.com/@{username}/video/{it.get('id', '')}",
+        } for it in items]
+        if not videos:
+            return _tiktok_record_failure("пустой itemList (антибот/нет данных)")
+        st = _tiktok_state_load()
+        st["consecutive_failures"] = 0
+        _tiktok_state_save(st)
+        return _ok({"videos": videos, "count": len(videos)})
+    except Exception as e:  # noqa: BLE001 — честная деградация + счётчик
+        return _tiktok_record_failure(f"{type(e).__name__}: {e}")
+
+
+# ── JSON-RPC каркас (зеркало mcp_servers/github) ──────────────────────────
+
+HANDLERS = {
+    "youtube_channel_videos": youtube_channel_videos,
+    "youtube_video_transcript": youtube_video_transcript,
+    "tiktok_channel_videos": tiktok_channel_videos,
+}
+
+
+def _reply(msg_id, result):
+    print(json.dumps({"jsonrpc": "2.0", "id": msg_id, "result": result}), flush=True)
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        method = req.get("method", "")
+        msg_id = req.get("id")
+        if method == "initialize":
+            _reply(msg_id, {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            })
+        elif method == "tools/list":
+            _reply(msg_id, {"tools": TOOLS})
+        elif method == "tools/call":
+            params = req.get("params", {})
+            name = params.get("name", "")
+            args = params.get("arguments", {}) or {}
+            handler = HANDLERS.get(name)
+            payload = handler(args) if handler else _fail(f"неизвестная тулза: {name}")
+            _reply(msg_id, {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+                            "isError": False})
+        elif method == "shutdown":
+            break
+        # notifications/initialized — без ответа
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
