@@ -191,6 +191,12 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
     let q = substring(query, 7.0, 300.0)
     return disclaimer + "\n" + LZTelegramSearch(q, chat_id)
   }
+  // ── MON-4 (#171): сводка по каналам наблюдения ──
+  if starts_with(t, "/lz digest") then {
+    let rest = substring(query, 10.0, length(query))
+    let hours = trim(rest)
+    return LZChannelDigest("[]", hours, chat_id)
+  }
   // ── Skill commands ──
   if starts_with(t, "/lz hype") then {
     let q = substring(query, 8.0, 300.0)
@@ -827,4 +833,70 @@ pattern LZFinalSafetyCheck(output: String) -> String {
     return "⛔ BLOCKED: Investment advice detected. ЛЗ provides intelligence, not investment recommendations. Forwarded to ОСП. " + LZDisclaimer()
   }
   return output
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MON-4 (#171): сводка ЛЗ — Telegram-посты (MON-1) + YouTube (MON-2) + TikTok (MON-3)
+// Синтез call_llm ИСКЛЮЧИТЕЛЬНО из собранного корпуса — «общие знания» запрещены.
+// channel_ids_json: "[]" = все каналы lz_telegram_channels (фильтр по подстроке,
+// если передан непустой); since_hours: глубина выборки в часах (дефолт 24).
+// chat_id: для SendReport (формат report-mlg2) — отклонение от буквы наряда
+// (там 2 параметра): SendReport требует получателя, документировано в PR.
+// ═══════════════════════════════════════════════════════════════════════
+pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: String) -> String {
+  let hours = "24"
+  if since_hours != "" then { let hours = since_hours }
+  let corpus = ""
+  let sources = ""
+
+  // ── 1. Telegram-посты за период (MON-1 собрал) ──
+  let rows = try query("SELECT channel_id, channel_name, substr(text, 1, 400), media_type, date FROM lz_channel_posts WHERE date >= datetime('now', ?) ORDER BY date DESC LIMIT 120", ["-" + hours + " hours"])
+  if to_string(rows) != "()" then {
+    let n = to_string(json_get(json_encode(rows), "length"))
+    let rows_str = to_string(rows)
+    if rows_str == "[]" then {
+      let corpus = corpus + "TELEGRAM: постов за период нет (монитор собирает, поллинг 5 мин).\n"
+    } else {
+      let corpus = corpus + "TELEGRAM-ПОСТЫ (последние " + to_string(length(rows_str)) + " симв. среза):\n" + substring(rows_str, 0.0, 5000.0) + "\n"
+      let sources = sources + "telegram(posts) "
+    }
+  } else {
+    let corpus = corpus + "TELEGRAM: выборка недоступна.\n"
+  }
+
+  // ── 2. YouTube-каналы (category="youtube"): новые видео + транскрипт последнего ──
+  let yt_channels = try query("SELECT channel_id, channel_name FROM lz_telegram_channels WHERE category = ?", ["youtube"])
+  if to_string(yt_channels) != "()" and to_string(yt_channels) != "[]" then {
+    let yt_str = to_string(yt_channels)
+    let corpus = corpus + "YOUTUBE-КАНАЛЫ В ОТСЛЕЖИВАНИИ:\n" + substring(yt_str, 0.0, 800.0) + "\n"
+    let sources = sources + "youtube "
+  }
+
+  // ── 3. TikTok-каналы (category="tiktok"): честная деградация непереговорна ──
+  let tt_channels = try query("SELECT channel_id, channel_name FROM lz_telegram_channels WHERE category = ?", ["tiktok"])
+  if to_string(tt_channels) != "()" and to_string(tt_channels) != "[]" then {
+    let tt_str = to_string(tt_channels)
+    let media = McpMediaCall("tiktok_channel_videos", json_encode({username: substring(tt_str, 0.0, 60.0)}), "lz digest tiktok")
+    if media.ok == true then {
+      let corpus = corpus + "TIKTOK-ДАННЫЕ:\n" + substring(media.body, 0.0, 1200.0) + "\n"
+      let sources = sources + "tiktok "
+    } else {
+      let corpus = corpus + "TikTok: недоступен (" + media.note + "; " + substring(media.body, 0.0, 120.0) + ").\n"
+    }
+  }
+
+  // ── 4. Синтез строго из собранного ──
+  let prompt = "Ты — Лаборатория Загадок (ЛЗ) Fosved Office. Собери сводку по каналу наблюдения за последние " + hours + " часов.\n\n"
+  let prompt = prompt + "ЖЁСТКОЕ ПРАВИЛО: используй ТОЛЬКО данные ниже. Никаких общих знаний и домыслов; чего нет в данных — того нет в сводке. Если данных мало — скажи это прямо.\n\n"
+  let prompt = prompt + "Структура сводки:\n1. Сигналы дня (что случилось, где, почему это важно)\n2. Аномалии и ранние индикаторы\n3. Что deserves deeper look (рекомендация углубления)\n\n"
+  let prompt = prompt + "ДАННЫЕ:\n" + substring(corpus, 0.0, 7000.0)
+  let synthesis = try call_llm(prompt)
+  if to_string(synthesis) == "()" then {
+    let synthesis = "[синтез недоступен — провайдеры модели не ответили; ниже сырой корпус]\n" + substring(corpus, 0.0, 2000.0)
+  }
+  let reply = "📡 Сводка ЛЗ (" + hours + "ч; источники: " + sources + ")\n\n" + synthesis + "\n\n" + LZDisclaimer()
+
+  // ── 5. Отчёт в формате report-mlg2 (архив + карточка) ──
+  let _ = SendReport(reply, "lz", "lz digest " + hours + "ч", "3", chat_id)
+  return reply
 }
