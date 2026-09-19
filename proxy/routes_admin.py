@@ -570,6 +570,152 @@ def api_archive_watches():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def _ensure_forge_skills():
+    """FORGE-UI-7 (#200): новая сущность скилов проекта (спроектирована в наряде):
+    project_slug — привязка к проекту; type ∈ {file, link, text} (file — пробел:
+    механизма загрузки нет); title — имя; content_ref — ссылка/текст/путь.
+    Изоляция: скилы принадлежат проекту и не попадают в общую библиотеку офиса."""
+    _query("""CREATE TABLE IF NOT EXISTS forge_project_skills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_slug TEXT NOT NULL,
+            type TEXT DEFAULT 'text',
+            title TEXT,
+            content_ref TEXT,
+            created_at TEXT DEFAULT (datetime('now')))""")
+    _query("CREATE INDEX IF NOT EXISTS idx_forge_skills_project ON forge_project_skills(project_slug, id)")
+
+
+@app.get("/api/forge/projects")
+def api_forge_projects():
+    """FORGE-UI-7 (#200): список проектов FORGE — чтение существующих таблиц
+    forge_projects + счётчики из forge_repos/forge_project_secrets; прогресс —
+    реальный (этапы forge_stages задач проекта), при отсутствии этапов — нет
+    прогресса. Ключевые значения не отдаются никогда (только счётчики)."""
+    try:
+        rows = _query("SELECT slug, name, customer_name, status, project_type, goal, created_at "
+                      "FROM forge_projects ORDER BY created_at DESC LIMIT 50", fetch=True) or []
+        rc = {r["pslug"]: int(r["c"]) for r in (_query(
+            "SELECT project_slug AS pslug, COUNT(*) AS c FROM forge_repos GROUP BY project_slug", fetch=True) or [])}
+        sc = {r["pslug"]: int(r["c"]) for r in (_query(
+            "SELECT project_slug AS pslug, COUNT(*) AS c FROM forge_project_secrets GROUP BY project_slug", fetch=True) or [])}
+        st = {}
+        try:
+            for r in (_query(
+                    "SELECT t.project_slug AS pslug, COUNT(s.id) AS total, "
+                    "SUM(CASE WHEN s.status='done' THEN 1 ELSE 0 END) AS done "
+                    "FROM forge_stages s JOIN forge_tasks t ON t.id = s.task_id GROUP BY t.project_slug",
+                    fetch=True) or []):
+                st[r["pslug"]] = (int(r["done"] or 0), int(r["total"] or 0))
+        except Exception as se:  # noqa: BLE001 — нет таблиц этапов → прогресса нет
+            _log_error(f"forge projects stages read: {se}", source="api_forge_projects", kind="input")
+        projects = []
+        for r in rows:
+            done, total = st.get(r["slug"], (0, 0))
+            projects.append({
+                "slug": r["slug"], "name": r["name"] or r["slug"],
+                "customer": r["customer_name"] or "", "status": r["status"] or "active",
+                "project_type": r["project_type"] or "", "goal": r["goal"] or "",
+                "repos": rc.get(r["slug"], 0), "secrets": sc.get(r["slug"], 0),
+                "stages_done": done, "stages_total": total,
+                "created": (r["created_at"] or "")[:16],
+            })
+        return jsonify({"status": "ok", "projects": projects})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/forge/projects/<slug>")
+def api_forge_project_detail(slug):
+    """FORGE-UI-7 (#200): карточка проекта. Значения ключей проекта
+    (forge_project_secrets.secret_ref) и данных заказчика
+    (forge_customer_data.secret_ref) НЕ читаются и НЕ отдаются — только
+    имена/факт наличия (SEC-5: хранятся шифрованно)."""
+    try:
+        rows = _query("SELECT slug, name, description, goal, project_type, customer_name, status, "
+                      "departments, model_combo, created_at FROM forge_projects WHERE slug=? LIMIT 1",
+                      (slug,), fetch=True)
+        if not rows:
+            return jsonify({"status": "error", "message": "проект не найден"}), 404
+        r = rows[0]
+        repos = _query("SELECT name, description, github_url, commits_count, last_commit_at "
+                       "FROM forge_repos WHERE project_slug=? ORDER BY created_at ASC, name ASC",
+                       (slug,), fetch=True) or []
+        secret_keys = _query("SELECT env_key FROM forge_project_secrets WHERE project_slug=? ORDER BY env_key",
+                             (slug,), fetch=True) or []
+        cust = _query("SELECT updated_at FROM forge_customer_data WHERE project_slug=? LIMIT 1",
+                      (slug,), fetch=True) or []
+        _ensure_forge_skills()
+        skills = _query("SELECT id, type, title, content_ref FROM forge_project_skills "
+                        "WHERE project_slug=? ORDER BY id DESC LIMIT 50", (slug,), fetch=True) or []
+        return jsonify({
+            "status": "ok",
+            "project": {
+                "slug": r["slug"], "name": r["name"] or r["slug"],
+                "description": r["description"] or "", "goal": r["goal"] or "",
+                "project_type": r["project_type"] or "", "customer": r["customer_name"] or "",
+                "status": r["status"] or "active", "departments": r["departments"] or "",
+                "model_combo": r["model_combo"] or "", "created": (r["created_at"] or "")[:16],
+            },
+            "repos": [{"name": x["name"], "description": x["description"] or "",
+                       "github_url": x["github_url"] or "", "commits": x["commits_count"] or 0,
+                       "last_commit": x["last_commit_at"] or ""} for x in repos],
+            "secrets": [{"env_key": x["env_key"], "set": True} for x in secret_keys],
+            "customer": {"present": bool(cust),
+                         "updated": (cust[0]["updated_at"] if cust else "") or ""},
+            "skills": [{"id": x["id"], "type": x["type"] or "text", "title": x["title"] or "",
+                        "content_ref": x["content_ref"] or ""} for x in skills],
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/forge/projects/<slug>/repos")
+def api_forge_project_repo_add(slug):
+    """FORGE-UI-7 (#200), Smoke-5: «Открыть дочерний репозиторий» — новая запись
+    в существующей forge_repos, привязанная к тому же project_slug."""
+    try:
+        rows = _query("SELECT slug FROM forge_projects WHERE slug=? LIMIT 1", (slug,), fetch=True)
+        if not rows:
+            return jsonify({"status": "error", "message": "проект не найден"}), 404
+        base = re.sub(r"[^a-z0-9\-]", "", str(slug).lower()) or "repo"
+        n = 1
+        name = f"{base}-child-{n}"
+        while _query("SELECT 1 FROM forge_repos WHERE name=? LIMIT 1", (name,), fetch=True):
+            n += 1
+            name = f"{base}-child-{n}"
+        _query("INSERT INTO forge_repos (name, project_slug, description) VALUES (?, ?, 'дочерний репозиторий (открыт из миниаппа)')",
+               (name, slug))
+        _log_audit("forge_child_repo_opened", {"project": slug, "repo": name}, dept="dev")
+        return jsonify({"status": "ok", "repo": {"name": name, "project_slug": slug}})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/forge/projects/<slug>/skills")
+def api_forge_project_skill_add(slug):
+    """FORGE-UI-7 (#200): добавить скил проекта (text/link). Загрузка ФАЙЛОВ —
+    механизма загрузки в проект нет (пробел зафиксирован в отчёте наряда)."""
+    try:
+        d = request.get_json(force=True) or {}
+        sk_type = d.get("type")
+        title = str(d.get("title") or "").strip()
+        content = str(d.get("content_ref") or "").strip()
+        if sk_type not in ("text", "link"):
+            return jsonify({"status": "error", "message": "type ∈ {text, link} (файлы — в разработке)"}), 400
+        if not title or not content:
+            return jsonify({"status": "error", "message": "нужны title и content"}), 400
+        rows = _query("SELECT slug FROM forge_projects WHERE slug=? LIMIT 1", (slug,), fetch=True)
+        if not rows:
+            return jsonify({"status": "error", "message": "проект не найден"}), 404
+        _ensure_forge_skills()
+        _query("INSERT INTO forge_project_skills (project_slug, type, title, content_ref) VALUES (?, ?, ?, ?)",
+               (slug, sk_type, title[:200], content[:2000]))
+        _log_audit("forge_project_skill_added", {"project": slug, "type": sk_type, "title": title[:80]}, dept="dev")
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.post("/api/narads/<nid>/approve")
 def api_narad_approve(nid):
     try:
