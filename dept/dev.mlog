@@ -2152,6 +2152,33 @@ pattern McpFsCall(tool: String, args_json: String, purpose: String) -> Dict {
   return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе (вне песочницы?)" }
 }
 
+// MON-2/MON-3 (#171): единый вызов media-MCP (YouTube/TikTok для ЛЗ).
+// Зеркало McpGithubCall: гейты ядра + audit + redact. Весь вывод недоверенный.
+pattern McpMediaServerCmd() -> String {
+  return "mcp_servers/media"
+}
+
+pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
+  let _ = McpAudit("media", tool, purpose, "attempt")
+  let out = try mcp_call(McpMediaServerCmd(), [], tool, args_json)
+  if to_string(out) == "()" then {
+    let _ = McpAudit("media", tool, purpose, "error")
+    return { ok: false, body: "", note: "MCP-сервер media недоступен (гейт ядра/сбой/таймаут). Fallback: без медиа-данных." }
+  }
+  let parsed = try parse_json(to_string(out))
+  if to_string(parsed) == "()" then {
+    let _ = McpAudit("media", tool, purpose, "error")
+    return { ok: false, body: redact(to_string(out), "secrets"), note: "ответ сервера не JSON" }
+  }
+  if to_string(json_get(parsed, "ok", "false")) == "true" then {
+    let _ = McpAudit("media", tool, purpose, "ok")
+    return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
+  }
+  let _ = McpAudit("media", tool, purpose, "refused")
+  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе (медиа-источник)" }
+}
+
 pattern McpWebServerCmd() -> String {
   return "mcp_servers/web"
 }
