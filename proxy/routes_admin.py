@@ -716,6 +716,160 @@ def api_forge_project_skill_add(slug):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+_SHOP_SOURCES_DDL = ("CREATE TABLE IF NOT EXISTS shop_sources (source_id TEXT PRIMARY KEY, "
+                     "enabled INTEGER DEFAULT 1, custom INTEGER DEFAULT 0, url TEXT)")
+
+# FORGE-UI-9 (#202): честные статусы известных источников (ограничения площадок
+# зафиксированы как есть; Ozon — «заблокирован антиботом», это не «выключено»)
+_SHOP_SOURCE_STATUS = {
+    "wb": ("работает", "ok"),
+    "ozon": ("заблокирован антиботом", "warn"),
+    "onliner": ("нужен слаг категории", "warn"),
+    "21vek": ("нужна форма", "warn"),
+}
+
+
+@app.get("/api/shop/sources")
+def api_shop_sources():
+    """FORGE-UI-9 (#202): источники Закупок — известные (wb/ozon/onliner/21vek)
+    + свои магазины (custom) из shop_sources. enabled — реальный флаг опроса."""
+    try:
+        _query(_SHOP_SOURCES_DDL)
+        rows = {r["source_id"]: r for r in
+                _query("SELECT * FROM shop_sources", fetch=True) or []}
+        out = []
+        for sid, label in [("wb", "Wildberries"), ("ozon", "Ozon"),
+                           ("onliner", "Onliner"), ("21vek", "21vek")]:
+            r = rows.pop(sid, None)
+            out.append({"id": sid, "label": label, "custom": False,
+                        "enabled": bool(r["enabled"]) if r else True,
+                        "url": (r["url"] if r else "") or ""})
+        for sid, r in rows.items():
+            out.append({"id": sid, "label": sid, "custom": bool(r["custom"]),
+                        "enabled": bool(r["enabled"]), "url": r["url"] or ""})
+        return jsonify({"status": "ok", "sources": out})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/shop/sources/<sid>/toggle")
+def api_shop_source_toggle(sid):
+    """FORGE-UI-9 (#202): включить/выключить источник. Выключенный не
+    опрашивается (фильтр в shop_watch.ensure_product/tick_shop_watches)."""
+    try:
+        d = request.get_json(force=True, silent=True) or {}
+        enabled = 1 if d.get("enabled") else 0
+        _query(_SHOP_SOURCES_DDL)
+        if _query("SELECT 1 FROM shop_sources WHERE source_id=? LIMIT 1", (sid,), fetch=True):
+            _query("UPDATE shop_sources SET enabled=? WHERE source_id=?", (enabled, sid))
+        else:
+            _query("INSERT INTO shop_sources (source_id, enabled) VALUES (?, ?)", (sid, enabled))
+        _log_audit("shop_source_toggled", {"source": sid, "enabled": bool(enabled)})
+        return jsonify({"status": "ok", "source": sid, "enabled": bool(enabled)})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/shop/sources/custom")
+def api_shop_source_custom():
+    """FORGE-UI-9 (#202): регистрация «своего магазина» (custom=1). Парсинг не
+    реализуется в этом наряде — интерфейс честно предупреждает о необходимости
+    отдельной настройки сборщика."""
+    try:
+        from proxy.shop_watch import register_custom_source
+        d = request.get_json(force=True, silent=True) or {}
+        name = str(d.get("name") or "").strip()
+        url = str(d.get("url") or "").strip()
+        if not name or not url:
+            return jsonify({"status": "error", "message": "нужны name и url"}), 400
+        sid = register_custom_source(name, url)
+        _log_audit("shop_source_custom_added", {"source": sid, "url": url[:120]})
+        return jsonify({"status": "ok", "id": sid})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/shop/settings")
+def api_shop_settings_get():
+    """FORGE-UI-9 (#202): настройки Закупок — дефолты вотчей (system_settings)."""
+    try:
+        disc = _get_setting("shop_watch_default_discount", "")
+        try:
+            disc = float(disc) if str(disc).strip() else None
+        except (TypeError, ValueError):
+            disc = None
+        in_stock = str(_get_setting("shop_watch_default_in_stock", "0")).lower() in ("1", "true")
+        return jsonify({"status": "ok", "default_discount_pct": disc,
+                        "default_in_stock": in_stock})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/shop/settings")
+def api_shop_settings_set():
+    """FORGE-UI-9 (#202): сохранить дефолты вотчей (порог скидки, уведомлять
+    о наличии) — используются add_watch, когда параметры не заданы явно."""
+    try:
+        d = request.get_json(force=True, silent=True) or {}
+        if "default_discount_pct" in d:
+            val = d.get("default_discount_pct")
+            if val in (None, ""):
+                _query("INSERT OR REPLACE INTO system_settings (key, value) VALUES "
+                       "('shop_watch_default_discount', '')")
+            else:
+                try:
+                    fv = float(val)
+                    if not 0 <= fv <= 99:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    return jsonify({"status": "error", "message": "порог — число 0..99"}), 400
+                _query("INSERT OR REPLACE INTO system_settings (key, value) VALUES "
+                       "('shop_watch_default_discount', ?)", (str(fv),))
+        if "default_in_stock" in d:
+            v = 1 if d.get("default_in_stock") else 0
+            _query("INSERT OR REPLACE INTO system_settings (key, value) VALUES "
+                   "('shop_watch_default_in_stock', ?)", (str(v),))
+        _log_audit("shop_settings_saved", {"keys": sorted(d.keys())})
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/shop/preview")
+def api_shop_preview():
+    """FORGE-UI-9 (#202): реальный запрос закупки с выбранным профилем оценки.
+    best/quality/cheap/availability — score_offers (весовые); top3 — отдельная
+    структура top3_by_price_bands (3 ценовых диапазона, топ-3 в каждом)."""
+    try:
+        from proxy.shop_watch import ensure_product, shop_source_enabled, PLATFORMS_MVP
+        from proxy.shop_engine import score_offers, top3_by_price_bands
+        from proxy.shop_collectors import refresh_product
+        d = request.get_json(force=True, silent=True) or {}
+        query = str(d.get("query") or "").strip()
+        profile = str(d.get("profile") or "best")
+        if not query:
+            return jsonify({"status": "error", "message": "нужен query"}), 400
+        pid, _details = ensure_product(query)
+        for platform in PLATFORMS_MVP:
+            if not shop_source_enabled(platform):
+                continue
+            try:
+                refresh_product(pid, platform, query)
+            except Exception:  # noqa: BLE001 — площадка недоступна, превью живёт
+                pass
+        offers = _query("SELECT * FROM shop_offers WHERE product_id=?", (pid,), fetch=True) or []
+        if profile == "top3":
+            res = top3_by_price_bands(offers)
+            return jsonify({"status": "ok", "profile": profile,
+                            "bands": res["bands"], "offers_total": len(offers)})
+        res = score_offers(offers, profile=profile)
+        top = sorted(res.get("offers", []), key=lambda o: o.get("total", 0), reverse=True)[:10]
+        return jsonify({"status": "ok", "profile": profile, "offers": top,
+                        "offers_total": len(offers)})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.post("/api/narads/<nid>/approve")
 def api_narad_approve(nid):
     try:

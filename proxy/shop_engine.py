@@ -40,7 +40,19 @@ import re
 WEIGHTS_DEFAULT = {"price": 0.35, "quality": 0.30, "access": 0.20, "seller": 0.15}
 WEIGHTS_EXPENSIVE = {"price": 0.20, "quality": 0.40, "access": 0.10, "seller": 0.30}
 
-_PROFILES = {"default": WEIGHTS_DEFAULT, "expensive": WEIGHTS_EXPENSIVE}
+# FORGE-UI-9 (#202): профили оценки Закупок.
+# cheap — «Самая низкая цена» (только цена); availability — «В наличии»
+# (доминирующий вес access-оценки); top3 — не весовой профиль, а отдельная
+# структура вывода (top3_by_price_bands ниже).
+WEIGHTS_CHEAP = {"price": 1.0, "quality": 0.0, "access": 0.0, "seller": 0.0}
+WEIGHTS_AVAILABILITY = {"price": 0.1, "quality": 0.1, "access": 0.7, "seller": 0.1}
+_PROFILES = {"default": WEIGHTS_DEFAULT, "expensive": WEIGHTS_EXPENSIVE,
+             "cheap": WEIGHTS_CHEAP, "availability": WEIGHTS_AVAILABILITY}
+PROFILE_LABELS = {
+    "best": "Лучшее соотношение", "quality": "Качество",
+    "cheap": "Самая низкая цена", "availability": "В наличии",
+    "top3": "Топ-3 по ценовым диапазонам",
+}
 
 _PRICE_RE = re.compile(r"^\d+(\.\d+)?$")
 
@@ -289,6 +301,39 @@ def stop_flags(offer, history_prices=None, product_specs=None):
                 "note": "характеристики оффера не пересекаются с базовой спекой товара",
             })
     return flags
+
+
+def top3_by_price_bands(offers, history_by_offer=None, product=None):
+    """FORGE-UI-9 (#202), профиль «Топ-3 по ценовым диапазонам».
+
+    НЕ весовой профиль: предложения с известной ценой сортируются и
+    разбиваются на три диапазона (терции по цене), внутри каждого
+    скорятся существующим score_offers (default-профиль) и возвращается
+    топ-3. Структура вывода другая: {"bands": [{band, offers}, ...]},
+    а не единый ранжированный список.
+    """
+    priced = [o for o in offers if rank_price(o) is not None]
+    priced.sort(key=rank_price)
+    n = len(priced)
+    bands = []
+    if n == 0:
+        return {"bands": []}
+    third = (n + 2) // 3
+    slices = [("low", priced[:third]),
+              ("mid", priced[third:2 * third]),
+              ("high", priced[2 * third:])]
+    for label, chunk in slices:
+        if not chunk:
+            continue
+        scored = score_offers(chunk, history_by_offer=history_by_offer,
+                              product=product)
+        top = sorted(scored.get("offers", []),
+                     key=lambda o: o.get("total", 0), reverse=True)[:3]
+        bands.append({"band": label, "offers": top,
+                      "count": len(chunk),
+                      "price_from": rank_price(chunk[0]),
+                      "price_to": rank_price(chunk[-1])})
+    return {"bands": bands}
 
 
 def score_offers(offers, history_by_offer=None, profile="default",

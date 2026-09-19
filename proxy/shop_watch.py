@@ -27,6 +27,40 @@ log = logging.getLogger("shop_watch")
 PLATFORMS_MVP = ("wb", "ozon")  # ozon — каркас (антибот, см. shop_collectors);
                                 # onliner (нет слага) / 21vek — вне такта
 
+def shop_source_enabled(platform):
+    """FORGE-UI-9 (#202): флаг включённости источника из таблицы shop_sources
+    (создаётся лениво). Нет строки → источник включён (дефолт — как раньше)."""
+    from proxy.core import _query
+    try:
+        _query("CREATE TABLE IF NOT EXISTS shop_sources (source_id TEXT PRIMARY KEY, "
+               "enabled INTEGER DEFAULT 1, custom INTEGER DEFAULT 0, url TEXT)")
+        rows = _query("SELECT enabled FROM shop_sources WHERE source_id=? LIMIT 1",
+                      (platform,), fetch=True)
+        if not rows:
+            return True  # нет строки — источник включён (дефолт)
+        return bool(rows[0]["enabled"])
+    except Exception as e:  # noqa: BLE001 — БД не готова: источник считаем включённым
+        log.warning("shop_source_enabled(%s): %s", platform, e)
+        return True
+
+
+def register_custom_source(name, url):
+    """FORGE-UI-9 (#202): регистрация «своего магазина» — только запись в
+    shop_sources (custom=1); парсинг нового магазина — отдельная настройка
+    сборщика, честно помечается в интерфейсе."""
+    from proxy.core import _query
+    import re as _re
+    _query("CREATE TABLE IF NOT EXISTS shop_sources (source_id TEXT PRIMARY KEY, "
+           "enabled INTEGER DEFAULT 1, custom INTEGER DEFAULT 0, url TEXT)")
+    sid = "custom-" + _re.sub(r"[^a-z0-9\-]", "", str(name).lower())[:30]
+    base, n = sid, 2
+    while _query("SELECT 1 FROM shop_sources WHERE source_id=? LIMIT 1", (sid,), fetch=True):
+        sid = f"{base}-{n}"
+        n += 1
+    _query("INSERT INTO shop_sources (source_id, enabled, custom, url) VALUES (?, 1, 1, ?)",
+           (sid, str(url or "")[:300]))
+    return sid
+
 
 def enabled():
     return os.environ.get("SHOP_ENABLED", "1") != "0"
@@ -63,14 +97,38 @@ def ensure_product(query, title=None):
     pid = row[0]["id"]
     details = {}
     for platform in PLATFORMS_MVP:
+        if not shop_source_enabled(platform):
+            details[platform] = {"ok": False, "kind": "source_disabled"}
+            continue
         details[platform] = refresh_product(pid, platform, query)
     return pid, details
 
 
+def default_watch_settings():
+    """FORGE-UI-9 (#202): дефолты новых вотчей из system_settings
+    (shop_watch_default_discount / shop_watch_default_in_stock)."""
+    from proxy.core import _get_setting
+    disc = _get_setting("shop_watch_default_discount", "")
+    try:
+        disc = float(disc) if str(disc).strip() else None
+    except (TypeError, ValueError):
+        disc = None
+    in_stock = str(_get_setting("shop_watch_default_in_stock", "0")).lower() in ("1", "true")
+    return {"discount_pct": disc, "alert_in_stock": in_stock}
+
+
 def add_watch(product_id, target_price_byn=None, discount_pct=None,
-              alert_in_stock=False):
-    """Поставить товар на отслеживание (один активный watch на продукт)."""
+              alert_in_stock=None):
+    """Поставить товар на отслеживание (один активный watch на продукт).
+    Если порог скидки/уведомление о наличии не заданы явно (None) — берутся
+    дефолты настроек Закупок (FORGE-UI-9); явно переданные True/False
+    приоритетнее дефолтов."""
     from proxy.core import _query
+    defaults = default_watch_settings()
+    if discount_pct is None:
+        discount_pct = defaults["discount_pct"]
+    if alert_in_stock is None:
+        alert_in_stock = defaults["alert_in_stock"]
     _query("UPDATE shop_watches SET status='paused' WHERE product_id=?", (product_id,))
     _query("INSERT INTO shop_watches (product_id, target_price_byn, discount_pct, "
            "alert_in_stock) VALUES (?, ?, ?, ?)",
@@ -197,6 +255,8 @@ def tick_shop_watches():
     for w in watches:
         # свежий сбор по MVP-площадкам продукта
         for platform in PLATFORMS_MVP:
+            if not shop_source_enabled(platform):
+                continue
             try:
                 refresh_product(w["product_id"], platform, w["query_text"])
             except Exception as e:  # noqa: BLE001 — площадка недоступна, такт живёт
