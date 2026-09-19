@@ -21,7 +21,7 @@ def test_poppins_linked_and_used():
     assert "display=swap" in INDEX
     assert "font-family:'Poppins',system-ui,sans-serif" in INDEX  # body (A.6)
     assert "--f:'Poppins'" in INDEX
-    assert "Newsreader" not in INDEX  # A.4: старый шрифт выведен
+    assert "Newsreader" not in INDEX  # A.4: старый шрифт выведен полностью (в т.ч. из комментариев)
 
 
 def test_dark_tokens_exact():
