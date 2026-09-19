@@ -342,7 +342,7 @@ def test_serve_route_body_needs_exec_gate(tmp_path):
     env.pop("PORT", None)
     p = subprocess.Popen(["bash", "-c",
                           f"exec {MLOG} serve {fx} 2>&1 | tee {tmp_path}/serve.log"],
-                         env=env, stdout=subprocess.DEVNULL)
+                         env=env, stdout=subprocess.DEVNULL, start_new_session=True)
     import time
     import urllib.request
     try:
@@ -356,5 +356,12 @@ def test_serve_route_body_needs_exec_gate(tmp_path):
         assert "route exec: denied" in log, log[-800:]
         assert "mcp_call" not in body or "denied" in body.lower() or body.strip() == ""
     finally:
-        p.terminate()
+        # Убиваем ВСЮ группу: bash-пайп порождает дочерний mlog serve —
+        # одного terminate() bash'а мало, mlog осиротеет и будет держать
+        # лок тестовой БД, ломая следующие полные прогоны (кейс 2026-09-19).
+        import signal, os as _os
+        try:
+            _os.killpg(p.pid, signal.SIGKILL)
+        except Exception:
+            p.kill()
         p.wait(timeout=10)
