@@ -336,6 +336,7 @@ button,input{font-family:inherit;color:inherit;font-size:15px}button{-webkit-tap
 <div id="projDetail" style="display:none"></div>
 </div></section>
 <section class="screen" data-tab="shopset"><div class="scroll">
+<div id="shopsetWrap">
 <div class="eyebrow">закупки</div><div class="h1">Закупки</div>
 <p class="lead">Сравнение цен и слежение за товарами на площадках РБ.</p>
 <div class="sec" style="margin-top:14px"><h2>Источники</h2></div>
@@ -361,6 +362,16 @@ button,input{font-family:inherit;color:inherit;font-size:15px}button{-webkit-tap
 </div>
 <div class="sec" style="margin-top:18px"><h2>Архив</h2></div>
 <button class="srow" type="button" id="shopArchiveRow"><span>Архив запросов закупок</span><span style="color:var(--muted)">›</span></button>
+</div>
+<div id="shopArchWrap" style="display:none">
+<button class="backbtn" type="button" id="shopArchBack">&#8249; назад к закупкам</button>
+<div class="eyebrow">закупки</div><div class="h1">Архив запросов</div>
+<input type="text" id="shopArchSearch" placeholder="Поиск по досье…" style="width:100%;height:40px;border-radius:3px;border:1px solid var(--line);background:var(--bg);padding:0 12px;font-size:13px;margin-top:12px">
+<div class="daterow" id="syearRow"></div>
+<div class="daterow" id="smonthRow"></div>
+<div class="daterow" id="sdayRow"></div>
+<div id="shopArchList" style="margin-top:10px"><div class="empty">Загружаю…</div></div>
+</div>
 </div></section>
 <section class="screen" data-tab="lzsrc"><div class="scroll">
 <div class="eyebrow"><button type="button" data-go="more" style="color:var(--red);font-family:var(--m);font-size:12px">‹ назад</button></div>
@@ -538,7 +549,7 @@ function setLive(on){var b=document.getElementById("liveBadge");b.classList.togg
 function go(tab){haptic("light");document.querySelectorAll(".screen").forEach(function(s){s.classList.toggle("on",s.getAttribute("data-tab")===tab)});document.querySelectorAll("#dock button").forEach(function(b){b.classList.toggle("on",b.getAttribute("data-go")===tab)});location.hash=tab;loadScreen(tab)}
 var loaded={};
 document.addEventListener("click",function(e){
-var t=e.target.closest("[data-go],[data-dept],[data-report],[data-act],[data-int-key],[data-nfilter],[data-narad],[data-nact],[data-nback],[data-rmfile],[data-srdept],[data-settheme],[data-setorient],[data-dchip],[data-aredit],[data-proj],[data-pback],[data-ptab],[data-skilltype],[data-srctoggle],[data-profile],[data-instock],[data-lztoggle],[data-lzdel],#sheetClose,#btnAttach,#addReportBtn,#reposRow,#auditRow,#attentionRow,#lockdownRow,#projAddRepo,#projAddSkill,#projAddFile,#customAdd,#previewRun,#watchSave,#shopArchiveRow,#lzRssAdd");
+var t=e.target.closest("[data-go],[data-dept],[data-report],[data-act],[data-int-key],[data-nfilter],[data-narad],[data-nact],[data-nback],[data-rmfile],[data-srdept],[data-settheme],[data-setorient],[data-dchip],[data-aredit],[data-proj],[data-pback],[data-ptab],[data-skilltype],[data-srctoggle],[data-profile],[data-instock],[data-lztoggle],[data-lzdel],[data-sdchip],[data-sdossier],#sheetClose,#btnAttach,#addReportBtn,#reposRow,#auditRow,#attentionRow,#lockdownRow,#projAddRepo,#projAddSkill,#projAddFile,#customAdd,#previewRun,#watchSave,#shopArchiveRow,#shopArchBack,#lzRssAdd");
 if(!t)return;
 if(t.id==="sheetClose"){document.getElementById("sheet").classList.remove("on");return}
 if(t.id==="btnAttach"){document.getElementById("fileInput").click();return}
@@ -570,7 +581,10 @@ if(t.hasAttribute("data-instock")){shopInStock=+t.getAttribute("data-instock");d
 if(t.id==="customAdd"){shopAddCustom();return}
 if(t.id==="previewRun"){shopPreview();return}
 if(t.id==="watchSave"){shopSaveWatchSettings();return}
-if(t.id==="shopArchiveRow"){openSheet("Архив запросов закупок","Вынесено в отдельный под-наряд — решение зафиксировано в отчёте FORGE-UI-9: список shop_dossiers требует собственного экрана с датами и карточками досье.");return}
+if(t.id==="shopArchiveRow"){openShopArchive();return}
+if(t.id==="shopArchBack"){shopArchBack();return}
+if(t.hasAttribute("data-sdchip")){var sdp=t.getAttribute("data-sdchip").split("|");var swhich=sdp[0],sval=sdp[1];if(swhich==="syearRow")sarchYear=sval;else if(swhich==="smonthRow")sarchMonth=sval;else sarchDay=sval;document.querySelectorAll("#"+swhich+" .dchip").forEach(function(c){c.classList.toggle("on",c===t)});renderShopArchList();return}
+if(t.hasAttribute("data-sdossier")){var su=t.getAttribute("data-url");if(su){window.open(su,"_blank")}else{toast("Ссылка недоступна")}return}
 if(t.hasAttribute("data-lztoggle")){lzToggle(t.getAttribute("data-lztoggle"));return}
 if(t.hasAttribute("data-lzdel")){lzDelete(t.getAttribute("data-lzdel"));return}
 if(t.id==="lzRssAdd"){lzAdd();return}
@@ -1091,6 +1105,38 @@ box.innerHTML=(d.offers||[]).length?'<div class="group">'+d.offers.map(function(
 }
 }catch(e){toast("Не удалось: "+e.message)}
 btn.textContent="Проверить"}
+/* FORGE-UI-13 (#216): Архив закупок — тот же UI-паттерн, что Архив отчётов
+(UI-5): поиск сервером (/api/shop/dossiers?q=), чипы год/месяц/день и
+фильтрация — клиентски; клик карточки открывает полное досье по
+кликабельной ссылке (существующий рендер /shop/dossier/<id>?t=HMAC). */
+var sarchAll=[],sarchYear="all",sarchMonth="all",sarchDay="all",sarchTimer=null;
+function openShopArchive(){
+document.getElementById("shopsetWrap").style.display="none";
+document.getElementById("shopArchWrap").style.display="";
+sarchYear="all";sarchMonth="all";sarchDay="all";
+document.getElementById("shopArchSearch").value="";
+loadShopArch()}
+function shopArchBack(){document.getElementById("shopArchWrap").style.display="none";document.getElementById("shopsetWrap").style.display="";loadShopAll()}
+async function loadShopArch(q){
+try{
+var d=await api(q?"/api/shop/dossiers?q="+encodeURIComponent(q):"/api/shop/dossiers");
+sarchAll=d.items||[];
+buildSArchChips();renderShopArchList();
+}catch(e){document.getElementById("shopArchList").innerHTML='<div class="empty">Нет связи с API.</div>'}}
+function buildSArchChips(){
+var ys=[],ms=[],ds=[],yset={},mset={},dset={};
+sarchAll.forEach(function(r){var d=String(r.created||"");if(d.length>=10){var y=d.slice(0,4),m=d.slice(5,7),dd=d.slice(8,10);if(!yset[y]){yset[y]=1;ys.push(y)}if(!mset[m]){mset[m]=1;ms.push(m)}if(!dset[dd]){dset[dd]=1;ds.push(dd)}}});
+ys.sort();ms.sort();ds.sort(function(a,b){return parseInt(a,10)-parseInt(b,10)});
+chipRow("syearRow",ys,null,sarchYear);
+chipRow("smonthRow",ms,function(k){return RU_MON[parseInt(k,10)-1]||k},sarchMonth);
+chipRow("sdayRow",ds,null,sarchDay)}
+function renderShopArchList(){
+var list=sarchAll.filter(function(r){var d=String(r.created||"");return (sarchYear==="all"||d.slice(0,4)===sarchYear)&&(sarchMonth==="all"||d.slice(5,7)===sarchMonth)&&(sarchDay==="all"||d.slice(8,10)===sarchDay)});
+var box=document.getElementById("shopArchList");
+if(!list.length){box.innerHTML='<div class="empty">'+(sarchAll.length?"За выбранный период пусто.":"Досье ещё не собирались.")+"</div>";return}
+box.innerHTML=list.map(function(r){
+return '<button class="arow" type="button" data-sdossier="'+esc(String(r.id))+'" data-url="'+esc(r.url||"")+'"><div class="adept" style="background:var(--red)">&#128717;</div><div class="abody"><div class="atitle">'+esc(r.title)+'</div><div class="ameta"><div class="adate">'+esc(fmtRuDate(r.created))+"</div>"+(r.on_watch?'<div class="awatch">&#9203; на контроле</div>':"")+'</div></div><span class="aedit">открыть</span></button>'}).join("")}
+document.getElementById("shopArchSearch").addEventListener("input",function(){var v=this.value.trim();clearTimeout(sarchTimer);sarchTimer=setTimeout(function(){loadShopArch(v)},350)});
 /* FORGE-UI-10 (#203): Источники ЛЗ — реальное управление RSS (rss_sources),
 честные статусы Telegram/YouTube/TikTok (MON-1..3 реализованы, управление
 командами Telegram — кнопки неактивны осознанно) */
