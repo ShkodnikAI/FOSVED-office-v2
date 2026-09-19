@@ -407,6 +407,24 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   let news = ""
   let news_result = try http_post("http://127.0.0.1:4000/news/fresh", json_encode({query: query, dept: "osp", limit: 5}), "application/json")
   if to_string(news_result) != "()" then { let news = json_get(parse_json(news_result), "news", "") }
+  // FRED (McpMarketsCall) — для monetary/financial: общие RSS-ленты
+  // /news/fresh не дают числовых макро-рядов (доходность облигаций,
+  // ставка ФРС, инфляция) — это и была реальная причина отчёта-каркаса
+  // без цифр по долгу США. Фиксированный набор ключевых рядов, не
+  // произвольный (нет лишнего вызова модели на извлечение series_id).
+  let fred_data = ""
+  if domain == "monetary" or domain == "financial" then {
+    let mut fred_lines = ""
+    each series in ["DGS10", "FEDFUNDS", "CPIAUCSL"] {
+      let r = McpMarketsCall("osp", "get_fred_series", json_encode({series_id: series, limit: 1}), "osp monetary/financial context")
+      if r.ok == true then {
+        let fred_lines = fred_lines + series + ": " + r.body + "\n"
+      } else {
+        let fred_lines = fred_lines + series + ": недоступно (" + r.note + ")\n"
+      }
+    }
+    let fred_data = "\n\n=== FRED (макроданные) ===\n" + fred_lines
+  }
   let s_mem = to_string(memories)
   if s_mem == "()" then { let s_mem = "" }
   let s_cor = to_string(corrections)
@@ -419,7 +437,7 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   if s_now == "()" then { let s_now = "" }
   let s_sk = to_string(skills)
   if s_sk == "()" then { let s_sk = "" }
-  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg
+  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + fred_data + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg
   let context = context + "\n\n=== ПОВТОР: ДАТА ===\n" + s_now
   return context
 }
