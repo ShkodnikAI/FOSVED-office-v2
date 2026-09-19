@@ -1,15 +1,6 @@
 // Fosved Office v2 — Main Application (MEGA-3)
 // 14 departments + routing + memory + cron + lockdown + voice + chain + learning + audit + archive
 
-// Наряд №395 (Metalogos gh#489): ADR-0161 compatibility profile — МИГРАЦИОННЫЙ
-// МОСТ, не место жительства. Офисные потоки написаны до решётки меток (№325
-// advisory-эра 0.19.x); мост №391 в 0.20.x делает clearance блокирующим.
-// `legacy` переводит ТОЛЬКО №325-clearance-хиты в audit-события (Severity::Info
-// + [SINK_CLEARANCE][audit-event] на stderr); Category A (SECRET_LEAK,
-// HTML_INJECTION, …) остаётся на полной строгости. Критерий выхода ADR-0161:
-// счётчик событий = метрика выгорания; каждая метрика в отчёте №395.
-profile legacy { egress: permissive_with_audit }
-
 db { url: env("DATABASE_URL") }
 
 llm {
@@ -24,39 +15,6 @@ llm {
   default_model: "deepseek-chat",
   failover: auto,
   circuit_breaker: 3
-}
-
-// ── Наряд №395 (Metalogos gh#489, Волна 3): capability-слой офиса ──────────────
-// Dogfood: офис живёт под линейными грантами (№390) + подписанный ledger-след
-// (№393). Деструктивный SQL (DROP/DELETE/TRUNCATE/ALTER) — только через
-// db_execute_with_grant с минимальным скоупом/TTL. Отказы безопасности
-// деградируют через on_deny-обработчики (№392): причина печатается и
-// дописывается в data/logs/deny_events.log (полный подписанный след — ledger,
-// файловый лог — эргономическая подсказка оператору).
-on_deny(db) {
-  match deny_reason() {
-    "VOICE_EGRESS_UNCONSENTED" then { print("deny:VOICE_EGRESS_UNCONSENTED") }
-    "IRREVERSIBLE_NO_GRANT" then { print("deny:IRREVERSIBLE_NO_GRANT") }
-    "UNTRUSTED_EXEC_DECISION" then { print("deny:UNTRUSTED_EXEC_DECISION") }
-    "SECRET_TO_EXEC" then { print("deny:SECRET_TO_EXEC") }
-    "SECRET_EGRESS_VCS" then { print("deny:SECRET_EGRESS_VCS") }
-    "SECRET_EGRESS_NETWORK" then { print("deny:SECRET_EGRESS_NETWORK") }
-    "PII_EGRESS_NETWORK" then { print("deny:PII_EGRESS_NETWORK") }
-    "PII_EGRESS_OUTPUT" then { print("deny:PII_EGRESS_OUTPUT") }
-    "UNTRUSTED_EGRESS_NETWORK" then { print("deny:UNTRUSTED_EGRESS_NETWORK") }
-    "SINK_CLEARANCE" then { print("deny:SINK_CLEARANCE") }
-    "HTML_INJECTION" then { print("deny:HTML_INJECTION") }
-    "TAINT_PERSISTENCE" then { print("deny:TAINT_PERSISTENCE") }
-    "SECRET_LEAK" then { print("deny:SECRET_LEAK") }
-  }
-  let _ = append_file("data/logs/deny_events.log", "[deny] class=db reason=" + deny_reason() + "\n")
-}
-
-// Wildcard-обработчик: точный класс побеждает wildcard (№392) — db покрыт
-// выше, остальные классы (network/exec/vcs/…) деградируют здесь.
-on_deny(*) {
-  print("deny:" + deny_reason())
-  let _ = append_file("data/logs/deny_events.log", "[deny] class=* reason=" + deny_reason() + "\n")
 }
 
 import dept/utils
@@ -116,23 +74,17 @@ pattern InitDB() -> String {
   // dept/priority/plan/acceptance/test_status/test_log/report/dispatch_id/
   // rework_count/in_work_at/testing_at. ALTER идемпотентен (try): колонки
   // добираются к живой БД при старте. Логика — в dept/narad.mlog.
-  // Наряд №395 (gh#489): деструктивные ALTER-миграции — под грантом
-  // (scope db:alter:* — формат действия db:<op>:<table>, грант обязан быть
-  // НЕ менее специфичен, чем действие (ADR-0155 §3.1); TTL 120 с, N(25) —
-  // по числу ALTER в InitDB; при добавлении миграции нарастить квоту.
-  // ALTER, отклонённый из-за дубля колонки, грант НЕ консюмирует).
-  let mig = grant_issue("db:alter:*", 120, "n", 25)
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN dept TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN plan TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN acceptance TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN test_log TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN report TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN in_work_at TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN testing_at TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN dept TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN plan TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN acceptance TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN test_log TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN report TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN in_work_at TEXT")
+  let _ = try db_execute("ALTER TABLE narads ADD COLUMN testing_at TEXT")
   // FO-049 (#161): метрики нарядной дисциплины — строка на каждый закрытый наряд
   db_execute("CREATE TABLE IF NOT EXISTS narad_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, narad_id TEXT, dept TEXT, first_try INTEGER DEFAULT 0, rework_count INTEGER DEFAULT 0, lead_seconds INTEGER, accepted_by TEXT, created_at TEXT DEFAULT (datetime('now')))")
   let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_narad_stats_created ON narad_stats(created_at)")
@@ -148,7 +100,7 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS shop_price_history (id INTEGER PRIMARY KEY AUTOINCREMENT, offer_id INTEGER NOT NULL, price_byn REAL NOT NULL, old_price_byn REAL, in_stock INTEGER, ts TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE INDEX IF NOT EXISTS idx_shop_ph_offer_ts ON shop_price_history(offer_id, ts)")
   db_execute("CREATE TABLE IF NOT EXISTS shop_watches (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, target_price_byn REAL, discount_pct REAL, alert_in_stock INTEGER DEFAULT 0, status TEXT DEFAULT 'active', last_checked_at TEXT, last_alert_json TEXT, created_at TEXT DEFAULT (datetime('now')))")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT")
+  let _ = try db_execute("ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT")
   db_execute("CREATE TABLE IF NOT EXISTS shop_dossiers (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, format TEXT NOT NULL, payload TEXT, snapshot_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))")
 
   // Admin
@@ -167,7 +119,7 @@ pattern InitDB() -> String {
   // LZ
   db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, channel_name TEXT, category TEXT, added_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, update_id TEXT UNIQUE, channel_id TEXT, channel_name TEXT, text TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')))")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
+  let _ = try db_execute("ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
   db_execute("CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, sources TEXT, frequency TEXT, last_scan TEXT, created_at TEXT DEFAULT (datetime('now')))")
 
   // System
@@ -180,15 +132,15 @@ pattern InitDB() -> String {
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
   // Yana events - alter table extensions
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN until_date TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN until_date TEXT")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
+  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
 
   // Yana metrics — delegation accuracy & forgetting incidents
   db_execute("CREATE TABLE IF NOT EXISTS yana_delegation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, query TEXT, delegated_to TEXT, dept_response_summary TEXT, was_correct INTEGER, feedback_source TEXT, delegated_at TEXT DEFAULT (datetime('now')), verified_at TEXT)")
@@ -229,9 +181,9 @@ pattern InitDB() -> String {
   // dept_archive.forecast_value: numeric forecast at creation time (Finance only)
   // dept_verification.actual_value: numeric actual post-factum (Finance only)
   // dept_verification.outcome_flag: categorical flag (Legal: "clean" / "rewrite_required")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
+  let _ = try db_execute("ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
+  let _ = try db_execute("ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
+  let _ = try db_execute("ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
 
   // Webhook dedup — time-windowed (WH-3): replaces eternal kv-flag
   db_execute("CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT DEFAULT (datetime('now')))")
@@ -622,8 +574,7 @@ pattern CheckRateLimit(provider: String) -> String {
 
 pattern RecordRateLimitCall(provider: String) -> String {
   let _ = db_execute("INSERT INTO rate_limits (provider, created_at) VALUES (?, datetime('now'))", [provider])
-  let g_rl = grant_issue("db:delete:rate_limits", 60, "once")
-  let _ = try db_execute_with_grant(g_rl, "DELETE FROM rate_limits WHERE created_at < datetime('now', '-2 minutes')", [])
+  let _ = try db_execute("DELETE FROM rate_limits WHERE created_at < datetime('now', '-2 minutes')", [])
   return "ok"
 }
 
@@ -2628,8 +2579,7 @@ mlogserver {
       let recent_count = to_float(json_get(recent[0], "c", "0"))
       if recent_count > 0.0 then { return respond("200 ok") }
       let _ = try db_execute("INSERT OR REPLACE INTO webhook_dedup (update_id, seen_at) VALUES (?, datetime('now'))", [update_id])
-      let g_wd = grant_issue("db:delete:webhook_dedup", 60, "once")
-      let _ = try db_execute_with_grant(g_wd, "DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
+      let _ = try db_execute("DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
     }
 
     // Lockdown check
@@ -4898,44 +4848,6 @@ return respond("200 ok") }
   }
 
   // ============================================================
-  // LEDGER EXPORT (наряд №395, Metalogos gh#489) — require CRON_SECRET
-  // ============================================================
-
-  // Снимок подписанного следа для внешней верификации (mlog ledger verify).
-  // Snapshot пиннит голову; JSONL — верифицируемая цепочка; in-toto —
-  // профиль №396 (первый корпус записей для внешнего черновика стандарта).
-  route "/cron/ledger-export" method=GET {
-    let secret = query_param("secret")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
-    let _ = InitDB()
-    let head_before = ledger_head()
-    let snap = ledger_snapshot()
-    let path_j = ledger_export("data/ledger/ledger_latest.jsonl")
-    let path_i = ledger_export_intoto("data/ledger/ledger_latest.intoto.json")
-    return respond("200 ok head_before=" + head_before + " snapshot=" + snap + " count=" + to_string(ledger_count()) + " jsonl=" + path_j + " intoto=" + path_i)
-  }
-
-  // Живой демонстрационный отказ (наряд №395, критерий (в)): N(1)-грант,
-  // второй деструктивный вызов отказывает (GRANT_EXHAUSTED — рантайм-состояние,
-  // невидимое статике) и деградирует через on_deny(db). След: grant.issued →
-  // grant.consumed (первый) → deny-запись (второй) — в подписанном ledger.
-  route "/dogfood/deny-demo" method=GET {
-    let secret = query_param("secret")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
-    let _ = InitDB()
-    let _ = db_execute("CREATE TABLE IF NOT EXISTS dogfood_demo (id INTEGER PRIMARY KEY, note TEXT)")
-    let _ = db_execute("INSERT INTO dogfood_demo (note) VALUES ('demo-row')")
-    let g = grant_issue("db:delete:dogfood_demo", 60, "n", 1)
-    let first = db_execute_with_grant(g, "DELETE FROM dogfood_demo WHERE id = (SELECT MIN(id) FROM dogfood_demo)")
-    let second = db_execute_with_grant(g, "DELETE FROM dogfood_demo")
-    return respond("200 dogfood first=" + first + " second_refused_type=" + type_of(second))
-  }
-
-  // ============================================================
   // CRON ENDPOINTS (8) — all require CRON_SECRET
   // ============================================================
 
@@ -5000,8 +4912,7 @@ return respond("200 ok") }
 
     // Phase: FO-027 TTL chain_steps — очистка старше 14 дней; pending/failed
     // без прогресса >24 ч → expired + Telegram-алерт владельцу
-    let g_cs = grant_issue("db:delete:chain_steps", 300, "once")
-    let _ = db_execute_with_grant(g_cs, "DELETE FROM chain_steps WHERE created_at < datetime('now', '-14 days')")
+    let _ = db_execute("DELETE FROM chain_steps WHERE created_at < datetime('now', '-14 days')")
     let expired_rows = query("SELECT chain_id, COUNT(*) AS c FROM chain_steps WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day') GROUP BY chain_id", [])
     let _ = db_execute("UPDATE chain_steps SET status='expired', updated_at=datetime('now') WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day')")
     each er in expired_rows {

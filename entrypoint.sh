@@ -83,15 +83,20 @@ echo "--- FORGE: repos dir=${FORGE_REPOS_DIR}/forge/repos, scratch swept ---"
 
 # 2. Metalogos
 # FO-014: песочница документов filesystem-MCP + каталог subprocess-аудита ядра
+# Наряд №395 (PR #191): бинарь и входной файл env-изированы для стейджинга.
+# Прод-дефолты: MLOG_BIN=./bin/mlog (0.19.0), MLOG_ENTRY=app.mlog — поведение не менялось.
+# Стейджинг VM-пилота (FO-050): MLOG_BIN=./bin/mlog-020, MLOG_ENTRY=dogfood_staging.mlog.
+MLOG_BIN="${MLOG_BIN:-./bin/mlog}"
+MLOG_ENTRY="${MLOG_ENTRY:-app.mlog}"
 mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs"
-if ./bin/mlog check app.mlog 2>&1 | grep -q "parse error"; then
+if "$MLOG_BIN" check "$MLOG_ENTRY" 2>&1 | grep -q "parse error"; then
   echo "WARNING: mlog check found parse errors (mlog serve may still work — interpreter is more lenient)"
-  ./bin/mlog check app.mlog 2>&1 | head -5
+  "$MLOG_BIN" check "$MLOG_ENTRY" 2>&1 | head -5
 fi
-./bin/mlog audit app.mlog 2>&1 | tail -3
-PORT=10001 ./bin/mlog serve app.mlog &
+"$MLOG_BIN" audit "$MLOG_ENTRY" 2>&1 | tail -3
+PORT=10001 "$MLOG_BIN" serve "$MLOG_ENTRY" &
 MLOG_PID=$!
-echo "Metalogos started (PID: $MLOG_PID)"
+echo "Metalogos started (PID: $MLOG_PID, bin: $MLOG_BIN, entry: $MLOG_ENTRY)"
 sleep 3
 
 for i in {1..10}; do

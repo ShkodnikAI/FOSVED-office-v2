@@ -331,7 +331,7 @@ def test_serve_route_body_needs_exec_gate(tmp_path):
     src = f'''mlogserver {{
   route "/t" method=GET {{
     let body = mcp_call("mcp_servers/filesystem", [], "list_dir", {args_literal})
-    return respond(body)
+    return respond(escape_html(body))
   }}
 }}
 '''

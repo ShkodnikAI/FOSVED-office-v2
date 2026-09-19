@@ -138,7 +138,8 @@ Reverse Proxy (Flask)
 ```
 .
 ├── app.mlog                  # Главный роутер (~4800 строк)
-├── bin/mlog                  # Metalogos v0.20.0 бинарник (x86-64, Rust)
+├── bin/mlog                  # Metalogos v0.19.0 бинарник (x86-64, Rust, прод)
+├── bin/mlog-020              # Metalogos 0.20.0 wave-3 (main 29de25a) — стейджинг-догфуд (FO-050)
 ├── llm_proxy.py              # Тонкий фасад-сборщик (FO-008), точка входа
 ├── proxy/                    # 27 модулей, ~12400 строк — вся логика LLM-прокси
 │   ├── core.py                    # Flask-приложение, auth, конфиг
@@ -230,7 +231,7 @@ docker run -p 10000:10000 --env-file .env fosved
 
 | Компонент | Технология |
 |---|---|
-| Ядро | Metalogos v0.20.0 (Rust DSL, 457 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory) |
+| Ядро | Metalogos v0.19.0 (Rust DSL, ~394 встроенных функции: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory) |
 | Прокси-слой | Python 3.12 + Flask, разбит на пакет `proxy/` (27 модулей) |
 | База данных | SQLite, 68 таблиц |
 | Голос STT | Whisper |
