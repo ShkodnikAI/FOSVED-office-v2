@@ -10,6 +10,38 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  # ── Job 0: Branch freshness (защита от мержа устаревшей ветки) ──────
+  # Адаптировано из практики проекта Metalogos (AGENTS.md, §4/§8) —
+  # там этот класс ошибки (мерж ветки, сильно отставшей от main, риск
+  # затереть уже смёрженную работу) ловили вручную дважды, прежде чем
+  # автоматизировали. У нас за сессию редизайна Mini App несколько раз
+  # приходилось вручную ловить устаревший локальный чекаут — тот же
+  # класс проблемы, просто раньше на этапе разработки, не на этапе PR.
+  branch-freshness:
+    name: Branch freshness (blocking)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check PR base is not stale relative to main
+        run: |
+          git fetch origin main --quiet
+          MERGE_BASE=$(git merge-base HEAD origin/main)
+          BEHIND=$(git rev-list --count "${MERGE_BASE}..origin/main")
+          echo "PR branch diverged from main at ${MERGE_BASE}"
+          echo "main has advanced ${BEHIND} commit(s) since divergence"
+          THRESHOLD=20
+          if [ "${BEHIND}" -gt "${THRESHOLD}" ]; then
+            echo "::error::Эта ветка отстала от main на ${BEHIND} коммитов (порог: ${THRESHOLD})."
+            echo "::error::Прямой мерж отсюда рискует откатить уже смёрженную в main работу."
+            echo "::error::Обнови ветку (rebase или merge main в неё) перед ревью."
+            exit 1
+          fi
+
+
   # ── Job 1: Python tests (pytest) ─────────────────────────────────────
   pytest:
     name: Python tests
