@@ -140,11 +140,10 @@ def scan_osint(username, level='basic', timeout=120, tor=False, sites=None):
         return {'error': 'aliens_eye binary not found. Install: pip3 install aliens-eye'}
     finally:
         # Убрать за собой — файлы результатов накапливались бы иначе.
-        try:
-            import shutil
-            shutil.rmtree(scan_dir, ignore_errors=True)
-        except Exception:
-            pass
+        # rmtree(ignore_errors=True) сам не бросает — обёртка try/except была мёртвой
+        # и нарушала FO-007 (silent except) — снято в PR #191.
+        import shutil
+        shutil.rmtree(scan_dir, ignore_errors=True)
 
 # ══════════════════════════════════════════════════════════════════════
 

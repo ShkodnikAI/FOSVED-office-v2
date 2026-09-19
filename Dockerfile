@@ -15,9 +15,13 @@ WORKDIR /office
 COPY requirements.txt /office/requirements.txt
 RUN pip3 install -r requirements.txt --break-system-packages
 
-# Metalogos v0.19.0 — WH-1: force cache invalidation to ensure latest binary
+# Metalogos v0.19.0 — прод-бинарь (WH-1: force cache invalidation to ensure latest binary)
+# Наряд №395 (PR #191): bin/mlog-020 (0.20.0, wave-3, main 29de25a) — ТОЛЬКО для
+# стейджинг-догфуда харнесса (FO-050). Прод остаётся на 0.19.0 до миграции
+# диалогового контура (№327) — отдельный наряд.
 COPY bin/mlog /usr/local/bin/mlog
-RUN chmod +x /usr/local/bin/mlog && /usr/local/bin/mlog --version
+COPY bin/mlog-020 /usr/local/bin/mlog-020
+RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 && /usr/local/bin/mlog --version
 
 COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
