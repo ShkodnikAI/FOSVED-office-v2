@@ -384,6 +384,111 @@ def api_narad_detail(nid):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.get("/api/depts/chat")
+def api_depts_chat():
+    """FORGE-UI-3 (#196): ряд кнопок отделов чата — только чтение существующих
+    данных. Порядок: Яна всегда первая; далее отделы, использовавшиеся за
+    последние 30 дней, по use_count из dept_activity (таблица существует именно
+    для этого, FO-контур RecordUserMessage); затем прочие использованные по
+    свежести last_used_at; затем ни разу не использованные. Цвета — из
+    DEPT_COLORS (proxy/core.py), без дублирования палитры во фронте.
+    Бейджи непрочитанных: last_msg_id из dialog_history + ?seen=dept:id —
+    количество сообщений отдела после последней прочитанной отметки фронта.
+    """
+    try:
+        from datetime import datetime, timedelta, timezone
+        act = {}
+        try:
+            rows = _query("SELECT dept, last_used_at, use_count FROM dept_activity", fetch=True)
+            act = {r["dept"]: (r["last_used_at"] or "", int(r["use_count"] or 0)) for r in rows}
+        except Exception:  # noqa: BLE001 — нет таблицы/БД не готова: порядок деградирует честно
+            act = {}
+        last_msg = {}
+        try:
+            rows = _query("SELECT dept, MAX(id) AS m FROM dialog_history GROUP BY dept", fetch=True)
+            last_msg = {r["dept"]: int(r["m"] or 0) for r in rows}
+        except Exception:  # noqa: BLE001
+            last_msg = {}
+        seen = {}
+        for part in (request.args.get("seen") or "").split(","):
+            if ":" in part:
+                k, v = part.split(":", 1)
+                try:
+                    seen[k.strip()] = int(v)
+                except ValueError:
+                    # битая отметка фронта — не молчим: warning FO-007
+                    _log_error(f"depts/chat: malformed seen part skipped: {part[:40]!r}",
+                               source="api_depts_chat", dept="admin", kind="input")
+        unread = {}
+        for dept_id, mark in seen.items():
+            if mark and dept_id in DEPT_COLORS:
+                try:
+                    r = _query("SELECT COUNT(*) AS c FROM dialog_history WHERE dept=? AND id>?",
+                               (dept_id, mark), fetch=True)
+                    unread[dept_id] = int(r[0]["c"]) if r else 0
+                except Exception:  # noqa: BLE001
+                    unread[dept_id] = 0
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        fresh = [d for d in DEPT_COLORS if d != "yana" and act.get(d, ("", 0))[0] and act.get(d, ("", 0))[0] >= cutoff]
+        fresh.sort(key=lambda d: (-act.get(d, ("", 0))[1], d))
+        stale = [d for d in DEPT_COLORS if d != "yana" and act.get(d, ("", 0))[0] and act.get(d, ("", 0))[0] < cutoff]
+        stale.sort(key=lambda d: act.get(d, ("", 0))[0], reverse=True)
+        never = sorted(d for d in DEPT_COLORS if d != "yana" and not act.get(d, ("", 0))[0])
+        depts = []
+        for d in ["yana"] + fresh + stale + never:
+            nm = DEPT_NAMES.get(d, d)
+            short = (nm.split("·")[0].split("—")[0].strip() or nm)
+            c = DEPT_COLORS.get(d, {})
+            depts.append({
+                "id": d, "name": nm, "short": short,
+                "color": c.get("start", ""), "color2": c.get("end", ""),
+                "last_used": act.get(d, ("", 0))[0], "uses": act.get(d, ("", 0))[1],
+                "last_msg_id": last_msg.get(d, 0), "unread": unread.get(d, 0),
+            })
+        return jsonify({"status": "ok", "depts": depts})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/depts/<dept>/dialog")
+def api_dept_dialog(dept):
+    """FORGE-UI-3 (#196): лента переписки отдела — чтение dialog_history
+    (последний chat_id отдела, последние 50 сообщений, хронологический порядок).
+    Это лента переписки, не список диалогов: role='user' → свои пузыри,
+    остальные → пузыри отдела."""
+    try:
+        rows = _query(
+            "SELECT id, role, content, created_at FROM dialog_history "
+            "WHERE dept=? AND chat_id=(SELECT chat_id FROM dialog_history "
+            "WHERE dept=? ORDER BY id DESC LIMIT 1) ORDER BY id DESC LIMIT 50",
+            (dept, dept), fetch=True)
+        msgs = [{"id": r["id"], "role": r["role"] or "assistant",
+                 "content": (r["content"] or "")[:800],
+                 "ts": r["created_at"] or ""} for r in reversed(rows)]
+        return jsonify({"status": "ok", "messages": msgs})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/dialog/search")
+def api_dialog_search():
+    """FORGE-UI-3 (#196): глобальный поиск по всем перепискам (dialog_history),
+    не только текущий отдел. <2 символов — пустой результат (не греем LIKE)."""
+    try:
+        q = (request.args.get("q") or "").strip()
+        if len(q) < 2:
+            return jsonify({"status": "ok", "results": []})
+        rows = _query(
+            "SELECT id, dept, role, content, created_at FROM dialog_history "
+            "WHERE content LIKE ? ORDER BY id DESC LIMIT 30", (f"%{q}%",), fetch=True)
+        results = [{"id": r["id"], "dept": r["dept"] or "", "role": r["role"] or "",
+                    "content": (r["content"] or "")[:200],
+                    "ts": r["created_at"] or ""} for r in rows]
+        return jsonify({"status": "ok", "results": results})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.post("/api/narads/<nid>/approve")
 def api_narad_approve(nid):
     try:
