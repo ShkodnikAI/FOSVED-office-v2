@@ -2074,5 +2074,6 @@ def miniapp_spa_static(filepath):
         return "<h1>Not found</h1>", 404
     ext = file_path.suffix
     mimes = {".html": "text/html", ".css": "text/css", ".js": "application/javascript",
-             ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json"}
+             ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json",
+             ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
     return Response(file_path.read_bytes(), mimetype=mimes.get(ext, "application/octet-stream"))
