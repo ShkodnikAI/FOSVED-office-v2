@@ -458,7 +458,7 @@ pattern TransitionArtifactState(artifact_id: String, target_state: String) -> Di
   let _ = db_execute("UPDATE design_artifacts SET status = ?, iteration_count = ?, updated_at = datetime('now') WHERE id = ?", [target_state, new_iteration, artifact_id])
 
   // Record state change in design_decisions for audit trail
-  let decision_id = hash(artifact_id + target_state + to_string(now()))
+  let decision_id = sha256(artifact_id + target_state + to_string(now()))
   let _ = db_execute("INSERT INTO design_decisions (id, artifact_id, decision_type, old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))", [decision_id, artifact_id, "state_transition", current_state, target_state])
 
   let _ = AuditLog("design_lifecycle", DEPT_NAME(), "artifact=" + artifact_id + " " + current_state + "→" + target_state + " iteration=" + to_string(new_iteration))
@@ -829,7 +829,7 @@ pattern CreateDesignArtifact(artifact_type: String, description: String, chat_id
   }
 
   // Generate artifact ID
-  let artifact_id = "da-" + substring(hash(description + to_string(now())), 0.0, 8.0)
+  let artifact_id = "da-" + substring(sha256(description + to_string(now())), 0.0, 8.0)
 
   // Load skills for this artifact type
   let skills = GetActiveSkills(artifact_type, DetectAISpecific(description), is_new)
@@ -919,7 +919,7 @@ pattern GenerateComponentSpec(artifact_id: String, chat_id: String) -> String {
   let g4 = GateInteractionStates("component_spec", states_spec)
 
   // Create spec artifact in DB
-  let spec_id = "da-" + substring(hash(artifact_id + "spec" + to_string(now())), 0.0, 8.0)
+  let spec_id = "da-" + substring(sha256(artifact_id + "spec" + to_string(now())), 0.0, 8.0)
   let _ = db_execute("INSERT INTO design_artifacts (id, name, artifact_type, status, content, design_tokens, interaction_states, parent_artifact_id, has_mobile, has_responsive, a11y_score, iteration_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))", [spec_id, name + " — Spec", "component_spec", STATE_DRAFT(), spec_content, tokens, states_spec, artifact_id, "true", "true", 0.0, 0])
 
   let g4_passes_str = "false"
@@ -1073,7 +1073,7 @@ pattern ListDesignArtifacts(chat_id: String, limit: Int) -> String {
 // /design-research — conduct user research (Tier 3 skill)
 pattern ConductUserResearch(domain: String, research_type: String, chat_id: String) -> String {
   // Hard rule 12: research required for new domain
-  let research_id = "ur-" + substring(hash(domain + to_string(now())), 0.0, 8.0)
+  let research_id = "ur-" + substring(sha256(domain + to_string(now())), 0.0, 8.0)
 
   let research_prompt = "Проведи пользовательское исследование для домена: " + domain + "\n\nТип исследования: " + research_type + "\n\nОпредели:\n1. Целевая аудитория (сегменты)\n2. Ключевые пользовательские задачи\n3. Текущие решения и их ограничения\n4. Боли и потребности\n5. Поведенческие паттерны\n6. Контекст использования (устройства, среда)\n7. Метрики успеха\n\nДля каждого сегмента укажи:\n• Демографический профиль\n• Поведенческие характеристики\n• Уровень цифровой грамотности\n• Критические задачи\n\nВерни JSON: {\"segments\": [...], \"tasks\": [...], \"pain_points\": [...], \"current_solutions\": [...], \"context\": {...}, \"success_metrics\": [...]}"
 
@@ -1153,7 +1153,7 @@ pattern IterateDesignArtifact(artifact_id: String, feedback: String, chat_id: St
   let _ = db_execute("UPDATE design_artifacts SET content = ?, updated_at = datetime('now') WHERE id = ?", [new_content, artifact_id])
 
   // Record iteration as design decision
-  let decision_id = hash(artifact_id + "iter" + to_string(new_iteration) + to_string(now()))
+  let decision_id = sha256(artifact_id + "iter" + to_string(new_iteration) + to_string(now()))
   let _ = db_execute("INSERT INTO design_decisions (id, artifact_id, decision_type, rationale, old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))", [decision_id, artifact_id, "iteration", feedback, "iteration_" + to_string(iteration_count), "iteration_" + to_string(new_iteration)])
 
   let token_check_all_tokens_str = "false"
@@ -1401,7 +1401,7 @@ pattern RunMonthlyDesignAudit() -> String {
   let output = output + substring(token_audit, 0.0, 1000.0) + "\n"
 
   // Store audit result
-  let _ = db_execute("INSERT INTO design_decisions (id, artifact_id, decision_type, rationale, created_at) VALUES (?, ?, ?, ?, datetime('now'))", [hash("monthly_audit" + to_string(now())), "", "monthly_audit", substring(output, 0.0, 4000.0)])
+  let _ = db_execute("INSERT INTO design_decisions (id, artifact_id, decision_type, rationale, created_at) VALUES (?, ?, ?, ?, datetime('now'))", [sha256("monthly_audit" + to_string(now())), "", "monthly_audit", substring(output, 0.0, 4000.0)])
   let _ = AuditLog("design_monthly_audit", DEPT_NAME(), "artifacts=" + to_string(metrics.total_artifacts) + " drift=" + to_string(metrics.drift_score))
 
   return output
@@ -1520,7 +1520,7 @@ pattern DesignPipeline(query: String, artifact_type: String, chat_id: String) ->
   let responsive_check = GateResponsiveDesign(atype, mobile != "", true)
 
   // Step 9: Generate artifact ID and store
-  let artifact_id = "da-" + substring(hash(query + to_string(now())), 0.0, 8.0)
+  let artifact_id = "da-" + substring(sha256(query + to_string(now())), 0.0, 8.0)
   let mobile_str = "false"
   if mobile != "" then { let mobile_str = "true" }
   let _ = db_execute("INSERT INTO design_artifacts (id, name, artifact_type, status, content, design_tokens, user_tasks, interaction_states, has_mobile, has_responsive, a11y_score, iteration_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))", [artifact_id, name, atype, STATE_DRAFT(), content, tokens_used, user_tasks, states, mobile_str, "true", 0.0, 0])
