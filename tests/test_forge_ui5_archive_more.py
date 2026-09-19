@@ -64,7 +64,7 @@ def ui5_schema():
 # ── Блок A. Экран «Ещё» ──────────────────────────────────────────────────
 
 def test_more_three_groups_danger_bottom():
-    more = INDEX.split('data-tab="more"')[1].split('</section>')[0]
+    more = INDEX.split('<section class="screen" data-tab="more">')[1].split('</section>')[0]
     assert "<h2>Материалы</h2>" in more and "<h2>Система</h2>" in more and "<h2>Опасно</h2>" in more
     # «Опасно» физически ниже остальных групп
     assert more.index("<h2>Опасно</h2>") > more.index("<h2>Система</h2>") > more.index("<h2>Материалы</h2>")
@@ -73,7 +73,7 @@ def test_more_three_groups_danger_bottom():
 
 
 def test_more_menu_items_present():
-    more = INDEX.split('data-tab="more"')[1].split('</section>')[0]
+    more = INDEX.split('<section class="screen" data-tab="more">')[1].split('</section>')[0]
     for label in ("Архив отчётов", "FORGE · Репозитории", "Интеграции и ключи",
                   "Журнал аудита", "Требует решения", "Экстренная блокировка"):
         assert f'<div class="mrow-label">{label}</div>' in more
@@ -91,7 +91,7 @@ def test_version_commit_real_build_data():
     assert 'at.commit||"local"' in INDEX
     assert '"офис build "+(at.commit||"local")+(at.version?" · mlog "+at.version:"")' in INDEX
     # вертикальная линия внизу экрана
-    more = INDEX.split('data-tab="more"')[1].split('</section>')[0]
+    more = INDEX.split('<section class="screen" data-tab="more">')[1].split('</section>')[0]
     assert '<div class="verline" id="verLine"></div>' in more
 
 
