@@ -136,11 +136,56 @@ def enrich_news_with_fulltext(limit=5):
     return enriched
 
 
+def _rss_state_table():
+    """FORGE-UI-10 (#203): состояние RSS-источников (ленивая схема).
+    rss_sources — общий список: сееденные из RSS_FEEDS (custom=0) и
+    добавленные владельцем (custom=1). deleted=1 скрывает сеединую ленту
+    (иначе она вернётся при следующем сеединге из кода)."""
+    from proxy.core import _query
+    _query("""CREATE TABLE IF NOT EXISTS rss_sources (
+            feed TEXT PRIMARY KEY, url TEXT, name TEXT, tag TEXT,
+            enabled INTEGER DEFAULT 1, custom INTEGER DEFAULT 0,
+            deleted INTEGER DEFAULT 0)""")
+    for feed_id, fc in RSS_FEEDS.items():
+        _query("INSERT OR IGNORE INTO rss_sources (feed, url, name, tag, enabled, custom, deleted) "
+               "VALUES (?, ?, ?, ?, 1, 0, 0)",
+               (feed_id, fc["url"], fc["name"], fc["category"]))
+
+
+def rss_enabled_feeds():
+    """FORGE-UI-10 (#203): активные ленты для collect_rss — код + таблица
+    состояния. Выключенные (enabled=0) и удалённые (deleted=1) пропускаются."""
+    from proxy.core import _query
+    _rss_state_table()
+    out = {}
+    rows = _query("SELECT feed, url, name, tag FROM rss_sources "
+                  "WHERE enabled=1 AND deleted=0 ORDER BY feed", fetch=True) or []
+    for r in rows:
+        out[r["feed"]] = {"url": r["url"], "name": r["name"], "category": r["tag"]}
+    return out
+
+
+def rss_validate_url(url):
+    """FORGE-UI-10 (#203): проверка, что URL — реально рабочая RSS/Atom-лента
+    (попытка распарсить до сохранения). Возвращает (ok, title)."""
+    import feedparser as _fp
+    try:
+        d = _fp.parse(str(url))
+        if d.bozo and not d.entries:
+            return False, ""
+        title = (d.feed.get("title") or "").strip()
+        if not d.entries and not title:
+            return False, ""
+        return True, title or "RSS-лента"
+    except Exception:
+        return False, ""
+
+
 def collect_rss():
     """Collect from all RSS feeds. Dedup by hash(title+url). TTL 7 days."""
     import feedparser as _fp
     collected, errors = 0, 0
-    for feed_id, fc in RSS_FEEDS.items():
+    for feed_id, fc in rss_enabled_feeds().items():
         try:
             feed = _fp.parse(fc["url"])
             for entry in feed.entries[:20]:

@@ -870,6 +870,101 @@ def api_shop_preview():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+_RSS_NOTICE = {
+    "telegram": "Сбор реализован (MON-1): чтение каналов через пользовательский аккаунт — нужен отдельный аккаунт, не основной личный. Управление каналами и сводкой — командами /lz_channel и /lz digest в Telegram.",
+    "youtube": "Сбор реализован (MON-2): нужен YOUTUBE_API_KEY (Интеграции). Управление каналами — командой /lz_channel в Telegram.",
+    "tiktok": "Сбор реализован (MON-3): веб-эндпоинт с лимитами запросов. Управление — командой /lz_channel в Telegram.",
+}
+
+
+@app.get("/api/lz/rss")
+def api_lz_rss_list():
+    """FORGE-UI-10 (#203): список RSS-источников ЛЗ — кодовый RSS_FEEDS,
+    сееденный в таблицу состояния rss_sources + добавленные владельцем."""
+    try:
+        from proxy.news import _rss_state_table
+        _rss_state_table()
+        rows = _query("SELECT feed, url, name, tag, enabled, custom FROM rss_sources "
+                      "WHERE deleted=0 ORDER BY tag, feed", fetch=True) or []
+        return jsonify({"status": "ok", "feeds": [
+            {"feed": r["feed"], "name": r["name"], "url": r["url"],
+             "category": r["tag"], "enabled": bool(r["enabled"]),
+             "custom": bool(r["custom"])} for r in rows]})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/lz/rss/<feed>/toggle")
+def api_lz_rss_toggle(feed):
+    """FORGE-UI-10 (#203): тумблер ленты — выключенная пропускается
+    collect_rss() при следующем сборе (без удаления из конфигурации)."""
+    try:
+        from proxy.news import _rss_state_table
+        _rss_state_table()
+        d = request.get_json(force=True, silent=True) or {}
+        enabled = 1 if d.get("enabled") else 0
+        _query("UPDATE rss_sources SET enabled=? WHERE feed=?", (enabled, feed))
+        _log_audit("lz_rss_toggled", {"feed": feed, "enabled": bool(enabled)}, dept="lz")
+        return jsonify({"status": "ok", "feed": feed, "enabled": bool(enabled)})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.delete("/api/lz/rss/<feed>")
+def api_lz_rss_delete(feed):
+    """FORGE-UI-10 (#203): удаление ленты. Кодовая — мягко (deleted=1, иначе
+    вернётся при сеединге); добавленная владельцем — удаляется строкой."""
+    try:
+        from proxy.news import _rss_state_table
+        _rss_state_table()
+        row = _query("SELECT custom FROM rss_sources WHERE feed=? LIMIT 1", (feed,), fetch=True)
+        if not row:
+            return jsonify({"status": "error", "message": "лента не найдена"}), 404
+        if row[0]["custom"]:
+            _query("DELETE FROM rss_sources WHERE feed=?", (feed,))
+        else:
+            _query("UPDATE rss_sources SET deleted=1, enabled=0 WHERE feed=?", (feed,))
+        _log_audit("lz_rss_deleted", {"feed": feed}, dept="lz")
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/lz/rss")
+def api_lz_rss_add():
+    """FORGE-UI-10 (#203): добавить сайт по ссылке — URL валидируется
+    (feedparser) ДО сохранения; заведомо нерабочая ссылка не сохраняется."""
+    try:
+        from proxy.news import rss_validate_url, _rss_state_table
+        d = request.get_json(force=True, silent=True) or {}
+        url = str(d.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return jsonify({"status": "error", "message": "нужен http(s) URL"}), 400
+        ok, title = rss_validate_url(url)
+        if not ok:
+            return jsonify({"status": "error", "message": "URL не похож на рабочую RSS/Atom-ленту"}), 400
+        _rss_state_table()
+        base = re.sub(r"[^a-z0-9\-]", "", url.split("//", 1)[-1].lower())[:40] or "custom-feed"
+        feed_id = f"custom-{base}"
+        n = 2
+        while _query("SELECT 1 FROM rss_sources WHERE feed=? LIMIT 1", (feed_id,), fetch=True):
+            feed_id = f"custom-{base}-{n}"
+            n += 1
+        _query("INSERT INTO rss_sources (feed, url, name, tag, enabled, custom, deleted) "
+               "VALUES (?, ?, ?, 'custom', 1, 1, 0)", (feed_id, url, title[:120]))
+        _log_audit("lz_rss_added", {"feed": feed_id, "url": url[:120]}, dept="lz")
+        return jsonify({"status": "ok", "feed": feed_id, "title": title})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/lz/notices")
+def api_lz_notices():
+    """FORGE-UI-10 (#203): честные статусы Telegram/YouTube/TikTok контура ЛЗ
+    (MON-1..4 реализованы; управление каналами — команды Telegram)."""
+    return jsonify({"status": "ok", "notices": _RSS_NOTICE})
+
+
 @app.post("/api/narads/<nid>/approve")
 def api_narad_approve(nid):
     try:
