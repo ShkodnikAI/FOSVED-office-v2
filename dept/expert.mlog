@@ -212,7 +212,28 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// EXPERT CONTEXT BUILDER — includes automotive domain + skills
+// LIVE SEARCH — общий живой поиск для любой темы встречи/переговоров
+// (владелец, 2026-09-19: Эксперт был узко заточен под авто — подкоманды,
+// ExpertAutomotiveKB, даже критерий self-verify буквально "automotive
+// data" — при вопросе про забор из солнечных панелей честно сказал
+// "живой поиск не подключён" и подмешал нерелевантную авто-базу.
+// Решение: живой поиск — всем темам, авто-база знаний — только авто.)
+// ═══════════════════════════════════════════════════════════════════════
+pattern ExpertTavilySearch(query: String, chat_id: String) -> String {
+  let result = try http_post("http://127.0.0.1:4000/lz/tavily", json_encode({query: query, dept: "expert"}), "application/json")
+  if to_string(result) == "()" then { return "" }
+  let reply = json_get(parse_json(result), "response", "")
+  return to_string(reply)
+}
+
+pattern ExpertIsAutomotiveTopic(query: String) -> Bool {
+  let t = lower(query)
+  return contains(t, "авто") or contains(t, "машин") or contains(t, "автомобил") or contains(t, "car ") or contains(t, "vehicle") or contains(t, "дилер") or contains(t, "residual") or contains(t, "лизинг авто") or contains(t, "trade-in")
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// EXPERT CONTEXT BUILDER — includes automotive domain (if relevant) + skills
 // ═══════════════════════════════════════════════════════════════════════
 pattern BuildExpertContext(query: String, chat_id: String) -> String {
   let profile = ReadDeptProfile("expert")
@@ -222,9 +243,15 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
   let facts = GetFacts("expert", "12")
   let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
-  let auto_kb = ExpertAutomotiveKB()
+  let auto_kb = ""
+  if ExpertIsAutomotiveTopic(query) == true then {
+    let auto_kb = ExpertAutomotiveKB()
+  }
+  let live = ExpertTavilySearch(query, chat_id)
+  let live_section = ""
+  if live != "" then { let live_section = "\n\n=== Live Search ===\n" + live }
 
-  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Automotive Knowledge Base ===\n" + auto_kb + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Консолидированные факты ===\n" + facts + "\n\n=== Recent Dialog ===\n" + dialog
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Automotive Knowledge Base ===\n" + auto_kb + live_section + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Консолидированные факты ===\n" + facts + "\n\n=== Recent Dialog ===\n" + dialog
   return context
 }
 
