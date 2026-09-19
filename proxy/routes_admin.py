@@ -308,9 +308,13 @@ def api_budget_status():
 
 @app.get("/api/narads")
 def api_narads():
-    """List narads."""
+    """List narads.
+
+    FORGE-UI-2 (#195): SELECT дополнен dept/priority/in_work_at (колонки схемы FO-046
+    уже существуют — миграции нет, только чтение существующей таблицы).
+    """
     try:
-        rows = _query("SELECT id, title, description, risk_level, status, created_at, approved_at FROM narads ORDER BY id DESC LIMIT 20", fetch=True)
+        rows = _query("SELECT id, title, description, risk_level, status, created_at, approved_at, dept, priority, in_work_at FROM narads ORDER BY id DESC LIMIT 20", fetch=True)
         narads = []
         for r in rows:
             narads.append({
@@ -318,8 +322,64 @@ def api_narads():
                 "risk": r["risk_level"], "status": r["status"],
                 "created": r["created_at"][:16] if r["created_at"] else "",
                 "approved": r["approved_at"][:16] if r["approved_at"] else "",
+                "dept": r["dept"] or "", "priority": r["priority"] or "normal",
+                "in_work": r["in_work_at"][:16] if r["in_work_at"] else "",
             })
         return jsonify({"status": "ok", "narads": narads})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.get("/api/narads/<nid>")
+def api_narad_detail(nid):
+    """FORGE-UI-2 (#195): деталь наряда — только чтение существующих таблиц.
+
+    narads (жизненный цикл: created/approved/in_work/testing/executed,
+    план/критерии/вердикт приёмки) + narad_steps (журнал исполнения FO-047,
+    ensure_schema создаёт её без миграций). Ни одна запись здесь не меняется.
+    """
+    try:
+        rows = _query(
+            "SELECT id, title, description, dept, priority, risk_level, status, plan, acceptance, "
+            "test_status, test_log, result, rework_count, created_at, approved_at, in_work_at, "
+            "testing_at, executed_at FROM narads WHERE id=? LIMIT 1", (nid,), fetch=True)
+        if not rows:
+            return jsonify({"status": "error", "message": "наряд не найден"}), 404
+        r = rows[0]
+        steps = []
+        try:
+            from proxy.narad_queue import ensure_schema as _ensure_steps
+            _ensure_steps()
+            step_rows = _query(
+                "SELECT status, reply, created_at, updated_at FROM narad_steps "
+                "WHERE narad_id=? ORDER BY id ASC LIMIT 50", (nid,), fetch=True)
+            for s in step_rows:
+                steps.append({
+                    "status": s["status"] or "",
+                    "reply": (s["reply"] or "")[:400],
+                    "created": s["created_at"] or "",
+                    "updated": s["updated_at"] or "",
+                })
+        except Exception as steps_err:  # noqa: BLE001 — журнал деградирует честно, наряд не прячем
+            _log_audit("narad_detail_steps_degraded", {"narad_id": nid, "error": str(steps_err)[:120]})
+        return jsonify({
+            "status": "ok",
+            "narad": {
+                "id": r["id"], "title": r["title"],
+                "description": r["description"] or "",
+                "dept": r["dept"] or "", "priority": r["priority"] or "normal",
+                "risk": r["risk_level"], "status": r["status"] or "",
+                "plan": r["plan"] or "", "acceptance": r["acceptance"] or "",
+                "test_status": r["test_status"] or "none",
+                "test_log": (r["test_log"] or "")[:600],
+                "result": (r["result"] or "")[:600],
+                "rework": r["rework_count"] or 0,
+                "created": r["created_at"] or "", "approved": r["approved_at"] or "",
+                "in_work": r["in_work_at"] or "", "testing": r["testing_at"] or "",
+                "executed": r["executed_at"] or "",
+            },
+            "steps": steps,
+        })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
