@@ -372,10 +372,36 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
     let ov_score = to_float(try json_get(ov_parsed, "result", "0.5"))
     let _ = AuditLog("osp_verify_score", dept, "score=" + to_string(ov_score) + " domain=" + domain + " depth=" + to_string(depth))
   }
-  let reply = reply + "\n\n" + OSPDisclaimerBottom()
+  let reply = reply + "\n\n" + OSPDisclaimerBottom() + OSPSourcesFooter(context)
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=" + to_string(depth) + " gates=" + gates + " safety=" + safety + " verify=" + to_string(ov_score))
   return reply
+}
+
+// Подвал со списком реально использованных источников — построен по
+// меткам в context. FRED-метка условная (появляется только если
+// реально запрашивался, monetary/financial) — простая проверка
+// contains() надёжна. "=== News ===" заголовок в контексте есть
+// ВСЕГДА (даже при пустом результате), поэтому для него проверяем не
+// сам заголовок, а есть ли за ним реальный текст, не только пустота
+// до следующей секции.
+pattern OSPSourcesFooter(context: String) -> String {
+  let mut lines = ""
+  let news_start = index_of(context, "=== News ===\n")
+  if news_start >= 0.0 then {
+    let after = substring(context, news_start + 13.0, length(context))
+    let news_end = index_of(after, "\n\n===")
+    let mut news_body = after
+    if news_end >= 0.0 then { let news_body = substring(after, 0.0, news_end) }
+    if length(trim(news_body)) > 20.0 then {
+      let lines = lines + "\n· Новостной поиск (RSS)"
+    }
+  }
+  if contains(context, "=== FRED (макроданные) ===") then {
+    let lines = lines + "\n· FRED (макроданные: доходность облигаций, ставка ФРС, инфляция)"
+  }
+  if length(lines) == 0.0 then { return "" }
+  return "\n\n---\n**Источники:**" + lines
 }
 
 // ═══════════════════════════════════════════════════════════════════════
