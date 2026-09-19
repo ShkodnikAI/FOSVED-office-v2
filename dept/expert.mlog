@@ -237,6 +237,38 @@ pattern ExpertTavilySearch(query: String, chat_id: String) -> String {
   return to_string(reply)
 }
 
+// Двухфазный поиск (владелец, 2026-09-19: принцип из gpt-researcher,
+// 29k★ на GitHub — не портируем их код, берём только паттерн). Один
+// плоский запрос к живому поиску даёт общий, размытый результат.
+// Вместо этого: 1) быстрый широкий поиск по самой теме, 2) модель на
+// основе ЕГО результата планирует 2-4 конкретных под-вопроса, 3)
+// прицельный поиск по каждому — глубже, чем один общий заход.
+pattern ExpertPlanSubQueries(query: String, initial_results: String) -> String {
+  if initial_results == "" then { return "" }
+  let plan_prompt = "Ты помогаешь спланировать короткий фактический поиск перед деловой встречей. По теме и по результату первого широкого поиска — сформулируй 2-4 узких, конкретных под-вопроса, которые стоит проверить отдельно (например: конкретные цифры, имена конкурентов, недавние события). Один под-вопрос на строку, без нумерации и пояснений — только сами вопросы, ничего больше."
+  let plan_result = try call_llm(plan_prompt, "Тема: " + query + "\n\nПервый широкий поиск дал:\n" + substring(initial_results, 0.0, 2000.0))
+  if to_string(plan_result) == "()" then { return "" }
+  return to_string(plan_result)
+}
+
+pattern ExpertTargetedSearches(sub_queries: String, chat_id: String) -> String {
+  if sub_queries == "" then { return "" }
+  let lines = split(sub_queries, "\n")
+  let mut out = ""
+  let mut done = 0.0
+  each line in lines {
+    let q = trim(line)
+    if q != "" and done < 4.0 then {
+      let done = done + 1.0
+      let r = ExpertTavilySearch(q, chat_id)
+      if r != "" then {
+        let out = out + "\n[" + q + "]\n" + r + "\n"
+      }
+    }
+  }
+  return out
+}
+
 pattern ExpertIsAutomotiveTopic(query: String) -> Bool {
   let t = lower(query)
   return contains(t, "авто") or contains(t, "машин") or contains(t, "автомобил") or contains(t, "car ") or contains(t, "vehicle") or contains(t, "дилер") or contains(t, "residual") or contains(t, "лизинг авто") or contains(t, "trade-in")
@@ -258,9 +290,15 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
   if ExpertIsAutomotiveTopic(query) == true then {
     let auto_kb = ExpertAutomotiveKB()
   }
-  let live = ExpertTavilySearch(query, chat_id)
+  // Фаза 1 — быстрый широкий поиск по самой теме
+  let initial = ExpertTavilySearch(query, chat_id)
+  // Фаза 2 — модель планирует 2-4 узких под-вопроса на основе фазы 1
+  let sub_queries = ExpertPlanSubQueries(query, initial)
+  // Фаза 3 — прицельный поиск по каждому под-вопросу
+  let targeted = ExpertTargetedSearches(sub_queries, chat_id)
+  let live = initial + targeted
   let live_section = ""
-  if live != "" then { let live_section = "\n\n=== Live Search ===\n" + live }
+  if live != "" then { let live_section = "\n\n=== Live Search (двухфазный) ===\n" + live }
 
   // Кросс-ссылки на КнowledgeArtifact (ЛЗ) и Analysis (ОСП) — из
   // исходного профиля ("Cross-references с КnowledgeArtifact от
