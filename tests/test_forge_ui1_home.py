@@ -19,13 +19,13 @@ INDEX = (REPO_ROOT / "miniapp" / "index.html").read_text(encoding="utf-8")
 
 
 def test_topbar_avatar_and_office():
-    assert '.avatar{width:36px;height:36px;border-radius:9px;background-image:url(assets/fosved-logo-2026.jpg);background-size:220% auto;background-position:50% 28%' in INDEX
+    assert '.avatar{width:36px;height:36px;border-radius:9px;background-image:url(/miniapp-spa/assets/fosved-logo-2026.jpg);background-size:220% auto;background-position:50% 28%' in INDEX
     assert '<div class="brand-name">FOSVED</div><div class="brand-sub">office</div>' in INDEX
     assert "диспетчерская офиса" not in INDEX  # решение владельца
 
 
 def test_hero_white_text_both_themes():
-    assert '.hero{position:relative;height:150px;border-radius:14px;overflow:hidden;background-image:url(assets/fosved-logo-2026.jpg);background-size:cover;background-position:50% 22%' in INDEX
+    assert '.hero{position:relative;height:150px;border-radius:14px;overflow:hidden;background-image:url(/miniapp-spa/assets/fosved-logo-2026.jpg);background-size:cover;background-position:50% 22%' in INDEX
     assert 'linear-gradient(180deg,rgba(10,10,12,0) 40%,rgba(10,10,12,.95) 100%)' in INDEX
     assert "color:#fff" in INDEX  # явный белый — не наследование
 
