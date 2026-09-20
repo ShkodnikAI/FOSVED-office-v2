@@ -56,6 +56,28 @@ Render НЕТ и НЕ БЫЛО** — всего 4 сервиса: prod web, stag
 База prod: `{prod-url}` = `https://fosved-office-v2.onrender.com`; стейджинг:
 `https://fosved-office-v2-staging.onrender.com` (создаётся blueprint'ом из render.yaml).
 
+## Исполнитель кронов: cron-job.org (внешний, workspace владельца) — состояние 2026-09-20
+
+Скрины владельца: 7 задач; при сверке с кодом — **жива только Admin Reply**.
+Секрет в URL задач — CRON_SECRET (засветился на скрине → ротация после починки).
+
+- **Жива:** Admin Reply `/cron/admin-reply` (200 OK ежедневно 7:27 МСК).
+- **Тайм-аут безвреден:** Morning Brief `/cron/morning` (LLM дольше лимита cron-job.org;
+  бриф доходит — подтверждено владельцем). Аналогично Night Cycle, если добавить.
+- **Чинит владелец:** Control Check и Evening Summary — в URL лишний `/` после
+  `secret=` → 403. Monthly Review — причина неясна (роут есть, secret чист) — код из ДЕТАЛЕЙ.
+- **Удалить:** News Collect — роут `/cron/collect-news` не существует (404 всегда);
+  сбор новостей не реализован — отдельный наряд.
+- **Добавить (роуты появились в #279):** Shop Tick `/cron/shop-tick` (каждые 6 ч),
+  Golden Evals `/cron/golden-evals` (ежедневно), Indicator Reminders
+  `/cron/indicator-reminders` (ежедневно), DB Backup `/cron/backup` (ежедневно).
+- **Добавить (роуты существовали):** LZ Daily `/cron/lz-daily` (ежедневно),
+  Night Cycle `/cron/night` (ежедневно ночью; тянет UA-цикл + lz-daily + memory).
+- **Не создавать:** Reminders — тикает внутренним шедулером mlog-serve (5s interval);
+  tool-output-cleanup — ретеншн FO-016 не реализован как endpoint (отдельная мелочь);
+  narad-tick (FO-047) — диспетчер не реализован; collect-news — нет источников.
+- После настройки: обновить эту секцию фактами (имена задач, расписания) — правило дрейфа.
+
 ## Прочее замеченное в workspace (2026-09-20, скрин владельца)
 
 - `fosved-bot-bd` — PostgreSQL 18, Available, Frankfurt, 4 мес. КТО ИСПОЛЬЗУЕТ —

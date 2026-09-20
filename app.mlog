@@ -5035,4 +5035,66 @@ return respond("200 ok") }
     let result = try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0)
     return respond("200 ok")
   }
+
+  // ── #255: недостающие cron-роуты (исполнитель — внешний крон cron-job.org) ──
+
+  // SHOP-4 tick: WB/Ozon вотчи каждые 6 ч (покрывает и daily watch-sweep из старой
+  // спецификации). Kill-switch SHOP_ENABLED=0 — роут молча отвечает ok.
+  route "/cron/shop-tick" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    if env("SHOP_ENABLED") != "1" then { return respond("200 ok (SHOP_ENABLED != 1 — skip)") }
+    let _ = AuditLog("cron_shop_tick", "shop", "shop-tick triggered by cron")
+    let result = try http_post("http://127.0.0.1:4000/scheduler/watch-sweep", "{}", "application/json", 240.0)
+    return respond("200 ok")
+  }
+
+  // FO-005: golden evals — ночная регрессия качества → алерт при деградации
+  route "/cron/golden-evals" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = AuditLog("cron_golden_evals", "qa", "golden evals triggered by cron")
+    let result = try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 240.0)
+    return respond("200 ok")
+  }
+
+  // Индикаторы с verifyDate ≤ 7 дней — превентивное напоминание до утреннего брифа
+  route "/cron/indicator-reminders" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by cron")
+    let body = json_encode({days_ahead: 7})
+    let result = try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body, "application/json", 240.0)
+    return respond("200 ok")
+  }
+
+  // FO-001: ежедневный cron-бэкап главной БД. VACUUM INTO требует несуществующий
+  // файл — уникальное имя через strftime; ретеншн по-прежнему на startup (entrypoint).
+  route "/cron/backup" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let ts_rows = query("SELECT strftime('%Y%m%dT%H%M%SZ', 'now') AS t", [])
+    let ts = "unknown"
+    each r in ts_rows {
+      let ts = to_string(json_get(r, "t", "unknown"))
+    }
+    let path = "/var/data/backups/fosved.db." + ts
+    let _ = db_execute("VACUUM INTO '" + path + "'")
+    let check_rows = query("PRAGMA integrity_check", [])
+    let integrity = "no-result"
+    each cr in check_rows {
+      let integrity = to_string(json_get(cr, "integrity_check", "no-result"))
+    }
+    let _ = AuditLog("cron_backup", "system", path + " integrity=" + integrity)
+    return respond("200 backup ok: " + path)
+  }
 }
