@@ -58,28 +58,30 @@ Render НЕТ и НЕ БЫЛО** — всего 4 сервиса: prod web, stag
 
 ## Исполнитель кронов: cron-job.org (внешний, workspace владельца) — состояние 2026-09-20
 
-Скрины владельца: 7 задач; при сверке с кодом — **жива только Admin Reply**.
-Секрет в URL задач — CRON_SECRET (засветился на скрине → ротация после починки).
+Скрины владельца: 7 задач (полный список 2026-09-20 20:45). Секрет в URL задач —
+CRON_SECRET (засветился на скрине → ротация после починки).
 
-- **Жива:** Admin Reply `/cron/admin-reply` (200 OK ежедневно 7:27 МСК).
-- **Тайм-аут безвреден:** Morning Brief `/cron/morning` (LLM дольше лимита cron-job.org;
-  бриф доходит — подтверждено владельцем). Аналогично Night Cycle, если добавить.
-- **Чинит владелец:** Control Check и Evening Summary — в URL лишний `/` после
-  `secret=` → 403. Monthly Review — причина неясна (роут есть, secret чист) — код из ДЕТАЛЕЙ.
-- **Удалить:** News Collect — роут `/cron/collect-news` не существует (404 всегда);
-  сбор новостей не реализован — отдельный наряд. Monthly Review — удалить сейчас
-  (освободить слот лимита), вернуть после разбора причины.
-- **ОДНА задача вместо шести (консолидация 2026-09-21, лимит cron-job.org free
-  по числу задач):** Night Tick `/cron/night-tick` (`0 2 * * *`, роут из #280) —
-  диспетчер сам обходит по порядку `/cron/backup` (FO-001) → `/cron/indicator-reminders`
-  → `/cron/shop-tick` (SHOP_ENABLED guard) → `/cron/golden-evals` → `/cron/night`
-  (UA-цикл + lz-daily + memory + AdminNightCycle). Тайм-аут cron-job.org (~30 c)
-  безвреден — сервер доделывает цепочку в фоне (прецедент Morning Brief); итог
-  цепочки приходит одним Telegram-сообщением.
-- **Остальные задачи (существуют, отдельными слотами):** Morning Brief `/cron/morning`,
-  Control Check `/cron/control`, Evening Summary `/cron/evening`, Admin Reply
-  `/cron/admin-reply`, Keep Alive → `/health` (каждые 10 мин, чтобы прод не засыпал
-  на free-плане Render — холодный старт ~1 мин роняет ночные задачи).
+- **Жива:** Admin Reply `/cron/admin-reply` (200 OK ежедневно 7:27, 2.1 c).
+- **Тайм-аут безвреден:** Morning Brief `/cron/morning` (30 c лимит крона, LLM дольше;
+  бриф доходит — подтверждено владельцем). Запускается ежедневно.
+- **Monthly Review `/cron/monthly`:** падает 1-го числа (HTTP error, 1.37 c — слишком
+  быстро для LLM → похоже на 403/500), НО задача активна (след. запуск 01.10).
+  Причина — из HISTORY крона; до разбора — удалить (слот лимита).
+- **НА ПАУЗЕ с августа (след. запуск «Неактивно») — фикс URL недостаточен, нужен
+  тумблер включения:** Control Check `/cron/control` (пауза с 05.08, HTTP error),
+  Evening Summary `/cron/evening` (с 05.08), Night Cycle `/cron/night` (с 06.08),
+  Weekly Digest `/cron/weekly` (с 10.08, понедельники). 7-я задача = Weekly Digest.
+- News Collect в списке больше нет — вопрос снят.
+- **Лимит числа задач (free)** → консолидация (#280): Night Cycle НЕ создавать заново,
+  а редактировать: URL → `/cron/night-tick` (`0 2 * * *`) — диспетчер сам обходит
+  `/cron/backup` → `/cron/indicator-reminders` → `/cron/shop-tick` →
+  `/cron/golden-evals` → `/cron/night`; итог цепочки — одним Telegram-сообщением;
+  тайм-аут крона безвреден (прецедент Morning Brief).
+- **Целевой расклад (7 слотов, все живые):** Admin Reply, Morning Brief, Control
+  Check (починить+включить), Evening Summary (починить+включить), Night Cycle →
+  night-tick (включить), Weekly Digest (починить+включить, понедельники),
+  Keep Alive → `/health` (новая, каждые 10 мин — прод на free-плане Render спит
+  без трафика, холодный старт роняет ночные задачи). Monthly Review — удалить.
 - **Не создавать:** Reminders — тикает внутренним шедулером mlog-serve (5s interval);
   tool-output-cleanup — ретеншн FO-016 не реализован как endpoint (отдельная мелочь);
   narad-tick (FO-047) — диспетчер не реализован; collect-news — нет источников.
