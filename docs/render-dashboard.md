@@ -1,19 +1,27 @@
 # Render Dashboard — инвентарь сервисов вне blueprint
 
-**Канонический источник** конфигурации prod-службы и 11 cron-джоб — **Render Dashboard**
-(workspace My Workspace), настроены вручную. `render.yaml` с 2026-09-20 управляет
+**Канонический источник** конфигурации prod-службы — **Render Dashboard**
+(workspace My Workspace), настроен вручную. `render.yaml` с 2026-09-20 управляет
 только стейджингом FO-050 (blueprint): старая схема кронов была невалидной
 (docker+startCommand, plan free у cron) и была отвергнута валидатором при первом
 Apply — см. #182, #276.
 
+**⚠️ Вердикт 2026-09-20 (скрин владельца + поиск дашборда): cron-сервисов в
+Render НЕТ и НЕ БЫЛО** — всего 4 сервиса: prod web, staging web, PostgreSQL
+`fosved-bot-bd`, 1 suspended. Старый render.yaml с кронами ни разу не применялся;
+аудит #244 ошибочно принял таблицу ниже за «настроенные вручную» джобы.
+Следствие: 11 периодических задач НЕ выполнялись по расписанию (частичные
+исключения: startup-бэкап при деплое; reminder-check внутренним шедулером mlog).
+Создание планировщика — наряд #255.
+
 **Правила:**
 - Любое ручное изменение в дашборде → обновить этот файл тем же днём (иначе дрейф).
-- Живость кронов («настроено ≠ работает») — проверяется по логам Render: наряд #255.
+- Таблица кронов ниже — СПЕЦИФИКАЦИЯ к созданию, не инвентарь работающих джоб: #255.
 - Восстановление/пересоздание — сверять с этим инвентарём построчно.
 
 ## Prod: fosved-office-v2 (web, docker, plan free, region frankfurt)
 
-- Runtime: Docker (Dockerfile, entrypoint.sh). Free tier: засыпает после 15 мин неактивности — держится кроном keep-alive (ниже).
+- Runtime: Docker (Dockerfile, entrypoint.sh). Free tier: засыпает после 15 мин неактивности — keep-alive-крона НЕ существует (см. вердикт выше); фактический план сервиса уточняется (#255).
 - Env: секреты заданы в дашборде НАПРЯЗУЮ на сервисе (группы `fosved-secrets` НЕ существует — валидатор Render 2026-09-20; список ниже). `DATABASE_URL` в дашборде НЕ задаётся (#269):
   entrypoint.sh сам ставит sqlite-URL, Prisma-ветка недостижима.
 
@@ -29,7 +37,7 @@ Apply — см. #182, #276.
 `METALOGOS_AUDIT_LOG_PATH=/office/data/logs/metalogos_audit.log`;
 `FOSVED_MCP_FS_ROOT=/office/data/documents`; `FORGE_REPOS_DIR=/var/forge/repos`.
 
-## Cron-джобы (11) — все docker? нет: curl-пингеры, web-вызовы prod API
+## Cron-джобы (11) — СПЕЦИФИКАЦИЯ (в Render НЕ созданы, вердикт 2026-09-20)
 
 | # | Имя | Расписание (UTC) | Вызов |
 |---|-----|------------------|-------|
@@ -47,6 +55,13 @@ Apply — см. #182, #276.
 
 База prod: `{prod-url}` = `https://fosved-office-v2.onrender.com`; стейджинг:
 `https://fosved-office-v2-staging.onrender.com` (создаётся blueprint'ом из render.yaml).
+
+## Прочее замеченное в workspace (2026-09-20, скрин владельца)
+
+- `fosved-bot-bd` — PostgreSQL 18, Available, Frankfurt, 4 мес. КТО ИСПОЛЬЗУЕТ —
+  не установлено (prod на sqlite: DATABASE_URL не задаётся, #269); кандидат на
+  удаление после сверки, сейчас НЕ трогаем.
+- 1 сервис в состоянии Suspended — имя не видно на скрине, уточняется (#255).
 
 ## Staging (в blueprint, для сверки): fosved-office-v2-staging
 

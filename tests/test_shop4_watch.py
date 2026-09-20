@@ -264,7 +264,8 @@ def test_platforms_mvp_kufar_out_ozon_in():
 
 def test_dashboard_doc_has_shop_cron_and_switch():
     # render.yaml с 2026-09-20 управляет только стейджингом (#182, #276);
-    # кроны настроены в дашборде — канонический инвентарь: docs/render-dashboard.md
+    # кронов в Render НЕТ (вердикт 2026-09-20) — таблица в docs/render-dashboard.md
+    # это СПЕЦИФИКАЦИЯ к созданию (наряд #255), а не инвентарь работающих джоб
     txt = (REPO_ROOT / "docs" / "render-dashboard.md").read_text(encoding="utf-8")
     assert "shop-tick" in txt and "/cron/shop-tick?secret=" in txt
     assert "0 */6 * * *" in txt  # 4 раза/сутки
