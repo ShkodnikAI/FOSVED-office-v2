@@ -56,7 +56,6 @@ PROVIDERS = {
     "grok": {"url": "https://api.x.ai/v1/chat/completions", "env_key": "GROK_API_KEY", "format": "openai", "timeout": 120},
     "anthropic": {"url": "https://api.anthropic.com/v1/messages", "env_key": "ANTHROPIC_API_KEY", "format": "anthropic", "timeout": 120},
     "openai": {"url": "https://api.openai.com/v1/chat/completions", "env_key": "OPENAI_API_KEY", "format": "openai", "timeout": 120},
-    "apodex": {"url": "https://api.apodex.ai/v1/chat/completions", "env_key": "APODEX_API_KEY", "format": "openai", "timeout": 300},
     "nvidia": {"url": "https://integrate.api.nvidia.com/v1/chat/completions", "env_key": "NVIDIA_API_KEY", "format": "openai", "timeout": 120},
     "cerebras": {"url": "https://api.cerebras.ai/v1/chat/completions", "env_key": "CEREBRAS_API_KEY", "format": "openai", "timeout": 120},
     "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
@@ -66,7 +65,6 @@ TOKEN_COSTS = {
     "zai": {"input": 0.5, "output": 1.5}, "deepseek": {"input": 0.14, "output": 0.28},
     "groq": {"input": 0.0, "output": 0.0}, "grok": {"input": 3.0, "output": 15.0},
     "anthropic": {"input": 3.0, "output": 15.0}, "openai": {"input": 2.5, "output": 10.0},
-    "apodex": {"input": 2.0, "output": 8.0},
     "nvidia": {"input": 0.0, "output": 0.0},
     "cerebras": {"input": 0.0, "output": 0.0},
     "kimi": {"input": 0.6, "output": 2.5},
@@ -469,8 +467,6 @@ def _provider_for_model(model):
             provider = "zai"; break
         elif model.startswith("llama") or model.startswith("mixtral") or model.startswith("gemma"):
             provider = "groq"; break
-        elif model.startswith("apodex"):
-            provider = "apodex"; break
         elif model.startswith("nvidia/"):
             provider = "nvidia"; break
         elif model.startswith("gpt-oss") or model.startswith("zai-glm"):

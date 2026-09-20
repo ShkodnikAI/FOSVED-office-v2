@@ -276,7 +276,7 @@ text-decoration:none;color:var(--ink)}}
 </body></html>"""
 
 def _evidence_badges_css():
-    """CSS бейджей доказательности Apodex — токены «Диспетчерской» (FO-045)."""
+    """CSS бейджей доказательности (verified/unverified) — токены «Диспетчерской» (FO-045)."""
     return """
 :root{--ink:#1C1B18;--paper:#EFEAE0;--paper-raised:#FBF8F2;--line:rgba(28,27,24,.14);--stamp:#A8321E;--stamp-soft:rgba(168,50,30,.10);--muted:#6B6558;--ok:#3D6B2C;--warn:#9C6B0B;--bad:#A8321E;--m:'IBM Plex Mono',ui-monospace,monospace;--ok-soft:rgba(61,107,44,.12);--warn-soft:rgba(156,107,11,.12);--bad-soft:rgba(168,50,30,.10)}
 .badge-verified{background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok);border-radius:4px;font-family:var(--m);font-size:0.7rem;padding:2px 8px;display:inline-block}
