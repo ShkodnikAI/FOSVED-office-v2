@@ -14,10 +14,10 @@ Apply — см. #182, #276.
 ## Prod: fosved-office-v2 (web, docker, plan free, region frankfurt)
 
 - Runtime: Docker (Dockerfile, entrypoint.sh). Free tier: засыпает после 15 мин неактивности — держится кроном keep-alive (ниже).
-- Env: группа `fosved-secrets` (см. ниже). `DATABASE_URL` в дашборде НЕ задаётся (#269):
+- Env: секреты заданы в дашборде НАПРЯЗУЮ на сервисе (группы `fosved-secrets` НЕ существует — валидатор Render 2026-09-20; список ниже). `DATABASE_URL` в дашборде НЕ задаётся (#269):
   entrypoint.sh сам ставит sqlite-URL, Prisma-ветка недостижима.
 
-## Env group: fosved-secrets (24 ключа)
+## Секреты prod-сервиса fosved-office-v2 (24 ключа, заданы в дашборде напрямую)
 
 `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `TELEGRAM_ARCHIVE_CHANNEL_ID`,
 `TELEGRAM_WEBHOOK_SECRET`, `CRON_SECRET`, `API_SECRET`, `DEEPSEEK_API_KEY`,
@@ -50,6 +50,8 @@ Apply — см. #182, #276.
 
 ## Staging (в blueprint, для сверки): fosved-office-v2-staging
 
-web, docker, plan free, frankfurt; env: `fosved-secrets` + `MLOG_BIN=./bin/mlog-020`,
-`MLOG_ENTRY=dogfood_staging.mlog`. VM-флип: `METALOGOS_SERVE_BACKEND=vm` после
+web, docker, plan free, frankfurt; env: ТОЛЬКО `MLOG_BIN=./bin/mlog-020` +
+`MLOG_ENTRY=dogfood_staging.mlog` (#277: группы `fosved-secrets` не существует,
+секреты — по потребности вручную; прод-токен бота НЕ давать — конфликт поллинга).
+VM-флип: `METALOGOS_SERVE_BACKEND=vm` после
 апгрейда бинаря (FO-050).
