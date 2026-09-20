@@ -262,8 +262,10 @@ def test_platforms_mvp_kufar_out_ozon_in():
     assert PLATFORMS_REAL == ("wb", "ozon")
 
 
-def test_render_yaml_has_shop_cron_and_switch():
-    txt = (REPO_ROOT / "render.yaml").read_text(encoding="utf-8")
-    assert "shop-tick" in txt and "cron/shop-tick" in txt
+def test_dashboard_doc_has_shop_cron_and_switch():
+    # render.yaml с 2026-09-20 управляет только стейджингом (#182, #276);
+    # кроны настроены в дашборде — канонический инвентарь: docs/render-dashboard.md
+    txt = (REPO_ROOT / "docs" / "render-dashboard.md").read_text(encoding="utf-8")
+    assert "shop-tick" in txt and "/cron/shop-tick?secret=" in txt
     assert "0 */6 * * *" in txt  # 4 раза/сутки
     assert "SHOP_ENABLED" in txt
