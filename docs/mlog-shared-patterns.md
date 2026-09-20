@@ -1,0 +1,31 @@
+# Междепартаментские дубли mlog-паттернов (intentional)
+
+**Источник:** аудит #244 (блок A.1), добивка верификации 2026-09-20 (main `6730737`).
+**Наряд:** #251. **Статус по умолчанию:** intentional shared helper — департаменты изолированы
+by design, общий `utils.mlog`-модуль пока не заведён. Этот документ фиксирует, что дубли
+**не дрейф**, чтобы будущие аудиты не поднимали ложную тревогу.
+
+## Контекст
+
+Повторяющиеся имена паттернов по дереву `*.mlog` — 110, но ~103 из них — зеркала стейджинга
+(`app.mlog` ↔ `dept/app.mlog` ↔ `dogfood_staging.mlog`) и хелперы тестовых файлов
+(`test_forge*v3.mlog`, `test_narad*v3.mlog`). Зеркала обновляются синхронно при выпусках,
+тестовые хелперы изолированы по построению. Настоящих междепартаментских дублей — 7:
+
+| Паттерн | Где | Статус | Комментарий |
+|---|---|---|---|
+| `ApplyDisclaimer` | `dept/legal.mlog`, `dept/qa.mlog` | intentional | одинаковый дисклеймер-обёртка; вынос возможен при заведении общего модуля |
+| `DISCLAIMER_TOP` / `DISCLAIMER_BOTTOM` | `dept/design.mlog`, `dept/engineering.mlog`, `dept/legal.mlog` | intentional | константы текста дисклеймера; при изменении текста править синхронно |
+| `EnforceHardRules` | `dept/legal.mlog`, `dept/qa.mlog` | intentional | гейт жёстких правил; различия в порогах недопустимы — менять только синхронно |
+| `QuarterlyMethodologyReview` | `dept/engineering.mlog`, `dept/qa.mlog` | intentional | планировщик ежеквартального обзора |
+| `RunQuarterlyMethodologyReview` | `dept/design.mlog`, `dept/legal.mlog` | intentional | исполнитель ежеквартального обзора |
+| `SearchArchive` | `dept/engineering.mlog`, `dept/legal.mlog`, `dept/utils.mlog` | intentional | полнотекстовый поиск по архиву; каноничная копия — в `dept/utils.mlog` |
+| `WrapWithDisclaimer` | `dept/design.mlog`, `dept/engineering.mlog` | intentional | обёртка ответа дисклеймером |
+
+## Правило сопровождения
+
+1. Меняешь тело одного из этих паттернов — проверь синхронность остальных копий
+   (`grep -rn "pattern <Имя>" dept/*.mlog`).
+2. Если копии начали расходиться по поведению — это уже не дубли, а дрейф: заводится
+   отдельный наряд на вынос в общий модуль (или на явное разделение с разными именами).
+3. Новый междепартаментский дубликат — добавляй в эту таблицу тем же PR, который его создаёт.
