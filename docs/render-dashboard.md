@@ -67,12 +67,19 @@ Render НЕТ и НЕ БЫЛО** — всего 4 сервиса: prod web, stag
 - **Чинит владелец:** Control Check и Evening Summary — в URL лишний `/` после
   `secret=` → 403. Monthly Review — причина неясна (роут есть, secret чист) — код из ДЕТАЛЕЙ.
 - **Удалить:** News Collect — роут `/cron/collect-news` не существует (404 всегда);
-  сбор новостей не реализован — отдельный наряд.
-- **Добавить (роуты появились в #279):** Shop Tick `/cron/shop-tick` (каждые 6 ч),
-  Golden Evals `/cron/golden-evals` (ежедневно), Indicator Reminders
-  `/cron/indicator-reminders` (ежедневно), DB Backup `/cron/backup` (ежедневно).
-- **Добавить (роуты существовали):** LZ Daily `/cron/lz-daily` (ежедневно),
-  Night Cycle `/cron/night` (ежедневно ночью; тянет UA-цикл + lz-daily + memory).
+  сбор новостей не реализован — отдельный наряд. Monthly Review — удалить сейчас
+  (освободить слот лимита), вернуть после разбора причины.
+- **ОДНА задача вместо шести (консолидация 2026-09-21, лимит cron-job.org free
+  по числу задач):** Night Tick `/cron/night-tick` (`0 2 * * *`, роут из #280) —
+  диспетчер сам обходит по порядку `/cron/backup` (FO-001) → `/cron/indicator-reminders`
+  → `/cron/shop-tick` (SHOP_ENABLED guard) → `/cron/golden-evals` → `/cron/night`
+  (UA-цикл + lz-daily + memory + AdminNightCycle). Тайм-аут cron-job.org (~30 c)
+  безвреден — сервер доделывает цепочку в фоне (прецедент Morning Brief); итог
+  цепочки приходит одним Telegram-сообщением.
+- **Остальные задачи (существуют, отдельными слотами):** Morning Brief `/cron/morning`,
+  Control Check `/cron/control`, Evening Summary `/cron/evening`, Admin Reply
+  `/cron/admin-reply`, Keep Alive → `/health` (каждые 10 мин, чтобы прод не засыпал
+  на free-плане Render — холодный старт ~1 мин роняет ночные задачи).
 - **Не создавать:** Reminders — тикает внутренним шедулером mlog-serve (5s interval);
   tool-output-cleanup — ретеншн FO-016 не реализован как endpoint (отдельная мелочь);
   narad-tick (FO-047) — диспетчер не реализован; collect-news — нет источников.

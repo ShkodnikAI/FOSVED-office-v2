@@ -5097,4 +5097,36 @@ return respond("200 ok") }
     let _ = AuditLog("cron_backup", "system", path + " integrity=" + integrity)
     return respond("200 backup ok: " + path)
   }
+
+  // ── #255, консолидация 2026-09-21: ночная корзина ──
+  // cron-job.org (free) ограничивает число задач → вместо шести отдельных задач
+  // владелец держит ОДНУ на /cron/night-tick. Диспетчер сам обходит существующие
+  // /cron/* роуты по порядку: backup → indicator-reminders → shop-tick →
+  // golden-evals → night (UA + lz-daily + memory + AdminNightCycle).
+  // Тайм-аут cron-job.org (~30 c) безвреден: сервер доделывает цепочку в фоне
+  // (прецедент — Morning Brief). Итог цепочки — одним сообщением в Telegram.
+  route "/cron/night-tick" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let base = "http://127.0.0.1:4000/cron/"
+    let qs = "?secret=" + cron_secret
+
+    let mut report = "night-tick:"
+    let r_backup = try http_get(base + "backup" + qs, 300.0)
+    if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else { report = report + " backup=ok" }
+    let r_ind = try http_get(base + "indicator-reminders" + qs, 300.0)
+    if to_string(r_ind) == "()" then { report = report + " indicators=FAIL" } else { report = report + " indicators=ok" }
+    let r_shop = try http_get(base + "shop-tick" + qs, 300.0)
+    if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
+    let r_evals = try http_get(base + "golden-evals" + qs, 300.0)
+    if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
+    let r_night = try http_get(base + "night" + qs, 600.0)
+    if to_string(r_night) == "()" then { report = report + " night=запущен(фоном)" } else { report = report + " night=ok" }
+    let _ = AuditLog("cron_night_tick", "system", report)
+    let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)
+    return respond("200 ok")
+  }
 }

@@ -14,6 +14,7 @@ ROUTES = [
     "/cron/golden-evals",     # FO-005: ночная регрессия качества
     "/cron/indicator-reminders",  # превентивные напоминания по индикаторам
     "/cron/backup",           # FO-001: ежедневный VACUUM INTO + integrity
+    "/cron/night-tick",       # консолидация 2026-09-21: ОДНА задача вместо шести
 ]
 
 # Существующие роуты, которые внешний крон должен дёргать (не терять при рефакторинге)
@@ -50,3 +51,18 @@ def test_backup_route_uses_vacuum_into():
     body = APP[idx:idx + 900]
     assert "VACUUM INTO" in body          # FO-001 механизм
     assert "integrity_check" in body      # проверка целостности после бэкапа
+
+
+def test_night_tick_chains_all_nightly_jobs():
+    # cron-job.org free лимит по числу задач: диспетчер /cron/night-tick —
+    # ОДНА внешняя задача, обходит все ночные роуты сам (секрет-чек обязателен)
+    idx = APP.find('route "/cron/night-tick"')
+    assert idx > 0
+    body = APP[idx:idx + 1600]
+    assert "CRON_SECRET" in body                      # гвард секрета
+    assert '"backup"' in body
+    assert '"indicator-reminders"' in body
+    assert '"shop-tick"' in body
+    assert '"golden-evals"' in body
+    assert '"night"' in body
+    assert "SendTelegramReply" in body                # итог цепочки — в TG
