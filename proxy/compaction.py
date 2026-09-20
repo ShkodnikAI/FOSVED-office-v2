@@ -58,7 +58,6 @@ PROVIDER_CONTEXT_LIMITS = {
     "nvidia": 131072,      # nemotron-super-49b — 128k+
     "grok": 131072,
     "deepseek": 65536,     # deepseek-chat — консервативно 64k
-    "apodex": 65536,       # окно не документировано — консервативно
 }
 _UNKNOWN_PROVIDER_LIMIT = 32768
 

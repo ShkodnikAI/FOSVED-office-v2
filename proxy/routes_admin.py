@@ -66,10 +66,12 @@ from proxy.lz_github import (
 )
 
 # ══════════════════════════════════════════════════════════════════════
-#  MEGA-4: EVIDENCE GRAPH BADGES (added to HTML base)
+#  EVIDENCE GRAPH BADGES (added to HTML base)
 # ══════════════════════════════════════════════════════════════════════
 
-# Apodex verified/unverified/conflicting badges are handled in strip_html_for_archive
+# Бейджи verified/unverified/conflicting — общий механизм для маркеров
+# [ФАКТ]/[ИНТЕРПРЕТАЦИЯ] (используется ОСП и другими отделами, не
+# привязан к конкретному провайдеру), обрабатывается в strip_html_for_archive
 # Evidence CSS is injected via _html_base extension
 
 # ══════════════════════════════════════════════════════════════════════
@@ -209,7 +211,6 @@ def api_models():
             "grok": {"name": "Grok 3", "provider": "grok", "label": "xAI", "tier": "free_limit"},
             "anthropic": {"name": "Claude Sonnet 4", "provider": "anthropic", "label": "Anthropic", "tier": "paid"},
             "openai": {"name": "GPT-4o", "provider": "openai", "label": "OpenAI", "tier": "paid"},
-            "apodex": {"name": "Apodex 1.0", "provider": "apodex", "label": "Apodex", "tier": "special"},
         }
 
         for prov_key, info in model_info.items():

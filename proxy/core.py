@@ -288,7 +288,6 @@ INTEGRATIONS_REGISTRY = [
     {"env_key": "GROK_API_KEY", "label": "Grok (xAI)", "kind": "model"},
     {"env_key": "ANTHROPIC_API_KEY", "label": "Anthropic (Claude)", "kind": "model"},
     {"env_key": "OPENAI_API_KEY", "label": "OpenAI", "kind": "model"},
-    {"env_key": "APODEX_API_KEY", "label": "Apodex", "kind": "model"},
     {"env_key": "NVIDIA_API_KEY", "label": "NVIDIA", "kind": "model"},
     {"env_key": "CEREBRAS_API_KEY", "label": "Cerebras", "kind": "model"},
     {"env_key": "SAKANA_API_KEY", "label": "Sakana Fugu", "kind": "model"},

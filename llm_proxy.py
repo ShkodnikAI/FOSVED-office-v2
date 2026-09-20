@@ -213,7 +213,6 @@ from proxy.routes_sched import (
     learning_stats as learning_stats, learning_record as learning_record,
     learning_recall as learning_recall, learning_debrief as learning_debrief,
     audit_recent as audit_recent, search_endpoint as search_endpoint,
-    lz_deep_research as lz_deep_research,
 )
 
 
