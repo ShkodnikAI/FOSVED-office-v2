@@ -281,12 +281,10 @@ def generate_image_endpoint():
 
 # ──────────────────────────── PYTHON TELEGRAM WEBHOOK (DEAD CODE) ────────────────────────────
 # WH-1/WH-2: route returned to Metalogos after fixing app.mlog:2251 SQL bug.
-# Kept RENDER_URL below (used elsewhere); the Flask route + full handler body
-# (~340 lines) removed as unreachable — reverse_proxy.py no longer sends
-# /webhook/telegram here. Old implementation lives in git history if a
-# rollback to the Python path is ever needed again.
-
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", os.environ.get("RENDER_URL", "https://fosved-office-v2.onrender.com"))
+# The Flask route + full handler body (~340 lines) removed as unreachable —
+# reverse_proxy.py no longer sends /webhook/telegram here. Old implementation
+# lives in git history if a rollback to the Python path is ever needed again.
+# RENDER_URL приходит из proxy.core (импорт в шапке модуля) — один источник.
 
 # ── Cron endpoint ──
 @app.route("/cron/collect-news", methods=["GET"])
