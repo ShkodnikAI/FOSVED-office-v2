@@ -1523,53 +1523,21 @@ def scheduler_indicator_pre_reminders():
 
 # ══════════════════════════════════════════════════════════════════════
 #  EXPERT CHART ENDPOINT
-#  Called by mlog via http_post to generate PNG charts (residual value,
-#  operation cost, TCO comparison) using scripts/expert_charts.py
+#  Наряд #267: scripts/expert_charts.py не существует в репозитории —
+#  маршрут раньше всегда падал необъяснённым 500 (плюс мусорный fallback
+#  на путь с чужой машины). Пока функциональность не восстановлена
+#  (отдельное решение владельца), маршрут отвечает честным 501.
 # ══════════════════════════════════════════════════════════════════════
 
 @app.post("/expert/chart")
 def expert_chart():
-    """Generate PNG chart for Expert automotive analysis.
-    Expects JSON: {chart_type: "residual_value"|"operation_cost"|"comparison", data: {...}}
-    Calls scripts/expert_charts.py to render the chart.
+    """PNG-графики Эксперта не реализованы — честный 501 (наряд #267).
+
+    Вызывающий (dept/expert.mlog ExpertGenerateChart) имеет собственную
+    честную деградацию: отдаёт данные текстом с пометкой, что
+    chart-сервер недоступен.
     """
-    import subprocess
-    d = request.get_json(force=True)
-    chart_type = d.get("chart_type", "residual_value")
-    chart_data = d.get("data", {})
-
-    if not chart_data:
-        return jsonify({"error": "data required"}), 400
-
-    script_path = os.path.join(os.path.dirname(__file__), "scripts", "expert_charts.py")
-    if not os.path.exists(script_path):
-        # Fallback: try /home/z/my-project/scripts/expert_charts.py
-        script_path = "/home/z/my-project/scripts/expert_charts.py"
-
-    try:
-        # Write data to temp file (avoid shell escaping issues with JSON)
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tf:
-            json.dump(chart_data, tf, ensure_ascii=False)
-            tmp_path = tf.name
-
-        result = subprocess.run(
-            [sys.executable, script_path, chart_type, tmp_path],
-            capture_output=True, text=True, timeout=30
-        )
-        os.unlink(tmp_path)
-
-        if result.returncode != 0:
-            app.logger.error(f"Expert chart error: {result.stderr}")
-            return jsonify({"error": "chart generation failed", "detail": result.stderr[:500]}), 500
-
-        chart_result = json.loads(result.stdout)
-        return jsonify(chart_result)
-
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "chart generation timeout"}), 504
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "графики Эксперта временно не реализованы"}), 501
 
 
 # ============================================================
