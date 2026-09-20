@@ -1161,14 +1161,14 @@ def api_admin_status():
     try:
         kg_nodes = _query("SELECT COUNT(*) as c FROM knowledge_graph WHERE valid_to IS NULL", fetch=True)
         kg_edges = _query("SELECT COUNT(*) as c FROM knowledge_edges", fetch=True)
-        issues = _query("SELECT id, severity, file_path, issue, status FROM admin_findings WHERE status='open' ORDER BY id DESC LIMIT 10", fetch=True)
+        issues = _query("SELECT id, severity, file, issue, status FROM admin_findings WHERE status='open' ORDER BY id DESC LIMIT 10", fetch=True)
         proposals = _query("SELECT id, content, status FROM admin_proposals WHERE status='pending' ORDER BY id DESC LIMIT 10", fetch=True)
         reports = _query("SELECT COUNT(*) as c FROM admin_reports", fetch=True)
 
         return jsonify({
             "status": "ok",
             "graph": {"nodes": kg_nodes[0]["c"] if kg_nodes else 0, "edges": kg_edges[0]["c"] if kg_edges else 0},
-            "issues": [{"id": r["id"], "severity": r["severity"], "file": r["file_path"], "issue": r["issue"]} for r in issues],
+            "issues": [{"id": r["id"], "severity": r["severity"], "file": r["file"], "issue": r["issue"]} for r in issues],
             "proposals": [{"id": r["id"], "content": r["content"][:200], "status": r["status"]} for r in proposals],
             "reports_count": reports[0]["c"] if reports else 0,
         })
