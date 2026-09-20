@@ -247,12 +247,6 @@ def context_cmd():
     ctx["facts"] = [{"content": r["content"], "confidence": r["confidence"], "ts": r["updated_at"]} for r in fact_rows]
     return jsonify(ctx)
 
-@app.post("/voice-set")
-def voice_set():
-    d = request.get_json(force=True)
-    _log_audit("voice_set", d)
-    return jsonify({"status": "ok"})
-
 @app.post("/archive/digest")
 def archive_digest():
     d = request.get_json(force=True)
