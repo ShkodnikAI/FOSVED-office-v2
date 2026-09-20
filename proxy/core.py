@@ -35,13 +35,6 @@ memory = FosvedMemory(_MEMORY_DB)
 log_mem = logging.getLogger("fosved.memory")
 log_mem.info(f"FosvedMemory loaded: {len(memory.TYPES)} types, db={_MEMORY_DB}")
 
-from flask import Flask, request, jsonify, Response
-import requests as http_requests
-import secrets_crypto
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger("llm_proxy")
-
 # ── LLM Trace (FO-004) ───────────────────────────────────────
 _TRACE_DIR = os.path.join(os.environ.get("DATABASE_PATH", "./data"), "traces")
 _TRACE_MAX_BYTES = int(os.environ.get("LLM_TRACE_MAX_BYTES", 10 * 1024 * 1024))  # 10 MB default
