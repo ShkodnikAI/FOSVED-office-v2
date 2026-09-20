@@ -292,17 +292,17 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
             t_in = data.get("usage", {}).get("input_tokens", 0)
             t_out = data.get("usage", {}).get("output_tokens", 0)
 
-        # Обрубленный по лимиту длины ответ для "глубоких" отделов — не
-        # принимаем как успех, тем же принципом, что пустой ответ (FO-022,
-        # ниже). Найдено по реальному инциденту (владелец, 2026-09-19):
-        # гонка провайдеров брала первого ЗАВЕРШИВШЕГОСЯ без проверки
-        # полноты — после введения обязательной энциклопедической глубины
-        # для Эксперта (правила №8/№9, PR #237) это стало реальным риском:
-        # более быстрый, но оборванный по max_tokens ответ выигрывал гонку
-        # у более медленного, но полного. openai formats: "length";
-        # anthropic: "max_tokens".
-        _deep_depts = {"yana", "admin", "osp", "lz", "expert", "engineering"}
-        if dept in _deep_depts and finish_reason in ("length", "max_tokens"):
+        # Обрубленный по лимиту длины ответ — не принимаем как успех, тем же
+        # принципом, что пустой ответ (FO-022, ниже). Найдено по реальному
+        # инциденту (владелец, 2026-09-19): гонка провайдеров брала первого
+        # ЗАВЕРШИВШЕГОСЯ без проверки полноты. Первая версия фикса ошибочно
+        # ограничивала проверку списком из 6 "глубоких" отделов
+        # (yana/admin/osp/lz/expert/engineering) — владелец прямо поправил:
+        # "не выдумывай, отчёты ВСЕХ отделов обрезаются". Проверка снята со
+        # всех отделов без исключения — обрубленный ответ вреден для любого
+        # отдела одинаково, не только для тех, что формально считаются
+        # "глубокими". openai formats: "length"; anthropic: "max_tokens".
+        if finish_reason in ("length", "max_tokens"):
             _breaker.record_success(provider_name)  # сам провайдер жив, не штрафуем его circuit breaker
             log.warning(f"LLM truncated: provider={provider_name} model={model} dept={dept} "
                         f"finish_reason={finish_reason} reply_chars={len(reply)} — отклонено, не принято как успех")
@@ -559,7 +559,7 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
             if skip_reason:
                 log.info(f"[resilience] skip {prov_name}/{model}: {skip_reason}")
                 continue
-            max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
+            max_tok = 16384  # владелец, 2026-09-20: "не выдумывай, отчёты ВСЕХ отделов обрезаются" — единый бюджет для всех, не только для 6 "глубоких"
             cap = PROVIDER_MAX_TOKENS.get(prov_name)
             if cap:
                 max_tok = min(max_tok, cap)
@@ -603,7 +603,7 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
             if skip_reason:
                 log.info(f"[resilience] skip {prov_name}/{model}: {skip_reason}")
                 continue
-            max_tok = 16384 if dept in {"yana", "admin", "osp", "lz", "expert", "engineering"} else 8192
+            max_tok = 16384  # владелец, 2026-09-20: "не выдумывай, отчёты ВСЕХ отделов обрезаются" — единый бюджет для всех, не только для 6 "глубоких"
             cap = PROVIDER_MAX_TOKENS.get(prov_name)
             if cap:
                 max_tok = min(max_tok, cap)
