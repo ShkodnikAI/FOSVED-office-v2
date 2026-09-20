@@ -493,8 +493,10 @@ def api_dialog_search():
 def api_attention():
     """FORGE-UI-5 (#198): сводка «Требует решения» — только чтение существующих
     данных: открытые гейты forge_gates (decision IS NULL/''), открытые находки
-    admin_findings (status='open'), состояние блокировки system_lockdown (общая
-    kv system_settings), версия/хеш коммита из реальных данных сборки
+    admin_findings (status='open'), состояние блокировки system_lockdown
+    (наряд #268: kv_store — встроенное KV mlog-бинаря, туда пишет
+    kv_set в app.mlog; ранее читали из system_settings — индикатор лгал),
+    версия/хеш коммита из реальных данных сборки
     (RENDER_GIT_COMMIT + файл VERSION — пин бинаря mlog)."""
     try:
         gates_count = 0
@@ -514,7 +516,7 @@ def api_attention():
             _log_error(f"attention: findings read failed: {fe}", source="api_attention", kind="input")
         locked = False
         try:
-            lr = _query("SELECT value FROM system_settings WHERE key = 'system_lockdown' LIMIT 1", fetch=True)
+            lr = _query("SELECT value FROM kv_store WHERE key = 'system_lockdown' LIMIT 1", fetch=True)
             locked = bool(lr) and str(lr[0]["value"] or "").lower() == "true"
         except Exception as le:  # noqa: BLE001
             _log_error(f"attention: lockdown read failed: {le}", source="api_attention", kind="input")
