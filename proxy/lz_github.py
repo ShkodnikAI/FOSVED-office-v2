@@ -402,13 +402,13 @@ def scheduler_lz_daily_core(dry_run, owner_id):
 
         # ── Phase 3: Save to DB + Memory (with cross-run dedup) ───────────
         if not dry_run:
-            # LZ Dedup: save releases & repos to lz_telegram_posts with update_id
+            # LZ Dedup: save releases & repos to lz_github_updates with update_id
             # update_id format: "gh:{repo}:{tag}" for releases, "gh:repo:{name}" for repos
             # UNIQUE constraint on update_id prevents duplicate entries across scans
             for r in all_releases:
                 try:
                     _query(
-                        "INSERT OR IGNORE INTO lz_telegram_posts (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT OR IGNORE INTO lz_github_updates (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, ?)",
                         (f"gh:{r.get('repo','')}:{r.get('tag','')}", r.get('repo',''), r.get('repo',''), r.get('body','')[:500], r.get('date',''))
                     )
                 except Exception:
@@ -416,11 +416,11 @@ def scheduler_lz_daily_core(dry_run, owner_id):
             for r in all_repos:
                 try:
                     _query(
-                        "INSERT OR IGNORE INTO lz_telegram_posts (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, datetime('now'))",
+                        "INSERT OR IGNORE INTO lz_github_updates (update_id, channel_id, channel_name, text, date) VALUES (?, ?, ?, ?, datetime('now'))",
                         (f"gh:repo:{r.get('name','')}", "github", r.get('lang',''), r.get('desc','')[:300])
                     )
                 except Exception as e:
-                    _log_error(f"lz_telegram_posts insert failed: {e}", source="lz_github", dept="lz", kind="data_loss")
+                    _log_error(f"lz_github_updates insert failed: {e}", source="lz_github", dept="lz", kind="data_loss")
 
             today_key = f"LZ Daily {datetime.utcnow().isoformat()[:10]}"
             # Check if we already stored today's scan summary

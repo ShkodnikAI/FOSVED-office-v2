@@ -118,12 +118,22 @@ pattern InitDB() -> String {
 
   // LZ
   db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, channel_name TEXT, category TEXT, added_at TEXT DEFAULT (datetime('now')))")
-  db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, update_id TEXT UNIQUE, channel_id TEXT, channel_name TEXT, text TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS lz_github_updates (id INTEGER PRIMARY KEY AUTOINCREMENT, update_id TEXT UNIQUE, channel_id TEXT, channel_name TEXT, text TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')))")
   // MON-1 (#171): посты Telegram-каналов от монитор-процесса (telegram_monitor.py)
-  // НЕ переиспользуем lz_telegram_posts — там GitHub-релизы (lz_github.py, channel_id="github")
+  // НЕ переиспользуем lz_github_updates — там GitHub-релизы (lz_github.py, channel_id="github")
   db_execute("CREATE TABLE IF NOT EXISTS lz_channel_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL, message_id TEXT NOT NULL, channel_name TEXT, text TEXT, media_type TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')), UNIQUE(channel_id, message_id))")
   let _ = try db_execute("ALTER TABLE lz_channel_posts ADD COLUMN stats_json TEXT")
+  // #252: миграция lz_telegram_posts → lz_github_updates. Таблица хранила GitHub-релизы
+  // из lz_github.py (channel_id="github") — имя врало. Блок идемпотентен: пока старая
+  // таблица существует в sqlite_master — разовый ALTER-апгрейд + копия данных
+  // (INSERT OR IGNORE гасит дубли по UNIQUE update_id) + DROP; после первого прогона
+  // — no-op. Ретро-читателей у старого имени нет (grep по дереву, #252) — VIEW не нужна.
   let _ = try db_execute("ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
+  let lz_old_posts = query("SELECT name FROM sqlite_master WHERE type='table' AND name='lz_telegram_posts'", [])
+  if to_string(lz_old_posts) != "()" then {
+    let _ = try db_execute("INSERT OR IGNORE INTO lz_github_updates (update_id, channel_id, channel_name, text, date, scanned_at) SELECT update_id, channel_id, channel_name, text, date, scanned_at FROM lz_telegram_posts")
+    let _ = try db_execute("DROP TABLE lz_telegram_posts")
+  }
   db_execute("CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, sources TEXT, frequency TEXT, last_scan TEXT, created_at TEXT DEFAULT (datetime('now')))")
 
   // System

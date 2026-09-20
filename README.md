@@ -301,7 +301,7 @@ Reverse Proxy (Flask)
 - **Архив**: `dept_archive`, `channel_archive`, `miniapp_responses`, `miniapp_notes`
 - **Admin / граф знаний**: `admin_reports`, `admin_findings`, `admin_proposals`, `knowledge_graph`, `knowledge_edges`
 - **ОСП**: `analysis`, `asymmetric_bet`, `indicator`, `watchlist_item`, `brier_score_log`, `calibration_curve_point`, `research_source`, `dept_verification`
-- **ЛЗ**: `lz_monitors`, `lz_telegram_channels`, `lz_telegram_posts`, `scan_logs`
+- **ЛЗ**: `lz_monitors`, `lz_telegram_channels`, `lz_github_updates`, `scan_logs`
 - **FORGE** (15 таблиц): `forge_projects`, `forge_repos`, `forge_tasks`, `forge_stages`, `forge_briefs`, `forge_remarks`, `forge_finding_decisions`, `forge_gates`, `forge_previews`, `forge_runs`, `forge_project_secrets`, `forge_customer_data`, `forge_step_config`, `forge_whitelist`, `forge_edit_stats`
 - **Отделы**: `dev_tasks`, `campaign_verifications`, `legal_assessments`, `training_sessions`, `marketing_ideas`, `visual_artifacts`, `visual_templates`, `design_tokens`, `style_evolution`
 - **Прочее**: `narads`, `factory_orders`, `quests`, `quest_files`, `quest_checkpoints`, `system_settings`, `secrets_store`, `webhook_dedup`, `yana_events`, `yana_delegation_log`, `yana_forgetting_incidents`, `chain_steps`

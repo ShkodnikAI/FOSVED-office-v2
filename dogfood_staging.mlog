@@ -175,8 +175,15 @@ pattern InitDB() -> String {
 
   // LZ
   db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, channel_name TEXT, category TEXT, added_at TEXT DEFAULT (datetime('now')))")
-  db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, update_id TEXT UNIQUE, channel_id TEXT, channel_name TEXT, text TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS lz_github_updates (id INTEGER PRIMARY KEY AUTOINCREMENT, update_id TEXT UNIQUE, channel_id TEXT, channel_name TEXT, text TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')))")
+  // #252: миграция lz_telegram_posts → lz_github_updates (идемпотентна: копия+DROP
+  // только пока старая таблица существует в sqlite_master; после первого прогона no-op)
   let _ = try db_execute_with_grant(mig, "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
+  let lz_old_posts = query("SELECT name FROM sqlite_master WHERE type='table' AND name='lz_telegram_posts'", [])
+  if to_string(lz_old_posts) != "()" then {
+    let _ = try db_execute("INSERT OR IGNORE INTO lz_github_updates (update_id, channel_id, channel_name, text, date, scanned_at) SELECT update_id, channel_id, channel_name, text, date, scanned_at FROM lz_telegram_posts")
+    let _ = try db_execute("DROP TABLE lz_telegram_posts")
+  }
   db_execute("CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, sources TEXT, frequency TEXT, last_scan TEXT, created_at TEXT DEFAULT (datetime('now')))")
 
   // System
