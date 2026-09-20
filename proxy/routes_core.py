@@ -249,9 +249,10 @@ def context_cmd():
 
 @app.post("/archive/digest")
 def archive_digest():
-    d = request.get_json(force=True)
-    _log_audit("digest", d)
-    return jsonify({"status": "ok", "digest_id": hashlib.md5(json.dumps(d).encode()).hexdigest()[:8]})
+    # Deprecated: ранее возвращал фейковый digest_id (md5 тела) — дайджест не генерировался.
+    # Живой путь — POST /archive/daily-digest (routes_sched.py).
+    _log_audit("digest", request.get_json(force=True, silent=True))
+    return jsonify({"error": "deprecated: use POST /archive/daily-digest"}), 410
 
 
 
