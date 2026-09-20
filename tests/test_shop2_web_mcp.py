@@ -27,7 +27,7 @@ import pytest
 
 BASE = Path(__file__).resolve().parent.parent
 WEB_SERVER = BASE / "mcp_servers" / "web"
-RENDER_YAML = BASE / "render.yaml"
+DASHBOARD_DOC = BASE / "docs" / "render-dashboard.md"
 DEV_MLOG = BASE / "dept" / "dev.mlog"
 
 
@@ -309,8 +309,11 @@ def test_rate_limit_enforces_min_interval(stub_url):
 
 
 # ── 8. Гварды сборки: ALLOWLIST и мост ───────────────────────────────────
-def test_render_yaml_allowlist_has_web():
-    txt = RENDER_YAML.read_text(encoding="utf-8")
+def test_dashboard_doc_allowlist_has_web():
+    # render.yaml с 2026-09-20 управляет только стейджингом (#182, #276);
+    # allowlist MCP живёт в env-группе fosved-secrets дашборда — канонический
+    # инвентарь дашборда: docs/render-dashboard.md
+    txt = DASHBOARD_DOC.read_text(encoding="utf-8")
     assert "mcp_servers/github,mcp_servers/filesystem,mcp_servers/markets,mcp_servers/web" in txt
 
 
