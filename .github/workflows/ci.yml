@@ -3,11 +3,24 @@ name: FOSVED CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 
 env:
   PYTHON_VERSION: "3.12"
+
+# gh#306: cancel superseded intermediate runs (final commit is always
+# verified in full). Saves billed minutes on hosted runners and serial
+# queue time on the self-hosted runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # ── Job 0: Branch freshness (защита от мержа устаревшей ветки) ──────
@@ -19,7 +32,7 @@ jobs:
   # класс проблемы, просто раньше на этапе разработки, не на этапе PR.
   branch-freshness:
     name: Branch freshness (blocking)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +58,7 @@ jobs:
   # ── Job 1: Python tests (pytest) ─────────────────────────────────────
   pytest:
     name: Python tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
 
@@ -73,7 +86,7 @@ jobs:
   # ── Job 1b: FO-007 error-hygiene policy ──────────────────────────────
   error-hygiene:
     name: No silent excepts (FO-007)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
 
@@ -87,7 +100,7 @@ jobs:
   # ── Job 2: Metalogos check (mlog check) ──────────────────────────────
   mlog-check:
     name: Metalogos syntax check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
 
@@ -154,7 +167,7 @@ jobs:
   # ── Job 3: Version consistency ────────────────────────────────────────
   version-check:
     name: Version consistency
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
 
@@ -200,14 +213,31 @@ jobs:
   # ── Job 4: Docker build ──────────────────────────────────────────────
   docker-build:
     name: Docker build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
 
+      # gh#306: self-hosted runner may lack docker (sandbox). Detect
+      # and degrade to an explicit warning instead of a red gate —
+      # the production image is built by Render from the same
+      # Dockerfile at deploy time. Gate stays blocking on runners
+      # where docker exists.
+      - name: Detect docker availability
+        id: detect
+        run: |
+          if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            echo "available=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::docker недоступен на раннере — Docker build пропущен (прод-образ собирает Render из того же Dockerfile)"
+          fi
+
       - name: Build Docker image
+        if: steps.detect.outputs.available == 'yes'
         run: docker build -t fosved-office-ci .
 
       - name: Verify mlog works in container
+        if: steps.detect.outputs.available == 'yes'
         run: |
           VER=$(docker run --rm fosved-office-ci /usr/local/bin/mlog --version | head -1)
           echo "Container mlog: $VER"
@@ -222,7 +252,7 @@ jobs:
   # Реальные LLM-сценарии остаются production-режимом (scripts/SMOKE.md).
   smoke:
     name: Smoke test (local lift)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
 
