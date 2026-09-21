@@ -2061,9 +2061,30 @@ def api_integrations_delete(env_key):
 _TTS_VOICE_MALE = "ru-RU-DmitryNeural"
 _TTS_VOICE_FEMALE = "ru-RU-SvetlanaNeural"
 
+# MINIAPP-3 (#290): параметры звука голоса (kv voice_speed/voice_volume/voice_pitch).
+# Дефолт = прежнее поведение: отсутствие kv → /tts не меняет звук (rate '+20%',
+# volume/pitch не задаются). Диапазоны edge-tts: rate/volume в %, pitch в Hz.
+_VOICE_PARAMS = {"voice_speed": (-50, 100), "voice_volume": (-100, 100), "voice_pitch": (-50, 50)}
+
 
 def _voice_gender_from_kv(raw: str) -> str:
     return "male" if (raw or "").strip() == _TTS_VOICE_MALE else "female"
+
+
+def _voice_params_get():
+    """MINIAPP-3 (#290): числовые параметры из kv_store (None = не задан)."""
+    out = {"speed": None, "volume": None, "pitch": None}
+    try:
+        for key, (_lo, _hi) in _VOICE_PARAMS.items():
+            row = _query(f"SELECT value FROM kv_store WHERE key = '{key}' LIMIT 1", fetch=True)
+            if row and str(row[0]["value"] or "").strip() != "":
+                try:
+                    out[key.replace("voice_", "")] = int(float(str(row[0]["value"])))
+                except (TypeError, ValueError):
+                    log.warning(f"voice params: kv '{key}' не число — пропущен (дефолт)")
+    except Exception:  # noqa: BLE001 — нет таблицы → все None
+        pass
+    return out
 
 
 @app.get("/api/voice/settings")
@@ -2079,18 +2100,21 @@ def api_voice_settings_get():
                 gender = _voice_gender_from_kv(str(grow[0]["value"] or ""))
         except Exception:  # noqa: BLE001 — нет таблицы → дефолт
             pass
-        return jsonify({"status": "ok", "voice_enabled": enabled, "voice_gender": gender})
+        return jsonify({"status": "ok", "voice_enabled": enabled, "voice_gender": gender,
+                        **_voice_params_get()})
     except Exception as e:  # noqa: BLE001 — нет таблицы → выключено, не 500
         _log_error(f"voice settings read failed: {e}", source="api_voice_settings", kind="input")
-        return jsonify({"status": "ok", "voice_enabled": False, "voice_gender": "female"})
+        return jsonify({"status": "ok", "voice_enabled": False, "voice_gender": "female",
+                        "speed": None, "volume": None, "pitch": None})
 
 
 @app.post("/api/voice/settings")
 def api_voice_settings_set():
-    """MINIAPP-1 (#288) + MINIAPP-2 (#289): включить/выключить голос, выбрать пол."""
+    """MINIAPP-1/2/3 (#288/#289/#290): голос вкл-выкл, пол, скорость/громкость/тон."""
     d = request.get_json(force=True, silent=True) or {}
-    if "enabled" not in d and "gender" not in d:
-        return jsonify({"status": "error", "message": "enabled (bool) или gender (male|female) обязательны"}), 400
+    # MINIAPP-3 (#290): слайдеры шлют только {"speed": N} / {"volume": N} / {"pitch": N}
+    if not ({"enabled", "gender", "speed", "volume", "pitch"} & set(d)):
+        return jsonify({"status": "error", "message": "enabled (bool), gender (male|female) или speed/volume/pitch (int|null) обязательны"}), 400
     try:
         out = {}
         if "enabled" in d:
@@ -2104,6 +2128,26 @@ def api_voice_settings_set():
             voice = _TTS_VOICE_MALE if g == "male" else _TTS_VOICE_FEMALE
             _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES ('tts_voice', ?)", (voice,))
             out["voice_gender"] = g
+        # MINIAPP-3 (#290): speed/volume/pitch — int в диапазоне или None (сброс)
+        for field, (lo, hi) in (("speed", _VOICE_PARAMS["voice_speed"]),
+                                 ("volume", _VOICE_PARAMS["voice_volume"]),
+                                 ("pitch", _VOICE_PARAMS["voice_pitch"])):
+            if field not in d:
+                continue
+            val = d.get(field)
+            if val is None:
+                _query(f"DELETE FROM kv_store WHERE key = 'voice_{field}'")
+                out[field] = None
+                continue
+            try:
+                n = int(float(val))
+            except (TypeError, ValueError):
+                return jsonify({"status": "error", "message": f"{field} — целое число или null"}), 400
+            if not lo <= n <= hi:
+                return jsonify({"status": "error", "message": f"{field} — диапазон {lo}..{hi}"}), 400
+            _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES (?, ?)",
+                   (f"voice_{field}", str(n)))
+            out[field] = n
         _log_audit("voice_settings_saved", {"fields": sorted(d.keys()), "source": "miniapp"})
         return jsonify({"status": "ok", **out})
     except Exception as e:  # noqa: BLE001
