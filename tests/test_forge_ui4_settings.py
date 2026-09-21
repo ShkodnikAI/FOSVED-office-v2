@@ -123,10 +123,13 @@ def test_scheduled_reports_honest_empty():
     assert 'toast("Эта функция в разработке — нужен отдельный наряд")' in INDEX
 
 
-# ── Блок E. Модели по отделам — приглушённое ─────────────────────────────
+# ── Блок E. Модели по отделам ────────────────────────────────────────────
 
-def test_models_per_dept_muted():
-    assert 'Назначение модели отделу (/model dept provider model)</span><span class="need-narad">нужен наряд</span>' in INDEX
+def test_models_per_dept_controls():
+    # MINIAPP-5 (#292): назначение — живой контрол (sheet /api/model/depts);
+    # MINIAPP-6 (#293): чтение override-файлов остаётся приглушённым до своего наряда
+    assert 'Назначение модели отделу (/model dept provider model)</span><span class="need-narad">нужен наряд</span>' not in INDEX
+    assert 'id="deptModelBtn"' in INDEX and 'id="deptModelSheet"' in INDEX
     assert 'Чтение текущих config/override_*.txt</span><span class="need-narad">нужен наряд</span>' in INDEX
 
 
