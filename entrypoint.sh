@@ -84,10 +84,47 @@ echo "--- FORGE: repos dir=${FORGE_REPOS_DIR}/forge/repos, scratch swept ---"
 # 2. Metalogos
 # FO-014: песочница документов filesystem-MCP + каталог subprocess-аудита ядра
 # Наряд №395 (PR #191): бинарь и входной файл env-изированы для стейджинга.
-# Прод-дефолты: MLOG_BIN=./bin/mlog (0.19.0), MLOG_ENTRY=app.mlog — поведение не менялось.
-# Стейджинг VM-пилота (FO-050): MLOG_BIN=./bin/mlog-020, MLOG_ENTRY=dogfood_staging.mlog.
-MLOG_BIN="${MLOG_BIN:-./bin/mlog}"
+# Стейджинг VM-пилота (FO-050): MLOG_BIN=./bin/mlog-020, MLOG_ENTRY=dogfood_staging.mlog
+#   (или ./bin/mlog-021 + METALOGOS_SERVE_BACKEND=interpreter — наряд №419).
+#
+# Наряд №419 (Metalogos gh#572): guard-переход на 0.21.0.
+# Прод-кандидат — mlog-021; перед стартом идёт ПРОБА: "$MLOG_CANDIDATE" audit
+# $MLOG_ENTRY. 0.21-аудит Category A блокирует бут офиса (долг №327
+# UNTRUSTED_DECISION ~430 сайтов диалогового контура + 33 деструктивных сайта
+# без грант-контура — ценз в отчёте №419) ⇒ проба громко откатывает прод на
+# легаси-бинарь. Переход произойдёт АВТОМАТИЧЕСКИ той же пробой, когда
+# миграционный наряд (объём №395) прочистит аудит. Явный MLOG_BIN из env
+# пробу не отменяет, но откат не трогает (оператор сказал — так и едем).
+MLOG_CANDIDATE="${MLOG_BIN:-./bin/mlog-021}"
+MLOG_LEGACY="./bin/mlog"
 MLOG_ENTRY="${MLOG_ENTRY:-app.mlog}"
+MLOG_BIN="$MLOG_CANDIDATE"
+if [ -x "$MLOG_CANDIDATE" ] && "$MLOG_CANDIDATE" audit "$MLOG_ENTRY" >/dev/null 2>&1; then
+  echo "--- Metalogos: 0.21 candidate PASSED the Category A audit probe — serving on $MLOG_CANDIDATE"
+  # Гейты №259 (env в роутах) и exec: паритет с 0.19 — офис читает служебные
+  # env (CRON_SECRET, OWNER_TELEGRAM_ID, ...); список = ценз env( по app.mlog
+  # и dept/*.mlog (наряд №419). Скомпрометированные значения ротируются в
+  # дашборде Render (см. docs/render-dashboard.md, секция native cron).
+  export METALOGOS_ENV_ALLOWLIST="${METALOGOS_ENV_ALLOWLIST:-CEREBRAS_API_KEY,CRON_SECRET,DATABASE_URL,DEEPSEEK_API_KEY,FNP_CUSTOMER,FNP_GOAL,FNP_NAME,FNP_SLUG,FNP_TYPE,FORGE_GITHUB_OWNER,FORGE_REPOS_DIR,FORGE_RUN_ENABLED,FORGE_RUN_VLIMIT_KB,GROQ_API_KEY,INTERNAL_API_TOKEN,KIMI_API_KEY,LOCKDOWN_PASSWORD,METALOGOS_EXEC_TIMEOUT_SECS,OWNER_TELEGRAM_ID,RENDER_URL,SAKANA_API_KEY,SHOP_ENABLED,TAVILY_API_KEY,TELEGRAM_ARCHIVE_CHANNEL_ID,TELEGRAM_BOT_TOKEN,ZAI_API_KEY}"
+  export METALOGOS_SERVE_ALLOW_EXEC="${METALOGOS_SERVE_ALLOW_EXEC:-1}"
+  # ADR-0171 дефолт — VM, но VM-хендлеры 0.21 не видят db-соединение (db_decl):
+  # office-путь держим на интерпретаторе до починки апстрима (находка №419).
+  export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-interpreter}"
+else
+  if [ -x "$MLOG_CANDIDATE" ]; then
+    echo "!!! Metalogos №419: 0.21 candidate ($MLOG_CANDIDATE) FAILED the audit probe — Category A blocks the office boot (№327 debt, см. отчёт №419)"
+    echo "!!! GRADUAL CUTOVER: falling back to legacy $MLOG_LEGACY (0.19). External cron-job.org keeps firing /cron/* routes; native schedules activate after the migration naryad."
+    "$MLOG_CANDIDATE" audit "$MLOG_ENTRY" 2>&1 | grep -m3 "ERROR" || true
+  else
+    echo "!!! Metalogos №419: candidate $MLOG_CANDIDATE not found — falling back to legacy $MLOG_LEGACY"
+  fi
+  if [ -n "${MLOG_BIN_FORCE:-}" ]; then
+    MLOG_BIN="$MLOG_CANDIDATE"
+    echo "!!! MLOG_BIN_FORCE set — serving on the FAILED candidate anyway (operator override)"
+  else
+    MLOG_BIN="$MLOG_LEGACY"
+  fi
+fi
 mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs"
 if "$MLOG_BIN" check "$MLOG_ENTRY" 2>&1 | grep -q "parse error"; then
   echo "WARNING: mlog check found parse errors (mlog serve may still work — interpreter is more lenient)"
@@ -104,6 +141,24 @@ for i in {1..10}; do
   echo "Waiting for Metalogos... ($i)"
   sleep 2
 done
+
+# ── Наряд №419: бутстрап реестра заданий (только на 0.21-пути) ─────────────
+# Реестр dept/schedules.mlog → нативный стор cron (идемпотентно по target).
+# На легаси-пути бутстрап не запускается: 4-аргументный cron_add/TZ — контракт
+# 0.21; внешние cron-job.org продолжают дёргать /cron/*-роуты как раньше.
+if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
+  echo "--- №419: bootstrapping native schedules (dept/schedules.mlog -> cron store)"
+  BOOT_REPORT=$(curl -sf "http://127.0.0.1:10001/schedules/bootstrap?secret=${CRON_SECRET}" 2>/dev/null || echo "")
+  if [ -n "$BOOT_REPORT" ]; then
+    echo "  bootstrap: ${BOOT_REPORT}"
+    case "$BOOT_REPORT" in
+      *"FAIL("*) echo "  !!! SCHEDULES BOOTSTRAP HAS FAILURES (loud per naryad №419) — fix dept/schedules.mlog and redeploy" ;;
+      *) echo "  native schedules OK" ;;
+    esac
+  else
+    echo "  !!! schedules/bootstrap did not answer — native schedules NOT registered (external crons remain the executor)"
+  fi
+fi
 
 echo "--- Version check ---"
 curl -sf http://127.0.0.1:10001/version 2>/dev/null || echo "version endpoint not available"
