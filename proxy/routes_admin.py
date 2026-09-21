@@ -2050,36 +2050,62 @@ def api_integrations_delete(env_key):
     return jsonify({"status": "ok"})
 
 
-# ── MINIAPP-1 (#288): голосовые ответы вкл/выкл из Mini App ────────────
-# mlog-команда /voice on|off (app.mlog) пишет kv_set("voice_enabled",
-# "true"/"false") во встроенное KV mlog-бинаря — таблица kv_store
-# (схема по бинарю, подтверждена в #268). Роут читает/пишет ту же
-# таблицу и ровно те же значения, чтобы TG /voice и Mini App видели
-# одно состояние (один источник правды, без своего второго kv).
+# ── MINIAPP-1 (#288) / MINIAPP-2 (#289): голос из Mini App ─────────────
+# mlog-команды /voice on|off (kv "voice_enabled") и /voice male|female
+# (kv "tts_voice" → "ru-RU-DmitryNeural"/"ru-RU-SvetlanaNeural") пишут
+# во встроенное KV mlog-бинаря — таблицу kv_store (схема по бинарю,
+# подтверждена в #268). Роут читает/пишет те же ключи и ровно те же
+# значения, чтобы TG-команды и Mini App видели одно состояние.
+
+# дефолт голоса = женский (app.mlog: пустой/короткий tts_voice → Svetlana)
+_TTS_VOICE_MALE = "ru-RU-DmitryNeural"
+_TTS_VOICE_FEMALE = "ru-RU-SvetlanaNeural"
+
+
+def _voice_gender_from_kv(raw: str) -> str:
+    return "male" if (raw or "").strip() == _TTS_VOICE_MALE else "female"
+
 
 @app.get("/api/voice/settings")
 def api_voice_settings_get():
-    """MINIAPP-1 (#288): текущее состояние голосовых ответов."""
+    """MINIAPP-1 (#288) + MINIAPP-2 (#289): состояние голосовых ответов."""
     try:
         row = _query("SELECT value FROM kv_store WHERE key = 'voice_enabled' LIMIT 1", fetch=True)
         enabled = bool(row) and str(row[0]["value"] or "").lower() == "true"
-        return jsonify({"status": "ok", "voice_enabled": enabled})
+        gender = "female"
+        try:
+            grow = _query("SELECT value FROM kv_store WHERE key = 'tts_voice' LIMIT 1", fetch=True)
+            if grow:
+                gender = _voice_gender_from_kv(str(grow[0]["value"] or ""))
+        except Exception:  # noqa: BLE001 — нет таблицы → дефолт
+            pass
+        return jsonify({"status": "ok", "voice_enabled": enabled, "voice_gender": gender})
     except Exception as e:  # noqa: BLE001 — нет таблицы → выключено, не 500
         _log_error(f"voice settings read failed: {e}", source="api_voice_settings", kind="input")
-        return jsonify({"status": "ok", "voice_enabled": False})
+        return jsonify({"status": "ok", "voice_enabled": False, "voice_gender": "female"})
 
 
 @app.post("/api/voice/settings")
 def api_voice_settings_set():
-    """MINIAPP-1 (#288): включить/выключить голосовые ответы."""
+    """MINIAPP-1 (#288) + MINIAPP-2 (#289): включить/выключить голос, выбрать пол."""
     d = request.get_json(force=True, silent=True) or {}
-    if "enabled" not in d:
-        return jsonify({"status": "error", "message": "enabled (bool) обязателен"}), 400
-    val = "true" if d.get("enabled") else "false"
+    if "enabled" not in d and "gender" not in d:
+        return jsonify({"status": "error", "message": "enabled (bool) или gender (male|female) обязательны"}), 400
     try:
-        _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES ('voice_enabled', ?)", (val,))
-        _log_audit("voice_settings_saved", {"enabled": bool(d.get("enabled")), "source": "miniapp"})
-        return jsonify({"status": "ok", "voice_enabled": bool(d.get("enabled"))})
+        out = {}
+        if "enabled" in d:
+            val = "true" if d.get("enabled") else "false"
+            _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES ('voice_enabled', ?)", (val,))
+            out["voice_enabled"] = bool(d.get("enabled"))
+        if "gender" in d:
+            g = str(d.get("gender") or "").strip().lower()
+            if g not in ("male", "female"):
+                return jsonify({"status": "error", "message": "gender — только male или female"}), 400
+            voice = _TTS_VOICE_MALE if g == "male" else _TTS_VOICE_FEMALE
+            _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES ('tts_voice', ?)", (voice,))
+            out["voice_gender"] = g
+        _log_audit("voice_settings_saved", {"fields": sorted(d.keys()), "source": "miniapp"})
+        return jsonify({"status": "ok", **out})
     except Exception as e:  # noqa: BLE001
         _log_error(f"voice settings write failed: {e}", source="api_voice_settings", kind="input")
         return jsonify({"status": "error", "message": str(e)}), 500

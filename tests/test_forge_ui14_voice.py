@@ -48,10 +48,10 @@ def _client():
 def voice_db():
     """kv_store — схема по бинарю (key, value); в проде таблицу создаёт бинарь."""
     _query("CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)")
-    _query("DELETE FROM kv_store WHERE key = 'voice_enabled'")
+    _query("DELETE FROM kv_store WHERE key IN ('voice_enabled', 'tts_voice')")
     _query("DELETE FROM audit_log WHERE action = 'voice_settings_saved'")
     yield
-    _query("DELETE FROM kv_store WHERE key = 'voice_enabled'")
+    _query("DELETE FROM kv_store WHERE key IN ('voice_enabled', 'tts_voice')")
     _query("DELETE FROM audit_log WHERE action = 'voice_settings_saved'")
 
 
@@ -142,3 +142,65 @@ def test_ui_need_narad_removed_and_control_present():
     assert 'Голосовые ответы</span><span class="need-narad"' not in INDEX
     # глушитель в JS-комментарии больше не заявляет, что голоса нет
     assert "приглушены (HTTP-эндпоинтов команд /voice" not in INDEX
+
+
+# ── MINIAPP-2 (#289): женский / мужской голос ─────────────────────────
+
+def test_get_gender_default_female():
+    """Дефолт = женский (app.mlog: пустой/короткий tts_voice → Svetlana)."""
+    r = _client().get("/api/voice/settings", headers=API_AUTH)
+    assert r.status_code == 200
+    assert r.get_json()["voice_gender"] == "female"
+
+
+def test_get_gender_male_from_kv():
+    """kv tts_voice='ru-RU-DmitryNeural' (как пишет mlog /voice male) → male."""
+    _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES ('tts_voice', 'ru-RU-DmitryNeural')")
+    r = _client().get("/api/voice/settings", headers=API_AUTH)
+    assert r.get_json()["voice_gender"] == "male"
+
+
+def test_post_gender_male_writes_exact_mlog_literal():
+    """POST gender=male пишет в kv_store ровно тот же литерал, что
+    kv_set("tts_voice", "ru-RU-DmitryNeural") в app.mlog (/voice male)."""
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"gender": "male"})
+    assert r.status_code == 200
+    assert r.get_json()["voice_gender"] == "male"
+    row = _query("SELECT value FROM kv_store WHERE key = 'tts_voice' LIMIT 1", fetch=True)
+    assert str(row[0]["value"]) == "ru-RU-DmitryNeural"
+    assert 'kv_set("tts_voice", "ru-RU-DmitryNeural")' in APP_MLOG
+
+
+def test_post_gender_female_writes_exact_mlog_literal():
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"gender": "female"})
+    assert r.status_code == 200
+    row = _query("SELECT value FROM kv_store WHERE key = 'tts_voice' LIMIT 1", fetch=True)
+    assert str(row[0]["value"]) == "ru-RU-SvetlanaNeural"
+    assert 'kv_set("tts_voice", "ru-RU-SvetlanaNeural")' in APP_MLOG
+
+
+def test_post_gender_invalid_rejected():
+    """gender — только male|female; прочее — 400 и ничего не записано."""
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"gender": "robot"})
+    assert r.status_code == 400
+    row = _query("SELECT value FROM kv_store WHERE key = 'tts_voice' LIMIT 1", fetch=True)
+    assert not row
+
+
+def test_post_enabled_and_gender_together():
+    """Один POST может менять оба поля (роут один, контролы два)."""
+    r = _client().post("/api/voice/settings", headers=API_AUTH,
+                       json={"enabled": True, "gender": "male"})
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["voice_enabled"] is True and j["voice_gender"] == "male"
+    r = _client().get("/api/voice/settings", headers=API_AUTH)
+    assert r.get_json()["voice_enabled"] is True
+    assert r.get_json()["voice_gender"] == "male"
+
+
+def test_ui_gender_control_present():
+    """UI: «Женский / мужской» — живой сегмент, .need-narad снят (MINIAPP-2)."""
+    assert 'id="voiceGenderSeg"' in INDEX
+    assert 'data-vgender="female"' in INDEX and 'data-vgender="male"' in INDEX
+    assert 'Женский / мужской голос</span><span class="need-narad"' not in INDEX
