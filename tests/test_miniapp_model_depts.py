@@ -173,12 +173,13 @@ def test_api_guard_401_without_bearer():
 # ── UI + app.mlog ────────────────────────────────────────────────────────
 
 def test_ui_control_replaces_muted_item():
-    """UI: muted-пункт заменён живой кнопкой + sheet; чтение override — ещё muted (#293)."""
+    """UI: оба muted-пункта сняты (#292 sheet + #293 raw-просмотр)."""
     assert 'id="deptModelBtn"' in INDEX
     assert 'id="deptModelSheet"' in INDEX
     assert 'id="deptModelSave"' in INDEX and 'id="deptModelReset"' in INDEX
+    assert 'id="deptModelRaw"' in INDEX  # #293: read-only просмотр файла
     assert 'Назначение модели отделу (/model dept provider model)</span><span class="need-narad"' not in INDEX
-    assert 'Чтение текущих config/override_*.txt</span><span class="need-narad"' in INDEX
+    assert 'Чтение текущих config/override_*.txt</span><span class="need-narad"' not in INDEX
 
 
 def test_app_mlog_tg_writes_model_only():
@@ -197,3 +198,25 @@ def test_load_cfg_clears_stale_overrides():
     (cfg / "override_legal.txt").write_text("", encoding="utf-8")
     providers._load_cfg()
     assert "legal" not in providers._cfg_cache["overrides"]
+
+
+# ── MINIAPP-6 (#293): read-only просмотр override-файлов ──────────────
+
+def test_get_raw_matches_server_file():
+    """raw в GET = фактическое содержимое файла (сверено с сервером)."""
+    cfg = routes_admin.CFG_DIR
+    (cfg / "override_lz.txt").write_text("# комментарий\nglm-4.6\n", encoding="utf-8")
+    r = _client().get("/api/model/depts", headers=API_AUTH)
+    lz = [d for d in r.get_json()["depts"] if d["dept"] == "lz"][0]
+    assert lz["raw"] == "# комментарий\nglm-4.6\n"
+    # пустой плейсхолдер → raw пустая строка, override []
+    qa = [d for d in r.get_json()["depts"] if d["dept"] == "qa"][0]
+    assert qa["raw"] == "" and qa["override"] == []
+
+
+def test_get_raw_none_when_file_missing():
+    cfg = routes_admin.CFG_DIR
+    (cfg / "override_dev.txt").unlink()
+    r = _client().get("/api/model/depts", headers=API_AUTH)
+    dev = [d for d in r.get_json()["depts"] if d["dept"] == "dev"][0]
+    assert dev["raw"] is None and dev["override"] == []

@@ -304,10 +304,23 @@ def _read_override_models(dept):
         return []
 
 
+def _read_override_raw(dept):
+    """MINIAPP-6 (#293): сырой текст override_<dept>.txt (read-only); None если файла нет."""
+    try:
+        p = CFG_DIR / f"override_{dept}.txt"
+        if not p.exists():
+            return None
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 @app.get("/api/model/depts")
 def api_model_depts_get():
-    """MINIAPP-5 (#292): текущие оверрайды моделей по отделам + каталог моделей."""
-    depts = [{"dept": d, "label": DEPT_NAMES[d], "override": _read_override_models(d)}
+    """MINIAPP-5 (#292) + MINIAPP-6 (#293): оверрайды моделей по отделам
+    (+ сырой текст override-файла каждого отдела, read-only) + каталог моделей."""
+    depts = [{"dept": d, "label": DEPT_NAMES[d], "override": _read_override_models(d),
+              "raw": _read_override_raw(d)}
              for d in DEPT_NAMES]
     return jsonify({"status": "ok", "depts": depts, "catalog": _model_catalog()})
 
