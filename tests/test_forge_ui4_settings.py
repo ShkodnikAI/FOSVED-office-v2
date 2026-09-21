@@ -7,9 +7,10 @@
   точки (.on зелёный / .limit жёлтый / .off серый) из реальных данных
   (/api/models — ключ, /health — quota_cooldowns и provider_cooldowns);
   ссылка на Интеграции;
-- Голос: приглушённые пункты (opacity .45, «нужен наряд»), БЕЗ обработчиков —
-  реального HTTP-эндпоинта команд /voice нет (Telegram-контур), фейковый
-  интерактив запрещён нарядом;
+- Голос: живые контролы (MINIAPP-1/2/3 — сегменты и слайдеры); «Свой голос /
+  свой провайдер» УДАЛЁН решением владельца по #291 (вариант Б — TTS-движок
+  один, edge-tts; вечных заглушек не держим); класс .need-narad снят полностью —
+  в miniapp его быть не должно (мета #254);
 - Экран: тема — сегмент, синхронный с топбаром (одно состояние setTheme,
   общий localStorage-ключ); ориентация — 3 варианта НА ОТДЕЛЬНОЙ строке под
   подписью (не обрезаются на 390px), screen.orientation.lock() с честным
@@ -71,14 +72,23 @@ def test_provider_three_states_from_real_sources():
     assert 'data-go="integrations"><span>Все 13 провайдеров и свои ключи</span>' in INDEX
 
 
-# ── Блок B. Голос — приглушённое, без интерактива ────────────────────────
+# ── Блок B. Голос — живые контролы; заглушки убраны (#291, вариант Б) ────
 
-def test_voice_items_muted_no_handlers():
-    assert '.muted-item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line);opacity:.45}' in INDEX
+def test_voice_custom_provider_removed_need_narad_gone():
+    # #291 (вариант Б, решение владельца 2026-09-21): «Свой голос / свой провайдер»
+    # удалён из UI — TTS-движок один (edge-tts), кастомного провайдера нет.
+    assert 'Свой голос' not in INDEX
+    assert 'свой провайдер' not in INDEX
+    # мета-критерий #254: в miniapp не осталось .need-narad ни в CSS, ни в разметке
+    assert 'need-narad' not in INDEX
+    assert 'нужен наряд' not in INDEX
+    # мёртвый CSS приглушённых пунктов вычищен вместе с последним потребителем
+    assert '.muted-item' not in INDEX
+
+
+def test_voice_settings_live_controls():
     # MINIAPP-1/2/3 (#288/#289/#290): голосовые ответы, пол и скорость/громкость/тон —
-    # живые контролы; «Свой голос / свой провайдер» остаётся приглушённым до
-    # решения по #291 (реализовать или убрать)
-    assert '<span>Свой голос / свой провайдер</span><span class="need-narad">нужен наряд</span>' in INDEX
+    # живые контролы (оставшиеся негативные гварды против возврата заглушек)
     assert 'Скорость, громкость, тон</span><span class="need-narad">нужен наряд</span>' not in INDEX
     assert 'Голосовые ответы</span><span class="need-narad">нужен наряд</span>' not in INDEX
     assert 'Женский / мужской голос</span><span class="need-narad">нужен наряд</span>' not in INDEX
