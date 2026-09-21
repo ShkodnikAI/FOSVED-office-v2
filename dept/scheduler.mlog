@@ -358,3 +358,118 @@ pattern ReminderCheck() -> String {
   }
   return "ok"
 }
+
+// ---------------------------------------------------------------------------
+// 9. Нативные cron-слоты (наряд №419, Metalogos gh#572) — zero-arg паттерны
+// для диспатча нативного cron Metalogos 0.21.0 (реестр: dept/schedules.mlog).
+// Логика = дословные тела /cron/*-роутов app.mlog БЕЗ секрет-гварда:
+// нативный файр — доверенный контекст (секрет нужен только внешнему HTTP-
+// триггеру). Бизнес-логика не меняется — меняется только триггер.
+// Слоты с деструктивным SQL в app.mlog (NightSlot) — там же, не здесь
+// (этот файл импортирует стейджинг-харнесс FO-050, 0.21-аудит которого чист).
+// ---------------------------------------------------------------------------
+
+pattern MorningSlot() -> String {
+  let _ = InitDB()
+  let _ = MorningBrief()
+  let _ = YanaSelfLearn()
+  return "morning ok"
+}
+
+pattern EveningSlot() -> String {
+  let _ = InitDB()
+  let _ = EveningSummary()
+  return "evening ok"
+}
+
+pattern WeeklySlot() -> String {
+  let _ = InitDB()
+  let _ = WeeklyDigest()
+  return "weekly ok"
+}
+
+pattern ControlSlot() -> String {
+  let _ = InitDB()
+  let _ = ControlCheck()
+  return "control ok"
+}
+
+pattern AdminReplySlot() -> String {
+  let _ = AuditLog("cron_admin_reply", "admin", "admin morning reply triggered by native cron")
+  let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+  let result = try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0)
+  return "admin-reply ok"
+}
+
+pattern LzDailySlot() -> String {
+  let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by native cron")
+  let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+  let result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0)
+  return "lz-daily ok"
+}
+
+pattern ShopTickSlot() -> String {
+  if env("SHOP_ENABLED") != "1" then { return "shop skip (SHOP_ENABLED != 1)" }
+  let _ = AuditLog("cron_shop_tick", "shop", "shop-tick triggered by native cron")
+  let result = try http_post("http://127.0.0.1:4000/scheduler/watch-sweep", "{}", "application/json", 240.0)
+  return "shop-tick ok"
+}
+
+pattern GoldenEvalsSlot() -> String {
+  let _ = AuditLog("cron_golden_evals", "qa", "golden evals triggered by native cron")
+  let result = try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 240.0)
+  return "golden-evals ok"
+}
+
+pattern IndicatorRemindersSlot() -> String {
+  let _ = AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by native cron")
+  let body = json_encode({days_ahead: 7})
+  let result = try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body, "application/json", 240.0)
+  return "indicator-reminders ok"
+}
+
+// FO-001: ежедневный бэкап главной БД (нативный слот; тело /cron/backup).
+// VACUUM INTO — не деструктивная операция (скан DROP/DELETE/TRUNCATE/ALTER).
+pattern DbBackupSlot() -> String {
+  let _ = InitDB()
+  let ts_rows = query("SELECT strftime('%Y%m%dT%H%M%SZ', 'now') AS t", [])
+  let ts = "unknown"
+  each r in ts_rows {
+    let ts = to_string(json_get(r, "t", "unknown"))
+  }
+  let path = "/var/data/backups/fosved.db." + ts
+  let _ = db_execute("VACUUM INTO ?", [path])
+  let check_rows = query("PRAGMA integrity_check", [])
+  let integrity = "no-result"
+  each cr in check_rows {
+    let integrity = to_string(json_get(cr, "integrity_check", "no-result"))
+  }
+  let _ = AuditLog("cron_backup", "system", path + " integrity=" + integrity)
+  return "backup ok: " + path
+}
+
+// ── #255, консолидация 2026-09-21: ночная корзина (нативный слот) ──────────
+// Тело /cron/night-tick: диспетчер обходит /cron/*-роуты по порядку —
+// backup → indicator-reminders → shop-tick → golden-evals → night.
+// Итог цепочки — одним сообщением в Telegram. Секрет нужен внутренним
+// HTTP-вызовам (роуты остаются ручным/аварийным фолбэком — п.4 наряда).
+pattern NightTickSlot() -> String {
+  let _ = InitDB()
+  let base = "http://127.0.0.1:4000/cron/"
+  let qs = "?secret=" + env("CRON_SECRET")
+
+  let mut report = "night-tick:"
+  let r_backup = try http_get(base + "backup" + qs, 300.0)
+  if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else { report = report + " backup=ok" }
+  let r_ind = try http_get(base + "indicator-reminders" + qs, 300.0)
+  if to_string(r_ind) == "()" then { report = report + " indicators=FAIL" } else { report = report + " indicators=ok" }
+  let r_shop = try http_get(base + "shop-tick" + qs, 300.0)
+  if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
+  let r_evals = try http_get(base + "golden-evals" + qs, 300.0)
+  if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
+  let r_night = try http_get(base + "night" + qs, 600.0)
+  if to_string(r_night) == "()" then { report = report + " night=запущен(фоном)" } else { report = report + " night=ok" }
+  let _ = AuditLog("cron_night_tick", "system", report)
+  let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)
+  return report
+}

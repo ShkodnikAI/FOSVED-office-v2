@@ -1,7 +1,25 @@
 // Fosved Office v2 — Main Application (MEGA-3)
 // 14 departments + routing + memory + cron + lockdown + voice + chain + learning + audit + archive
 
+// ── Наряд №419 (Metalogos gh#572): статус совместимости с Metalogos 0.21.0 ─────
+// Прод-бинарь 0.19.0 этой декларации НЕ понимает (profile-грамматика появилась
+// в 0.20.x), поэтому мост ADR-0161 (`profile legacy`) ЗДЕСЬ НЕ ОБЪЯВЛЕН — его
+// добавит миграционный наряд вместе с полным Category-A контуром (ценз:
+// `mlog-021 audit app.mlog` в отчёте №419 — ~430 UNTRUSTED_DECISION №327 +
+// clearance-семейство + 33 деструктивных сайта под гранты). Entry-проба
+// entrypoint.sh (audit-чек кандидата) держит прод на 0.19 и перережется на
+// 0.21 автоматически, когда файл пройдёт аудит. Хвосты для того наряда:
+// инфраструктура нативных расписаний уже здесь (dept/schedules.mlog + роуты
+// /schedules/*), на 0.19 они безопасно неактивны.
+
 db { url: env("DATABASE_URL") }
+
+// Наряд №419: персистность KV-стора (в нём живёт стор нативного cron —
+// ключ cron_jobs). Дедуп-штампы окон №418 и задания переживают рестарт
+// процесса; при полном ре-деплое бутстрап dept/schedules.mlog перерегистрирует
+// реестр (идемпотентно по target). На 0.19-фолбэке декларация безвредна
+// (KV API тот же).
+memory { persist: "data/metalogos_kv.db" }
 
 llm {
   providers: [
@@ -23,6 +41,7 @@ import dept/miniapp
 import dept/chain
 import dept/narad
 import dept/scheduler
+import dept/schedules
 import dept/quest
 // import dept/yana — REMOVED: HandleYana inlined below to bypass binary import caching
 import dept/osp
@@ -2385,6 +2404,56 @@ pattern call_python(module: String, function: String, args_json: String) -> Stri
 // ============================================================
 // SERVER
 // ============================================================
+
+// ── Наряд №419: нативный cron-слот ночного цикла ───────────────────────────
+// Тело /cron/night переехало дословно в zero-arg паттерн NightSlot — единый
+// источник для HTTP-роута (ручной/аварийный триггер) и нативного файра.
+// ВНИМАНИЕ: тело содержит деструктивный SQL (chain_steps TTL/expired) —
+// на 0.21 это объект грант-миграции (ценз в отчёте №419); на 0.19 легально.
+pattern NightSlot() -> String {
+  let _ = InitDB()
+
+  // Phase: FO-027 TTL chain_steps — очистка старше 14 дней; pending/failed
+  // без прогресса >24 ч → expired + Telegram-алерт владельцу
+  let _ = db_execute("DELETE FROM chain_steps WHERE created_at < datetime('now', '-14 days')")
+  let expired_rows = query("SELECT chain_id, COUNT(*) AS c FROM chain_steps WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day') GROUP BY chain_id", [])
+  let _ = db_execute("UPDATE chain_steps SET status='expired', updated_at=datetime('now') WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day')")
+  each er in expired_rows {
+    let exp_chain = to_string(json_get(er, "chain_id", "?"))
+    let exp_count = to_string(json_get(er, "c", "?"))
+    let _ = AuditLog("chain_expired", "system", exp_chain + " steps=" + exp_count)
+    let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), "FO-027: цепочка " + exp_chain + " истекла без прогресса >24 ч (" + exp_count + " степов) — resume: /chain continue " + exp_chain + " <query>")
+  }
+
+  // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
+  let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
+  let ua_body = "{}"
+  let mut ua_result = try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
+  if to_string(ua_result) == "()" then { ua_result = "{}" }
+  let ua_summary = json_get(parse_json(ua_result), "summary", "UA cycle failed")
+
+  // Phase 1: LZ Daily Report (GitHub scan → Admin)
+  let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
+  let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+  let mut lz_result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
+  if to_string(lz_result) == "()" then { lz_result = "{}" }
+  let lz_summary = json_get(parse_json(lz_result), "report", "LZ daily failed")
+
+  // Phase 2: Memory Maintenance
+  let mem_body = "{}"
+  let mut mem_result = try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
+  if to_string(mem_result) == "()" then { mem_result = "{}" }
+  let mem_summary = json_get(parse_json(mem_result), "result", "Memory maintenance failed")
+
+  // Phase 3: Original AdminNightCycle
+  let result = AdminNightCycle()
+  // Phase 4: Устаревшие отделы (hermes-agent lifecycle, адаптировано под use-based сигнал)
+  let stale_result = try AdminCheckStaleDepts()
+  if to_string(stale_result) == "()" then { let stale_result = "проверка не выполнена" }
+  let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result
+  kv_set("admin_night_summary", result)
+  return result
+}
 
 mlogserver {
   port: 10001
@@ -4938,47 +5007,10 @@ return respond("200 ok") }
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
     if secret != cron_secret then { return respond("403 Forbidden") }
-    let _ = InitDB()
-
-    // Phase: FO-027 TTL chain_steps — очистка старше 14 дней; pending/failed
-    // без прогресса >24 ч → expired + Telegram-алерт владельцу
-    let _ = db_execute("DELETE FROM chain_steps WHERE created_at < datetime('now', '-14 days')")
-    let expired_rows = query("SELECT chain_id, COUNT(*) AS c FROM chain_steps WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day') GROUP BY chain_id", [])
-    let _ = db_execute("UPDATE chain_steps SET status='expired', updated_at=datetime('now') WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day')")
-    each er in expired_rows {
-      let exp_chain = to_string(json_get(er, "chain_id", "?"))
-      let exp_count = to_string(json_get(er, "c", "?"))
-      let _ = AuditLog("chain_expired", "system", exp_chain + " steps=" + exp_count)
-      let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), "FO-027: цепочка " + exp_chain + " истекла без прогресса >24 ч (" + exp_count + " степов) — resume: /chain continue " + exp_chain + " <query>")
-    }
-
-    // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
-    let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
-    let ua_body = "{}"
-    let mut ua_result = try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
-    if to_string(ua_result) == "()" then { ua_result = "{}" }
-    let ua_summary = json_get(parse_json(ua_result), "summary", "UA cycle failed")
-
-    // Phase 1: LZ Daily Report (GitHub scan → Admin)
-    let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
-    let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
-    let mut lz_result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
-    if to_string(lz_result) == "()" then { lz_result = "{}" }
-    let lz_summary = json_get(parse_json(lz_result), "report", "LZ daily failed")
-
-    // Phase 2: Memory Maintenance
-    let mem_body = "{}"
-    let mut mem_result = try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
-    if to_string(mem_result) == "()" then { mem_result = "{}" }
-    let mem_summary = json_get(parse_json(mem_result), "result", "Memory maintenance failed")
-
-    // Phase 3: Original AdminNightCycle
-    let result = AdminNightCycle()
-    // Phase 4: Устаревшие отделы (hermes-agent lifecycle, адаптировано под use-based сигнал)
-    let stale_result = try AdminCheckStaleDepts()
-    if to_string(stale_result) == "()" then { let stale_result = "проверка не выполнена" }
-    let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result
-    kv_set("admin_night_summary", result)
+    // №419: логика переехала дословно в паттерн NightSlot (нативный cron-слот,
+    // реестр dept/schedules.mlog). Роут остаётся ручным/аварийным триггером —
+    // дедуп окон №418 делает двойной запуск безопасным.
+    let _ = NightSlot()
     return respond("200 ok")
   }
 
@@ -5136,8 +5168,81 @@ return respond("200 ok") }
     if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
     let r_night = try http_get(base + "night" + qs, 600.0)
     if to_string(r_night) == "()" then { report = report + " night=запущен(фоном)" } else { report = report + " night=ok" }
-    let _ = AuditLog("cron_night_tick", "system", report)
+     let _ = AuditLog("cron_night_tick", "system", report)
     let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)
     return respond("200 ok")
+  }
+
+  // ── Наряд №419: живая поверхность реестра заданий (нативный стор cron) ──
+  // Авторизация — тот же CRON_SECRET-гвард, что у /cron/* (существующее
+  // доверенное домено планирования; ротация секрета накрывает и эти роуты).
+  // На 0.19-фолбэке роуты парсятся, но 4-аргументный cron_add/таймзоны —
+  // контракт 0.21: create/bootstrap ответят ошибкой времени исполнения.
+  // list/remove/чтение — безопасны на обоих бинарях.
+  route "/schedules/list" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let jobs = cron_list()
+    let registry = SchedulesRegistry()
+    return respond("200 " + json_encode({jobs: jobs, registry: registry}))
+  }
+
+  // Ручной ре-запуск бутстрапа реестра (идемпотентен по target; громкий
+  // отчёт: ADD/REPLACE/KEEP/REMOVE/ONESHOT/EXTERNAL/FAIL — entrypoint
+  // громко ругается на FAIL(...), AuditLog пишет отчёт всегда).
+  route "/schedules/bootstrap" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let report = BootstrapSchedules()
+    return respond("200 " + report)
+  }
+
+  // Создать задание поверх нативного стора (без рестарта). Новые задания
+  // через этот роут — сознательное действие владельца (админ-домен).
+  // Валидация: target обязан быть известным zero-arg паттерном (inspect),
+  // cron-выражение обязано быть непустым; битое выражение громко отвергнет
+  // сам cron_add (CRON_JOB_FAILED-контракт №418/№413).
+  route "/schedules/create" method=POST {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let data = json_body()
+    let cron_expr = json_get(data, "cron", "")
+    let target = json_get(data, "target", "")
+    let tz = json_get(data, "tz", "Europe/Moscow")
+    let catch_up = json_get(data, "catch_up", "run_once")
+    let probe = inspect(target)
+    // №327: решения на недоверенных данных (json_body/inspect) — через
+    // one-way redact-hash (ADR-0161 sanctioned path); детерминированный хеш
+    // сохраняет семантику равенства.
+    if redact(to_string(probe), "hash_only") == redact("()", "hash_only") then { return respond("400 unknown target pattern") }
+    if redact(cron_expr, "hash_only") == redact("", "hash_only") then { return respond("400 empty cron expression") }
+    let _ = InitDB()
+    let created_job = cron_add(cron_expr, target, tz, catch_up)
+    let job_id = json_get(created_job, "id", "?")
+    let _ = AuditLog("schedules_create", "scheduler", target + " -> " + job_id)
+    return respond("200 created " + job_id)
+  }
+
+  route "/schedules/remove" method=POST {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    if secret != cron_secret then { return respond("403 Forbidden") }
+    let data = json_body()
+    let job_id = json_get(data, "id", "")
+    if redact(job_id, "hash_only") == redact("", "hash_only") then { return respond("400 missing id") }
+    let _ = InitDB()
+    let rm = cron_remove(job_id)
+    let n = json_get(rm, "removed", 0.0)
+    let _ = AuditLog("schedules_remove", "scheduler", job_id + " -> removed=" + to_string(n))
+    if redact(to_string(n), "hash_only") == redact(to_string(0.0), "hash_only") then { return respond("404 job not found") }
+    return respond("200 removed " + job_id)
   }
 }
