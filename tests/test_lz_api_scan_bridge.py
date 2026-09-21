@@ -121,3 +121,18 @@ def test_lz_api_scan_signature_untouched():
     from proxy import lz_sources as lzs
     sig = inspect.signature(lzs.lz_api_scan)
     assert list(sig.parameters) == ["topics", "max_per_source", "dept"]
+
+
+def test_lz_compare_command_removed():
+    # #284 (вариант 2, решение владельца): подкоманда compare удалена из /lz —
+    # вызывала несуществующий паттерн (гарантированное падение при первом
+    # использовании), исходный замысел умер вместе с Apodex (#282).
+    app_mlog = open(os.path.join(REPO_ROOT, "app.mlog"), encoding="utf-8").read()
+    assert "/lz compare" not in app_mlog
+    assert "LZCompare" not in app_mlog  # несуществующий паттерн не должен вернуться
+    assert 'starts_with(query, " compare ")' not in app_mlog  # ветка не возвращается
+    assert "/lz compare" not in LZ_MLOG
+    assert "LZCompetingAlternatives" not in LZ_MLOG
+    # способность ЛЗ «конкурирующие альтернативы» остаётся: Gate 7 + скилл-контекст
+    assert "LZGateCompetingCheck" in LZ_MLOG
+    assert "competing-alternatives" in LZ_MLOG
