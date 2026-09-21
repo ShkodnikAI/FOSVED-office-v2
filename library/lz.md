@@ -108,7 +108,7 @@ version: 2.0
 
 ## Команды
 
-**Сканирование:** `/lz <query>` · `/lz scan` · `/lz deep` · `/lz all` · `/lz compare`
+**Сканирование:** `/lz <query>` · `/lz scan` · `/lz deep` · `/lz all`
 
 **Домены:** `/lz politics <query>` · `/lz economics <query>` · `/lz geopolitics <query>` · `/lz event <query>`
 
