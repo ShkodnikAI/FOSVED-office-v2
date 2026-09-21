@@ -2050,6 +2050,41 @@ def api_integrations_delete(env_key):
     return jsonify({"status": "ok"})
 
 
+# ── MINIAPP-1 (#288): голосовые ответы вкл/выкл из Mini App ────────────
+# mlog-команда /voice on|off (app.mlog) пишет kv_set("voice_enabled",
+# "true"/"false") во встроенное KV mlog-бинаря — таблица kv_store
+# (схема по бинарю, подтверждена в #268). Роут читает/пишет ту же
+# таблицу и ровно те же значения, чтобы TG /voice и Mini App видели
+# одно состояние (один источник правды, без своего второго kv).
+
+@app.get("/api/voice/settings")
+def api_voice_settings_get():
+    """MINIAPP-1 (#288): текущее состояние голосовых ответов."""
+    try:
+        row = _query("SELECT value FROM kv_store WHERE key = 'voice_enabled' LIMIT 1", fetch=True)
+        enabled = bool(row) and str(row[0]["value"] or "").lower() == "true"
+        return jsonify({"status": "ok", "voice_enabled": enabled})
+    except Exception as e:  # noqa: BLE001 — нет таблицы → выключено, не 500
+        _log_error(f"voice settings read failed: {e}", source="api_voice_settings", kind="input")
+        return jsonify({"status": "ok", "voice_enabled": False})
+
+
+@app.post("/api/voice/settings")
+def api_voice_settings_set():
+    """MINIAPP-1 (#288): включить/выключить голосовые ответы."""
+    d = request.get_json(force=True, silent=True) or {}
+    if "enabled" not in d:
+        return jsonify({"status": "error", "message": "enabled (bool) обязателен"}), 400
+    val = "true" if d.get("enabled") else "false"
+    try:
+        _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES ('voice_enabled', ?)", (val,))
+        _log_audit("voice_settings_saved", {"enabled": bool(d.get("enabled")), "source": "miniapp"})
+        return jsonify({"status": "ok", "voice_enabled": bool(d.get("enabled"))})
+    except Exception as e:  # noqa: BLE001
+        _log_error(f"voice settings write failed: {e}", source="api_voice_settings", kind="input")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.get("/miniapp-spa")
 @app.get("/miniapp-spa/")
 @require_telegram
