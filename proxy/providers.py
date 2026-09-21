@@ -442,10 +442,16 @@ def _load_cfg():
         p = CFG_DIR / "priority_model.txt"
         if p.exists(): _cfg_cache["priority_model"] = p.read_text().strip()
     except Exception as e: log.warning(f"[config] priority_model read failed: {e}")
+    # #292: сначала чистим кэш оверрайдов — сброс/изменение override-файла
+    # должен снимать кэш без рестарта (пустой файл = оверрайда нет)
+    _cfg_cache["overrides"] = {}
     for dept in DEPT_NAMES:
         try:
             p = CFG_DIR / f"override_{dept}.txt"
-            if p.exists(): _cfg_cache["overrides"][dept] = p.read_text().strip()
+            if p.exists():
+                val = p.read_text().strip()
+                if val:
+                    _cfg_cache["overrides"][dept] = val
         except Exception as e: log.warning(f"[config] override_{dept} read failed: {e}")
 
 _load_cfg()

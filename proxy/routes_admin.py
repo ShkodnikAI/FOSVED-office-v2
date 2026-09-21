@@ -39,7 +39,7 @@ from proxy.providers import (
     PROVIDERS, TOKEN_COSTS, PROVIDER_MAX_TOKENS, COMBO_CHAINS,
     _breaker, _cfg_cache, call_llm, _call_single_provider,
     _generate_image, _IMG_DIR, _ALLOWED_SIZES, _zai_headers, _load_zai_config,
-    _estimate_tokens, _compress_messages, _combo_for_task,
+    _estimate_tokens, _compress_messages, _combo_for_task, _load_cfg,
 )
 from proxy.telegram import (
     _MARKER_EMOJI, _ALL_EMOJI, _escape_mdv2, _tg_send_formatted,
@@ -256,6 +256,96 @@ def api_models():
         return jsonify({"status": "ok", "models": models, "overrides": overrides, "analytics": analytics})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ── MINIAPP-5 (#292): «Модели по отделам» — назначение модели отделу ─────
+# Факт-чек 2026-09-21: потребители override_<dept>.txt читают файл как СПИСОК
+# МОДЕЛЕЙ построчно (GetModelFallbackChain app.mlog:508 → CallLLMResilient
+# модель-оверрайдом в /ask; providers._load_cfg → legacy fallback providers.py;
+# budget.econom_model_for). Провайдер выводится из префикса модели
+# (_provider_for_model, FO-025). Поэтому формат файла — только имена моделей,
+# одна на строку (порядок = цепь fallback); TG /model <dept> приведён к тому же
+# формату (был "provider model" — такой литерал ни один потребитель не читает).
+
+_MODEL_LABELS = {"zai": "Z.ai", "deepseek": "DeepSeek", "groq": "Groq", "grok": "xAI",
+                 "anthropic": "Anthropic", "openai": "OpenAI", "cerebras": "Cerebras",
+                 "kimi": "Kimi", "nvidia": "NVIDIA"}
+_MODEL_CATALOG_EXTRA = {"openai": ["gpt-4o"], "grok": ["grok-3"]}
+_RE_MODEL_NAME = re.compile(r"^[A-Za-z0-9/._:+-]{1,120}$")
+
+
+def _model_catalog():
+    """Каталог моделей по провайдерам — выводится из COMBO_CHAINS (+ известные direct)."""
+    cat = {}
+    for chain in COMBO_CHAINS.values():
+        for prov, models in chain:
+            lst = cat.setdefault(prov, [])
+            for m in models:
+                if m not in lst:
+                    lst.append(m)
+    for prov, models in _MODEL_CATALOG_EXTRA.items():
+        lst = cat.setdefault(prov, [])
+        for m in models:
+            if m not in lst:
+                lst.append(m)
+    return [{"provider": p, "label": _MODEL_LABELS.get(p, p), "models": cat[p]}
+            for p in PROVIDERS if p in cat]
+
+
+def _read_override_models(dept):
+    """Модели из override_<dept>.txt (строки без '#' и пустых); [] если нет/пуст."""
+    try:
+        p = CFG_DIR / f"override_{dept}.txt"
+        if not p.exists():
+            return []
+        return [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines()
+                if ln.strip() and not ln.strip().startswith("#")]
+    except OSError:
+        return []
+
+
+@app.get("/api/model/depts")
+def api_model_depts_get():
+    """MINIAPP-5 (#292): текущие оверрайды моделей по отделам + каталог моделей."""
+    depts = [{"dept": d, "label": DEPT_NAMES[d], "override": _read_override_models(d)}
+             for d in DEPT_NAMES]
+    return jsonify({"status": "ok", "depts": depts, "catalog": _model_catalog()})
+
+
+@app.post("/api/model/depts")
+def api_model_depts_set():
+    """MINIAPP-5 (#292): назначить модели отделу или сбросить на auto.
+
+    body: {"dept": "lz", "models": ["glm-4.6", "deepseek-chat"]} — назначить
+    (1..5 моделей, порядок = цепь fallback, провайдер выводится из префикса);
+          {"dept": "lz", "models": []} — сброс: файл-плейсхолдер очищается,
+    отдел возвращается в auto-роутинг (как до назначения)."""
+    d = request.get_json(force=True, silent=True) or {}
+    dept = str(d.get("dept") or "").strip()
+    if dept not in DEPT_NAMES:
+        return jsonify({"status": "error", "message": "неизвестный отдел"}), 400
+    models = d.get("models")
+    if not isinstance(models, list):
+        return jsonify({"status": "error", "message": "models — список моделей"}), 400
+    models = [str(m).strip() for m in models if str(m).strip()]
+    if len(models) > 5:
+        return jsonify({"status": "error", "message": "максимум 5 моделей в цепи"}), 400
+    for m in models:
+        if not _RE_MODEL_NAME.match(m):
+            return jsonify({"status": "error", "message": f"некорректное имя модели: {m[:40]}"}), 400
+    try:
+        p = CFG_DIR / f"override_{dept}.txt"
+        if models:
+            p.write_text("\n".join(models) + "\n", encoding="utf-8")
+            _log_audit("model_override_set", {"dept": dept, "models": models, "source": "miniapp"})
+        else:
+            p.write_text("", encoding="utf-8")  # пустой плейсхолдер = auto (как в репо)
+            _log_audit("model_override_reset", {"dept": dept, "source": "miniapp"})
+        _load_cfg()  # кэш провайдера обновляется сразу; mlog-цепь читает файл напрямую
+        return jsonify({"status": "ok", "dept": dept, "override": models})
+    except OSError as e:
+        _log_error(f"model depts write failed: {e}", source="api_model_depts", kind="io")
+        return jsonify({"status": "error", "message": "не удалось записать override"}), 500
 
 
 @app.get("/api/economics")
