@@ -256,10 +256,12 @@ def test_transport_down_tick_survives(monkeypatch, sent):
     assert "цель" in sent[0]
 
 
-def test_platforms_mvp_kufar_out_ozon_in():
-    """Решение владельца 2026-09-16: Kufar выведен из такта, Ozon в такте
-    (каркас за антиботом — отказ честный, такт живёт)."""
-    assert PLATFORMS_REAL == ("wb", "ozon")
+def test_platforms_real_loop_wb_ozon_onliner_21vek():
+    """Такт реальных площадок. 2026-09-16: kufar выведен, ozon — каркас
+    (антибот, отказ честный). 2026-09-21 (f281c20): onliner/21vek заведены
+    в реальный цикл опроса — настройки Mini App обещали переключатель,
+    который ничего не делал; гвард 16.09 под новый расклад не обновили."""
+    assert PLATFORMS_REAL == ("wb", "ozon", "onliner", "21vek")
 
 
 def test_dashboard_doc_has_shop_cron_and_switch():
