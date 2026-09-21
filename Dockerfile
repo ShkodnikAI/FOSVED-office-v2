@@ -27,6 +27,13 @@ COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
 COPY . .
 
+# Наряд №419 follow-up (проверка 0.21): бинарь 0.21 приходит через COPY . . —
+# exec-бит должен жить в самом git (100755); chmod ниже — страховка, чтобы
+# аудиторская проба entrypoint ("-x $MLOG_CANDIDATE") физически запускалась
+# в образе. Без него guard-переход молча вечно едет на легаси 0.19 и
+# нативный cron никогда не бутстрапится (предусловие А cutover-чеклиста).
+RUN chmod +x /office/bin/mlog-021 && /office/bin/mlog-021 --version
+
 # Node.js deps (Prisma client for PostgreSQL)
 RUN npm install --production 2>/dev/null || true
 RUN npx prisma generate 2>/dev/null || true
