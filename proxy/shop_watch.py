@@ -24,7 +24,12 @@ import os
 
 log = logging.getLogger("shop_watch")
 
-PLATFORMS_MVP = ("wb", "ozon")  # ozon — каркас (антибот, см. shop_collectors);
+PLATFORMS_MVP = ("wb", "ozon", "onliner", "21vek")  # ozon — каркас (антибот, см. shop_collectors);
+# onliner/21vek добавлены 2026-09-21: сборщики (COLLECTORS) существовали и
+# правильно диспетчеризовались через collect(), но в сам MVP-список не
+# попадали — реальный опрос шёл только по WB/Ozon, хотя настройки Mini App
+# (FORGE-UI-9, #202) честно показывали переключатели для всех четырёх,
+# создавая ложное впечатление, что источник влияет на реальный сбор.
                                 # onliner (нет слага) / 21vek — вне такта
 
 def shop_source_enabled(platform):
