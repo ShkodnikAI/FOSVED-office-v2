@@ -268,15 +268,31 @@ class TestEmptyReply:
 # ─────────────────── 6. /health агрегат за 24 ч ───────────────────
 
 @pytest.fixture
-def _clean_traces():
-    """Чистая трейс-директория (фактический _TRACE_DIR ядра — он заморожен
-    при первом импорте llm_proxy и может не совпадать с DATABASE_PATH файла)."""
-    import glob
-    for fp in glob.glob(os.path.join(_TRACE_DIR, 'llm_*.jsonl')):
-        os.remove(fp)
+def _clean_traces(tmp_path, monkeypatch):
+    """Герметичная пара «запись/чтение» трейсов в одном tmp-каталоге.
+
+    Раньше фикстура чистила общий _TRACE_DIR ядра. Он заморожен при первом
+    импорте proxy.core в коллекции, а другие тест-файлы перезатирают
+    DATABASE_PATH на уровне модуля (fo016/fo017/fo019/fo020/fo025/ui8) —
+    в полном прогоне запись шла в замороженный каталог, а
+    buckets_last_24h() читала текущий env: расхождение путей давало
+    пустые buckets (2 red в CI на self-hosted прогоне 2026-09-22).
+
+    Теперь запись (proxy.core._TRACE_DIR) и чтение (env DATABASE_PATH)
+    патчатся в один и тот же tmp_path: порядок исполнения и соседние
+    тест-файлы не влияют.
+
+    Retention-прут (7 дней по реальным часам) на время теста отключается:
+    иначе _prune_old_traces мгновенно удаляет файл, записанный с
+    фейковым ts 2026-09-13 — тест test_old_records_excluded «истёк»
+    2026-09-21, когда реальная дата вышла из 7-дневного окна
+    захардкоженной даты (маскировалось падением CI по квоте).
+    """
+    db = tmp_path / "fosved-traces-db"
+    monkeypatch.setenv("DATABASE_PATH", str(db))
+    monkeypatch.setattr("proxy.core._TRACE_DIR", str(db / "traces"))
+    monkeypatch.setattr("proxy.core._TRACE_RETENTION", 3650)
     yield
-    for fp in glob.glob(os.path.join(_TRACE_DIR, 'llm_*.jsonl')):
-        os.remove(fp)
 
 
 class TestBucketsAggregation:
