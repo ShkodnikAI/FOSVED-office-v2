@@ -1,0 +1,188 @@
+// ── Реестр заданий владельца + нативный бутстрап (наряд №419, Metalogos gh#572) ──
+// SSOT офисных расписаний: «внесение задания = правка этого файла → деплой».
+// Планировщик = нативный cron Metalogos 0.21.0 (№418: дедуп окна, catch-up,
+// per-job TZ, payload-контракт); waker (бодрствование free-инстанса Render) —
+// №420 (GH Actions); внешний cron-job.org выводится из исполнения.
+//
+// Формат записи реестра:
+//   { name: <id>, cron: "<5-field expr>", tz: "Europe/Moscow",
+//     target: "<zero-arg pattern name>", catch_up: "run_once"|"skip",
+//     enabled: true|false }
+//   разовое задание: { name, at: <epoch seconds>, target|note, enabled }
+//     — регистрируется через remind() (доставка в ReminderCheck);
+//       epoch — однозначное дата-время без парсера (recipe в README-runbook).
+//
+// Правила (границы наряда):
+//   • НОВЫЕ записи по умолчанию создаются выключенными (enabled: false) —
+//     владелец включает сознательно (правка файла → деплой).
+//   • Идемпотентность бутстрапа — по target (prompt нативного стора):
+//     ре-деплой ЗАМЕНЯЕТ задание при изменении cron/tz, не дублирует;
+//     неизменное задание сохраняет run_count/last_run.
+//   • enabled: false на ранее зарегистрированное задание = снятие с расписания
+//     (реестр — SSOT).
+//   • Битая запись (пустой cron, неизвестный target) — LOUD-fail в отчёте
+//     бутстрапа (строка FAIL + AuditLog), не тихий пропуск.
+//   • tz записей — Europe/Moscow (MSK = фиксированный UTC+3); времена записей
+//     в MSK wall-clock (пример: 07:20 MSK = 04:20 UTC).
+//
+// Целевой расклад — docs/render-dashboard.md («native cron»): 7 слотов +
+// night-tick-диспетчер; keep-alive — внешний (№420), в реестре как
+// enabled: false-памятка с kind: external.
+
+import dept/utils
+
+// ── Реестр: целевой расклад слотов (файл правит владелец) ──────────────────
+pattern SchedulesRegistry() -> List {
+  return [
+    // 7 слотов целевого расклада (render-dashboard.md), все живые:
+    { name: "admin-reply",   cron: "25 7 * * *",  tz: "Europe/Moscow", target: "AdminReplySlot",   catch_up: "run_once", enabled: true },
+    { name: "morning-brief", cron: "20 7 * * *",  tz: "Europe/Moscow", target: "MorningSlot",      catch_up: "run_once", enabled: true },
+    { name: "control-check", cron: "0 12 * * *",  tz: "Europe/Moscow", target: "ControlSlot",      catch_up: "run_once", enabled: true },
+    { name: "evening-summary", cron: "0 21 * * *", tz: "Europe/Moscow", target: "EveningSlot",     catch_up: "run_once", enabled: true },
+    { name: "night-tick",    cron: "0 5 * * *",   tz: "Europe/Moscow", target: "NightTickSlot",    catch_up: "run_once", enabled: true },
+    { name: "weekly-digest", cron: "0 9 * * 1",   tz: "Europe/Moscow", target: "WeeklySlot",       catch_up: "run_once", enabled: true },
+    // Служебные нативные задания:
+    { name: "lz-daily",      cron: "10 9 * * *",  tz: "Europe/Moscow", target: "LzDailySlot",      catch_up: "run_once", enabled: true },
+    // Памятка внешнего слота (не нативное — держит free-инстанс бодрым;
+    // исполняется waker'ом №420 / GH Actions, в реестре выключено):
+    { name: "keep-alive",    cron: "*/10 * * * *", tz: "Europe/Moscow", target: "ExternalKeepAlive", catch_up: "skip", enabled: false }
+  ]
+}
+
+// ── Бутстрап: реестр → нативный стор cron (идемпотентно по target) ──────────
+// Возвращает текстовый отчёт; каждая запись даёт строку ADD/REPLACE/KEEP/
+// REMOVE/ONESHOT/EXTERNAL/FAIL. FAIL — громкий отказ записи (битое
+// cron-выражение ловит сам cron_add — CRON_JOB_FAILED; неизвестный target
+// ловит inspect()).
+//
+// ДВА ПРОХОДА — защита от коллизии id нативного стора (cron_add штампует
+// id секундным таймстампом: батч-регистрация в одну секунду даёт ОДИНАКОВЫЕ
+// id — cron_remove(id) удаляет ВСЕ задания с этим id, включая чужие):
+//   Проход 1 — решения на удаление: disabled/external-осиротевшие и записи
+//   с изменённым расписанием снимаются (cron_remove может задеть одноимённые
+//   id других слотов — это допустимо);
+//   Проход 2 — дозаполнение: каждое включённое повторяемое задание,
+//   отсутствующее в сторе, добавляется заново. Итог всегда = реестру.
+pattern BootstrapSchedules() -> String {
+  // Контур БД (AuditLog пишет в ledger/audit-таблицу): инициализировать, как
+  // делают все офисные роуты; в харнессе/приложении InitDB определён.
+  let _ = InitDB()
+  let registry = SchedulesRegistry()
+  let mut report = "bootstrap:"
+  let mut added = 0.0
+  let mut kept = 0.0
+  let mut removed = 0.0
+  let mut failed = 0.0
+
+  // ── Проход 1: удаления (disabled, external, изменившиеся расписания) ──
+  each rec in registry {
+    let name = json_get(rec, "name", "?")
+    let target = json_get(rec, "target", "")
+    let cron_expr = json_get(rec, "cron", "")
+    let tz = json_get(rec, "tz", "Europe/Moscow")
+    let enabled_s = to_string(json_get(rec, "enabled", false))
+    let at = json_get(rec, "at", 0.0)
+
+    // mut обязателен: переприсваивания внутри each должны пережить цикл
+    // (офисная конвенция; без mut — shadow-биндинг, умирающий с итерацией).
+    let mut existing_id = ""
+    let mut existing_expr = ""
+    let mut existing_tz = ""
+    let jobs = cron_list()
+    each j in jobs {
+      if json_get(j, "prompt", "") == target then {
+        let existing_id = json_get(j, "id", "")
+        let existing_expr = json_get(j, "cron_expr", "")
+        let existing_tz = json_get(j, "tz", "")
+      }
+    }
+
+    let mut need_remove = "no"
+    let mut remove_kind = ""
+    if enabled_s != "true" and existing_id != "" then {
+      let need_remove = "yes"
+      let remove_kind = "DISABLED"
+    }
+    if target == "ExternalKeepAlive" and existing_id != "" then {
+      let need_remove = "yes"
+      let remove_kind = "EXTERNAL"
+    }
+    if enabled_s == "true" and at == 0.0 and target != "ExternalKeepAlive" and existing_id != "" then {
+      if existing_expr != cron_expr or existing_tz != tz then {
+        let need_remove = "yes"
+        let remove_kind = "STALE"
+      }
+    }
+    if need_remove == "yes" then {
+      let _ = cron_remove(existing_id)
+      let removed = removed + 1.0
+      let report = report + " REMOVE-" + remove_kind + "(" + name + ")"
+    }
+  }
+
+  // ── Проход 2: разовые + дозаполнение повторяемых ──
+  each rec in registry {
+    let name = json_get(rec, "name", "?")
+    let target = json_get(rec, "target", "")
+    let cron_expr = json_get(rec, "cron", "")
+    let tz = json_get(rec, "tz", "Europe/Moscow")
+    let catch_up = json_get(rec, "catch_up", "run_once")
+    let enabled_s = to_string(json_get(rec, "enabled", false))
+    let at = json_get(rec, "at", 0.0)
+
+    if enabled_s == "true" and at > 0.0 then {
+      // Разовое задание — через remind (доставка в ReminderCheck).
+      // Идемпотентность: то же сообщение не дублируется; прошедшее время — skip.
+      let msg = "[schedules] " + name + ": " + target
+      let mut dup = "no"
+      let mut past = "no"
+      let rems = list_reminders()
+      each r in rems {
+        if json_get(r, "message", "") == msg then { let dup = "yes" }
+        if json_get(r, "fire_at", 0.0) <= time() then { let past = "yes" }
+      }
+      if dup == "yes" then {
+        let report = report + " ONESHOT-KEEP(" + name + ")"
+      } else if past == "yes" then {
+        let report = report + " ONESHOT-PAST(" + name + ")"
+      } else {
+        let _ = remind(msg, at, target)
+        let report = report + " ONESHOT(" + name + ")"
+      }
+    } else if enabled_s == "true" and at == 0.0 and target != "ExternalKeepAlive" then {
+      // Повторяемое задание: validate target (известный zero-arg паттерн).
+      let probe = inspect(target)
+      if to_string(probe) == "()" then {
+        let failed = failed + 1.0
+        let report = report + " FAIL(" + name + ": unknown target pattern " + target + ")"
+      } else if redact(cron_expr, "hash_only") == redact("", "hash_only") then {
+        let failed = failed + 1.0
+        let report = report + " FAIL(" + name + ": empty cron expression)"
+      } else {
+        let mut present = "no"
+        let jobs = cron_list()
+        each j in jobs {
+          if json_get(j, "prompt", "") == target then { let present = "yes" }
+        }
+        if present == "no" then {
+          // cron_add возвращает Struct { id, cron_expr, prompt, enabled, next_run, status }
+          let added_job = cron_add(cron_expr, target, tz, catch_up)
+          let new_id = json_get(added_job, "id", "?")
+          let added = added + 1.0
+          let report = report + " ADD(" + name + " -> " + new_id + ")"
+        } else {
+          let kept = kept + 1.0
+          let report = report + " KEEP(" + name + ")"
+        }
+      }
+    } else if enabled_s != "true" and target == "ExternalKeepAlive" then {
+      // Внешний слот живёт вне нативного стора (waker №420) — только отметка.
+      let report = report + " EXTERNAL(" + name + ")"
+    }
+  }
+
+  let summary = " added=" + to_string(added) + " kept=" + to_string(kept) + " removed=" + to_string(removed) + " failed=" + to_string(failed)
+  let report = report + summary
+  let _ = AuditLog("schedules_bootstrap", "scheduler", report)
+  return report
+}

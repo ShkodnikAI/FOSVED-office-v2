@@ -18,6 +18,10 @@ profile legacy { egress: permissive_with_audit }
 
 db { url: env("DATABASE_URL") }
 
+// Наряд №419: персистность KV-стора (стор нативного cron — ключ cron_jobs):
+// дедуп-штампы окон №418 и задания переживают рестарт (без двойного файра).
+memory { persist: "data/metalogos_kv.db" }
+
 llm {
   providers: [
     { alias: kimi, provider: openai_compatible, key: env("KIMI_API_KEY"), url: "https://api.moonshot.ai/v1/chat/completions" },
@@ -74,6 +78,7 @@ import dept/miniapp
 import dept/chain
 import dept/narad
 import dept/scheduler
+import dept/schedules
 import dept/quest
 // import dept/yana — REMOVED: HandleYana inlined below to bypass binary import caching
 import dept/osp
@@ -2843,6 +2848,67 @@ mlogserver {
     let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
     let result = try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0)
     return respond("200 ok")
+  }
+
+  // ── Наряд №419: живая поверхность реестра заданий (стейджинг-демо) ──────
+  // Гвард — в стиле харнесса (redact-hash). На 0.21-бинаре (mlog-021) эти
+  // роуты — самопроверка п.1 наряда: нативный тик жив, cron_list отвечает.
+  route "/schedules/list" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let jobs = cron_list()
+    let registry = SchedulesRegistry()
+    return respond("200 " + json_encode({jobs: jobs, registry: registry}))
+  }
+
+  route "/schedules/bootstrap" method=GET {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let report = BootstrapSchedules()
+    return respond("200 " + report)
+  }
+
+  route "/schedules/create" method=POST {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let data = json_body()
+    let cron_expr = json_get(data, "cron", "")
+    let target = json_get(data, "target", "")
+    let tz = json_get(data, "tz", "Europe/Moscow")
+    let catch_up = json_get(data, "catch_up", "run_once")
+    let probe = inspect(target)
+    // №327: решения на недоверенных данных (json_body/inspect) — через
+    // one-way redact-hash (ADR-0161 sanctioned path); детерминированный хеш
+    // сохраняет семантику равенства.
+    if redact(to_string(probe), "hash_only") == redact("()", "hash_only") then { return respond("400 unknown target pattern") }
+    if redact(cron_expr, "hash_only") == redact("", "hash_only") then { return respond("400 empty cron expression") }
+    let _ = InitDB()
+    let created_job = cron_add(cron_expr, target, tz, catch_up)
+    let job_id = json_get(created_job, "id", "?")
+    let _ = AuditLog("schedules_create", "scheduler", target + " -> " + job_id)
+    return respond("200 created " + job_id)
+  }
+
+  route "/schedules/remove" method=POST {
+    let secret = query_param("secret")
+    let cron_secret = env("CRON_SECRET")
+    if redact(cron_secret, "hash_only") == redact("", "hash_only") then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let data = json_body()
+    let job_id = json_get(data, "id", "")
+    if redact(job_id, "hash_only") == redact("", "hash_only") then { return respond("400 missing id") }
+    let _ = InitDB()
+    let rm = cron_remove(job_id)
+    let n = json_get(rm, "removed", 0.0)
+    let _ = AuditLog("schedules_remove", "scheduler", job_id + " -> removed=" + to_string(n))
+    if redact(to_string(n), "hash_only") == redact(to_string(0.0), "hash_only") then { return respond("404 job not found") }
+    return respond("200 removed " + job_id)
   }
 }
 
