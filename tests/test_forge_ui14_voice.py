@@ -48,10 +48,10 @@ def _client():
 def voice_db():
     """kv_store — схема по бинарю (key, value); в проде таблицу создаёт бинарь."""
     _query("CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)")
-    _query("DELETE FROM kv_store WHERE key IN ('voice_enabled', 'tts_voice')")
+    _query("DELETE FROM kv_store WHERE key IN ('voice_enabled', 'tts_voice', 'voice_speed', 'voice_volume', 'voice_pitch')")
     _query("DELETE FROM audit_log WHERE action = 'voice_settings_saved'")
     yield
-    _query("DELETE FROM kv_store WHERE key IN ('voice_enabled', 'tts_voice')")
+    _query("DELETE FROM kv_store WHERE key IN ('voice_enabled', 'tts_voice', 'voice_speed', 'voice_volume', 'voice_pitch')")
     _query("DELETE FROM audit_log WHERE action = 'voice_settings_saved'")
 
 
@@ -204,3 +204,109 @@ def test_ui_gender_control_present():
     assert 'id="voiceGenderSeg"' in INDEX
     assert 'data-vgender="female"' in INDEX and 'data-vgender="male"' in INDEX
     assert 'Женский / мужской голос</span><span class="need-narad"' not in INDEX
+
+
+# ── MINIAPP-3 (#290): скорость / громкость / тон ─────────────────────────
+
+def test_get_params_default_none():
+    """Пустая kv → speed/volume/pitch = None (звучание прежнее, дефолты /tts)."""
+    r = _client().get("/api/voice/settings", headers=API_AUTH)
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["speed"] is None and j["volume"] is None and j["pitch"] is None
+
+
+def test_post_speed_only_writes_kv():
+    """Слайдер шлёт ТОЛЬКО {\"speed\": N} — гвард должен пустить (без enabled/gender)."""
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"speed": 40})
+    assert r.status_code == 200
+    assert r.get_json()["speed"] == 40
+    row = _query("SELECT value FROM kv_store WHERE key = 'voice_speed' LIMIT 1", fetch=True)
+    assert str(row[0]["value"]) == "40"
+    r = _client().get("/api/voice/settings", headers=API_AUTH)
+    assert r.get_json()["speed"] == 40
+
+
+def test_post_volume_and_pitch_roundtrip():
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"volume": -30})
+    assert r.status_code == 200 and r.get_json()["volume"] == -30
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"pitch": 10})
+    assert r.status_code == 200 and r.get_json()["pitch"] == 10
+    r = _client().get("/api/voice/settings", headers=API_AUTH)
+    assert r.get_json()["volume"] == -30 and r.get_json()["pitch"] == 10
+
+
+def test_post_param_null_resets_kv():
+    """None = сброс на дефолт: kv-ключ удаляется, GET отдаёт None."""
+    _client().post("/api/voice/settings", headers=API_AUTH, json={"speed": 40})
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"speed": None})
+    assert r.status_code == 200 and r.get_json()["speed"] is None
+    row = _query("SELECT value FROM kv_store WHERE key = 'voice_speed' LIMIT 1", fetch=True)
+    assert not row
+
+
+def test_post_param_out_of_range_400():
+    """Диапазоны edge-tts: speed −50..100, volume −100..100, pitch −50..50."""
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"speed": 500})
+    assert r.status_code == 400
+    row = _query("SELECT value FROM kv_store WHERE key = 'voice_speed' LIMIT 1", fetch=True)
+    assert not row
+
+
+def test_post_param_garbage_400():
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"volume": "abc"})
+    assert r.status_code == 400
+
+
+def test_post_absent_params_no_change():
+    """POST без параметров (enabled=true) не трогает kv параметров и не добавляет
+    лишних ключей в ответ (обратная совместимость с #288)."""
+    _client().post("/api/voice/settings", headers=API_AUTH, json={"speed": 40})
+    r = _client().post("/api/voice/settings", headers=API_AUTH, json={"enabled": True})
+    assert r.get_json() == {"status": "ok", "voice_enabled": True}
+    r = _client().get("/api/voice/settings", headers=API_AUTH)
+    assert r.get_json()["speed"] == 40
+
+
+def test_voice_py_normalizers_edge_tts_format():
+    """proxy/voice.py: _pct/_hz переводят kv-числа в формат edge-tts (+N% / +NHz);
+    пустое/мусор → дефолт (прежнее поведение — нет регрессии у нетронувших настройки)."""
+    from proxy.voice import _pct, _hz
+    assert _pct(None, "+20%") == "+20%"
+    assert _pct("", "+20%") == "+20%"
+    assert _pct("40", "+20%") == "+40%"
+    assert _pct("+40", "+20%") == "+40%"
+    assert _pct("-20", "+20%") == "-20%"
+    assert _pct("40%", "+20%") == "40%"
+    assert _pct("0", "+20%") == "+0%"
+    assert _pct("abc", "+20%") == "+20%"
+    assert _hz(None, "") == ""
+    assert _hz("", "") == ""
+    assert _hz("10", "") == "+10Hz"
+    assert _hz("-10", "") == "-10Hz"
+    assert _hz("10Hz", "") == "10Hz"
+    assert _hz("abc", "") == ""
+
+
+def test_app_mlog_tts_body_passes_params_both_sites():
+    """app.mlog: оба места TTS-вызова прокидывают speed/volume/pitch из kv."""
+    assert APP_MLOG.count('speed: kv_get("voice_speed")') == 2
+    assert APP_MLOG.count('volume: kv_get("voice_volume")') == 2
+    assert APP_MLOG.count('pitch: kv_get("voice_pitch")') == 2
+
+
+def test_ui_sliders_present_need_narad_removed():
+    """UI: три слайдера живые; пункт «Скорость, громкость, тон» без .need-narad."""
+    assert 'id="voiceSpeed"' in INDEX and 'id="voiceVol"' in INDEX and 'id="voicePitch"' in INDEX
+    assert 'Скорость, громкость, тон</span><span class="need-narad"' not in INDEX
+    assert ".vslider" in INDEX  # CSS-правило слайдера на месте
+
+
+def test_voice_py_endpoint_reads_all_params():
+    """tts_endpoint читает speed/volume/pitch из body (не только жёсткий rate)."""
+    import inspect
+    from proxy import voice
+    src = inspect.getsource(voice.tts_endpoint)
+    assert '_pct(d.get("speed")' in src
+    assert '_pct(d.get("volume")' in src
+    assert '_hz(d.get("pitch")' in src

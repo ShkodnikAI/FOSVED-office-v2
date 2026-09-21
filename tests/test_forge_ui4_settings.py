@@ -75,14 +75,15 @@ def test_provider_three_states_from_real_sources():
 
 def test_voice_items_muted_no_handlers():
     assert '.muted-item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line);opacity:.45}' in INDEX
-    # MINIAPP-1 (#288) + MINIAPP-2 (#289): «Голосовые ответы» и «Женский/мужской» —
-    # живые контролы (kv voice_enabled / tts_voice); остальные два голосовых
-    # пункта остаются приглушёнными до своих нарядов (MINIAPP-3..6: #290–#293)
-    for item in ("Скорость, громкость, тон", "Свой голос / свой провайдер"):
-        assert f'<span>{item}</span><span class="need-narad">нужен наряд</span>' in INDEX
+    # MINIAPP-1/2/3 (#288/#289/#290): голосовые ответы, пол и скорость/громкость/тон —
+    # живые контролы; «Свой голос / свой провайдер» остаётся приглушённым до
+    # решения по #291 (реализовать или убрать)
+    assert '<span>Свой голос / свой провайдер</span><span class="need-narad">нужен наряд</span>' in INDEX
+    assert 'Скорость, громкость, тон</span><span class="need-narad">нужен наряд</span>' not in INDEX
     assert 'Голосовые ответы</span><span class="need-narad">нужен наряд</span>' not in INDEX
     assert 'Женский / мужской голос</span><span class="need-narad">нужен наряд</span>' not in INDEX
     assert 'id="voiceSeg"' in INDEX and 'id="voiceGenderSeg"' in INDEX
+    assert 'id="voiceSpeed"' in INDEX and 'id="voiceVol"' in INDEX and 'id="voicePitch"' in INDEX
     # нет фейковых вызовов голосовых команд — только реальный API-роут настроек
     assert '"/voice' not in INDEX.replace('"/voice-set"', '')  # и voice-set (audit-stub) не притворяется работающим
 

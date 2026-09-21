@@ -24,9 +24,42 @@ from proxy.core import (
 from proxy.providers import call_llm
 from proxy.telegram import _tg_send_voice, _tg_get_file, _tg_download_file, _ALL_EMOJI
 
+def _pct(value, default):
+    """MINIAPP-3 (#290): нормализация rate/volume в edge-tts формат «+N%».
+
+    Пустое/отсутствующее → default (прежнее поведение). Строка с '%' — как есть.
+    Число или числовая строка ('40', '+40') → «+40%». Мусор → default."""
+    if value is None:
+        return default
+    s = str(value).strip().replace(" ", "")
+    if not s:
+        return default
+    if s.endswith("%") and s[:-1].lstrip("+-").isdigit():
+        return s
+    if s.lstrip("+-").isdigit():
+        return f"{int(s):+d}%"
+    return default
+
+
+def _hz(value, default=""):
+    """MINIAPP-3 (#290): нормализация pitch в edge-tts формат «+NHz».
+
+    Пустое/отсутствующее → default (параметр не передаётся вовсе)."""
+    if value is None:
+        return default
+    s = str(value).strip().replace(" ", "")
+    if not s:
+        return default
+    if s.endswith("Hz") and s[:-2].lstrip("+-").isdigit():
+        return s
+    if s.lstrip("+-").isdigit():
+        return f"{int(s):+d}Hz"
+    return default
+
+
 def _clean_text_for_tts(text):
     """Strip emoji, Markdown syntax, special chars for clean edge-tts voice output.
-    
+
     Keeps: letters (all scripts), digits, basic sentence punctuation (. , - : ;).
     Removes: emoji, *, _ `, #, ▸ ◦ ───, quotes (" " « »), ‑, •, etc.
     """
@@ -69,8 +102,12 @@ def tts_endpoint():
     tmp_path = f"/tmp/tts_{timestamp}_{uuid.uuid4().hex[:6]}.mp3"
 
     try:
-        # Run edge-tts subprocess
-        rate = d.get("rate", "+20%")
+        # Run edge-tts subprocess.
+        # MINIAPP-3 (#290): speed/volume/pitch из kv (прокинуты app.mlog) или body.
+        # Пустые/отсутствующие → прежнее поведение: rate '+20%', volume/pitch не задаются.
+        rate = _pct(d.get("speed") or d.get("rate"), "+20%")
+        volume = _pct(d.get("volume"), "")
+        pitch = _hz(d.get("pitch"), "")
         cmd = [
             "edge-tts",
             "--voice", voice,
@@ -78,6 +115,10 @@ def tts_endpoint():
             "--text", text,
             "--write-media", tmp_path
         ]
+        if volume:
+            cmd += ["--volume", volume]
+        if pitch:
+            cmd += ["--pitch", pitch]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
             log.error(f"edge-tts failed: {result.stderr}")
