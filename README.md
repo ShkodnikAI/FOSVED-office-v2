@@ -378,6 +378,15 @@ docker run -p 10000:10000 --env-file .env fosved
 (апстрим-репорт в Metalogos). Известный апстрим-ложняк аудита — эвристика
 SECRETS («sk_» совпадает внутри «task_id»/«risk_level», нужен word-boundary).
 
+Дополнение (наряд №423, 2026-09-22): `CRON_SECRET` оставлен без ротации
+(решение владельца — периметр приватный; компенсация — access-лог прокси
+маскирует `secret=`/`token=`/`password=` значения фильтром
+`QuerySecretMasker`, гвард `tests/test_proxy_log_masking.py`; триггеры
+пересмотра — в docs/render-dashboard.md). 403 на `/cron/morning` в бут-логе —
+рассинхрон секрета между URL cron-job.org и env Render (диагноз пробой на
+реальном 0.21: совпадение даёт 200, пустой env даёт 403, отсутствие в
+allowlist даёт громкий 500; деталей — docs/render-dashboard.md, §№423).
+
 ## Технологический стек
 
 | Компонент | Технология |
