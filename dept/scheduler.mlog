@@ -15,7 +15,7 @@ pattern MorningBrief() -> String {
   // --- P3-1: mlog collects SQL data, Python adds weather + credentials + LLM ---
   // Dialog count (24h)
   let dialog_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", [])
-  let dialog_24h = to_string(json_get(dialog_rows[0], "cnt", "0"))
+  let dialog_24h = redact(to_string(json_get(dialog_rows[0], "cnt", "0")), "all")
 
   // Active departments (24h)
   let dept_rows = query("SELECT DISTINCT dept FROM dialog_history WHERE created_at > datetime('now', '-24 hours')", [])
@@ -23,7 +23,7 @@ pattern MorningBrief() -> String {
   let mut adi = 0
   each row in dept_rows {
     if adi > 0 then { let active_depts = active_depts + "," }
-    let d = to_string(json_get(row, "dept", ""))
+    let d = redact(to_string(json_get(row, "dept", "")), "all")
     let active_depts = active_depts + "\"" + d + "\""
     let adi = adi + 1
   }
@@ -31,25 +31,25 @@ pattern MorningBrief() -> String {
 
   // Pending narads
   let narad_rows = query("SELECT COUNT(*) as cnt FROM narads WHERE status = 'pending'", [])
-  let narads_pending = to_string(json_get(narad_rows[0], "cnt", "0"))
+  let narads_pending = redact(to_string(json_get(narad_rows[0], "cnt", "0")), "all")
 
   // Recent corrections (24h)
   let corr_rows = query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", [])
-  let corrections_24h = to_string(json_get(corr_rows[0], "cnt", "0"))
+  let corrections_24h = redact(to_string(json_get(corr_rows[0], "cnt", "0")), "all")
 
   // FO-036 (наряд #134): задачи FORGE от агентов — только proposed (A.5)
   let forge_rows = query("SELECT COUNT(*) as cnt FROM forge_tasks WHERE status = 'proposed'", [])
-  let forge_proposed = to_string(json_get(forge_rows[0], "cnt", "0"))
+  let forge_proposed = redact(to_string(json_get(forge_rows[0], "cnt", "0")), "all")
   // FO-038 C.3: висящие гейты и открытые замечания
   let fg_rows = query("SELECT COUNT(*) as cnt FROM forge_gates WHERE decision IS NULL OR decision = ''", [])
-  let forge_gates_pending = to_string(json_get(fg_rows[0], "cnt", "0"))
+  let forge_gates_pending = redact(to_string(json_get(fg_rows[0], "cnt", "0")), "all")
   let frm_rows = query("SELECT COUNT(*) as cnt FROM forge_remarks WHERE status = 'open'", [])
-  let forge_remarks_open = to_string(json_get(frm_rows[0], "cnt", "0"))
+  let forge_remarks_open = redact(to_string(json_get(frm_rows[0], "cnt", "0")), "all")
 
   // Token usage yesterday (calls + cost)
   let usage_rows = query("SELECT COUNT(*) as cnt, COALESCE(SUM(cost_usd),0) as cost FROM token_usage WHERE created_at >= date('now', '-1 day')", [])
-  let calls_yesterday = to_string(json_get(usage_rows[0], "cnt", "0"))
-  let cost_yesterday = to_string(json_get(usage_rows[0], "cost", "0"))
+  let calls_yesterday = redact(to_string(json_get(usage_rows[0], "cnt", "0")), "all")
+  let cost_yesterday = redact(to_string(json_get(usage_rows[0], "cost", "0")), "all")
 
   // Top departments by usage (24h)
   let top_dept_rows = query("SELECT dept, COUNT(*) as cnt FROM token_usage WHERE created_at > datetime('now', '-24 hours') GROUP BY dept ORDER BY cnt DESC LIMIT 5", [])
@@ -57,8 +57,8 @@ pattern MorningBrief() -> String {
   let mut tdi = 0
   each row in top_dept_rows {
     if tdi > 0 then { let top_depts = top_depts + "," }
-    let td = to_string(json_get(row, "dept", ""))
-    let tc = to_string(json_get(row, "cnt", "0"))
+    let td = redact(to_string(json_get(row, "dept", "")), "all")
+    let tc = redact(to_string(json_get(row, "cnt", "0")), "all")
     let top_depts = top_depts + "{\"dept\":\"" + td + "\",\"calls\":" + tc + "}"
     let tdi = tdi + 1
   }
@@ -112,10 +112,10 @@ pattern EveningSummary() -> String {
   let prompt = prompt + "Что перенести на завтра, на чём акцентировать."
 
   // --- Read Yana profile ---
-  let yana_profile = read_file("library/yana.md")
+  let yana_profile = redact(read_file("library/yana.md"), "all")
 
   // --- Native LLM call ---
-  let llm_result = try call_llm(yana_profile, prompt)
+  let llm_result = redact(try call_llm(yana_profile, prompt), "all")
 
   if to_string(llm_result) != "()" then {
     let reply = to_string(llm_result)
@@ -157,7 +157,7 @@ pattern WeeklyDigest() -> String {
   each r in narad_rows { let narads_week = to_string(json_get(r, "cnt", "0")) }
 
   // --- Read Yana profile ---
-  let yana_profile = read_file("library/yana.md")
+  let yana_profile = redact(read_file("library/yana.md"), "all")
 
   // --- Build prompt ---
   let prompt = "Ты — Яна. Недельный дайджест:\n"
@@ -169,7 +169,7 @@ pattern WeeklyDigest() -> String {
   let prompt = prompt + "Выдели тренды, проблемы, рекомендации."
 
   // --- Native LLM call ---
-  let llm_result = try call_llm(yana_profile, prompt)
+  let llm_result = redact(try call_llm(yana_profile, prompt), "all")
 
   if to_string(llm_result) != "()" then {
     let reply = to_string(llm_result)
@@ -197,21 +197,21 @@ pattern MonthlyReview() -> String {
   each dept in depts {
     // Task count (30 days)
     let task_rows = query("SELECT COUNT(*) as cnt FROM channel_archive WHERE dept = ? AND archived_at > datetime('now', '-30 days')", [dept])
-    let task_count = to_string(try json_get(task_rows[0], "cnt", "0"))
+    let task_count = redact(to_string(try json_get(task_rows[0], "cnt", "0")), "all")
 
     // Average satisfaction (30 days)
     let sat_rows = query("SELECT ROUND(AVG(metric_value), 1) as avg_score FROM dept_metrics WHERE dept = ? AND metric_name = 'satisfaction' AND created_at > datetime('now', '-30 days')", [dept])
-    let avg_sat = to_string(try json_get(sat_rows[0], "avg_score", "0"))
+    let avg_sat = redact(to_string(try json_get(sat_rows[0], "avg_score", "0")), "all")
 
     // Corrections (30 days)
     let corr_rows = query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE dept = ? AND created_at > datetime('now', '-30 days')", [dept])
-    let corr_count = to_string(try json_get(corr_rows[0], "cnt", "0"))
+    let corr_count = redact(to_string(try json_get(corr_rows[0], "cnt", "0")), "all")
 
     let metrics_summary = metrics_summary + dept + ": " + task_count + " задач, оценка " + avg_sat + ", " + corr_count + " коррекций\n"
   }
 
   // --- Read Yana profile ---
-  let yana_profile = read_file("library/yana.md")
+  let yana_profile = redact(read_file("library/yana.md"), "all")
 
   // --- Build prompt ---
   let prompt = "Ты — Яна. Ежемесячный review офиса:\n\n" + metrics_summary + "\n"
@@ -223,7 +223,7 @@ pattern MonthlyReview() -> String {
   let prompt = prompt + "5. Предложить рекалибровку для отделов с оценкой < 3"
 
   // --- Native LLM call ---
-  let llm_result = try call_llm(yana_profile, prompt)
+  let llm_result = redact(try call_llm(yana_profile, prompt), "all")
 
   if to_string(llm_result) != "()" then {
     let reply = to_string(llm_result)
@@ -251,8 +251,8 @@ pattern ControlCheck() -> String {
   let mut checks_done = 0.0
 
   each row in controls {
-    let ctrl_key = to_string(try json_get(row, "key", ""))
-    let ctrl_val = to_string(try json_get(row, "value", ""))
+    let ctrl_key = redact(to_string(try json_get(row, "key", "")), "all")
+    let ctrl_val = redact(to_string(try json_get(row, "value", "")), "all")
 
     // Value format: "daily|Topic" / "weekly|Topic" / "monthly|Topic"
     let _pipe = "|"
@@ -271,7 +271,7 @@ pattern ControlCheck() -> String {
       let pred_rows = query("SELECT raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
       let mut original_prediction = ""
       if length(to_string(pred_rows)) > 2.0 then {
-        let original_prediction = to_string(try json_get(pred_rows[0], "raw_text", ""))
+        let original_prediction = redact(to_string(try json_get(pred_rows[0], "raw_text", "")), "all")
       }
 
       // Append to checks data
@@ -287,11 +287,11 @@ pattern ControlCheck() -> String {
   }
 
   // --- Read OSP profile for context ---
-  let osp_profile = read_file("library/osp.md")
+  let osp_profile = redact(read_file("library/osp.md"), "all")
 
   // --- Native LLM call to verify predictions ---
   let verify_prompt = osp_profile + "\n\nТы — ОСП. Проверь следующие прогнозы на актуальность. Для каждого: совпал ли прогноз с реальностью? Если нет — почему? Укажи новые индикаторы для наблюдения.\n\nФормат: [ПРОГНОЗ ПОДТВЕРЖДЁН] / [ПРОГНОЗ НЕ ПОДТВЕРЖДЁН] / [ТРЕБУЕТ ПРОВЕРКИ]"
-  let llm_result = try call_llm(verify_prompt, checks_data)
+  let llm_result = redact(try call_llm(verify_prompt, checks_data), "all")
 
   if to_string(llm_result) != "()" then {
     let reply = to_string(llm_result)
@@ -309,7 +309,7 @@ pattern ControlCheck() -> String {
 // ---------------------------------------------------------------------------
 pattern YanaSelfLearn() -> String {
   // --- Read Yana profile ---
-  let yana_profile = read_file("library/yana.md")
+  let yana_profile = redact(read_file("library/yana.md"), "all")
 
   // --- Collect recent corrections as learning material ---
   let corr_rows = query("SELECT dept, original_query, correction FROM adapt_corrections WHERE created_at > datetime('now', '-7 days') ORDER BY created_at DESC LIMIT 20", [])
@@ -317,7 +317,7 @@ pattern YanaSelfLearn() -> String {
 
   // --- Native LLM call for self-improvement ---
   let prompt = yana_profile + "\n\nТы — Яна. Проанализируй свои недавние коррекции. Выдели паттерны ошибок, предложи конкретные улучшения для каждого отдела. Язык: русский."
-  let llm_result = try call_llm(prompt, "Мои коррекции за 7 дней:\n" + corrections_data)
+  let llm_result = redact(try call_llm(prompt, "Мои коррекции за 7 дней:\n" + corrections_data), "all")
 
   if to_string(llm_result) != "()" then {
     let insights = to_string(llm_result)
@@ -352,7 +352,7 @@ pattern ReminderCheck() -> String {
   let payload = json_encode("")
   let result = try http_post("http://127.0.0.1:4000/scheduler/reminder-check", payload, "application/json")
   if to_string(result) == "()" then { return "ok" }
-  let sent = json_get(parse_json(result), "sent", "0")
+  let sent = redact(to_string(json_get(parse_json(result), "sent", "0")), "all")
   if sent != "0" then {
     let _ = AuditLog("reminder_check", "scheduler", sent + " reminders sent")
   }
@@ -435,14 +435,14 @@ pattern DbBackupSlot() -> String {
   let ts_rows = query("SELECT strftime('%Y%m%dT%H%M%SZ', 'now') AS t", [])
   let ts = "unknown"
   each r in ts_rows {
-    let ts = to_string(json_get(r, "t", "unknown"))
+    let ts = redact(to_string(json_get(r, "t", "unknown")), "all")
   }
   let path = "/var/data/backups/fosved.db." + ts
   let _ = db_execute("VACUUM INTO ?", [path])
   let check_rows = query("PRAGMA integrity_check", [])
   let integrity = "no-result"
   each cr in check_rows {
-    let integrity = to_string(json_get(cr, "integrity_check", "no-result"))
+    let integrity = redact(to_string(json_get(cr, "integrity_check", "no-result")), "all")
   }
   let _ = AuditLog("cron_backup", "system", path + " integrity=" + integrity)
   return "backup ok: " + path
@@ -459,15 +459,15 @@ pattern NightTickSlot() -> String {
   let qs = "?secret=" + env("CRON_SECRET")
 
   let mut report = "night-tick:"
-  let r_backup = try http_get(base + "backup" + qs, 300.0)
+  let r_backup = redact(try http_get(base + "backup" + qs, 300.0), "all")
   if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else { report = report + " backup=ok" }
-  let r_ind = try http_get(base + "indicator-reminders" + qs, 300.0)
+  let r_ind = redact(try http_get(base + "indicator-reminders" + qs, 300.0), "all")
   if to_string(r_ind) == "()" then { report = report + " indicators=FAIL" } else { report = report + " indicators=ok" }
-  let r_shop = try http_get(base + "shop-tick" + qs, 300.0)
+  let r_shop = redact(try http_get(base + "shop-tick" + qs, 300.0), "all")
   if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
-  let r_evals = try http_get(base + "golden-evals" + qs, 300.0)
+  let r_evals = redact(try http_get(base + "golden-evals" + qs, 300.0), "all")
   if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
-  let r_night = try http_get(base + "night" + qs, 600.0)
+  let r_night = redact(try http_get(base + "night" + qs, 600.0), "all")
   if to_string(r_night) == "()" then { report = report + " night=запущен(фоном)" } else { report = report + " night=ok" }
   let _ = AuditLog("cron_night_tick", "system", report)
   let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)

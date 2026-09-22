@@ -29,7 +29,7 @@ pattern ExecuteChain(dept_chain: String, query: String, chat_id: String) -> Stri
   // и имеющая незавершённые степы, продолжается вместо нового запуска
   let resume_rows = query("SELECT chain_id FROM chain_steps WHERE dept_chain = ? AND mode = 'sequential' AND status IN ('pending','failed') AND created_at > datetime('now', '-1 hour') ORDER BY id DESC LIMIT 1", [dept_chain])
   if to_string(resume_rows) != "()" and length(resume_rows) > 0.0 then {
-    let old_chain_id = to_string(json_get(resume_rows[0], "chain_id", ""))
+    let old_chain_id = redact(to_string(json_get(resume_rows[0], "chain_id", "")), "all")
     let _ = AuditLog("chain_auto_resume", "system", old_chain_id)
     let _ = SendTelegramReply(chat_id, "Обнаружена незавершённая цепочка <1 ч — авто-resume " + old_chain_id)
     return ResumeChainSteps(old_chain_id, dept_chain, query, chat_id)
@@ -126,14 +126,14 @@ pattern ResumeChainSteps(chain_id: String, dept_chain: String, query: String, ch
   let mut reused = 0.0
   let mut reran = 0.0
   each row in rows {
-    let dept = trim(to_string(json_get(row, "dept", "")))
+    let dept = redact(trim(to_string(json_get(row, "dept", ""))), "all")
     let step_num = to_float(json_get(row, "step_num", "0"))
-    let st = to_string(json_get(row, "status", ""))
-    let stored_hash = to_string(json_get(row, "input_hash", ""))
+    let st = redact(to_string(json_get(row, "status", "")), "all")
+    let stored_hash = redact(to_string(json_get(row, "input_hash", "")), "all")
     let h = to_string(sha256(chain_id + to_string(step_num) + dept + query))
     if st == "ok" and stored_hash == h then {
       let reused = reused + 1.0
-      let results = results + "\n\n=== " + dept + " === (из кэша, без LLM)\n" + to_string(json_get(row, "reply", ""))
+      let results = redact(results + "\n\n=== " + dept + " === (из кэша, без LLM)\n" + to_string(json_get(row, "reply", "")), "all")
     } else {
       if st == "ok" then {
         // hash разошёлся — степа инвалидна (детерминизм против молчаливой неактуальности)

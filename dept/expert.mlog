@@ -63,7 +63,7 @@ pattern ExpertGateMaxBriefingAge(briefingId: String) -> String {
   let _ = InitDB()
   let rows = query("SELECT created_at FROM expert_briefings WHERE id = ?", [briefingId])
   if length(rows) == 0.0 then { return "PASS" }
-  let created = to_string(json_get(json_get(rows, 0.0), "created_at", ""))
+  let created = redact(to_string(json_get(json_get(rows, 0.0), "created_at", "")), "all")
   if created == "" then { return "PASS" }
   // Compare: if briefing > 30 days, flag stale
   let age_check = query("SELECT CAST(julianday('now') - julianday(?) AS INTEGER) as age_days", [created])
@@ -83,7 +83,7 @@ pattern ExpertGateVehicleDataFreshness(brand: String, model: String) -> String {
     let _ = AuditLog("hard_gate_warning", "expert", "Gate 5: no KB entry for " + brand + " " + model)
     return "ВНИМАНИЕ: Данные для " + brand + " " + model + " отсутствуют в KB. Требуется ручная верификация."
   }
-  let updated = to_string(json_get(json_get(rows, 0.0), "updated_at", ""))
+  let updated = redact(to_string(json_get(json_get(rows, 0.0), "updated_at", "")), "all")
   let age_check = query("SELECT CAST(julianday('now') - julianday(?) AS INTEGER) as age_days", [updated])
   let age_days = to_float(to_string(json_get(json_get(age_check, 0.0), "age_days", "0")))
   if age_days > 90.0 then {
@@ -189,7 +189,7 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
   // ── Default: full Expert pipeline (LLM with domain-enriched context) ──
   let context = BuildExpertContext(query, chat_id)
   let disclaimer = ExpertDisclaimer()
-  let llm_result = try call_llm(context, query)
+  let llm_result = redact(try call_llm(context, query), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
@@ -204,13 +204,13 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
     }
     // Conditional regeneration: if score < 0.55, generate 2nd candidate and select best-of-2
     if ev_score < 0.55 then {
-      let llm_result2 = try call_llm(context, query)
+      let llm_result2 = redact(try call_llm(context, query), "all")
       if to_string(llm_result2) != "()" then {
         let reply2 = to_string(llm_result2)
         let sel_resp = try call_python("llm_verifier", "select", json_encode([query, json_encode([reply, reply2]), "Accuracy: Factual correctness? Completeness: All aspects covered? Actionability: Usable for meeting prep?"]))
         if to_string(sel_resp) != "()" and contains(to_string(sel_resp), "error") == false then {
           let sel_parsed = try parse_json(sel_resp)
-          let best_idx = to_int(try json_get(sel_parsed, "result", "0"))
+          let best_idx = redact(to_int(try json_get(sel_parsed, "result", "0")), "all")
           if best_idx == 1 then { let reply = reply2 }
           let _ = AuditLog("expert_bestof2", dept, "original_score=" + to_string(ev_score) + " selected=" + to_string(best_idx) + " query=" + substring(query, 0.0, 60.0))
         }
@@ -246,7 +246,7 @@ pattern ExpertSourcesFooter(context: String) -> String {
 pattern ExpertTavilySearch(query: String, chat_id: String) -> String {
   let result = try http_post("http://127.0.0.1:4000/lz/tavily", json_encode({query: query, dept: "expert"}), "application/json")
   if to_string(result) == "()" then { return "" }
-  let reply = json_get(parse_json(result), "response", "")
+  let reply = redact(to_string(json_get(parse_json(result), "response", "")), "all")
   return to_string(reply)
 }
 
@@ -259,7 +259,7 @@ pattern ExpertTavilySearch(query: String, chat_id: String) -> String {
 pattern ExpertPlanSubQueries(query: String, initial_results: String) -> String {
   if initial_results == "" then { return "" }
   let plan_prompt = "Ты помогаешь спланировать короткий фактический поиск перед деловой встречей. По теме и по результату первого широкого поиска — сформулируй 2-4 узких, конкретных под-вопроса, которые стоит проверить отдельно (например: конкретные цифры, имена конкурентов, недавние события). Один под-вопрос на строку, без нумерации и пояснений — только сами вопросы, ничего больше."
-  let plan_result = try call_llm(plan_prompt, "Тема: " + query + "\n\nПервый широкий поиск дал:\n" + substring(initial_results, 0.0, 2000.0))
+  let plan_result = redact(try call_llm(plan_prompt, "Тема: " + query + "\n\nПервый широкий поиск дал:\n" + substring(initial_results, 0.0, 2000.0)), "all")
   if to_string(plan_result) == "()" then { return "" }
   return to_string(plan_result)
 }
@@ -323,8 +323,8 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
   if to_string(la_rows) != "()" and length(la_rows) > 0.0 then {
     let mut lz_lines = ""
     each row in la_rows {
-      let title = to_string(json_get(row, "title", ""))
-      let status = to_string(json_get(row, "status", ""))
+      let title = redact(to_string(json_get(row, "title", "")), "all")
+      let status = redact(to_string(json_get(row, "status", "")), "all")
       let lz_lines = lz_lines + "- " + title + " (статус: " + status + ")\n"
     }
     let cross_section = cross_section + "\n\n=== Уже отслеживается Лабораторией Знаний ===\n" + lz_lines
@@ -333,8 +333,8 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
   if to_string(osp_rows) != "()" and length(osp_rows) > 0.0 then {
     let mut osp_lines = ""
     each row in osp_rows {
-      let topic = to_string(json_get(row, "topic", ""))
-      let status = to_string(json_get(row, "status", ""))
+      let topic = redact(to_string(json_get(row, "topic", "")), "all")
+      let status = redact(to_string(json_get(row, "status", "")), "all")
       let osp_lines = osp_lines + "- " + topic + " (статус: " + status + ")\n"
     }
     let cross_section = cross_section + "\n\n=== Уже анализировалось ОСП ===\n" + osp_lines
@@ -367,40 +367,40 @@ pattern LoadExpertSkills(query: String) -> String {
   let budget = 25000.0
 
   // ── Tier 1: Methodological core (always loaded) ──
-  let s = read_file("skills/rapid-domain-immersion/SKILL.md")
+  let s = redact(read_file("skills/rapid-domain-immersion/SKILL.md"), "all")
   if s != "" and length(result) < budget then { let result = result + "\n--- rapid-domain-immersion ---\n" + s }
-  let s = read_file("skills/project-deconstruction/SKILL.md")
+  let s = redact(read_file("skills/project-deconstruction/SKILL.md"), "all")
   if s != "" and length(result) < budget then { let result = result + "\n--- project-deconstruction ---\n" + s }
-  let s = read_file("skills/failure-modes-mapping/SKILL.md")
+  let s = redact(read_file("skills/failure-modes-mapping/SKILL.md"), "all")
   if s != "" and length(result) < budget then { let result = result + "\n--- failure-modes-mapping ---\n" + s }
-  let s = read_file("skills/combat-questions-design/SKILL.md")
+  let s = redact(read_file("skills/combat-questions-design/SKILL.md"), "all")
   if s != "" and length(result) < budget then { let result = result + "\n--- combat-questions-design ---\n" + s }
-  let s = read_file("skills/bullshit-detection/SKILL.md")
+  let s = redact(read_file("skills/bullshit-detection/SKILL.md"), "all")
   if s != "" and length(result) < budget then { let result = result + "\n--- bullshit-detection ---\n" + s }
 
   // ── Tier 2: Domain depth (by topic triggers) ──
   // Trigger: economic/финанс/стоимость/BOM/capex
   let need_economics = contains(t, "эконом") or contains(t, "стоимост") or contains(t, "capex") or contains(t, "bom") or contains(t, "финанс") or contains(t, "unit economics")
   if need_economics then {
-    let s = read_file("skills/technical-economics-validation/SKILL.md")
+    let s = redact(read_file("skills/technical-economics-validation/SKILL.md"), "all")
     if s != "" and length(result) < budget then { let result = result + "\n--- technical-economics-validation ---\n" + s }
   }
   // Trigger: peer review/научн/статья/реценз
   let need_peer = contains(t, "peer review") or contains(t, "научн") or contains(t, "стать") or contains(t, "реценз") or contains(t, "publication")
   if need_peer then {
-    let s = read_file("skills/peer-review-simulation/SKILL.md")
+    let s = redact(read_file("skills/peer-review-simulation/SKILL.md"), "all")
     if s != "" and length(result) < budget then { let result = result + "\n--- peer-review-simulation ---\n" + s }
   }
   // Trigger: adjacent/смежн/кросс-чек
   let need_adjacent = contains(t, "adjacent") or contains(t, "смежн") or contains(t, "кросс") or contains(t, "cross-check")
   if need_adjacent then {
-    let s = read_file("skills/adjacent-field-cross-check/SKILL.md")
+    let s = redact(read_file("skills/adjacent-field-cross-check/SKILL.md"), "all")
     if s != "" and length(result) < budget then { let result = result + "\n--- adjacent-field-cross-check ---\n" + s }
   }
   // Trigger: compare/конкурент/сравнен
   let need_compare = contains(t, "compar") or contains(t, "конкурент") or contains(t, "сравнен") or contains(t, "versus") or contains(t, " vs ")
   if need_compare then {
-    let s = read_file("skills/competing-claims-comparison/SKILL.md")
+    let s = redact(read_file("skills/competing-claims-comparison/SKILL.md"), "all")
     if s != "" and length(result) < budget then { let result = result + "\n--- competing-claims-comparison ---\n" + s }
   }
   // Trigger: automotive/автопром/авто/машина
@@ -414,17 +414,17 @@ pattern LoadExpertSkills(query: String) -> String {
   // Trigger: people/люди/attendee/участник + meeting/встреча
   let need_intel = contains(t, "pre-meeting") or contains(t, "интел") or (contains(t, "люди") and contains(t, "встреч"))
   if need_intel then {
-    let s = read_file("skills/pre-meeting-intel/SKILL.md")
+    let s = redact(read_file("skills/pre-meeting-intel/SKILL.md"), "all")
     if s != "" and length(result) < budget then { let result = result + "\n--- pre-meeting-intel ---\n" + s }
   }
   // Trigger: tactical/тактик/переговор
   let need_tactical = contains(t, "тактик") or contains(t, "переговор") or contains(t, "tactical")
   if need_tactical then {
-    let s = read_file("skills/tactical-meeting-protocol/SKILL.md")
+    let s = redact(read_file("skills/tactical-meeting-protocol/SKILL.md"), "all")
     if s != "" and length(result) < budget then { let result = result + "\n--- tactical-meeting-protocol ---\n" + s }
   }
   // iterative-research-loop — always available as engine
-  let s = read_file("skills/iterative-research-loop/SKILL.md")
+  let s = redact(read_file("skills/iterative-research-loop/SKILL.md"), "all")
   if s != "" and length(result) < budget then { let result = result + "\n--- iterative-research-loop (engine) ---\n" + substring(s, 0.0, 2000.0) }
 
   if result == "" then { return "Expert skills: rapid-domain-immersion, project-deconstruction, failure-modes-mapping, combat-questions-design, bullshit-detection, technical-economics-validation, peer-review-simulation, adjacent-field-cross-check, competing-claims-comparison, pre-meeting-intel, tactical-meeting-protocol, iterative-research-loop, automotive-domain" }
@@ -486,7 +486,7 @@ pattern ExpertAutomotiveLookup(query: String, chat_id: String) -> String {
   let auto_kb = ExpertAutomotiveKB()
   let system_prompt = "Ты — Эксперт-автомобилист отдела Fosved. Специализация: российский авторынок, сравнительный анализ автомобилей, расчёт остаточной стоимости и стоимости владения. Отвечай конкретно, с цифрами. Используй данные из базы знаний.\n\n" + auto_kb
   let disclaimer = ExpertDisclaimer()
-  let llm_result = try call_llm(system_prompt, query)
+  let llm_result = redact(try call_llm(system_prompt, query), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
@@ -507,7 +507,7 @@ pattern ExpertCompareVehicles(query: String, chat_id: String) -> String {
   let compare_prompt = compare_prompt + "4. КРАСНЫЕ ФЛАГИ: что может увеличить реальные затраты сверх расчётных\n\n"
   let compare_prompt = compare_prompt + "Используй данные из базы знаний. Все цифры — для российского рынка 2024-2026.\n\n" + auto_kb
   let disclaimer = ExpertDisclaimer()
-  let llm_result = try call_llm(compare_prompt, "Сравни: " + query)
+  let llm_result = redact(try call_llm(compare_prompt, "Сравни: " + query), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
@@ -698,8 +698,8 @@ pattern ExpertGenerateChart(chart_type: String, query: String, chat_id: String) 
   }
 
   let parsed = parse_json(result)
-  let chart_url = json_get(parsed, "url", "")
-  let chart_summary = json_get(parsed, "summary", "")
+  let chart_url = redact(to_string(json_get(parsed, "url", "")), "all")
+  let chart_summary = redact(to_string(json_get(parsed, "summary", "")), "all")
 
   let _ = AuditLog("expert_chart", "expert", "type=" + chart_type + " vehicle=" + substring(query, 0.0, 50.0))
 
@@ -715,7 +715,7 @@ pattern ExpertGenerateChart(chart_type: String, query: String, chat_id: String) 
 pattern ExpertCreateBriefing(topic: String, depth: String, chat_id: String) -> String {
   // Generate unique ID
   let ts = query("SELECT strftime('%s','now')", [])
-  let brief_id = "brf-" + to_string(json_get(parse_json(json_encode(ts)), "0", "0"))
+  let brief_id = redact("brf-" + to_string(json_get(parse_json(json_encode(ts)), "0", "0")), "all")
 
   // Insert into DB
   let _ = db_execute("INSERT INTO expert_briefings (id, topic, depth_level, status, chat_id, created_at) VALUES (?, ?, ?, 'requested', ?, datetime('now'))", [brief_id, topic, depth, chat_id])
@@ -731,18 +731,18 @@ pattern ExpertCreateBriefing(topic: String, depth: String, chat_id: String) -> S
 
   let disclaimer = ExpertDisclaimer()
   // ── Deep briefing: best-of-2 with LLM-Verifier select ──
-  let llm_result = try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic)
+  let llm_result = redact(try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Ошибка генерации брифинга." }
   let reply = to_string(llm_result)
   if depth == "3" then {
-    let llm_result2 = try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic)
+    let llm_result2 = redact(try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic), "all")
     if to_string(llm_result2) != "()" then {
       let reply2 = to_string(llm_result2)
       let sel_resp = try call_python("llm_verifier", "select", json_encode(["Подготовь брифинг на тему: " + topic, json_encode([reply, reply2]), "Completeness: All 4 phases covered (immersion, deconstruction, failure modes, combat questions)? Depth: Sufficient technical detail? Actionability: Usable combat questions with expected answers?"]))
       if to_string(sel_resp) != "()" and contains(to_string(sel_resp), "error") == false then {
         let sel_parsed = try parse_json(sel_resp)
-        let best_idx = to_int(try json_get(sel_parsed, "result", "0"))
+        let best_idx = redact(to_int(try json_get(sel_parsed, "result", "0")), "all")
         if best_idx == 1 then { let reply = reply2 }
         let _ = AuditLog("expert_briefing_bestof2", "expert", "id=" + brief_id + " selected=" + to_string(best_idx))
       }

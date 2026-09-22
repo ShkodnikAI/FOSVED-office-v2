@@ -12,6 +12,13 @@
 // инфраструктура нативных расписаний уже здесь (dept/schedules.mlog + роуты
 // /schedules/*), на 0.19 они безопасно неактивны.
 
+// ── Миграционный наряд №421 (продолжение №419): мост ADR-0161 ────────────────
+// Декларация profile legacy — часть полного Category-A контура (этот наряд):
+// egress-clearance переводится в Info-события (burn-down метрика), остальные
+// гейты (№327 anti-injection, гранты, SECRET_LEAK) остаются на полной силе.
+// Ценз миграции: mlog-021 audit app.mlog → 0 errors (см. отчёт наряда).
+profile legacy { egress: permissive_with_audit }
+
 db { url: env("DATABASE_URL") }
 
 // Наряд №419: персистность KV-стора (в нём живёт стор нативного cron —
@@ -93,17 +100,17 @@ pattern InitDB() -> String {
   // dept/priority/plan/acceptance/test_status/test_log/report/dispatch_id/
   // rework_count/in_work_at/testing_at. ALTER идемпотентен (try): колонки
   // добираются к живой БД при старте. Логика — в dept/narad.mlog.
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN dept TEXT")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN plan TEXT")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN acceptance TEXT")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN test_log TEXT")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN report TEXT")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN in_work_at TEXT")
-  let _ = try db_execute("ALTER TABLE narads ADD COLUMN testing_at TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN dept TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN plan TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN acceptance TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN test_log TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN report TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN in_work_at TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN testing_at TEXT")
   // FO-049 (#161): метрики нарядной дисциплины — строка на каждый закрытый наряд
   db_execute("CREATE TABLE IF NOT EXISTS narad_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, narad_id TEXT, dept TEXT, first_try INTEGER DEFAULT 0, rework_count INTEGER DEFAULT 0, lead_seconds INTEGER, accepted_by TEXT, created_at TEXT DEFAULT (datetime('now')))")
   let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_narad_stats_created ON narad_stats(created_at)")
@@ -119,7 +126,7 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS shop_price_history (id INTEGER PRIMARY KEY AUTOINCREMENT, offer_id INTEGER NOT NULL, price_byn REAL NOT NULL, old_price_byn REAL, in_stock INTEGER, ts TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE INDEX IF NOT EXISTS idx_shop_ph_offer_ts ON shop_price_history(offer_id, ts)")
   db_execute("CREATE TABLE IF NOT EXISTS shop_watches (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, target_price_byn REAL, discount_pct REAL, alert_in_stock INTEGER DEFAULT 0, status TEXT DEFAULT 'active', last_checked_at TEXT, last_alert_json TEXT, created_at TEXT DEFAULT (datetime('now')))")
-  let _ = try db_execute("ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:shop_watches", 3600.0, "once"), "ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT")
   db_execute("CREATE TABLE IF NOT EXISTS shop_dossiers (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, format TEXT NOT NULL, payload TEXT, snapshot_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))")
 
   // Admin
@@ -141,17 +148,17 @@ pattern InitDB() -> String {
   // MON-1 (#171): посты Telegram-каналов от монитор-процесса (telegram_monitor.py)
   // НЕ переиспользуем lz_github_updates — там GitHub-релизы (lz_github.py, channel_id="github")
   db_execute("CREATE TABLE IF NOT EXISTS lz_channel_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL, message_id TEXT NOT NULL, channel_name TEXT, text TEXT, media_type TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')), UNIQUE(channel_id, message_id))")
-  let _ = try db_execute("ALTER TABLE lz_channel_posts ADD COLUMN stats_json TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:lz_channel_posts", 3600.0, "once"), "ALTER TABLE lz_channel_posts ADD COLUMN stats_json TEXT")
   // #252: миграция lz_telegram_posts → lz_github_updates. Таблица хранила GitHub-релизы
   // из lz_github.py (channel_id="github") — имя врало. Блок идемпотентен: пока старая
   // таблица существует в sqlite_master — разовый ALTER-апгрейд + копия данных
   // (INSERT OR IGNORE гасит дубли по UNIQUE update_id) + DROP; после первого прогона
   // — no-op. Ретро-читателей у старого имени нет (grep по дереву, #252) — VIEW не нужна.
-  let _ = try db_execute("ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:lz_telegram_posts", 3600.0, "once"), "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
   let lz_old_posts = query("SELECT name FROM sqlite_master WHERE type='table' AND name='lz_telegram_posts'", [])
   if to_string(lz_old_posts) != "()" then {
     let _ = try db_execute("INSERT OR IGNORE INTO lz_github_updates (update_id, channel_id, channel_name, text, date, scanned_at) SELECT update_id, channel_id, channel_name, text, date, scanned_at FROM lz_telegram_posts")
-    let _ = try db_execute("DROP TABLE lz_telegram_posts")
+    let _ = try db_execute_with_grant(grant_issue("db:drop:lz_telegram_posts", 3600.0, "once"), "DROP TABLE lz_telegram_posts")
   }
   db_execute("CREATE TABLE IF NOT EXISTS lz_monitors (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, sources TEXT, frequency TEXT, last_scan TEXT, created_at TEXT DEFAULT (datetime('now')))")
 
@@ -165,15 +172,15 @@ pattern InitDB() -> String {
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
   // Yana events - alter table extensions
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT")
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT")
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT")
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN until_date TEXT")
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
-  let _ = try db_execute("ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN until_date TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
 
   // Yana metrics — delegation accuracy & forgetting incidents
   db_execute("CREATE TABLE IF NOT EXISTS yana_delegation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, query TEXT, delegated_to TEXT, dept_response_summary TEXT, was_correct INTEGER, feedback_source TEXT, delegated_at TEXT DEFAULT (datetime('now')), verified_at TEXT)")
@@ -214,9 +221,9 @@ pattern InitDB() -> String {
   // dept_archive.forecast_value: numeric forecast at creation time (Finance only)
   // dept_verification.actual_value: numeric actual post-factum (Finance only)
   // dept_verification.outcome_flag: categorical flag (Legal: "clean" / "rewrite_required")
-  let _ = try db_execute("ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
-  let _ = try db_execute("ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
-  let _ = try db_execute("ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:dept_archive", 3600.0, "once"), "ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:dept_verification", 3600.0, "once"), "ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
+  let _ = try db_execute_with_grant(grant_issue("db:alter:dept_verification", 3600.0, "once"), "ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
 
   // Webhook dedup — time-windowed (WH-3): replaces eternal kv-flag
   db_execute("CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT DEFAULT (datetime('now')))")
@@ -399,7 +406,7 @@ pattern SaveDialogV2(session_id: String, role: String, dept: String, content: St
 }
 
 pattern SendTelegramReply(chat_id: String, text: String) -> String {
-  let token = env("TELEGRAM_BOT_TOKEN")
+  let token = TgToken()
   let body = json_encode({chat_id: to_float(chat_id), text: text})
   let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
   return result
@@ -410,7 +417,7 @@ pattern SendTelegramReply(chat_id: String, text: String) -> String {
 // If Telegram rejects the formatting (ok != true), resends original text without parse_mode.
 // Used for yana/admin departments where bold/italic formatting matters.
 pattern SendTelegramReplyMDV2(chat_id: String, text: String) -> String {
-  let token = env("TELEGRAM_BOT_TOKEN")
+  let token = TgToken()
   let escaped = EscapeMarkdownV2Simple(text)
   let body = json_encode({chat_id: to_float(chat_id), text: escaped, parse_mode: "MarkdownV2"})
   let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
@@ -421,7 +428,7 @@ pattern SendTelegramReplyMDV2(chat_id: String, text: String) -> String {
     return result2
   }
   let parsed = parse_json(result)
-  let ok = json_get(parsed, "ok", "")
+  let ok = redact(to_string(json_get(parsed, "ok", "")), "all")
   if ok != "true" then {
     // Telegram rejected MarkdownV2 formatting — fallback to plain text
     let body2 = json_encode({chat_id: to_float(chat_id), text: text})
@@ -432,7 +439,7 @@ pattern SendTelegramReplyMDV2(chat_id: String, text: String) -> String {
 }
 
 pattern SendTyping(chat_id: String) -> String {
-  let token = env("TELEGRAM_BOT_TOKEN")
+  let token = TgToken()
   let body = json_encode({chat_id: to_float(chat_id), action: "typing"})
   let result = try http_post("https://api.telegram.org/bot" + token + "/sendChatAction", body, "application/json")
   return result
@@ -460,8 +467,8 @@ pattern ReviewQueueCard(chat_id: String) -> String {
     let _ = SendTelegramReply(chat_id, "Review-очередь: ошибка разбора ответа.")
     return ""
   }
-  let depth = to_string(json_get(parsed, "depth", "0"))
-  let items = json_get(parsed, "items", "[]")
+  let depth = redact(to_string(json_get(parsed, "depth", "0")), "all")
+  let items = redact(to_string(json_get(parsed, "items", "[]")), "all")
   let count = to_float(json_get(parsed, "count", "0"))
   if count == 0.0 then {
     let _ = SendTelegramReply(chat_id, "🔍 Review-очередь пуста — всё выведенное подтверждено (глубина: " + depth + ").")
@@ -470,15 +477,15 @@ pattern ReviewQueueCard(chat_id: String) -> String {
   let mut text = "🔍 Review-очередь (" + depth + " невыверенных, топ по числу источников):\n\n"
   let mut kb = ""
   each it in items {
-    let sid = to_string(json_get(it, "source", ""))
-    let iid = to_string(json_get(it, "id", ""))
-    let pc = to_string(json_get(it, "parent_count", "1"))
-    let content = to_string(json_get(it, "content", ""))
+    let sid = redact(to_string(json_get(it, "source", "")), "all")
+    let iid = redact(to_string(json_get(it, "id", "")), "all")
+    let pc = redact(to_string(json_get(it, "parent_count", "1")), "all")
+    let content = redact(to_string(json_get(it, "content", "")), "all")
     let text = text + "• [" + sid + "#" + iid + " x" + pc + "] " + substring(content, 0.0, 140.0) + "\n"
     let kb = kb + "[{text: \"ОК\", callback_data: \"rv_approve_" + sid + "_" + iid + "\"},{text: \"NO\", callback_data: \"rv_decline_" + sid + "_" + iid + "\"},{text: \"UNDO\", callback_data: \"rv_undo_" + sid + "_" + iid + "\"}],"
   }
   if length(kb) > 0.0 then { let kb = substring(kb, 0.0, length(kb) - 1.0) }
-  let token = env("TELEGRAM_BOT_TOKEN")
+  let token = TgToken()
   let text_esc = JsonEscapeText(text)
   let body2 = "{\"chat_id\": " + to_string(to_float(chat_id)) + ", \"text\": \"" + text_esc + "\", \"reply_markup\": {\"inline_keyboard\": [" + kb + "]}}"
   let _ = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body2, "application/json")
@@ -506,7 +513,7 @@ pattern GetModelFallbackChain(dept: String) -> String {
   let tier = kv_get("query_tier")
   if tier != "" then {
     let tier_file = "config/tier_" + tier + ".txt"
-    let tier_content = read_file(tier_file)
+    let tier_content = redact(read_file(tier_file), "all")
     if tier_content != "" then {
       let tier_lines = split(tier_content, "\n")
       let mut tier_models = ""
@@ -525,7 +532,7 @@ pattern GetModelFallbackChain(dept: String) -> String {
   }
   // Read dept-specific override, fallback to global priority_model
   let override_file = "config/override_" + dept + ".txt"
-  let override_content = read_file(override_file)
+  let override_content = redact(read_file(override_file), "all")
   if override_content != "" then {
     // Extract model lines (skip comments and empty)
     let ov_lines = split(override_content, "\n")
@@ -539,7 +546,7 @@ pattern GetModelFallbackChain(dept: String) -> String {
     }
     if ov_models != "" then { return ov_models }
   }
-  let global = read_file("config/priority_model.txt")
+  let global = redact(read_file("config/priority_model.txt"), "all")
   if global != "" then { return trim(global) }
   return "glm-4.6"
 }
@@ -569,10 +576,10 @@ pattern ClearModelFails(model: String) -> String {
 // FOIP-003.14: Internal Endpoint Auth
 // ============================================================
 pattern RequireInternalAuth() -> String {
-  let token = query_param("token")
+  let token = redact(query_param("token"), "all")
   let expected = env("INTERNAL_API_TOKEN")
   if expected == "" then { return "ok" }
-  if token == expected then { return "ok" }
+  if redact(token, "hash_only") == redact(expected, "hash_only") then { return "ok" }
   return "unauthorized"
 }
 
@@ -676,7 +683,7 @@ pattern CallLLMResilient(dept: String, messages: String) -> String {
                   last_error = "parse error from " + model
                   let _ = try MarkModelFail(model)
                 } else {
-                  let r = to_string(try json_get(parsed, "reply", ""))
+                  let r = redact(to_string(try json_get(parsed, "reply", "")), "all")
                   if r == "" or r == "()" then {
                     last_error = "empty reply from " + model
                     let _ = try MarkModelFail(model)
@@ -746,8 +753,8 @@ pattern AggregateDailyStats() -> String {
   let rows = query("SELECT id, model, total_tokens_in, total_tokens_out FROM daily_stats WHERE estimated_cost_usd = 0.0", [])
   let updated = "0"
   each row in rows {
-    let rid = to_string(json_get(row, "id", "0"))
-    let m = to_string(json_get(row, "model", ""))
+    let rid = redact(to_string(json_get(row, "id", "0")), "all")
+    let m = redact(to_string(json_get(row, "model", "")), "all")
     let ti = to_float(json_get(row, "total_tokens_in", "0"))
     let to_ = to_float(json_get(row, "total_tokens_out", "0"))
     let cost_in_rate = to_float(GetModelCostPer1M(m, "in"))
@@ -775,7 +782,7 @@ pattern ShowStats(chat_id: String) -> String {
   let grand_errs = 0.0
   let grand_cost = 0.0
   each row in rows {
-    let d = to_string(json_get(row, "dept", "?"))
+    let d = redact(to_string(json_get(row, "dept", "?")), "all")
     let c = to_float(json_get(row, "calls", "0"))
     let ti = to_float(json_get(row, "ti", "0"))
     let to_ = to_float(json_get(row, "to_", "0"))
@@ -809,7 +816,7 @@ pattern ShowCosts(chat_id: String) -> String {
   let total_calls = 0.0
   let total_tokens = 0.0
   each row in rows {
-    let m = to_string(json_get(row, "model", "?"))
+    let m = redact(to_string(json_get(row, "model", "?")), "all")
     let c = to_float(json_get(row, "calls", "0"))
     let ti = to_float(json_get(row, "ti", "0"))
     let to_ = to_float(json_get(row, "to_", "0"))
@@ -826,9 +833,9 @@ pattern ShowCosts(chat_id: String) -> String {
   if length(trend_rows) > 0.0 then {
     let out = out + "\nLast 7 days:\n"
     each tr in trend_rows {
-      let td = to_string(json_get(tr, "date", "?"))
-      let tc = to_string(json_get(tr, "cost", "0"))
-      let tcl = to_string(to_int(to_float(json_get(tr, "calls", "0"))))
+      let td = redact(to_string(json_get(tr, "date", "?")), "all")
+      let tc = redact(to_string(json_get(tr, "cost", "0")), "all")
+      let tcl = redact(to_string(to_int(to_float(json_get(tr, "calls", "0")))), "all")
       let out = out + "  " + td + ": ~$" + tc + " (" + tcl + " calls)\n"
     }
   }
@@ -842,8 +849,8 @@ pattern GetModelErrorRate(model: String) -> String {
   each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
   let rows = query("SELECT total_calls, total_errors FROM daily_stats WHERE date = ? AND model = ?", [today, model])
   if length(rows) == 0.0 then { return "0" }
-  let calls = to_int(json_get(rows[0], "total_calls", "0"))
-  let errors = to_int(json_get(rows[0], "total_errors", "0"))
+  let calls = redact(to_int(json_get(rows[0], "total_calls", "0")), "all")
+  let errors = redact(to_int(json_get(rows[0], "total_errors", "0")), "all")
   if calls == 0 then { return "0" }
   return to_string(to_float(errors) / to_float(calls) * 100.0)
 }
@@ -862,7 +869,7 @@ pattern EstimateTokens(text: String) -> String {
 
 pattern GetCompactedHistory(chat_id: String, limit: String, dept: String) -> String {
   let total_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ? AND dept = ?", [chat_id, dept])
-  let total = to_int(json_get(total_rows[0], "cnt", "0"))
+  let total = redact(to_int(json_get(total_rows[0], "cnt", "0")), "all")
   let lim = to_int(limit)
   if total <= lim * 2 then {
     return GetRecentDialog(chat_id, limit, dept)
@@ -871,8 +878,8 @@ pattern GetCompactedHistory(chat_id: String, limit: String, dept: String) -> Str
   let recent_rows = query("SELECT role, content FROM dialog_history WHERE chat_id = ? AND dept = ? ORDER BY created_at DESC LIMIT ?", [chat_id, dept, limit])
   let out = ""
   each row in early_rows {
-    let role = to_string(json_get(row, "role", ""))
-    let content = to_string(json_get(row, "content", ""))
+    let role = redact(to_string(json_get(row, "role", "")), "all")
+    let content = redact(to_string(json_get(row, "content", "")), "all")
     if length(content) > 300.0 then { let content = substring(content, 0.0, 300.0) + "..." }
     let out = out + role + ": " + content + "\n"
   }
@@ -881,8 +888,8 @@ pattern GetCompactedHistory(chat_id: String, limit: String, dept: String) -> Str
     let out = out + "\n[... " + to_string(skipped) + " messages skipped for context economy ...]\n\n"
   }
   each row in recent_rows {
-    let role = to_string(json_get(row, "role", ""))
-    let content = to_string(json_get(row, "content", ""))
+    let role = redact(to_string(json_get(row, "role", "")), "all")
+    let content = redact(to_string(json_get(row, "content", "")), "all")
     let out = out + role + ": " + content + "\n"
   }
   return out
@@ -951,11 +958,11 @@ pattern HandleDesignImage(prompt: String, chat_id: String) -> String {
     return ""
   }
   let parsed = parse_json(result)
-  let status = json_get(parsed, "status", "error")
+  let status = redact(to_string(json_get(parsed, "status", "error")), "all")
   if status == "ok" then {
     return ""
   } else {
-    let err = json_get(parsed, "error", "Unknown error")
+    let err = redact(to_string(json_get(parsed, "error", "Unknown error")), "all")
     return "Ошибка генерации: " + err
   }
 }
@@ -1007,7 +1014,7 @@ pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
     if to_string(news_result) != "()" then {
       let news_parsed = try parse_json(news_result)
       if to_string(news_parsed) != "()" then {
-        let news = json_get(news_parsed, "news", "")
+        let news = redact(to_string(json_get(news_parsed, "news", "")), "all")
       }
     }
   }
@@ -1096,7 +1103,7 @@ pattern GetOwnerProfile(dept: String) -> String {
 pattern ReadDeptProfile(dept: String) -> String {
   let cached = kv_get("fc_profile_" + dept)
   if cached != "" then { return cached }
-  let content = read_file("library/" + dept + ".md")
+  let content = redact(read_file("library/" + dept + ".md"), "all")
   if content != "" then { return content }
   return "Department: " + dept + ". Act professionally."
 }
@@ -1106,7 +1113,7 @@ pattern ReadDeptProfile(dept: String) -> String {
 // Phase 2: remaining skills matched by query keywords appearing in skill content
 // Budget: 80000 chars (was 2000), per-skill limit: 15000 chars (was 500)
 pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
-  let index_content = read_file("skills_index/" + dept + ".txt")
+  let index_content = redact(read_file("skills_index/" + dept + ".txt"), "all")
   if index_content == "" then { return "No skills loaded." }
   let _nl = "\n"
   let _sp = " "
@@ -1142,7 +1149,7 @@ pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
   each skill in skills_list {
     if length(result) < budget then {
       let skill_name = trim(skill)
-      let skill_content = read_file("skills/" + skill_name + "/SKILL.md")
+      let skill_content = redact(read_file("skills/" + skill_name + "/SKILL.md"), "all")
       if skill_content != "" then {
         if i < core_count then {
           // Phase 1: core skills always loaded
@@ -1171,87 +1178,87 @@ pattern LoadOspSkills(query: String) -> String {
   let mut budget = 25000.0
 
   // ── Tier 1: Methodological core (always) ──
-  let s = read_file("skills/deconstruct/SKILL.md")
+  let s = redact(read_file("skills/deconstruct/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- deconstruct ---\n" + s }
-  let s = read_file("skills/awareness-frame/SKILL.md")
+  let s = redact(read_file("skills/awareness-frame/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- awareness-frame ---\n" + s }
-  let s = read_file("skills/root-cause-mapping/SKILL.md")
+  let s = redact(read_file("skills/root-cause-mapping/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- root-cause-mapping ---\n" + s }
-  let s = read_file("skills/forces-and-potentials/SKILL.md")
+  let s = redact(read_file("skills/forces-and-potentials/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- forces-and-potentials ---\n" + s }
-  let s = read_file("skills/strategic-maneuvers/SKILL.md")
+  let s = redact(read_file("skills/strategic-maneuvers/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- strategic-maneuvers ---\n" + s }
-  let s = read_file("skills/two-paths-synthesis/SKILL.md")
+  let s = redact(read_file("skills/two-paths-synthesis/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- two-paths-synthesis ---\n" + s }
-  let s = read_file("skills/decision-tree-forecast/SKILL.md")
+  let s = redact(read_file("skills/decision-tree-forecast/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- decision-tree-forecast ---\n" + s }
-  let s = read_file("skills/reflexive-impact/SKILL.md")
+  let s = redact(read_file("skills/reflexive-impact/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- reflexive-impact ---\n" + s }
-  let s = read_file("skills/calibration/SKILL.md")
+  let s = redact(read_file("skills/calibration/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- calibration ---\n" + s }
-  let s = read_file("skills/system-health-diagnostics/SKILL.md")
+  let s = redact(read_file("skills/system-health-diagnostics/SKILL.md"), "all")
   if s != "" and length(result) < budget then { result = result + "\n--- system-health-diagnostics ---\n" + s }
 
   // ── Tier 2: Domain depth (by topic triggers) ──
   // Finance / markets
   if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "gold") or contains(t, "золот")) and length(result) < budget then {
-    let s = read_file("skills/cross-asset-divergence/SKILL.md")
+    let s = redact(read_file("skills/cross-asset-divergence/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- cross-asset-divergence ---\n" + s }
   }
   if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "крипто") or contains(t, "нефт")) and length(result) < budget then {
-    let s = read_file("skills/macro-regime-id/SKILL.md")
+    let s = redact(read_file("skills/macro-regime-id/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- macro-regime-id ---\n" + s }
-    let s = read_file("skills/cantillon/SKILL.md")
+    let s = redact(read_file("skills/cantillon/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- cantillon ---\n" + s }
   }
   // Person / leader
   if (contains(t, "персона") or contains(t, "лидер") or contains(t, "президент") or contains(t, "глава") or contains(t, "министр") or contains(t, "губернатор") or contains(t, "ceo") or contains(t, "исчез")) and length(result) < budget then {
-    let s = read_file("skills/deep-profiling/SKILL.md")
+    let s = redact(read_file("skills/deep-profiling/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- deep-profiling ---\n" + s }
   }
   // Narrative / media
   if (contains(t, "нарратив") or contains(t, "пропаганд") or contains(t, "заявлен") or contains(t, "сми") or contains(t, "media") or contains(t, "информаци")) and length(result) < budget then {
-    let s = read_file("skills/narrative-vs-flows/SKILL.md")
+    let s = redact(read_file("skills/narrative-vs-flows/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- narrative-vs-flows ---\n" + s }
   }
   // Sources / verification
   if (contains(t, "источник") or contains(t, "проверь") or contains(t, "правда") or contains(t, "фактчек")) and length(result) < budget then {
-    let s = read_file("skills/source-triangulation/SKILL.md")
+    let s = redact(read_file("skills/source-triangulation/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- source-triangulation ---\n" + s }
   }
   // Investment / risk
   if (contains(t, "ставк") or contains(t, "инвестиц") or contains(t, "риск") or contains(t, "портфель") or contains(t, "хедж")) and length(result) < budget then {
-    let s = read_file("skills/asymmetric-bet-structure/SKILL.md")
+    let s = redact(read_file("skills/asymmetric-bet-structure/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- asymmetric-bet-structure ---\n" + s }
-    let s = read_file("skills/antifragility-design/SKILL.md")
+    let s = redact(read_file("skills/antifragility-design/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- antifragility-design ---\n" + s }
   }
   // Cycles
   if (contains(t, "цикл") or contains(t, "фаза") or contains(t, "перелом") or contains(t, "кондратьев") or contains(t, "juglar")) and length(result) < budget then {
-    let s = read_file("skills/cycle-position/SKILL.md")
+    let s = redact(read_file("skills/cycle-position/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- cycle-position ---\n" + s }
   }
   // I&W
   if (contains(t, "индикатор") or contains(t, "наблюден") or contains(t, "watch") or contains(t, "тревог")) and length(result) < budget then {
-    let s = read_file("skills/iw-watchlist/SKILL.md")
+    let s = redact(read_file("skills/iw-watchlist/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- iw-watchlist ---\n" + s }
   }
 
   // ── Tier 3: Special techniques (explicit triggers) ──
   if (contains(t, "война") or contains(t, "армия") or contains(t, "фронт") or contains(t, "наступлен") or contains(t, "воен")) and length(result) < budget then {
-    let s = read_file("skills/order-of-battle/SKILL.md")
+    let s = redact(read_file("skills/order-of-battle/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- order-of-battle ---\n" + s }
   }
   if (contains(t, "коллапс") or contains(t, "обвал") or contains(t, "транзит") or contains(t, "фазов")) and length(result) < budget then {
-    let s = read_file("skills/phase-transition-detection/SKILL.md")
+    let s = redact(read_file("skills/phase-transition-detection/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- phase-transition-detection ---\n" + s }
   }
   if (contains(t, "переговор") or contains(t, "коалиц") or contains(t, "консенсус")) and length(result) < budget then {
-    let s = read_file("skills/schelling-points/SKILL.md")
+    let s = redact(read_file("skills/schelling-points/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- schelling-points ---\n" + s }
   }
   if (contains(t, "контр") or contains(t, "redteam") or contains(t, "red-team") or contains(t, "слеп")) and length(result) < budget then {
-    let s = read_file("skills/red-team/SKILL.md")
+    let s = redact(read_file("skills/red-team/SKILL.md"), "all")
     if s != "" then { result = result + "\n--- red-team ---\n" + s }
   }
 
@@ -1356,7 +1363,7 @@ pattern ComputeLegalCleanRate() -> String {
   let clean_count = 0.0
   each row in rows {
     let n = n + 1.0
-    let flag = json_get(row, "outcome_flag", "")
+    let flag = redact(to_string(json_get(row, "outcome_flag", "")), "all")
     if flag == "clean" then {
       let clean_count = clean_count + 1.0
     }
@@ -1373,7 +1380,7 @@ pattern ScoreDept(dept: String) -> String {
   if to_string(d1) == "()" then { return "Score: " + dept + "\n[Ошибка запроса к БД]" }
   let d2 = try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'verified'", [dept])
   let d3 = try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'drafted'", [dept])
-  let g1 = try json_get(d1[0], "cnt", "0")
+  let g1 = redact(try json_get(d1[0], "cnt", "0"), "all")
   let mut g2 = "0"
   if to_string(d2) != "()" then { g2 = to_string(try json_get(d2[0], "cnt", "0")) }
   let mut g3 = "0"
@@ -1410,10 +1417,10 @@ pattern FormatArchiveRows(rows: Any) -> String {
   if length(rows) == 0.0 then { return "Нет записей в архиве." }
   let output = ""
   each item in rows {
-    let id = json_get(item, "id", "?")
-    let topic = json_get(item, "topic", "?")
-    let status = json_get(item, "status", "?")
-    let created = json_get(item, "created_at", "?")
+    let id = redact(to_string(json_get(item, "id", "?")), "all")
+    let topic = redact(to_string(json_get(item, "topic", "?")), "all")
+    let status = redact(to_string(json_get(item, "status", "?")), "all")
+    let created = redact(to_string(json_get(item, "created_at", "?")), "all")
     let output = output + "#" + id + " [" + status + "] " + topic + " (" + created + ")\n"
   }
   return output
@@ -1429,7 +1436,7 @@ pattern FormatArchiveRows(rows: Any) -> String {
 // ============================================================
 
 pattern ReadConsensus() -> String {
-  let content = read_file("memories/consensus.mlog")
+  let content = redact(read_file("memories/consensus.mlog"), "all")
   if content == "" then { return "" }
   // Extract only the section between === CONSENSUS === markers
   let start_marker = "=== CONSENSUS ==="
@@ -1454,7 +1461,7 @@ pattern UpdateConsensus(dept: String, query: String, result_summary: String) -> 
   each dr in date_rows { let now_str = to_string(json_get(dr, "d", "")) }
   // Append new entry before === END CONSENSUS ===
   let entry = "\n[" + now_str + "] " + dept + ": " + substring(query, 0.0, 80.0) + "\n  result: " + substring(result_summary, 0.0, 200.0) + "\n"
-  let content = read_file("memories/consensus.mlog")
+  let content = redact(read_file("memories/consensus.mlog"), "all")
   if content == "" then { return "" }
   // Replace "Last updated: never" with current timestamp
   let content = replace(content, "Last updated: never", "Last updated: " + now_str)
@@ -1489,12 +1496,12 @@ pattern RecallLearnings(dept: String, query: String) -> String {
   if to_string(parsed) == "()" then { return "" }
   let count = to_float(json_get(parsed, "count", "0"))
   if count == 0.0 then { return "" }
-  let results = try json_get(parsed, "results", "[]")
+  let results = redact(try json_get(parsed, "results", "[]"), "all")
   if to_string(results) == "()" then { return "" }
   let mut learnings_text = ""
   each r in results {
-    let approach = to_string(json_get(r, "approach", ""))
-    let sc = to_string(json_get(r, "score", ""))
+    let approach = redact(to_string(json_get(r, "approach", "")), "all")
+    let sc = redact(to_string(json_get(r, "score", "")), "all")
     if approach != "" then {
       let learnings_text = learnings_text + "- [score:" + sc + "] " + approach + "\n"
     }
@@ -1554,7 +1561,7 @@ pattern GetBudgetedHistory(chat_id: String, limit: String, max_tokens_str: Strin
 // ============================================================
 
 pattern GetExpertPersona(dept: String) -> String {
-  let content = read_file("library/personas.mlog")
+  let content = redact(read_file("library/personas.mlog"), "all")
   if content == "" then { return "" }
   // Find the section for this department: "## dept"
   let marker = "## " + dept
@@ -1578,7 +1585,7 @@ pattern GetExpertPersona(dept: String) -> String {
 // ============================================================
 
 pattern GetBrandContract() -> String {
-  let content = read_file("library/brand.mlog")
+  let content = redact(read_file("library/brand.mlog"), "all")
   if content == "" then { return "" }
   // Trim to 2000 chars max
   if length(content) > 2000.0 then {
@@ -1653,10 +1660,10 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
     let _ = AuditLog("llm_fail", dept, "parse_json on proxy_result failed: " + substring(to_string(proxy_result), 0.0, 100.0))
     return ""
   }
-  let reply = to_string(json_get(parsed, "reply", "Error: empty reply"))
-  let used_model = to_string(json_get(parsed, "model", ""))
-  let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
-  let tokens_out = to_string(json_get(parsed, "tokens_out", "0"))
+  let reply = redact(to_string(json_get(parsed, "reply", "Error: empty reply")), "all")
+  let used_model = redact(to_string(json_get(parsed, "model", "")), "all")
+  let tokens_in = redact(to_string(json_get(parsed, "tokens_in", "0")), "all")
+  let tokens_out = redact(to_string(json_get(parsed, "tokens_out", "0")), "all")
   // FOIP-003.3: Log token usage
   if used_model != "" then {
     let _ = LogModelSuccess(chat_id, dept, used_model, tokens_in, tokens_out)
@@ -1731,7 +1738,7 @@ pattern DetectDepartment(text: String) -> String {
   let body = json_encode({text: lower_text})
   let result = try http_post("http://127.0.0.1:4000/detect-dept", body, "application/json")
   if to_string(result) == "()" then { return "" }
-  let detected = json_get(parse_json(result), "dept", "")
+  let detected = redact(to_string(json_get(parse_json(result), "dept", "")), "all")
   if detected != "" then { return detected }
 
   return ""
@@ -1973,10 +1980,10 @@ pattern HandleYana(query: String, chat_id: String) -> String {
     return ""
   }
   let parsed = parse_json(proxy_result)
-  let reply = to_string(json_get(parsed, "reply", ""))
-  let used_model = to_string(json_get(parsed, "model", ""))
-  let tokens_in = to_string(json_get(parsed, "tokens_in", "0"))
-  let tokens_out = to_string(json_get(parsed, "tokens_out", "0"))
+  let reply = redact(to_string(json_get(parsed, "reply", "")), "all")
+  let used_model = redact(to_string(json_get(parsed, "model", "")), "all")
+  let tokens_in = redact(to_string(json_get(parsed, "tokens_in", "0")), "all")
+  let tokens_out = redact(to_string(json_get(parsed, "tokens_out", "0")), "all")
   if used_model != "" then { let _ = kv_set("last_model_yana", used_model) }
   let _ = kv_set("last_tokens_yana", tokens_in + "+" + tokens_out)
   if reply == "" then {
@@ -2039,12 +2046,12 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   return final_reply
 }
 pattern YanaNowInfo() -> String {
-  let resp = try http_get("http://127.0.0.1:4000/now-time")
+  let resp = redact(try http_get("http://127.0.0.1:4000/now-time"), "all")
   if to_string(resp) == "()" then {
     let ts = to_string(now())
     return "Текущее время (приблизительно): Unix " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
   }
-  let time_str = json_get(parse_json(resp), "time", "")
+  let time_str = redact(to_string(json_get(parse_json(resp), "time", "")), "all")
   if time_str == "" then {
     let ts = to_string(now())
     return "Текущее время (приблизительно): Unix " + ts + "\nЧасовой пояс: Europe/Minsk (UTC+3)"
@@ -2053,9 +2060,9 @@ pattern YanaNowInfo() -> String {
 }
 
 pattern YanaWeather() -> String {
-  let resp = try http_get("http://127.0.0.1:4000/now-weather")
+  let resp = redact(try http_get("http://127.0.0.1:4000/now-weather"), "all")
   if to_string(resp) == "()" then { return "Погода недоступна" }
-  let w = json_get(parse_json(resp), "weather", "")
+  let w = redact(to_string(json_get(parse_json(resp), "weather", "")), "all")
   if w == "" then { return "Погода недоступна" }
   return w
 }
@@ -2074,7 +2081,7 @@ pattern YanaRecallMemories(query: String) -> String {
   if to_string(parsed) == "()" then { return "" }
   let count = to_float(json_get(parsed, "count", "0"))
   if count == 0.0 then { return "" }
-  let results = try json_get(parsed, "results", "[]")
+  let results = redact(try json_get(parsed, "results", "[]"), "all")
   if to_string(results) == "()" then { return "" }
   let mem_raw = try FormatMemoryResults(results)
   let mem_text = to_string(mem_raw)
@@ -2085,9 +2092,9 @@ pattern YanaRecallMemories(query: String) -> String {
 pattern FormatMemoryResults(results: String) -> String {
   let mut mem_text = ""
   each r in results {
-    let content = to_string(json_get(r, "content", ""))
-    let mem_type = to_string(json_get(r, "type", "fact"))
-    let conf = to_string(json_get(r, "confidence", "0.5"))
+    let content = redact(to_string(json_get(r, "content", "")), "all")
+    let mem_type = redact(to_string(json_get(r, "type", "fact")), "all")
+    let conf = redact(to_string(json_get(r, "confidence", "0.5")), "all")
     if content != "" then {
       let mem_text = mem_text + "- [" + mem_type + "] " + content + " (conf: " + conf + ")\n"
     }
@@ -2116,9 +2123,9 @@ pattern YanaCalendar() -> String {
   let i = 0.0
   each row in rows {
     let i = i + 1.0
-    let etext = json_get(row, "event_text", "")
-    let edate = json_get(row, "event_date", "")
-    let etype = json_get(row, "event_type", "напоминание")
+    let etext = redact(to_string(json_get(row, "event_text", "")), "all")
+    let edate = redact(to_string(json_get(row, "event_date", "")), "all")
+    let etype = redact(to_string(json_get(row, "event_type", "напоминание")), "all")
     let result = result + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
   }
   let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('checkpoint','system','yana','cal_step_5_complete','ok')")
@@ -2168,9 +2175,9 @@ pattern YanaCheckShop(reply: String, chat_id: String) -> String {
     let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость вернула нечитаемый ответ.")
     return ""
   }
-  let ok = to_string(json_get(parsed, "ok", ""))
+  let ok = redact(to_string(json_get(parsed, "ok", "")), "all")
   if ok != "True" and ok != "true" then {
-    let _ = SendTelegramReply(chat_id, "ОТКАЗ: досье не собрано: " + to_string(json_get(parsed, "error", "нет деталей")))
+    let _ = redact(SendTelegramReply(chat_id, "ОТКАЗ: досье не собрано: " + to_string(json_get(parsed, "error", "нет деталей"))), "all")
     return ""
   }
   // маркер вырезаем из видимого текста Яны
@@ -2249,11 +2256,11 @@ pattern DeliverDueReminders() -> String {
   let rows = query("SELECT id, COALESCE(event_text,'') AS event_text, COALESCE(rrule_kind,'') AS rrule_kind, COALESCE(fire_time,'') AS fire_time, COALESCE(fire_weekday,'') AS fire_weekday, COALESCE(fire_monthday,'') AS fire_monthday, COALESCE(chat_id,'') AS chat_id, COALESCE(until_date,'') AS until_date FROM yana_events WHERE active = 1 AND rrule_kind IS NOT NULL AND rrule_kind != '' AND next_fire_at IS NOT NULL AND next_fire_at <= datetime('now') ORDER BY next_fire_at ASC LIMIT 20", [])
   let count = 0.0
   each row in rows {
-    let rid = json_get(row, "id", "")
-    let rtext = json_get(row, "event_text", "")
-    let rkind = json_get(row, "rrule_kind", "")
-    let rchat = json_get(row, "chat_id", "")
-    let runtil = json_get(row, "until_date", "")
+    let rid = redact(to_string(json_get(row, "id", "")), "all")
+    let rtext = redact(to_string(json_get(row, "event_text", "")), "all")
+    let rkind = redact(to_string(json_get(row, "rrule_kind", "")), "all")
+    let rchat = redact(to_string(json_get(row, "chat_id", "")), "all")
+    let runtil = redact(to_string(json_get(row, "until_date", "")), "all")
     let mut target_chat = rchat
     if target_chat == "" then { target_chat = env("OWNER_TELEGRAM_ID") }
     let send_result = try SendTelegramReply(target_chat, "Напоминание: " + rtext)
@@ -2264,7 +2271,7 @@ pattern DeliverDueReminders() -> String {
       } else if rkind == "daily" then {
         if runtil != "" then {
           let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
-          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          let fire_val = redact(to_string(json_get(current_fire[0], "next_fire_at", "")), "all")
           if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
             let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
           } else {
@@ -2276,7 +2283,7 @@ pattern DeliverDueReminders() -> String {
       } else if rkind == "weekly" then {
         if runtil != "" then {
           let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
-          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          let fire_val = redact(to_string(json_get(current_fire[0], "next_fire_at", "")), "all")
           if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
             let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
           } else {
@@ -2288,7 +2295,7 @@ pattern DeliverDueReminders() -> String {
       } else if rkind == "yearly" then {
         if runtil != "" then {
           let current_fire = query("SELECT next_fire_at FROM yana_events WHERE id = ?", [rid])
-          let fire_val = json_get(current_fire[0], "next_fire_at", "")
+          let fire_val = redact(to_string(json_get(current_fire[0], "next_fire_at", "")), "all")
           if fire_val != "" and substring(fire_val, 0.0, 10.0) > runtil then {
             let _ = query("UPDATE yana_events SET active = 0 WHERE id = ?", [rid])
           } else {
@@ -2348,8 +2355,8 @@ pattern YanaGetMetrics() -> String {
   let deleg_by_dept = query("SELECT delegated_to, COUNT(*) AS c FROM yana_delegation_log GROUP BY delegated_to ORDER BY c DESC LIMIT 5", [])
   let dept_breakdown = ""
   each row in deleg_by_dept {
-    let d = json_get(row, "delegated_to", "?")
-    let dc = to_string(json_get(row, "c", "0"))
+    let d = redact(to_string(json_get(row, "delegated_to", "?")), "all")
+    let dc = redact(to_string(json_get(row, "c", "0")), "all")
     let dept_breakdown = dept_breakdown + d + ": " + dc + "  "
   }
   let forget_total = query("SELECT COUNT(*) AS c FROM yana_forgetting_incidents", [])
@@ -2415,12 +2422,12 @@ pattern NightSlot() -> String {
 
   // Phase: FO-027 TTL chain_steps — очистка старше 14 дней; pending/failed
   // без прогресса >24 ч → expired + Telegram-алерт владельцу
-  let _ = db_execute("DELETE FROM chain_steps WHERE created_at < datetime('now', '-14 days')")
+  let _ = db_execute_with_grant(grant_issue("db:delete:chain_steps", 3600.0, "once"), "DELETE FROM chain_steps WHERE created_at < datetime('now', '-14 days')")
   let expired_rows = query("SELECT chain_id, COUNT(*) AS c FROM chain_steps WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day') GROUP BY chain_id", [])
   let _ = db_execute("UPDATE chain_steps SET status='expired', updated_at=datetime('now') WHERE status IN ('pending','failed') AND updated_at < datetime('now', '-1 day')")
   each er in expired_rows {
-    let exp_chain = to_string(json_get(er, "chain_id", "?"))
-    let exp_count = to_string(json_get(er, "c", "?"))
+    let exp_chain = redact(to_string(json_get(er, "chain_id", "?")), "all")
+    let exp_count = redact(to_string(json_get(er, "c", "?")), "all")
     let _ = AuditLog("chain_expired", "system", exp_chain + " steps=" + exp_count)
     let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), "FO-027: цепочка " + exp_chain + " истекла без прогресса >24 ч (" + exp_count + " степов) — resume: /chain continue " + exp_chain + " <query>")
   }
@@ -2430,20 +2437,20 @@ pattern NightSlot() -> String {
   let ua_body = "{}"
   let mut ua_result = try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json")
   if to_string(ua_result) == "()" then { ua_result = "{}" }
-  let ua_summary = json_get(parse_json(ua_result), "summary", "UA cycle failed")
+  let ua_summary = redact(to_string(json_get(parse_json(ua_result), "summary", "UA cycle failed")), "all")
 
   // Phase 1: LZ Daily Report (GitHub scan → Admin)
   let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
   let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
   let mut lz_result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0)
   if to_string(lz_result) == "()" then { lz_result = "{}" }
-  let lz_summary = json_get(parse_json(lz_result), "report", "LZ daily failed")
+  let lz_summary = redact(to_string(json_get(parse_json(lz_result), "report", "LZ daily failed")), "all")
 
   // Phase 2: Memory Maintenance
   let mem_body = "{}"
   let mut mem_result = try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json")
   if to_string(mem_result) == "()" then { mem_result = "{}" }
-  let mem_summary = json_get(parse_json(mem_result), "result", "Memory maintenance failed")
+  let mem_summary = redact(to_string(json_get(parse_json(mem_result), "result", "Memory maintenance failed")), "all")
 
   // Phase 3: Original AdminNightCycle
   let result = AdminNightCycle()
@@ -2458,6 +2465,7 @@ pattern NightSlot() -> String {
 mlogserver {
   port: 10001
   host: "127.0.0.1"
+  middleware: [rate_limit]
 
   // Health
   route "/" method=GET {
@@ -2473,7 +2481,7 @@ mlogserver {
   route "/version" method=GET {
     let auth = RequireInternalAuth()
     if auth == "unauthorized" then { return respond("401 Unauthorized") }
-    let yana_src = read_file("dept/yana.mlog")
+    let yana_src = redact(read_file("dept/yana.mlog"), "all")
     let has_anti_format = "0"
     if contains(yana_src, "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА") then { let has_anti_format = "1" }
     if contains(yana_src, "has_layers") then { let has_anti_format = "1" }
@@ -2489,12 +2497,12 @@ mlogserver {
     let auth = RequireInternalAuth()
     if auth == "unauthorized" then { return respond("401 Unauthorized") }
     let data = json_body()
-    let dept = to_string(json_get(data, "dept", ""))
-    let query = to_string(json_get(data, "query", ""))
-    let chat_id = to_string(json_get(data, "chat_id", "0"))
-    let group_id = to_string(json_get(data, "group_id", ""))
-    let round_no = to_string(json_get(data, "round", "1"))
-    let peer = to_string(json_get(data, "peer_context", ""))
+    let dept = redact(to_string(json_get(data, "dept", "")), "all")
+    let query = redact(to_string(json_get(data, "query", "")), "all")
+    let chat_id = redact(to_string(json_get(data, "chat_id", "0")), "all")
+    let group_id = redact(to_string(json_get(data, "group_id", "")), "all")
+    let round_no = redact(to_string(json_get(data, "round", "1")), "all")
+    let peer = redact(to_string(json_get(data, "peer_context", "")), "all")
     let q = query
     if peer != "" then {
       let q = query + "\n\n=== РАУНД " + round_no + ": ответ коллеги — внеси поправки или подтверди ===\n" + peer
@@ -2512,10 +2520,10 @@ mlogserver {
     let rows = query("SELECT slug, name, project_type, status, gate_policy, updated_at FROM forge_projects ORDER BY updated_at DESC LIMIT 50", [])
     let mut items = ""
     each r in rows {
-      let slug = ForgeEscape(to_string(json_get(r, "slug", "")))
-      let nm = ForgeEscape(to_string(json_get(r, "name", "")))
-      let st = ForgeEscape(to_string(json_get(r, "status", "")))
-      let pt = ForgeEscape(to_string(json_get(r, "project_type", "")))
+      let slug = redact(ForgeEscape(to_string(json_get(r, "slug", ""))), "all")
+      let nm = redact(ForgeEscape(to_string(json_get(r, "name", ""))), "all")
+      let st = redact(ForgeEscape(to_string(json_get(r, "status", ""))), "all")
+      let pt = redact(ForgeEscape(to_string(json_get(r, "project_type", ""))), "all")
       let items = items + "<li><a href='/repos/project?slug=" + slug + "'>" + nm + "</a> — " + pt + " [" + st + "]</li>"
     }
     let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Репозитории — FORGE</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;margin:0;padding:16px;max-width:480px;margin-left:auto}h1{font-family:Newsreader,serif;color:#1C1B18}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}a{color:#A8321E}ul{list-style:none;padding:0}</style></head><body><h1>Проекты FORGE</h1><div class='panel'><ul>" + items + "</ul></div></body></html>"
@@ -2523,22 +2531,22 @@ mlogserver {
   }
 
   route "/repos/project" method=GET {
-    let slug = query_param("slug")
+    let slug = redact(query_param("slug"), "all")
     let rows = query("SELECT slug, name, description, goal, project_type, gate_policy, model_combo, departments, status, updated_at FROM forge_projects WHERE slug = ? LIMIT 1", [slug])
     if length(rows) == 0.0 then { return respond("404 project not found") }
     let repos = query("SELECT name, description, github_url, commits_count, last_commit_at FROM forge_repos WHERE project_slug = ? ORDER BY created_at DESC", [slug])
     let mut rep_html = ""
     each r in repos {
-      let rn = ForgeEscape(to_string(json_get(r, "name", "")))
-      let rep_html = rep_html + "<li><a href='/repos/repo?name=" + rn + "'>" + rn + "</a> — коммитов: " + to_string(json_get(r, "commits_count", "0")) + "</li>"
+      let rn = redact(ForgeEscape(to_string(json_get(r, "name", ""))), "all")
+      let rep_html = redact(rep_html + "<li><a href='/repos/repo?name=" + rn + "'>" + rn + "</a> — коммитов: " + to_string(json_get(r, "commits_count", "0")) + "</li>", "all")
     }
-    let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(to_string(json_get(rows[0], "name", ""))) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1,h2{font-family:Newsreader,serif}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}a{color:#A8321E}pre{background:#FBF8F2;padding:8px;overflow-x:auto}ul{list-style:none;padding:0}</style></head><body><h1>" + ForgeEscape(to_string(json_get(rows[0], "name", ""))) + "</h1><div class='panel'><p>" + ForgeEscape(to_string(json_get(rows[0], "goal", ""))) + "</p><p>Тип: " + ForgeEscape(to_string(json_get(rows[0], "project_type", ""))) + " · Гейты: " + ForgeEscape(to_string(json_get(rows[0], "gate_policy", ""))) + " · Статус: " + ForgeEscape(to_string(json_get(rows[0], "status", ""))) + "</p></div><h2>Репозитории</h2><div class='panel'><ul>" + rep_html + "</ul></div></body></html>"
+    let html = redact("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(to_string(json_get(rows[0], "name", ""))) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1,h2{font-family:Newsreader,serif}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}a{color:#A8321E}pre{background:#FBF8F2;padding:8px;overflow-x:auto}ul{list-style:none;padding:0}</style></head><body><h1>" + ForgeEscape(to_string(json_get(rows[0], "name", ""))) + "</h1><div class='panel'><p>" + ForgeEscape(to_string(json_get(rows[0], "goal", ""))) + "</p><p>Тип: " + ForgeEscape(to_string(json_get(rows[0], "project_type", ""))) + " · Гейты: " + ForgeEscape(to_string(json_get(rows[0], "gate_policy", ""))) + " · Статус: " + ForgeEscape(to_string(json_get(rows[0], "status", ""))) + "</p></div><h2>Репозитории</h2><div class='panel'><ul>" + rep_html + "</ul></div></body></html>", "all")
     return respond_html(html)
   }
 
   // ── FO-038 C.1: страница задачи — гейты, этапы, прогоны, замечания, история ──
   route "/repos/task" method=GET {
-    let task_id = query_param("task_id")
+    let task_id = redact(query_param("task_id"), "all")
     let rows = query("SELECT t.title, t.status, t.project_slug, p.name FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
     if length(rows) < 1.0 then { return respond("404 task not found") }
     let t = get(rows, 0)
@@ -2549,15 +2557,15 @@ mlogserver {
     let gates = query("SELECT id, kind, question, options_json, decision FROM forge_gates WHERE task_id = ? ORDER BY id DESC LIMIT 10", [task_id])
     html = html + "<h2>Гейты</h2><ul>"
     each g in gates {
-      let gid = to_string(json_get(g, "id", ""))
-      let dec = to_string(json_get(g, "decision", ""))
+      let gid = redact(to_string(json_get(g, "id", "")), "all")
+      let dec = redact(to_string(json_get(g, "decision", "")), "all")
       let dec_mark = "<b>ждёт решения</b> "
       if dec != "" then { let dec_mark = "решён: " + ForgeEscape(dec) + " " }
       html = html + "<li>#" + gid + " [" + ForgeEscape(to_string(json_get(g, "kind", ""))) + "] " + ForgeEscape(substring(to_string(json_get(g, "question", "")), 0, 120)) + " — " + dec_mark
       if dec == "" then {
         let opts = parse_json(to_string(json_get(g, "options_json", "[]")))
         each o in opts {
-          let html = html + "<a href='/repos/task/decide?task_id=" + task_id + "&gate=" + gid + "&idx=" + to_string(json_get(o, "idx", "")) + "'>[" + ForgeEscape(to_string(json_get(o, "label", ""))) + "]</a> "
+          let html = redact(html + "<a href='/repos/task/decide?task_id=" + task_id + "&gate=" + gid + "&idx=" + to_string(json_get(o, "idx", "")) + "'>[" + ForgeEscape(to_string(json_get(o, "label", ""))) + "]</a> ", "all")
         }
       }
       let html = html + "</li>"
@@ -2594,8 +2602,8 @@ mlogserver {
     let prevs = query("SELECT slug, status, port FROM forge_previews WHERE repo_name IN (SELECT name FROM forge_repos WHERE project_slug = (SELECT project_slug FROM forge_tasks WHERE id = ? LIMIT 1)) ORDER BY started_at DESC LIMIT 3", [task_id])
     html = html + "<h2>Живое превью</h2><ul>"
     each pv in prevs {
-      let pv_slug = to_string(json_get(pv, "slug", ""))
-      let pv_status = to_string(json_get(pv, "status", ""))
+      let pv_slug = redact(to_string(json_get(pv, "slug", "")), "all")
+      let pv_status = redact(to_string(json_get(pv, "status", "")), "all")
       if pv_status == "running" then {
         html = html + "<li><a href='/preview-live/" + pv_slug + "/' style='color:#8f8'>открыть</a> [" + pv_status + "] порт " + to_string(json_get(pv, "port", "")) + " <a href='/repos/task/preview-down?slug=" + pv_slug + "'>погасить</a></li>"
       } else {
@@ -2610,13 +2618,13 @@ mlogserver {
   // решение по гейту из веба (дубль Telegram-кнопок)
   // FO-039: подъём/гашение живого превью из веба
   route "/repos/task/preview-up" method=GET {
-    let task_id = query_param("task_id")
+    let task_id = redact(query_param("task_id"), "all")
     let rows = query("SELECT t.project_slug, p.project_type, (SELECT name FROM forge_repos WHERE project_slug = t.project_slug LIMIT 1) as repo_name, (SELECT COUNT(*) FROM forge_repos r WHERE r.project_slug = t.project_slug AND r.name LIKE '%package%') as has_pkg FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
     if length(rows) < 1.0 then { return respond("404 task not found") }
     let r = get(rows, 0)
-    let project_slug = to_string(json_get(r, "project_slug", ""))
-    let repo_name = to_string(json_get(r, "repo_name", ""))
-    let ptype = to_string(json_get(r, "project_type", ""))
+    let project_slug = redact(to_string(json_get(r, "project_slug", "")), "all")
+    let repo_name = redact(to_string(json_get(r, "repo_name", "")), "all")
+    let ptype = redact(to_string(json_get(r, "project_type", "")), "all")
     let cmd = "python3 -m http.server"
     if ptype == "ai_office" then { let cmd = "python3 app.py" }
     let result = ForgePreviewUp(project_slug, repo_name, cmd)
@@ -2624,20 +2632,20 @@ mlogserver {
   }
 
   route "/repos/task/preview-down" method=GET {
-    let slug = query_param("slug")
+    let slug = redact(query_param("slug"), "all")
     let result = ForgePreviewDown(slug)
     return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(result) + "</body></html>")
   }
 
   route "/repos/task/decide" method=GET {
-    let gate = query_param("gate")
-    let idx = query_param("idx")
+    let gate = redact(query_param("gate"), "all")
+    let idx = redact(query_param("idx"), "all")
     let result = ForgeGateDecide(gate, idx, "owner-web")
     return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(substring(result, 0.0, 400)) + "</body></html>")
   }
 
   route "/repos/repo" method=GET {
-    let name = query_param("name")
+    let name = redact(query_param("name"), "all")
     let files_out = ForgeRepoFiles(name, "main")
     let commits_out = ForgeCommits(name, "20")
     let html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>" + ForgeEscape(name) + "</title><style>body{background:#EFEAE0;color:#1C1B18;font-family:'IBM Plex Sans',sans-serif;padding:16px;max-width:480px;margin-left:auto}h1,h2{font-family:Newsreader,serif}.panel{background:#FBF8F2;border-radius:8px;padding:12px;margin-bottom:8px}pre{background:#FBF8F2;padding:8px;overflow-x:auto;font-size:12px}</style></head><body><h1>" + ForgeEscape(name) + "</h1><h2>Дерево (main)</h2><div class='panel'><pre>" + ForgeEscape(files_out) + "</pre></div><h2>Коммиты</h2><div class='panel'><pre>" + ForgeEscape(commits_out) + "</pre></div></body></html>"
@@ -2645,9 +2653,9 @@ mlogserver {
   }
 
   route "/repos/file" method=GET {
-    let name = query_param("name")
-    let refv = query_param("ref")
-    let path = query_param("path")
+    let name = redact(query_param("name"), "all")
+    let refv = redact(query_param("ref"), "all")
+    let path = redact(query_param("path"), "all")
     let rv = ForgeValidRef(refv)
     if rv != "ok" then { return respond("400 " + rv) }
     let vp = ForgeValidPath(path)
@@ -2664,32 +2672,39 @@ mlogserver {
   route "/webhook/telegram" method=POST {
     let data = json_body()
     let _sp = " "
-    let chat_id = to_string(json_get(data, "message.chat.id", "0"))
-    let user_id = to_string(json_get(data, "message.from.id", "0"))
+    let chat_id = redact(to_string(json_get(data, "message.chat.id", "0")), "all")
+    let user_id = redact(to_string(json_get(data, "message.from.id", "0")), "all")
     let owner_id = env("OWNER_TELEGRAM_ID")
     // Owner check — ignore non-owner
     if user_id != owner_id then { return respond("200 ok") }
 
     // Idempotency: игнорируем быстрый повтор (в пределах 90 с), пропускаем медленный ретрай (WH-3)
-    let update_id = to_string(json_get(data, "update_id", ""))
+    let update_id = redact(to_string(json_get(data, "update_id", "")), "all")
     if update_id != "" then {
       let recent = query("SELECT COUNT(*) AS c FROM webhook_dedup WHERE update_id = ? AND seen_at > datetime('now', '-90 seconds')", [update_id])
       let recent_count = to_float(json_get(recent[0], "c", "0"))
       if recent_count > 0.0 then { return respond("200 ok") }
       let _ = try db_execute("INSERT OR REPLACE INTO webhook_dedup (update_id, seen_at) VALUES (?, datetime('now'))", [update_id])
-      let _ = try db_execute("DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
+      let _ = try db_execute_with_grant(grant_issue("db:delete:webhook_dedup", 3600.0, "once"), "DELETE FROM webhook_dedup WHERE seen_at < datetime('now', '-1 day')")
     }
 
+    // №421: сырой текст — ТОЛЬКО для извлечения пароля (/lockdown, /unlock);
+    // пароль сравнивается через hash_only (равенство хешей ⟺ равенство строк,
+    // immune к redact-маскированию ввода). Во все остальные ветки идёт
+    // вымытый text.
+    let raw_text = to_string(json_get(data, "message.text", ""))
     // Lockdown check
     let locked = kv_get("system_lockdown")
     if locked == "true" then {
-      let text = to_string(json_get(data, "message.text", ""))
+      let text = redact(to_string(json_get(data, "message.text", "")), "all")
       if starts_with(text, "/unlock") then {
-        let parts = split(text, _sp)
+        let parts = split(raw_text, _sp)
         let password = ""
-        if length(parts) > 1.0 then { let password = get(parts, 1.0) }
+        // №421: счётчик токенов — по вымытой копии (маски без пробелов →
+        // количество частей идентично); сам пароль — из сырого текста
+        if length(split(redact(raw_text, "all"), _sp)) > 1.0 then { let password = get(parts, 1.0) }
         let stored_pwd = kv_get("lockdown_password")
-        if password == stored_pwd or password == env("LOCKDOWN_PASSWORD") then {
+        if redact(password, "hash_only") == redact(stored_pwd, "hash_only") or redact(password, "hash_only") == redact(env("LOCKDOWN_PASSWORD"), "hash_only") then {
           kv_set("system_lockdown", "false")
           let _ = SendTelegramReply(chat_id, "Lockdown disabled. Office is operational.")
           let _ = AuditLog("unlock", "system", "owner unlocked office")
@@ -2702,20 +2717,20 @@ mlogserver {
     // Voice check — STT via Python proxy
     // Detect voice via json_get (dot notation works reliably), not has_field
     let text = ""
-    let voice_file_id = to_string(json_get(data, "message.voice.file_id", ""))
+    let voice_file_id = redact(to_string(json_get(data, "message.voice.file_id", "")), "all")
     if voice_file_id != "" then {
       let _ = AuditLog("voice_received", "voice", "file_id: " + voice_file_id)
       let stt_body = json_encode({file_id: voice_file_id})
       let stt_result = try http_post("http://127.0.0.1:4000/stt", stt_body, "application/json")
-      if to_string(stt_result) == "()" then {
+      if redact(to_string(stt_result), "hash_only") == redact("()", "hash_only") then {
         let _ = SendTelegramReply(chat_id, "Ошибка распознавания: STT-прокси недоступен.")
         return respond("200 ok")
       } else {
         let _ = AuditLog("stt_raw_response", "voice", substring(stt_result, 0.0, 300.0))
         let stt_parsed = parse_json(stt_result)
-        let stt_status = json_get(stt_parsed, "status", "error")
+        let stt_status = redact(to_string(json_get(stt_parsed, "status", "error")), "all")
         if stt_status == "ok" then {
-          let transcribed = json_get(stt_parsed, "text", "")
+          let transcribed = redact(to_string(json_get(stt_parsed, "text", "")), "all")
           if transcribed != "" then {
             let _ = SendTelegramReply(chat_id, "Распознано: " + transcribed)
             let text = transcribed
@@ -2724,31 +2739,31 @@ mlogserver {
             return respond("200 ok")
           }
         } else {
-          let stt_err = json_get(stt_parsed, "message", "неизвестная ошибка")
+          let stt_err = redact(to_string(json_get(stt_parsed, "message", "неизвестная ошибка")), "all")
           let _ = SendTelegramReply(chat_id, "Ошибка распознавания: " + stt_err)
           return respond("200 ok")
         }
       }
     } else {
-      let doc_file_id = to_string(json_get(data, "message.document.file_id", ""))
+      let doc_file_id = redact(to_string(json_get(data, "message.document.file_id", "")), "all")
       if doc_file_id != "" then {
-        let doc_name = to_string(json_get(data, "message.document.file_name", "file"))
-        let doc_mime = to_string(json_get(data, "message.document.mime_type", ""))
-        let caption = to_string(json_get(data, "message.caption", ""))
+        let doc_name = redact(to_string(json_get(data, "message.document.file_name", "file")), "all")
+        let doc_mime = redact(to_string(json_get(data, "message.document.mime_type", "")), "all")
+        let caption = redact(to_string(json_get(data, "message.caption", "")), "all")
         let _ = AuditLog("document_received", "document", "name=" + doc_name + " mime=" + doc_mime)
 
         // НАРЯД №48: PDF-роутинг через нативный pdf_classify
         if contains(doc_mime, "application/pdf") or ends_with(lower(doc_name), ".pdf") then {
           let _ = SendTelegramReply(chat_id, "PDF получен: " + doc_name + ". Классифицирую и извлекаю текст.")
           // Скачиваем файл через Telegram File API → proxy
-          let token = env("TELEGRAM_BOT_TOKEN")
+          let token = TgToken()
           let file_info = try http_post("https://api.telegram.org/bot" + token + "/getFile", json_encode({file_id: doc_file_id}), "application/json")
-          if to_string(file_info) == "()" then {
+          if redact(to_string(file_info), "hash_only") == redact("()", "hash_only") then {
             let _ = SendTelegramReply(chat_id, "Ошибка: не удалось получить информацию о файле.")
             return respond("200 ok")
           }
           let file_parsed = parse_json(file_info)
-          let file_path = to_string(json_get(file_parsed, "result.file_path", ""))
+          let file_path = redact(to_string(json_get(file_parsed, "result.file_path", "")), "all")
           if file_path == "" then {
             let _ = SendTelegramReply(chat_id, "Ошибка: файл недоступен (истёк срок).")
             return respond("200 ok")
@@ -2756,44 +2771,44 @@ mlogserver {
           // Скачиваем binary через proxy (base64-кодированный)
           let dl_body = json_encode({file_path: file_path})
           let dl_result = try http_post("http://127.0.0.1:4000/download-telegram-file", dl_body, "application/json", 120.0)
-          if to_string(dl_result) == "()" then {
+          if redact(to_string(dl_result), "hash_only") == redact("()", "hash_only") then {
             let _ = SendTelegramReply(chat_id, "Ошибка: скачивание файла не удалось.")
             return respond("200 ok")
           }
           let dl_parsed = parse_json(dl_result)
-          let pdf_b64 = to_string(json_get(dl_parsed, "data", ""))
+          let pdf_b64 = redact(to_string(json_get(dl_parsed, "data", "")), "all")
           if pdf_b64 == "" then {
             // Fallback: используем старый extract-document
             let _ = SendTelegramReply(chat_id, "PDF получен. Извлекаю текст через прокси...")
             let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
             let doc_result = try http_post("http://127.0.0.1:4000/extract-document", doc_body, "application/json", 120.0)
-            if to_string(doc_result) == "()" then {
+            if redact(to_string(doc_result), "hash_only") == redact("()", "hash_only") then {
               let _ = SendTelegramReply(chat_id, "Ошибка: сервис извлечения текста недоступен.")
               return respond("200 ok")
             }
             let doc_parsed = parse_json(doc_result)
-            let extracted = to_string(json_get(doc_parsed, "text", ""))
+            let extracted = redact(to_string(json_get(doc_parsed, "text", "")), "all")
             text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + extracted
             // text устанавливается, продолжаем к маршрутизации департамента
           } else {
             // Нативная классификация через pdf_classify builtin
             let pdf_info = try pdf_classify(pdf_b64)
-            let pdf_type = to_string(json_get(pdf_info, "type", "unknown"))
-            let pdf_needs_ocr = to_string(json_get(pdf_info, "needs_ocr", "0"))
-            let pdf_pages = to_string(json_get(pdf_info, "pages", "0"))
+            let pdf_type = redact(to_string(json_get(pdf_info, "type", "unknown")), "all")
+            let pdf_needs_ocr = redact(to_string(json_get(pdf_info, "needs_ocr", "0")), "all")
+            let pdf_pages = redact(to_string(json_get(pdf_info, "pages", "0")), "all")
 
             let _ = AuditLog("pdf_classified", "document", "type=" + pdf_type + " pages=" + pdf_pages + " needs_ocr=" + pdf_needs_ocr)
 
             // Извлекаем текст нативно
             let md_result = try pdf_to_markdown(pdf_b64)
-            let md_text = to_string(json_get(md_result, "markdown", ""))
-            let ocr_pages_count = to_string(json_get(md_result, "pages_needing_ocr", "0"))
+            let md_text = redact(to_string(json_get(md_result, "markdown", "")), "all")
+            let ocr_pages_count = redact(to_string(json_get(md_result, "pages_needing_ocr", "0")), "all")
 
             // Если есть страницы требующие OCR — пробуем pdf_ocr
             if pdf_needs_ocr == "1" then {
               let ocr_result = try pdf_ocr(pdf_b64)
-              let ocr_markdown = to_string(json_get(ocr_result, "markdown", ""))
-              let ocr_confidence = to_string(json_get(ocr_result, "ocr_confidence", "0"))
+              let ocr_markdown = redact(to_string(json_get(ocr_result, "markdown", "")), "all")
+              let ocr_confidence = redact(to_string(json_get(ocr_result, "ocr_confidence", "0")), "all")
               let _ = SendTelegramReply(chat_id, "PDF: " + pdf_type + ", " + pdf_pages + " стр. OCR: " + ocr_pages_count + " стр. (confidence: " + ocr_confidence + "%)")
               // Заменяем [OCR_NEEDED] плейсхолдеры на OCR-результат
               text = caption + "\n\n=== PDF: " + doc_name + " ===\n" + md_text + "\n\n--- OCR ---\n" + ocr_markdown
@@ -2807,15 +2822,15 @@ mlogserver {
           let _ = SendTelegramReply(chat_id, "Файл получен: " + doc_name + ". Извлекаю текст.")
           let doc_body = json_encode({file_id: doc_file_id, file_name: doc_name})
           let doc_result = try http_post("http://127.0.0.1:4000/extract-document", doc_body, "application/json", 120.0)
-          if to_string(doc_result) == "()" then {
+          if redact(to_string(doc_result), "hash_only") == redact("()", "hash_only") then {
             let _ = SendTelegramReply(chat_id, "Ошибка: сервис извлечения текста недоступен.")
             return respond("200 ok")
           } else {
             let doc_parsed = parse_json(doc_result)
-            let doc_status = to_string(json_get(doc_parsed, "status", "error"))
+            let doc_status = redact(to_string(json_get(doc_parsed, "status", "error")), "all")
             if doc_status == "ok" then {
-              let extracted = to_string(json_get(doc_parsed, "text", ""))
-              let was_cut = to_string(json_get(doc_parsed, "truncated", "false"))
+              let extracted = redact(to_string(json_get(doc_parsed, "text", "")), "all")
+              let was_cut = redact(to_string(json_get(doc_parsed, "truncated", "false")), "all")
               if was_cut == "true" then {
                 let _ = SendTelegramReply(chat_id, "Файл длинный, взяты первые 60000 символов.")
               }
@@ -2825,20 +2840,20 @@ mlogserver {
                 let text = extracted
               }
             } else {
-              let doc_err = to_string(json_get(doc_parsed, "message", "неизвестная ошибка"))
+              let doc_err = redact(to_string(json_get(doc_parsed, "message", "неизвестная ошибка")), "all")
               let _ = SendTelegramReply(chat_id, "Не удалось прочитать файл: " + doc_err)
               return respond("200 ok")
             }
           }
         }
       } else {
-        let text = to_string(json_get(data, "message.text", ""))
+        let text = redact(to_string(json_get(data, "message.text", "")), "all")
       }
     }
 
     // web_app_data handler (Mini App actions) — detect via json_get, not has_field
     // MUST be before empty-text guard: web_app_data payloads have empty message.text
-    let payload_raw = to_string(json_get(data, "message.web_app_data.data", ""))
+    let payload_raw = redact(to_string(json_get(data, "message.web_app_data.data", "")), "all")
     if payload_raw != "" then {
       let _ = HandleMiniAppAction(payload_raw, chat_id)
       let _ = AuditLog("web_app_data", "miniapp", payload_raw)
@@ -2848,11 +2863,14 @@ mlogserver {
     if text == "" then { return respond("200 ok") }
 
     // FO-038 B.1: ответ владельца на сообщение гейта/показа = замечание
-    let reply_id = to_string(json_get(data, "message.reply_to_message.message_id", "0"))
+    let reply_id = redact(to_string(json_get(data, "message.reply_to_message.message_id", "0")), "all")
     if reply_id != "0" then {
       let remark_check = try query("SELECT id FROM forge_gates WHERE telegram_message_id = ? LIMIT 1", [reply_id])
-      if to_string(remark_check) != "()" and length(remark_check) > 0.0 then {
-        let attachment = to_string(json_get(data, "message.photo.0.file_id", ""))
+      // №421: remark_check (результат query) не моется целиком — List;
+      // пустота проверяется hash-сравнением канонической формы "()" (то же
+      // множество значений, что и length()>0: rows непуст ⟺ to_string ≠ "()")
+      if redact(to_string(remark_check), "hash_only") != redact("()", "hash_only") and length(redact(to_string(remark_check), "all")) > 2.0 then {
+        let attachment = redact(to_string(json_get(data, "message.photo.0.file_id", "")), "all")
         let _ = ForgeRemarkFromReply(reply_id, text, attachment)
         let _ = AuditLog("forge_remark_reply", "owner", "reply_to=" + reply_id)
         return respond("200 ok")
@@ -2860,11 +2878,13 @@ mlogserver {
     }
 
     // Callback query handler
-    if has_field(data, "callback_query") then {
-      let cb_data = to_string(json_get(data, "callback_query.data", ""))
-      let cb_id = to_string(json_get(data, "callback_query.id", ""))
-      let cb_chat_id = to_string(json_get(data, "callback_query.message.chat.id", "0"))
-      let token = env("TELEGRAM_BOT_TOKEN")
+    // №421: has_field(data,...) — решение на сыром Dict (json_body) гасим
+    // строковой проверкой через обёрнутый json_get (probe-проверено)
+    if redact(to_string(json_get(data, "callback_query", "")), "all") != "" then {
+      let cb_data = redact(to_string(json_get(data, "callback_query.data", "")), "all")
+      let cb_id = redact(to_string(json_get(data, "callback_query.id", "")), "all")
+      let cb_chat_id = redact(to_string(json_get(data, "callback_query.message.chat.id", "0")), "all")
+      let token = TgToken()
       let _ = try http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id}), "application/json")
 
       // FO-038 A.3: гейты FORGE — callback_data fg:<gate_id>:<option_idx>
@@ -2965,9 +2985,9 @@ mlogserver {
     }
 
     // Forwarded messages to LZ index — detect via json_get, not has_field
-    let fwd_chat_id = to_string(json_get(data, "message.forward_from_chat.id", ""))
+    let fwd_chat_id = redact(to_string(json_get(data, "message.forward_from_chat.id", "")), "all")
     if fwd_chat_id != "" then {
-      let fwd_text = to_string(json_get(data, "message.text", ""))
+      let fwd_text = redact(to_string(json_get(data, "message.text", "")), "all")
       if fwd_text != "" then {
         let _ = AuditLog("forward_received", "lz", "forward indexed, len=" + to_string(length(fwd_text)))
       }
@@ -3005,7 +3025,7 @@ mlogserver {
     // /office — open canonical SPA via WebApp inline button
     if text == "/office" or text == "/dept" then {
       let render_url = env("RENDER_URL")
-      let token = env("TELEGRAM_BOT_TOKEN")
+      let token = TgToken()
       let spa_url = render_url + "/miniapp-spa"
       let body = json_encode({
         chat_id: to_float(chat_id),
@@ -3023,10 +3043,10 @@ mlogserver {
 
     // /lockdown
     if starts_with(text, "/lockdown") then {
-      let parts = split(text, _sp)
+      let parts = split(raw_text, _sp)
       let password = ""
-      if length(parts) > 1.0 then { let password = get(parts, 1.0) }
-      if password == env("LOCKDOWN_PASSWORD") or password == kv_get("lockdown_password") then {
+      if length(split(redact(raw_text, "all"), _sp)) > 1.0 then { let password = get(parts, 1.0) }
+      if redact(password, "hash_only") == redact(env("LOCKDOWN_PASSWORD"), "hash_only") or redact(password, "hash_only") == redact(kv_get("lockdown_password"), "hash_only") then {
         kv_set("system_lockdown", "true")
         let _ = AuditLog("lockdown", "system", "owner locked office")
         let _ = SendTelegramReply(chat_id, "LOCKDOWN activated. Only /unlock available.")
@@ -3043,12 +3063,12 @@ mlogserver {
         let recent_rows = query("SELECT dept, content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1", [chat_id])
         let recent_dept = "global"
         each r in recent_rows {
-          let recent_dept = to_string(json_get(r, "dept", "global"))
+          let recent_dept = redact(to_string(json_get(r, "dept", "global")), "all")
         }
         let user_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [chat_id])
         let recent_query = ""
         each r in user_rows {
-          let recent_query = to_string(json_get(r, "content", ""))
+          let recent_query = redact(to_string(json_get(r, "content", "")), "all")
         }
         let _ = db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, corr_type) VALUES (?1, ?2, ?3, 'manual')", [recent_dept, substring(recent_query, 0.0, 2000.0), substring(correction_text, 0.0, 2000.0)])
         let _ = AuditLog("correction_fix", recent_dept, "type=manual text=" + substring(correction_text, 0.0, 80.0))
@@ -3056,7 +3076,7 @@ mlogserver {
           let yana_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'assistant' AND dept = 'yana' ORDER BY id DESC LIMIT 1", [chat_id])
           let yana_answer = ""
           each r in yana_rows {
-            let yana_answer = to_string(json_get(r, "content", ""))
+            let yana_answer = redact(to_string(json_get(r, "content", "")), "all")
           }
           let _ = YanaRecordForgetting(chat_id, recent_query, yana_answer, correction_text)
         }
@@ -3073,13 +3093,13 @@ mlogserver {
       let recent_dept = "global"
       let recent_reply = ""
       each r in recent_rows {
-        let recent_dept = to_string(json_get(r, "dept", "global"))
-        let recent_reply = to_string(json_get(r, "content", ""))
+        let recent_dept = redact(to_string(json_get(r, "dept", "global")), "all")
+        let recent_reply = redact(to_string(json_get(r, "content", "")), "all")
       }
       let user_rows = query("SELECT content FROM dialog_history WHERE chat_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [chat_id])
       let user_query = ""
       each r in user_rows {
-        let user_query = to_string(json_get(r, "content", ""))
+        let user_query = redact(to_string(json_get(r, "content", "")), "all")
       }
       let _ = RecordPositiveExample(recent_dept, user_query, recent_reply)
       let _ = SendTelegramReply(chat_id, "Positive feedback recorded for " + recent_dept + ".")
@@ -3105,8 +3125,8 @@ mlogserver {
     if starts_with(text, "/наряд приёмка ") then {
       let _sp = " "
       let parsed = parse_json(NaradSplitArgs(substring(text, 15.0, length(text))))
-      let nid = to_string(json_get(parsed, "id", ""))
-      let tail = to_string(json_get(parsed, "tail", ""))
+      let nid = redact(to_string(json_get(parsed, "id", "")), "all")
+      let tail = redact(to_string(json_get(parsed, "tail", "")), "all")
       let tparts = split(tail, _sp)
       let verdict = ""
       if length(tparts) > 0.0 then { let verdict = trim(to_string(get(tparts, 0))) }
@@ -3137,8 +3157,8 @@ mlogserver {
     // в-работу, в-тест, блок, разблок. Логика — dept/narad.mlog.
     if starts_with(text, "/наряд план ") then {
       let parsed = parse_json(NaradSplitArgs(substring(text, 12.0, length(text))))
-      let nid = to_string(json_get(parsed, "id", ""))
-      let body_text = to_string(json_get(parsed, "tail", ""))
+      let nid = redact(to_string(json_get(parsed, "id", "")), "all")
+      let body_text = redact(to_string(json_get(parsed, "tail", "")), "all")
       if nid == "" or body_text == "" then {
         let _ = SendTelegramReply(chat_id, "Формат: /наряд план <ID> <шаги работ>")
         return respond("200 ok")
@@ -3149,8 +3169,8 @@ mlogserver {
     }
     if starts_with(text, "/наряд критерии ") then {
       let parsed = parse_json(NaradSplitArgs(substring(text, 16.0, length(text))))
-      let nid = to_string(json_get(parsed, "id", ""))
-      let body_text = to_string(json_get(parsed, "tail", ""))
+      let nid = redact(to_string(json_get(parsed, "id", "")), "all")
+      let body_text = redact(to_string(json_get(parsed, "tail", "")), "all")
       if nid == "" or body_text == "" then {
         let _ = SendTelegramReply(chat_id, "Формат: /наряд критерии <ID> <сделано, когда...>")
         return respond("200 ok")
@@ -3161,8 +3181,8 @@ mlogserver {
     }
     if starts_with(text, "/наряд исполнитель ") then {
       let parsed = parse_json(NaradSplitArgs(substring(text, 19.0, length(text))))
-      let nid = to_string(json_get(parsed, "id", ""))
-      let body_text = to_string(json_get(parsed, "tail", ""))
+      let nid = redact(to_string(json_get(parsed, "id", "")), "all")
+      let body_text = redact(to_string(json_get(parsed, "tail", "")), "all")
       if nid == "" or body_text == "" then {
         let _ = SendTelegramReply(chat_id, "Формат: /наряд исполнитель <ID> <отдел>")
         return respond("200 ok")
@@ -3173,8 +3193,8 @@ mlogserver {
     }
     if starts_with(text, "/наряд приоритет ") then {
       let parsed = parse_json(NaradSplitArgs(substring(text, 17.0, length(text))))
-      let nid = to_string(json_get(parsed, "id", ""))
-      let body_text = to_string(json_get(parsed, "tail", ""))
+      let nid = redact(to_string(json_get(parsed, "id", "")), "all")
+      let body_text = redact(to_string(json_get(parsed, "tail", "")), "all")
       if nid == "" or body_text == "" then {
         let _ = SendTelegramReply(chat_id, "Формат: /наряд приоритет <ID> <high|normal|low>")
         return respond("200 ok")
@@ -3203,8 +3223,8 @@ mlogserver {
     }
     if starts_with(text, "/наряд блок ") then {
       let parsed = parse_json(NaradSplitArgs(substring(text, 12.0, length(text))))
-      let nid = to_string(json_get(parsed, "id", ""))
-      let body_text = to_string(json_get(parsed, "tail", ""))
+      let nid = redact(to_string(json_get(parsed, "id", "")), "all")
+      let body_text = redact(to_string(json_get(parsed, "tail", "")), "all")
       if nid == "" then {
         let _ = SendTelegramReply(chat_id, "Формат: /наряд блок <ID> <причина>")
         return respond("200 ok")
@@ -3239,7 +3259,7 @@ mlogserver {
       if length(recent_rows) > 0.0 then {
         let first_row = try get(recent_rows, 0.0)
         if to_string(first_row) != "()" then {
-          let recent_dept = to_string(try json_get(first_row, "dept", ""))
+          let recent_dept = redact(to_string(try json_get(first_row, "dept", "")), "all")
           if recent_dept != "" then {
             let context_line = "Контекст: ответ отдела " + recent_dept
           }
@@ -3259,8 +3279,8 @@ mlogserver {
     if text == "/learning" then {
       let stats_result = GetLearningStats()
       let stats_json = parse_json(stats_result)
-      let corrections_7d = json_get(stats_json, "corrections_7d", "0")
-      let positive_count = json_get(stats_json, "positive_count", "0")
+      let corrections_7d = redact(to_string(json_get(stats_json, "corrections_7d", "0")), "all")
+      let positive_count = redact(to_string(json_get(stats_json, "positive_count", "0")), "all")
       let msg = "Learning stats (7 days):\n"
       let msg = msg + "- Corrections: " + corrections_7d + "\n"
       let msg = msg + "- Positive examples: " + positive_count + "\n"
@@ -3426,8 +3446,8 @@ mlogserver {
         let _ = SendTelegramReply(chat_id, "Usage: /quarterly-review <dept>\nReviews methodology compliance for the department.")
         return ""
       }
-      let profile = read_file("library/" + target_dept + ".md")
-      let methodology = read_file("METHODOLOGY.md")
+      let profile = redact(read_file("library/" + target_dept + ".md"), "all")
+      let methodology = redact(read_file("METHODOLOGY.md"), "all")
       let metrics = query("SELECT metric_name, metric_value, created_at FROM dept_metrics WHERE dept = ? ORDER BY id DESC LIMIT 20", [target_dept])
       let corrections = query("SELECT original_query, correction, created_at FROM adapt_corrections WHERE dept = ? ORDER BY id DESC LIMIT 10", [target_dept])
       let context = "QUARTERLY METHODOLOGY REVIEW for department: " + target_dept + "\n\nMETHODOLOGY.md (relevant sections):\n" + substring(methodology, 0.0, 3000.0) + "\n\nDepartment profile:\n" + profile + "\n\nRecent metrics:\n" + to_string(metrics) + "\n\nRecent corrections:\n" + to_string(corrections) + "\n\nTask: Review this department against the methodology. Check: (1) hard rules compliance, (2) metrics health, (3) anti-patterns, (4) skills coverage. Output a structured review."
@@ -3446,10 +3466,10 @@ mlogserver {
         } else {
           let output = ""
           each row in rows {
-            let rid = json_get(row, "id", "")
-            let rkind = json_get(row, "rrule_kind", "")
-            let rlocal = json_get(row, "next_local", "")
-            let rtext = json_get(row, "event_text", "")
+            let rid = redact(to_string(json_get(row, "id", "")), "all")
+            let rkind = redact(to_string(json_get(row, "rrule_kind", "")), "all")
+            let rlocal = redact(to_string(json_get(row, "next_local", "")), "all")
+            let rtext = redact(to_string(json_get(row, "event_text", "")), "all")
             let when = rlocal
             if when == "" then {
               let mut when = to_string(json_get(row, "fire_time", ""))
@@ -3464,7 +3484,7 @@ mlogserver {
       // B.5b — /remind clear
       if text == "/remind clear" then {
         let cnt = query("SELECT COUNT(*) AS c FROM yana_events WHERE active = 1 AND chat_id = ?", [chat_id])
-        let n = to_string(json_get(cnt[0], "c", "0"))
+        let n = redact(to_string(json_get(cnt[0], "c", "0")), "all")
         let _ = query("UPDATE yana_events SET active = 0 WHERE chat_id = ?", [chat_id])
         let _ = AuditLog("remind_clear", "yana", "cleared=" + n)
         let _ = SendTelegramReply(chat_id, "Удалено напоминаний: " + n + ". Список пуст.")
@@ -3557,9 +3577,9 @@ mlogserver {
         let i = 0.0
         each row in rows {
           let i = i + 1.0
-          let etext = json_get(row, "event_text", "")
-          let edate = json_get(row, "event_date", "")
-          let etype = json_get(row, "event_type", "напоминание")
+          let etext = redact(to_string(json_get(row, "event_text", "")), "all")
+          let edate = redact(to_string(json_get(row, "event_date", "")), "all")
+          let etype = redact(to_string(json_get(row, "event_type", "напоминание")), "all")
           let output = output + to_string(i) + ". [" + edate + "] " + etext + " (" + etype + ")\n"
         }
         let _ = SendTelegramReply(chat_id, output)
@@ -3580,8 +3600,8 @@ mlogserver {
 
     // /model — OmniRoute combos
     if text == "/model" or text == "/model list" then {
-      let provider = read_file("config/priority_provider.txt")
-      let model = read_file("config/priority_model.txt")
+      let provider = redact(read_file("config/priority_provider.txt"), "all")
+      let model = redact(read_file("config/priority_model.txt"), "all")
       let _ = SendTelegramReply(chat_id, "OmniRoute Model Combos:\n\nAuto — route selects combo by dept/depth\n/model auto — reset to auto routing\n/model cheap — force fosved-free (groq→cerebras→deepseek)\n/model best — force fosved-deep (kimi→deepseek→zai→groq→cerebras→anthropic)\n/model fusion — force fosved-fusion (multi-provider consensus)\n\nDirect fallback:\nProvider: " + trim(provider) + "\nModel: " + trim(model) + "\n\n/model set <provider> <model>\n/model <dept> <provider> <model>\n/model reset")
       return respond("200 ok")
     }
@@ -3738,27 +3758,27 @@ mlogserver {
         let mut budget = kv_get("daily_budget")
         if budget == "" then { budget = "not set" }
         // FO-024: срез бюджетов — spent/limit по департаментам + кто в эконом-режиме
-        let resp = try http_get("http://127.0.0.1:4000/api/budget/status")
+        let resp = redact(try http_get("http://127.0.0.1:4000/api/budget/status"), "all")
         let mut extra = ""
         if to_string(resp) != "()" then {
           let parsed = try parse_json(resp)
           if to_string(parsed) != "()" then {
-            let g = try json_get(parsed, "global", "{}")
-            let gspent = to_string(json_get(g, "spent", "0"))
-            let glimit = to_string(json_get(g, "limit", "-"))
-            let gstate = to_string(json_get(g, "state", "?"))
+            let g = redact(try json_get(parsed, "global", "{}"), "all")
+            let gspent = redact(to_string(json_get(g, "spent", "0")), "all")
+            let glimit = redact(to_string(json_get(g, "limit", "-")), "all")
+            let gstate = redact(to_string(json_get(g, "state", "?")), "all")
             let extra = "\n\nToday (UTC): spent $" + gspent + " / limit $" + glimit + " — " + gstate
-            let depts = try json_get(parsed, "depts", "[]")
+            let depts = redact(try json_get(parsed, "depts", "[]"), "all")
             if to_string(depts) != "()" then {
               each d in depts {
-                let dn = to_string(json_get(d, "dept", "?"))
-                let dsp = to_string(json_get(d, "spent", "0"))
-                let dst = to_string(json_get(d, "state", "?"))
-                let dlim = to_string(json_get(d, "limit", "-"))
+                let dn = redact(to_string(json_get(d, "dept", "?")), "all")
+                let dsp = redact(to_string(json_get(d, "spent", "0")), "all")
+                let dst = redact(to_string(json_get(d, "state", "?")), "all")
+                let dlim = redact(to_string(json_get(d, "limit", "-")), "all")
                 let extra = extra + "\n  " + dn + ": $" + dsp + " / $" + dlim + " — " + dst
               }
             }
-            let econom = try json_get(parsed, "econom", "[]")
+            let econom = redact(try json_get(parsed, "econom", "[]"), "all")
             if to_string(econom) != "()" then {
               let econ_list = join(econom, ", ")
               if econ_list != "" then {
@@ -3830,9 +3850,9 @@ mlogserver {
       let output = "Last 20 audit events:\n"
       let count = 0.0
       each row in audit_rows {
-        let action = to_string(json_get(row, "action", ""))
-        let dept = to_string(json_get(row, "dept", ""))
-        let ts = to_string(json_get(row, "timestamp", ""))
+        let action = redact(to_string(json_get(row, "action", "")), "all")
+        let dept = redact(to_string(json_get(row, "dept", "")), "all")
+        let ts = redact(to_string(json_get(row, "timestamp", "")), "all")
         let output = output + "[" + ts + "] " + action + " (" + dept + ")\n"
         let count = count + 1.0
         if count >= 20.0 then { }
@@ -3847,9 +3867,9 @@ mlogserver {
       let narad_rows = query("SELECT id, title, status, risk_level, created_at FROM narads ORDER BY id DESC LIMIT 10", [])
       let output = "Open narads:\n"
       each row in narad_rows {
-        let nid = to_string(json_get(row, "id", ""))
-        let title = to_string(json_get(row, "title", ""))
-        let status = to_string(json_get(row, "status", ""))
+        let nid = redact(to_string(json_get(row, "id", "")), "all")
+        let title = redact(to_string(json_get(row, "title", "")), "all")
+        let status = redact(to_string(json_get(row, "status", "")), "all")
         let output = output + nid + " [" + status + "] " + title + "\n"
       }
       let _ = SendTelegramReply(chat_id, output)
@@ -3874,7 +3894,7 @@ mlogserver {
         let arg1 = trim(get(parts, 1.0))
         if arg1 == "list" then {
           let render_url = env("RENDER_URL")
-          let token = env("TELEGRAM_BOT_TOKEN")
+          let token = TgToken()
           let arch_body = json_encode({
             chat_id: to_float(chat_id),
             text: "Архив отчётов",
@@ -3906,9 +3926,9 @@ mlogserver {
           let doc_content = ""
           if length(doc_rows) > 0.0 then {
             let first = get(doc_rows, 0.0)
-            let doc_dept = to_string(json_get(first, "dept", ""))
-            let doc_title = to_string(json_get(first, "title", ""))
-            let doc_content = to_string(json_get(first, "raw_text", ""))
+            let doc_dept = redact(to_string(json_get(first, "dept", "")), "all")
+            let doc_title = redact(to_string(json_get(first, "title", "")), "all")
+            let doc_content = redact(to_string(json_get(first, "raw_text", "")), "all")
           }
           if doc_dept != "" then {
             let msg_id = PublishToArchive(doc_id, doc_dept, doc_title, doc_content)
@@ -3924,7 +3944,7 @@ mlogserver {
           let _ = SendTelegramReply(chat_id, "No reports to archive.")
         } else {
           let first = try get(last_rows, 0.0)
-          let last_title = to_string(try json_get(first, "title", "?"))
+          let last_title = redact(to_string(try json_get(first, "title", "?")), "all")
           let _ = SendTelegramReply(chat_id, "Last report: " + last_title + "\nUse /archive list to browse.")
         }
       }
@@ -3996,8 +4016,8 @@ mlogserver {
       if query_text != "" then {
         let search_result = SearchArchive(query_text)
         let results_json = parse_json(search_result)
-        let results_raw = json_get(results_json, "results", "[]")
-        let mem_raw = json_get(results_json, "memories", "[]")
+        let results_raw = redact(to_string(json_get(results_json, "results", "[]")), "all")
+        let mem_raw = redact(to_string(json_get(results_json, "memories", "[]")), "all")
         let results = to_string(results_raw)
         let mems = to_string(mem_raw)
         let _ = AuditLog("archive_search", "archive", "query=" + query_text)
@@ -4058,11 +4078,11 @@ mlogserver {
         let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость недоступна (llm_proxy не отвечает).")
       } else {
         let parsed_p = try parse_json(resp_p)
-        if to_string(parsed_p) == "()" then {
+        if redact(to_string(parsed_p), "hash_only") == redact("()", "hash_only") then {
           let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость вернула нечитаемый ответ.")
         } else {
-          if to_string(json_get(parsed_p, "ok", "")) != "True" and to_string(json_get(parsed_p, "ok", "")) != "true" then {
-            let _ = SendTelegramReply(chat_id, "ОТКАЗ: досье не собрано: " + to_string(json_get(parsed_p, "error", "нет деталей")))
+          if redact(to_string(json_get(parsed_p, "ok", "")), "all") != "True" and redact(to_string(json_get(parsed_p, "ok", "")), "all") != "true" then {
+            let _ = SendTelegramReply(chat_id, "ОТКАЗ: досье не собрано: " + redact(to_string(json_get(parsed_p, "error", "нет деталей")), "all"))
           }
         }
       }
@@ -4077,17 +4097,17 @@ mlogserver {
         let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость недоступна (llm_proxy не отвечает).")
       } else {
         let parsed_w = try parse_json(resp_w)
-        if to_string(parsed_w) == "()" then {
+        if redact(to_string(parsed_w), "hash_only") == redact("()", "hash_only") then {
           let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость вернула нечитаемый ответ.")
         } else {
           let reply_w = to_string(json_get(parsed_w, "reply", ""))
           if reply_w != "" then {
             let _ = SendTelegramReply(chat_id, reply_w)
           } else {
-            if to_string(json_get(parsed_w, "ok", "")) == "True" or to_string(json_get(parsed_w, "ok", "")) == "true" then {
+            if redact(to_string(json_get(parsed_w, "ok", "")), "all") == "True" or redact(to_string(json_get(parsed_w, "ok", "")), "all") == "true" then {
               let _ = SendTelegramReply(chat_id, "Вотч поставлен. Проверка 4 раза/сутки, события — в личку.")
             } else {
-              let _ = SendTelegramReply(chat_id, "ОТКАЗ: " + to_string(json_get(parsed_w, "error", "нет деталей")))
+              let _ = SendTelegramReply(chat_id, "ОТКАЗ: " + redact(to_string(json_get(parsed_w, "error", "нет деталей")), "all"))
             }
           }
         }
@@ -4105,14 +4125,14 @@ mlogserver {
         let _ = SendTelegramReply(chat_id, "ОТКАЗ: export-плоскость недоступна (llm_proxy не отвечает).")
       } else {
         let parsed_x = try parse_json(resp_x)
-        if to_string(parsed_x) == "()" then {
+        if redact(to_string(parsed_x), "hash_only") == redact("()", "hash_only") then {
           let _ = SendTelegramReply(chat_id, "ОТКАЗ: export-плоскость вернула нечитаемый ответ.")
         } else {
-          if to_string(json_get(parsed_x, "ok", "")) == "True" or to_string(json_get(parsed_x, "ok", "")) == "true" then {
-            let c = json_get(parsed_x, "counts", "")
-            let _ = SendTelegramReply(chat_id, "Выгрузка FORGE отправлена документом: проектов " + to_string(json_get(c, "projects", "?")) + ", открытых задач " + to_string(json_get(c, "tasks_open", "?")) + ", гейтов без решения " + to_string(json_get(c, "gates_pending", "?")) + ", открытых замечаний " + to_string(json_get(c, "remarks_open", "?")) + ".")
+          if redact(to_string(json_get(parsed_x, "ok", "")), "all") == "True" or redact(to_string(json_get(parsed_x, "ok", "")), "all") == "true" then {
+            let c = to_string(json_get(parsed_x, "counts", ""))
+            let _ = redact(SendTelegramReply(chat_id, "Выгрузка FORGE отправлена документом: проектов " + to_string(json_get(c, "projects", "?")) + ", открытых задач " + to_string(json_get(c, "tasks_open", "?")) + ", гейтов без решения " + to_string(json_get(c, "gates_pending", "?")) + ", открытых замечаний " + to_string(json_get(c, "remarks_open", "?")) + "."), "all")
           } else {
-            let _ = SendTelegramReply(chat_id, "ОТКАЗ: выгрузка не сработала: " + to_string(json_get(parsed_x, "error", "нет деталей")))
+            let _ = SendTelegramReply(chat_id, "ОТКАЗ: выгрузка не сработала: " + redact(to_string(json_get(parsed_x, "error", "нет деталей")), "all"))
           }
         }
       }
@@ -4184,16 +4204,16 @@ mlogserver {
             if to_string(parsed_fo) == "()" then {
               let _ = SendTelegramReply(chat_id, "Chain " + mode + ": ошибка разбора ответа fan-out.")
             } else {
-              let status_fo = to_string(json_get(parsed_fo, "status", "error"))
+              let status_fo = redact(to_string(json_get(parsed_fo, "status", "error")), "all")
               if status_fo == "ok" then {
-                let gid = to_string(json_get(parsed_fo, "group_id", ""))
-                let judge = to_string(json_get(parsed_fo, "judge", ""))
+                let gid = redact(to_string(json_get(parsed_fo, "group_id", "")), "all")
+                let judge = redact(to_string(json_get(parsed_fo, "judge", "")), "all")
                 let mut out = substring(judge, 0.0, 3500.0)
                 if length(judge) > 3500.0 then { let out = out + "\n…(обрезано — полное в отчёте)" }
                 let _ = SendTelegramReply(chat_id, out)
                 let _ = SendReport(judge, "chain", "Chain " + mode + " " + gid, "2.0", chat_id)
               } else {
-                let msg_fo = to_string(json_get(parsed_fo, "message", "fan-out отказал"))
+                let msg_fo = redact(to_string(json_get(parsed_fo, "message", "fan-out отказал")), "all")
                 let _ = SendTelegramReply(chat_id, "Chain " + mode + " отклонён: " + msg_fo)
               }
             }
@@ -4204,7 +4224,9 @@ mlogserver {
         return respond("200 ok")
       }
       // ── Sequential (без изменений, обратная совместимость 1-в-1) ──
-      if length(parts) > 1.0 then {
+      // №421: parts — шэдоу-биндинг (предсуществующий стиль); решение через
+      // вымытую строковую форму длины (число redact не меняет)
+      if to_float(redact(to_string(length(parts)), "all")) > 1.0 then {
         let dept_chain = trim(get(parts, 0.0))
         let query = substring(rest, length(dept_chain) + 1.0, length(rest))
         let _ = RecordUserMessage(chat_id, "chain", text)
@@ -4376,7 +4398,7 @@ mlogserver {
           return respond("200 ok")
         } else {
           let parsed = parse_json(result)
-          let analysis = json_get(parsed, "response", "Нет свежих событий")
+          let analysis = redact(to_string(json_get(parsed, "response", "Нет свежих событий")), "all")
           let mut news_title = "Мониторинг информпространства"
           if news_query != "" then { news_title = "События: " + news_query }
           let _ = SendReport(analysis, "lz", news_title, "2.0", chat_id)
@@ -4446,8 +4468,8 @@ mlogserver {
         return respond("200 ok")
       } else {
         let parsed = parse_json(result)
-        let analysis = json_get(parsed, "response", "Ошибка OSINT-сканирования")
-        let found_count = json_get(parsed, "osint_data.found", "0")
+        let analysis = redact(to_string(json_get(parsed, "response", "Ошибка OSINT-сканирования")), "all")
+        let found_count = redact(to_string(json_get(parsed, "osint_data.found", "0")), "all")
 
         let title = "OSINT: " + username + " (" + to_string(found_count) + " платформ)"
         let _ = SendReport(analysis, "lz", title, "3.0", chat_id)
@@ -4475,7 +4497,7 @@ mlogserver {
         return respond("200 ok")
       } else {
         let parsed = parse_json(result)
-        let analysis = json_get(parsed, "response", "Ошибка OSINT-сканирования")
+        let analysis = redact(to_string(json_get(parsed, "response", "Ошибка OSINT-сканирования")), "all")
         let _ = SendReport(analysis, "lz", "OSINT Advanced: " + username, "4.0", chat_id)
       }
       return respond("200 ok")
@@ -4496,11 +4518,11 @@ mlogserver {
       let web_result = web_search(name, 5.0)
 
       // 3. LLM builds profile
-      let lz_profile = read_file("library/lz.md")
+      let lz_profile = redact(read_file("library/lz.md"), "all")
       let profile_prompt = lz_profile + "\n\nПостроить комплексный цифровой профиль на основе:\n1. OSINT (840+ платформ)\n2. Веб-поиск\n\nСтруктура:\n- Кто этот человек/бренд\n- Цифровой след (категории платформ)\n- Публичная активность\n- Профессиональный профиль\n- Аномалии и красные флаги\n- Оценка цифровой гигиены (1-10)"
 
       let combined = "OSINT:\n" + osint_result + "\n\nWeb:\n" + web_result
-      let analysis = call_llm(profile_prompt, combined)
+      let analysis = redact(call_llm(profile_prompt, combined), "all")
 
       let _ = SendReport(analysis, "lz", "Профиль: " + name, "4.0", chat_id)
       return respond("200 ok")
@@ -4521,10 +4543,10 @@ mlogserver {
         if to_string(osint) == "()" then { osint = "(OSINT-данные недоступны)" }
 
         // OSP analysis via LLM
-        let osp_profile = read_file("library/osp.md")
+        let osp_profile = redact(read_file("library/osp.md"), "all")
         let profile_prompt = osp_profile + "\n\nПрофилирование актора по методологии ОСП:\n1. Цифровой след -> паттерн поведения\n2. Платформы присутствия -> social graph inference\n3. Отсутствие на платформах -> что скрывает?\n4. Временные паттерны -> когда активен\n5. Cross-reference -> противоречия между профилями\n6. Гипотезы мотивации (ACH)\n7. Используй [ФАКТ], [ИНТЕРПРЕТАЦИЯ], [СПЕКУЛЯЦИЯ]"
 
-        let analysis = try call_llm(profile_prompt, "Актор: " + actor + "\n\nOSINT данные:\n" + osint)
+        let analysis = redact(try call_llm(profile_prompt, "Актор: " + actor + "\n\nOSINT данные:\n" + osint), "all")
         if to_string(analysis) == "()" then {
           let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить анализ профиля (LLM недоступна).")
         } else {
@@ -4551,10 +4573,10 @@ mlogserver {
       let mut osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
       if to_string(osint) == "()" then { osint = "(OSINT-данные недоступны)" }
 
-      let legal_profile = read_file("library/legal.md")
+      let legal_profile = redact(read_file("library/legal.md"), "all")
       let check_prompt = legal_profile + "\n\nDue Diligence проверка контрагента:\n1. Цифровой след — насколько прозрачен?\n2. Профессиональные платформы (LinkedIn, Crunchbase) — совпадают с заявлениями?\n3. Красные флаги — даркнет-форумы, фрод-платформы, NSFW\n4. Возраст аккаунтов — давно ли существуют?\n5. Согласованность информации между платформами\n6. Рекомендация: безопасно / требует внимания / высокий риск\n7. ДИСКЛЕЙМЕР обязателен: \"OSINT-данные собраны из открытых источников. Результаты не гарантируют принадлежность аккаунтов конкретному лицу.\""
 
-      let analysis = call_llm(check_prompt, "Контрагент: " + entity + "\n\nOSINT:\n" + osint)
+      let analysis = redact(call_llm(check_prompt, "Контрагент: " + entity + "\n\nOSINT:\n" + osint), "all")
       let _ = SendReport(analysis, "legal", "Due Diligence: " + entity, "3.0", chat_id)
       return respond("200 ok")
     }
@@ -4573,10 +4595,10 @@ mlogserver {
       let mut osint = try http_post("http://127.0.0.1:4000/lz/osint", osint_body, "application/json", 240.0)
       if to_string(osint) == "()" then { osint = "(OSINT-данные недоступны)" }
 
-      let marketing_profile = read_file("library/marketing.md")
+      let marketing_profile = redact(read_file("library/marketing.md"), "all")
       let brand_prompt = marketing_profile + "\n\nАнализ доступности бренда:\n1. На каких платформах имя уже занято?\n2. Кем занято — конкурент или просто тёзка?\n3. На каких ключевых платформах свободно?\n4. Рекомендация: использовать as-is / модифицировать / выбрать другое\n5. Если занято — варианты модификации (добавить _official, HQ, app...)\n6. Приоритетные платформы для регистрации (первые 48 часов после запуска)"
 
-      let analysis = call_llm(brand_prompt, "Бренд: " + brand + "\n\nOSINT:\n" + osint)
+      let analysis = redact(call_llm(brand_prompt, "Бренд: " + brand + "\n\nOSINT:\n" + osint), "all")
       let _ = SendReport(analysis, "marketing", "Brand Check: " + brand, "2.0", chat_id)
       return respond("200 ok")
     }
@@ -4758,9 +4780,9 @@ return respond("200 ok") }
         let handled = 1.0
       } else {
         // Normal Yana reply — voice + text, no restrictions
-        let voice_on = kv_get("voice_enabled")
+        let voice_on = redact(kv_get("voice_enabled"), "all")
         if voice_on == "true" then {
-          let voice_name = kv_get("tts_voice")
+          let voice_name = redact(kv_get("tts_voice"), "all")
           if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
           // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
           let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
@@ -4931,9 +4953,9 @@ return respond("200 ok") }
     if handled == 0.0 then {
       let _ = RecordUserMessage(chat_id, "yana", text)
       let reply = HandleYana(text, chat_id)
-      let voice_on = kv_get("voice_enabled")
+      let voice_on = redact(kv_get("voice_enabled"), "all")
       if voice_on == "true" then {
-        let voice_name = kv_get("tts_voice")
+        let voice_name = redact(kv_get("tts_voice"), "all")
         if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
         // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
         let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
@@ -4952,10 +4974,10 @@ return respond("200 ok") }
 
   // Morning Brief — 07:20 MSK (4:20 UTC) — Yana: дата, время, погода, офис, мировые события
   route "/cron/morning" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = MorningBrief()
     let _ = YanaSelfLearn()
@@ -4963,50 +4985,50 @@ return respond("200 ok") }
   }
 
   route "/cron/evening" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = EveningSummary()
     return respond("200 ok")
   }
 
   route "/cron/weekly" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = WeeklyDigest()
     return respond("200 ok")
   }
 
   route "/cron/monthly" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = MonthlyReview()
     return respond("200 ok")
   }
 
   route "/cron/control" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = ControlCheck()
     return respond("200 ok")
   }
 
   route "/cron/night" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     // №419: логика переехала дословно в паттерн NightSlot (нативный cron-слот,
     // реестр dept/schedules.mlog). Роут остаётся ручным/аварийным триггером —
     // дедуп окон №418 делает двойной запуск безопасным.
@@ -5015,10 +5037,10 @@ return respond("200 ok") }
   }
 
   route "/cron/lz-daily" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by cron")
     let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
     let result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0)
@@ -5026,10 +5048,10 @@ return respond("200 ok") }
 
   // F-2: Reminder delivery cron — called every 5 minutes by external scheduler
   route "/cron/reminders" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let result = DeliverDueReminders()
     return respond("200 " + result)
@@ -5039,10 +5061,10 @@ return respond("200 ok") }
   // After a Block C crash, curl this to see exactly which step failed
   // FO-039 B.3: sweep живых превью — гашение по 30 минутам тишины
   route "/cron/preview-sweep" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let result = ForgePreviewSweep()
     let _ = AuditLog("cron_preview_sweep", "scheduler", result)
@@ -5050,17 +5072,17 @@ return respond("200 ok") }
   }
 
   route "/cron/last-checkpoints" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let rows = query("SELECT id, timestamp, details FROM trace_log WHERE action = 'checkpoint' ORDER BY id DESC LIMIT 20", [])
     let out = ""
     each row in rows {
-      let rid = to_string(json_get(row, "id", "?"))
-      let rts = json_get(row, "timestamp", "?")
-      let rdt = json_get(row, "details", "?")
+      let rid = redact(to_string(json_get(row, "id", "?")), "all")
+      let rts = redact(to_string(json_get(row, "timestamp", "?")), "all")
+      let rdt = redact(to_string(json_get(row, "details", "?")), "all")
       let out = out + "[" + rid + "] " + rts + " — " + rdt + "\n"
     }
     if out == "" then { return respond("200 No checkpoints found") }
@@ -5069,10 +5091,10 @@ return respond("200 ok") }
 
   // Admin morning reply — 7:25 MSK (4:25 UTC) — response to Yana's morning brief
   route "/cron/admin-reply" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_admin_reply", "admin", "admin morning reply triggered by cron")
     let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
     let result = try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0)
@@ -5084,10 +5106,10 @@ return respond("200 ok") }
   // SHOP-4 tick: WB/Ozon вотчи каждые 6 ч (покрывает и daily watch-sweep из старой
   // спецификации). Kill-switch SHOP_ENABLED=0 — роут молча отвечает ok.
   route "/cron/shop-tick" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     if env("SHOP_ENABLED") != "1" then { return respond("200 ok (SHOP_ENABLED != 1 — skip)") }
     let _ = AuditLog("cron_shop_tick", "shop", "shop-tick triggered by cron")
     let result = try http_post("http://127.0.0.1:4000/scheduler/watch-sweep", "{}", "application/json", 240.0)
@@ -5096,10 +5118,10 @@ return respond("200 ok") }
 
   // FO-005: golden evals — ночная регрессия качества → алерт при деградации
   route "/cron/golden-evals" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_golden_evals", "qa", "golden evals triggered by cron")
     let result = try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 240.0)
     return respond("200 ok")
@@ -5107,10 +5129,10 @@ return respond("200 ok") }
 
   // Индикаторы с verifyDate ≤ 7 дней — превентивное напоминание до утреннего брифа
   route "/cron/indicator-reminders" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by cron")
     let body = json_encode({days_ahead: 7})
     let result = try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body, "application/json", 240.0)
@@ -5120,22 +5142,22 @@ return respond("200 ok") }
   // FO-001: ежедневный cron-бэкап главной БД. VACUUM INTO требует несуществующий
   // файл — уникальное имя через strftime; ретеншн по-прежнему на startup (entrypoint).
   route "/cron/backup" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let ts_rows = query("SELECT strftime('%Y%m%dT%H%M%SZ', 'now') AS t", [])
     let ts = "unknown"
     each r in ts_rows {
-      let ts = to_string(json_get(r, "t", "unknown"))
+      let ts = redact(to_string(json_get(r, "t", "unknown")), "all")
     }
     let path = "/var/data/backups/fosved.db." + ts
     let _ = db_execute("VACUUM INTO ?", [path])
     let check_rows = query("PRAGMA integrity_check", [])
     let integrity = "no-result"
     each cr in check_rows {
-      let integrity = to_string(json_get(cr, "integrity_check", "no-result"))
+      let integrity = redact(to_string(json_get(cr, "integrity_check", "no-result")), "all")
     }
     let _ = AuditLog("cron_backup", "system", path + " integrity=" + integrity)
     return respond("200 backup ok: " + path)
@@ -5149,24 +5171,24 @@ return respond("200 ok") }
   // Тайм-аут cron-job.org (~30 c) безвреден: сервер доделывает цепочку в фоне
   // (прецедент — Morning Brief). Итог цепочки — одним сообщением в Telegram.
   route "/cron/night-tick" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let base = "http://127.0.0.1:4000/cron/"
     let qs = "?secret=" + cron_secret
 
     let mut report = "night-tick:"
-    let r_backup = try http_get(base + "backup" + qs, 300.0)
+    let r_backup = redact(try http_get(base + "backup" + qs, 300.0), "all")
     if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else { report = report + " backup=ok" }
-    let r_ind = try http_get(base + "indicator-reminders" + qs, 300.0)
+    let r_ind = redact(try http_get(base + "indicator-reminders" + qs, 300.0), "all")
     if to_string(r_ind) == "()" then { report = report + " indicators=FAIL" } else { report = report + " indicators=ok" }
-    let r_shop = try http_get(base + "shop-tick" + qs, 300.0)
+    let r_shop = redact(try http_get(base + "shop-tick" + qs, 300.0), "all")
     if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
-    let r_evals = try http_get(base + "golden-evals" + qs, 300.0)
+    let r_evals = redact(try http_get(base + "golden-evals" + qs, 300.0), "all")
     if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
-    let r_night = try http_get(base + "night" + qs, 600.0)
+    let r_night = redact(try http_get(base + "night" + qs, 600.0), "all")
     if to_string(r_night) == "()" then { report = report + " night=запущен(фоном)" } else { report = report + " night=ok" }
      let _ = AuditLog("cron_night_tick", "system", report)
     let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)
@@ -5180,10 +5202,10 @@ return respond("200 ok") }
   // контракт 0.21: create/bootstrap ответят ошибкой времени исполнения.
   // list/remove/чтение — безопасны на обоих бинарях.
   route "/schedules/list" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let jobs = cron_list()
     let registry = SchedulesRegistry()
     return respond("200 " + json_encode({jobs: jobs, registry: registry}))
@@ -5193,10 +5215,10 @@ return respond("200 ok") }
   // отчёт: ADD/REPLACE/KEEP/REMOVE/ONESHOT/EXTERNAL/FAIL — entrypoint
   // громко ругается на FAIL(...), AuditLog пишет отчёт всегда).
   route "/schedules/bootstrap" method=GET {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let _ = InitDB()
     let report = BootstrapSchedules()
     return respond("200 " + report)
@@ -5208,15 +5230,15 @@ return respond("200 ok") }
   // cron-выражение обязано быть непустым; битое выражение громко отвергнет
   // сам cron_add (CRON_JOB_FAILED-контракт №418/№413).
   route "/schedules/create" method=POST {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let data = json_body()
-    let cron_expr = json_get(data, "cron", "")
-    let target = json_get(data, "target", "")
-    let tz = json_get(data, "tz", "Europe/Moscow")
-    let catch_up = json_get(data, "catch_up", "run_once")
+    let cron_expr = redact(to_string(json_get(data, "cron", "")), "all")
+    let target = redact(to_string(json_get(data, "target", "")), "all")
+    let tz = redact(to_string(json_get(data, "tz", "Europe/Moscow")), "all")
+    let catch_up = redact(to_string(json_get(data, "catch_up", "run_once")), "all")
     let probe = inspect(target)
     // №327: решения на недоверенных данных (json_body/inspect) — через
     // one-way redact-hash (ADR-0161 sanctioned path); детерминированный хеш
@@ -5225,22 +5247,22 @@ return respond("200 ok") }
     if redact(cron_expr, "hash_only") == redact("", "hash_only") then { return respond("400 empty cron expression") }
     let _ = InitDB()
     let created_job = cron_add(cron_expr, target, tz, catch_up)
-    let job_id = json_get(created_job, "id", "?")
+    let job_id = redact(to_string(json_get(created_job, "id", "?")), "all")
     let _ = AuditLog("schedules_create", "scheduler", target + " -> " + job_id)
     return respond("200 created " + job_id)
   }
 
   route "/schedules/remove" method=POST {
-    let secret = query_param("secret")
+    let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
-    if secret != cron_secret then { return respond("403 Forbidden") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     let data = json_body()
-    let job_id = json_get(data, "id", "")
+    let job_id = redact(to_string(json_get(data, "id", "")), "all")
     if redact(job_id, "hash_only") == redact("", "hash_only") then { return respond("400 missing id") }
     let _ = InitDB()
     let rm = cron_remove(job_id)
-    let n = json_get(rm, "removed", 0.0)
+    let n = to_float(redact(to_string(json_get(rm, "removed", 0.0)), "all"))
     let _ = AuditLog("schedules_remove", "scheduler", job_id + " -> removed=" + to_string(n))
     if redact(to_string(n), "hash_only") == redact(to_string(0.0), "hash_only") then { return respond("404 job not found") }
     return respond("200 removed " + job_id)
