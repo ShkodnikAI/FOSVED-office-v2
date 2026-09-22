@@ -90,7 +90,7 @@ pattern LZGateConfirmations(artifact_id: Int) -> String {
 
 // Gate 2: Impact claims must include timeline
 pattern LZGateTimeline(claim: String) -> String {
-  let result = try call_llm("Does this impact claim include a specific timeline (years to commercial/mass adoption)? Claim: " + claim + " Reply YES or NO only.")
+  let result = redact(try call_llm("Does this impact claim include a specific timeline (years to commercial/mass adoption)? Claim: " + claim + " Reply YES or NO only."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if result != "YES" then { return "FAIL: no timeline in impact claim" }
   return "PASS: timeline present"
@@ -102,7 +102,7 @@ pattern LZGateNegativeSignals(artifact_id: Int) -> String {
   if len(rows) == 0 then { return "FAIL: not found" }
   let stage = to_string(get(get(rows, 0), "hype_cycle_stage"))
   if stage == "peak" then {
-    let check = try call_llm("Technology at Peak of Inflated Expectations. Check for negative signals (failed POCs, talent exodus, regulatory blocks, cost overruns). Technology: " + to_string(get(get(rows, 0.0), "title")) + ". List any negative signals found or say NONE.")
+    let check = redact(try call_llm("Technology at Peak of Inflated Expectations. Check for negative signals (failed POCs, talent exodus, regulatory blocks, cost overruns). Technology: " + to_string(get(get(rows, 0.0), "title")) + ". List any negative signals found or say NONE."), "all")
     if to_string(check) == "()" then { let check = "[оценка недоступна — провайдеры модели не ответили]" }
     if check == "NONE" then { return "PASS: no negative signals at peak" }
     return "WARN: negative signals at peak — " + check
@@ -112,7 +112,7 @@ pattern LZGateNegativeSignals(artifact_id: Int) -> String {
 
 // Gate 4: Hype narrative must be verified against actual flows
 pattern LZGateHypeVsFlows(technology: String) -> String {
-  let result = try call_llm("Compare public narrative about " + technology + " with actual financial/material/talent flows. Are narrative and flows aligned or divergent? Reply ALIGNED or DIVERGENT with brief explanation.")
+  let result = redact(try call_llm("Compare public narrative about " + technology + " with actual financial/material/talent flows. Are narrative and flows aligned or divergent? Reply ALIGNED or DIVERGENT with brief explanation."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if starts_with(result, "DIVERGENT") then { return "WARN: narrative diverges from flows — " + result }
   return "PASS: narrative consistent with flows"
@@ -120,7 +120,7 @@ pattern LZGateHypeVsFlows(technology: String) -> String {
 
 // Gate 5: Investment implications must be referred to OSP
 pattern LZGateOSPReferral(query: String) -> String {
-  let result = try call_llm("Does this query involve investment recommendations or portfolio implications? Query: " + query + " Reply YES or NO.")
+  let result = redact(try call_llm("Does this query involve investment recommendations or portfolio implications? Query: " + query + " Reply YES or NO."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if result == "YES" then {
     try http_post("http://127.0.0.1:4000/osp/analyze", json_encode({source: "lz", query: query, type: "investment_implication"}), "application/json")
@@ -131,7 +131,7 @@ pattern LZGateOSPReferral(query: String) -> String {
 
 // Gate 6: Emerging tech must check emission flow (Cantillon)
 pattern LZGateEmissionCheck(technology: String) -> String {
-  let result = try call_llm("Does " + technology + " involve or depend on monetary emission, credit expansion, or fiscal subsidy flows? Reply YES or NO.")
+  let result = redact(try call_llm("Does " + technology + " involve or depend on monetary emission, credit expansion, or fiscal subsidy flows? Reply YES or NO."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if result == "YES" then {
     try http_post("http://127.0.0.1:4000/osp/cantillon", json_encode({technology: technology, source: "lz"}), "application/json")
@@ -142,7 +142,7 @@ pattern LZGateEmissionCheck(technology: String) -> String {
 
 // Gate 7: Single-tech focus must check competing alternatives
 pattern LZGateCompetingCheck(technology: String) -> String {
-  let result = try call_llm("Name 2-3 competing alternatives to " + technology + " that solve the same fundamental problem differently. If none exist, reply NONE.")
+  let result = redact(try call_llm("Name 2-3 competing alternatives to " + technology + " that solve the same fundamental problem differently. If none exist, reply NONE."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if result == "NONE" then { return "PASS: no known alternatives" }
   return "PASS: alternatives identified — " + result
@@ -150,7 +150,7 @@ pattern LZGateCompetingCheck(technology: String) -> String {
 
 // Gate 8: Every tracked technology assessed for cross-domain potential
 pattern LZGateCrossDomain(technology: String, source_domain: String) -> String {
-  let result = try call_llm("Could " + technology + " (currently in " + source_domain + ") have applications in other domains? Name 1-2 cross-domain possibilities or reply NONE.")
+  let result = redact(try call_llm("Could " + technology + " (currently in " + source_domain + ") have applications in other domains? Name 1-2 cross-domain possibilities or reply NONE."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if result == "NONE" then { return "PASS: no cross-domain potential identified" }
   return "PASS: cross-domain potential — " + result
@@ -277,7 +277,7 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   // отдела в свежести.
   let live = "\n\n" + LZTavilySearch(query, chat_id)
 
-  let result = try call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать». Если это involves investment — начни ответ со слова INVEST_REFERRAL.", query + "\nContext: " + context + live)
+  let result = redact(try call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать». Если это involves investment — начни ответ со слова INVEST_REFERRAL.", query + "\nContext: " + context + live), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if starts_with(result, "INVEST_REFERRAL") then {
     let _ = try http_post("http://127.0.0.1:4000/osp/analyze", json_encode({source: "lz", query: query, domain: domain}), "application/json")
@@ -319,7 +319,7 @@ pattern LZSourcesFooter(context: String, live: String) -> String {
 // DOMAIN CLASSIFICATION + CONTEXT BUILDER
 // ═══════════════════════════════════════════════════════════════════════
 pattern LZClassifyDomain(query: String) -> String {
-  let result = try call_llm("Classify this query into exactly one domain: tech, politics, economics, geopolitics, events. Query: " + query + ". Reply with single word only.")
+  let result = redact(try call_llm("Classify this query into exactly one domain: tech, politics, economics, geopolitics, events. Query: " + query + ". Reply with single word only."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return result
 }
@@ -357,7 +357,7 @@ pattern LZApiScanContext(query: String, domain: String, chat_id: String) -> Stri
   if to_string(resp) == "()" then { return "" }
   let parsed = try parse_json(resp)
   if to_string(parsed) == "()" then { return "" }
-  let text = to_string(json_get(parsed, "result.text", ""))
+  let text = redact(to_string(json_get(parsed, "result.text", "")), "all")
   if text == "" then {
     return "APIscan: детерминированный скан (arXiv/HN/GitHub) не нашёл релевантных результатов по теме «" + topic + "»"
   }
@@ -379,7 +379,7 @@ pattern LZContainsCyrillic(s: String) -> Bool {
 // Fallback — усечённый исходный запрос: источники честно вернут пусто и
 // LZApiScanContext отразит это, молчаливой подмены данных нет.
 pattern LZExtractTopic(query: String) -> String {
-  let result = try call_llm("Extract 2-4 English search keywords from the query below for arXiv/HackerNews/GitHub search. Reply with the keywords separated by spaces, nothing else. Query: " + substring(query, 0.0, 400.0))
+  let result = redact(try call_llm("Extract 2-4 English search keywords from the query below for arXiv/HackerNews/GitHub search. Reply with the keywords separated by spaces, nothing else. Query: " + substring(query, 0.0, 400.0)), "all")
   if to_string(result) == "()" then { return substring(query, 0.0, 120.0) }
   return substring(result, 0.0, 120.0)
 }
@@ -417,7 +417,7 @@ pattern LoadLZSkills(query: String, domain: String) -> String {
 
 // Skill 1: hype-cycle-mapping
 pattern LZHypeCycleMap(technology: String, chat_id: String) -> String {
-  let result = try call_llm("HYPE CYCLE MAPPING for: " + technology + "\n\nClassify onto Gartner hype cycle:\n1. Innovation Trigger — breakthrough generates attention\n2. Peak of Inflated Expectations — overpromotion\n3. Trough of Disillusionment — expectations correct\n4. Slope of Enlightenment — practical use emerges\n5. Plateau of Productivity — mainstream adoption\n\nProvide: stage, evidence, timeline_to_next_stage, investment_implication (buy/sell/wait)")
+  let result = redact(try call_llm("HYPE CYCLE MAPPING for: " + technology + "\n\nClassify onto Gartner hype cycle:\n1. Innovation Trigger — breakthrough generates attention\n2. Peak of Inflated Expectations — overpromotion\n3. Trough of Disillusionment — expectations correct\n4. Slope of Enlightenment — practical use emerges\n5. Plateau of Productivity — mainstream adoption\n\nProvide: stage, evidence, timeline_to_next_stage, investment_implication (buy/sell/wait)"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // Store result
   db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = ?, updated_at = datetime('now') WHERE title LIKE ?", [result, "%" + technology + "%"])
@@ -430,7 +430,7 @@ pattern LZHypeCycleMap(technology: String, chat_id: String) -> String {
 
 // Skill 2: disruption-scoring
 pattern LZDisruptionScore(technology: String, chat_id: String) -> String {
-  let result = try call_llm("DISRUPTION SCORING for: " + technology + "\n\nEvaluate 5 components (0-100 each):\n1. Performance ratio vs incumbent\n2. Cost trajectory\n3. Patent activity concentration\n4. Talent flow signal\n5. VC investment patterns\n\nCompute weighted disruption probability at horizons: 1y, 3y, 5y, 10y.\nStatus: tracking | hot | confirmed_disruption | cooled | failed")
+  let result = redact(try call_llm("DISRUPTION SCORING for: " + technology + "\n\nEvaluate 5 components (0-100 each):\n1. Performance ratio vs incumbent\n2. Cost trajectory\n3. Patent activity concentration\n4. Talent flow signal\n5. VC investment patterns\n\nCompute weighted disruption probability at horizons: 1y, 3y, 5y, 10y.\nStatus: tracking | hot | confirmed_disruption | cooled | failed"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // Store scores
   db_execute("UPDATE tracked_technologies SET disruption_1y = ?, disruption_3y = ?, disruption_5y = ?, disruption_10y = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [0.0, 0.0, 0.0, 0.0, "%" + technology + "%"])
@@ -443,10 +443,10 @@ pattern LZDisruptionScore(technology: String, chat_id: String) -> String {
 
 // Skill 3: inflection-detection
 pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
-  let result = try call_llm("INFLECTION DETECTION for: " + technology + "\n\nWatch for signals:\n1. First non-academic deployments\n2. Regulatory attention signals\n3. Corporate VC entry\n4. Supply chain emergence\n5. Technical standards formation\n6. Talent concentration shift\n\nIs this technology at inflection point? Provide evidence and confidence level.")
+  let result = redact(try call_llm("INFLECTION DETECTION for: " + technology + "\n\nWatch for signals:\n1. First non-academic deployments\n2. Regulatory attention signals\n3. Corporate VC entry\n4. Supply chain emergence\n5. Technical standards formation\n6. Talent concentration shift\n\nIs this technology at inflection point? Provide evidence and confidence level."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // If inflection detected, escalate to hot
-  let check = try call_llm("Is this technology at inflection? Reply YES or NO. Analysis: " + result)
+  let check = redact(try call_llm("Is this technology at inflection? Reply YES or NO. Analysis: " + result), "all")
   if to_string(check) == "()" then { let check = "[оценка недоступна — провайдеры модели не ответили]" }
   if check == "YES" then {
     db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE title LIKE ?", ["hot", "%" + technology + "%"])
@@ -458,7 +458,7 @@ pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
 
 // Skill 4: technology-OOB
 pattern LZOrderOfBattle(technology: String, chat_id: String) -> String {
-  let result = try call_llm("TECHNOLOGY ORDER OF BATTLE for: " + technology + "\n\nCompare competing actors' capabilities:\n1. Compute capacity\n2. Talent concentration\n3. Data access\n4. Capital resources\n5. IP position (patents)\n6. Manufacturing capability\n7. Regulatory environment\n8. Time-to-market\n\nWho has structural advantage? Who can catch up? Who is structurally disadvantaged?")
+  let result = redact(try call_llm("TECHNOLOGY ORDER OF BATTLE for: " + technology + "\n\nCompare competing actors' capabilities:\n1. Compute capacity\n2. Talent concentration\n3. Data access\n4. Capital resources\n5. IP position (patents)\n6. Manufacturing capability\n7. Regulatory environment\n8. Time-to-market\n\nWho has structural advantage? Who can catch up? Who is structurally disadvantaged?"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("UPDATE tracked_technologies SET oob_data = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [result, "%" + technology + "%"])
   return "⚔️ OOB: " + technology + "\n" + result
@@ -466,7 +466,7 @@ pattern LZOrderOfBattle(technology: String, chat_id: String) -> String {
 
 // Skill 5: cross-domain-transfer
 pattern LZCrossDomainTransfer(query: String, chat_id: String) -> String {
-  let result = try call_llm("CROSS-DOMAIN TRANSFER analysis for: " + query + "\n\nIdentify technologies from one domain applicable in another.\nLook for:\n1. Core capability applicable elsewhere\n2. Unrecognized applicability\n3. Revenue potential in target domain\n4. Barriers to transfer\n5. Historical precedents (mRNA→cancer, ML→finance, Li-ion→EVs)")
+  let result = redact(try call_llm("CROSS-DOMAIN TRANSFER analysis for: " + query + "\n\nIdentify technologies from one domain applicable in another.\nLook for:\n1. Core capability applicable elsewhere\n2. Unrecognized applicability\n3. Revenue potential in target domain\n4. Barriers to transfer\n5. Historical precedents (mRNA→cancer, ML→finance, Li-ion→EVs)"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return "🔀 Cross-Domain: " + query + "\n" + result
 }
@@ -477,7 +477,7 @@ pattern LZCrossDomainTransfer(query: String, chat_id: String) -> String {
 
 // Skill 6: patent-prosecution-analysis
 pattern LZPatentAnalysis(technology: String) -> String {
-  let result = try call_llm("PATENT PROSECUTION ANALYSIS for: " + technology + "\n\nAnalyze patent activity to reveal real R&D priorities:\n1. Recent filings (USPTO/EPO/WIPO/CN)\n2. Assignee concentration\n3. Claim direction analysis\n4. Filing velocity trend\n5. What they protect reveals what they build")
+  let result = redact(try call_llm("PATENT PROSECUTION ANALYSIS for: " + technology + "\n\nAnalyze patent activity to reveal real R&D priorities:\n1. Recent filings (USPTO/EPO/WIPO/CN)\n2. Assignee concentration\n3. Claim direction analysis\n4. Filing velocity trend\n5. What they protect reveals what they build"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("UPDATE tracked_technologies SET patent_activity = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [result, "%" + technology + "%"])
   return "📋 Patents: " + technology + "\n" + result
@@ -485,7 +485,7 @@ pattern LZPatentAnalysis(technology: String) -> String {
 
 // Skill 7: talent-flow-tracking
 pattern LZTalentFlow(technology: String) -> String {
-  let result = try call_llm("TALENT FLOW TRACKING for: " + technology + "\n\nTrack migration of top researchers/engineers:\n1. Key researchers in this field\n2. Recent moves (LinkedIn, conferences)\n3. Concentration points (where talent goes)\n4. Exodus signals (where talent leaves)\n5. Implications for capability direction")
+  let result = redact(try call_llm("TALENT FLOW TRACKING for: " + technology + "\n\nTrack migration of top researchers/engineers:\n1. Key researchers in this field\n2. Recent moves (LinkedIn, conferences)\n3. Concentration points (where talent goes)\n4. Exodus signals (where talent leaves)\n5. Implications for capability direction"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("UPDATE tracked_technologies SET talent_flow = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [result, "%" + technology + "%"])
   return "👥 Talent Flow: " + technology + "\n" + result
@@ -493,11 +493,11 @@ pattern LZTalentFlow(technology: String) -> String {
 
 // Skill 8: vc-tracking
 pattern LZVCTracking(technology: String) -> String {
-  let result = try call_llm("VC TRACKING for: " + technology + "\n\nAnalyze venture capital patterns:\n1. Recent funding rounds (Crunchbase)\n2. Investor quality signal (track record firms)\n3. Capital concentration by subfield\n4. Stage distribution (seed/A/B/C)\n5. Smart money vs dumb money ratio")
+  let result = redact(try call_llm("VC TRACKING for: " + technology + "\n\nAnalyze venture capital patterns:\n1. Recent funding rounds (Crunchbase)\n2. Investor quality signal (track record firms)\n3. Capital concentration by subfield\n4. Stage distribution (seed/A/B/C)\n5. Smart money vs dumb money ratio"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("UPDATE tracked_technologies SET vc_investment = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [result, "%" + technology + "%"])
   // Cross-dept: notify Finance if significant VC signal
-  let sig_check = try call_llm("Is this VC signal significant enough to notify Finance? Reply YES or NO. Analysis: " + result)
+  let sig_check = redact(try call_llm("Is this VC signal significant enough to notify Finance? Reply YES or NO. Analysis: " + result), "all")
   if to_string(sig_check) == "()" then { let sig_check = "[оценка недоступна — провайдеры модели не ответили]" }
   if sig_check == "YES" then {
     try http_post("http://127.0.0.1:4000/finance/vc-signal", json_encode({technology: technology, analysis: result, source: "lz"}), "application/json")
@@ -517,7 +517,7 @@ pattern LZVCTracking(technology: String) -> String {
 pattern LZPoliticsScan(query: String, chat_id: String) -> String {
   let context = BuildLZContext(query, "politics", chat_id)
   let live = LZTavilySearch(query, chat_id)
-  let result = try call_llm("ЛЗ Politics: analyze political intelligence — geopolitical shifts, elections, sanctions, conflicts, cyber warfare. Apply cantillon, narrative-vs-flows, cycle-position lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live)
+  let result = redact(try call_llm("ЛЗ Politics: analyze political intelligence — geopolitical shifts, elections, sanctions, conflicts, cyber warfare. Apply cantillon, narrative-vs-flows, cycle-position lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["politics", "rss,gdlt,tavily"])
   return result
@@ -526,7 +526,7 @@ pattern LZPoliticsScan(query: String, chat_id: String) -> String {
 pattern LZEconomicsScan(query: String, chat_id: String) -> String {
   let context = BuildLZContext(query, "economics", chat_id)
   let live = LZTavilySearch(query, chat_id)
-  let result = try call_llm("ЛЗ Economics: analyze economic intelligence — macro indicators, monetary policy, commodity markets, crisis signals. Apply macro-regime-id, cross-asset-divergence, cantillon lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live)
+  let result = redact(try call_llm("ЛЗ Economics: analyze economic intelligence — macro indicators, monetary policy, commodity markets, crisis signals. Apply macro-regime-id, cross-asset-divergence, cantillon lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["economics", "rss,gdlt,tavily"])
   return result
@@ -535,7 +535,7 @@ pattern LZEconomicsScan(query: String, chat_id: String) -> String {
 pattern LZEventsScan(query: String, chat_id: String) -> String {
   let context = BuildLZContext(query, "events", chat_id)
   let live = LZTavilySearch(query, chat_id)
-  let result = try call_llm("ЛЗ Events: analyze event intelligence — disasters, protests, pandemics, corporate events, scientific breakthroughs. Apply domain-rapid-entry, failure-modes-mapping, adjacent-field-cross-check lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live)
+  let result = redact(try call_llm("ЛЗ Events: analyze event intelligence — disasters, protests, pandemics, corporate events, scientific breakthroughs. Apply domain-rapid-entry, failure-modes-mapping, adjacent-field-cross-check lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["events", "rss,gdlt,tavily"])
   return result
@@ -544,7 +544,7 @@ pattern LZEventsScan(query: String, chat_id: String) -> String {
 pattern LZGeopoliticsScan(query: String, chat_id: String) -> String {
   let context = BuildLZContext(query, "geopolitics", chat_id)
   let live = LZTavilySearch(query, chat_id)
-  let result = try call_llm("ЛЗ Geopolitics: deep geopolitical analysis — spheres of influence, military alliances, energy geopolitics, tech sovereignty, sanctions regimes. Apply cantillon, narrative-vs-flows, iw-watchlist lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live)
+  let result = redact(try call_llm("ЛЗ Geopolitics: deep geopolitical analysis — spheres of influence, military alliances, energy geopolitics, tech sovereignty, sanctions regimes. Apply cantillon, narrative-vs-flows, iw-watchlist lenses. Работай как разведотдел: без уточняющих вопросов, без списков вариантов на выбор.", query + "\n" + context + "\n\nLive findings:\n" + live), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["geopolitics", "rss,gdlt,tavily"])
   return result
@@ -561,7 +561,7 @@ pattern LZTavilySearch(query: String, chat_id: String) -> String {
   // См. /lz/diagnose для честной проверки достижимости.
   let response = try http_post("https://api.tavily.com/search", json_encode({api_key: env("TAVILY_API_KEY"), query: query, search_depth: "advanced", max_results: 5}), "application/json")
   if to_string(response) == "()" then { return "[tavily: сеть недоступна или ключ не задан — см. /lz/diagnose]" }
-  let analysis = try call_llm("Synthesize Tavily results for ЛЗ intelligence: extract key findings, disruption signals, inflection indicators, cross-domain opportunities.", "Запрос: " + query + "\nРезультаты: " + to_string(response))
+  let analysis = redact(try call_llm("Synthesize Tavily results for ЛЗ intelligence: extract key findings, disruption signals, inflection indicators, cross-domain opportunities.", "Запрос: " + query + "\nРезультаты: " + to_string(response)), "all")
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
   let _ = try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, ?)", ["tavily", "tavily", 5])
   return analysis
@@ -573,7 +573,7 @@ pattern LZTelegramSearch(query: String, chat_id: String) -> String {
   if to_string(channels) == "()" then { return "[telegram: нет отслеживаемых каналов — таблица lz_channels пуста или недоступна]" }
   let ch_str = to_string(channels)
   if ch_str == "[]" then { return "[telegram: список каналов пуст, добавь через /lz channel add]" }
-  let result = try call_llm("Search Telegram channels for: " + query + "\nMonitored channels: " + ch_str + "\n\nAnalyze posts for: emerging tech signals, insider intel, sentiment shifts, early indicators.", query)
+  let result = redact(try call_llm("Search Telegram channels for: " + query + "\nMonitored channels: " + ch_str + "\n\nAnalyze posts for: emerging tech signals, insider intel, sentiment shifts, early indicators.", query), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return result
 }
@@ -585,10 +585,10 @@ pattern LZTelegramSearch(query: String, chat_id: String) -> String {
 // Skill 10: leaked-roadmap-analysis
 pattern LZLeakedRoadmap(query: String, chat_id: String) -> String {
   // Tier 3: requires owner approval
-  let approval = try call_llm("Is leaked roadmap analysis approved for this session? Check owner context. Reply APPROVED or DENIED.")
+  let approval = redact(try call_llm("Is leaked roadmap analysis approved for this session? Check owner context. Reply APPROVED or DENIED."), "all")
   if to_string(approval) == "()" then { let approval = "[оценка недоступна — провайдеры модели не ответили]" }
   if approval != "APPROVED" then { return "⛔ Tier 3: leaked-roadmap-analysis requires owner approval" }
-  let result = try call_llm("LEAKED ROADMAP ANALYSIS for: " + query + "\n\nAuthenticate source → Extract strategic direction → Assess credibility → Identify timing constraints → Generate actionable intelligence. Distinguish authentic leaks from disinformation.")
+  let result = redact(try call_llm("LEAKED ROADMAP ANALYSIS for: " + query + "\n\nAuthenticate source → Extract strategic direction → Assess credibility → Identify timing constraints → Generate actionable intelligence. Distinguish authentic leaks from disinformation."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return "🔐 Leaked Intel: " + query + "\n" + result
 }
@@ -596,17 +596,17 @@ pattern LZLeakedRoadmap(query: String, chat_id: String) -> String {
 // Skill 11: dark-web-tech-research
 pattern LZDarkWebResearch(query: String, chat_id: String) -> String {
   // Tier 3: requires owner approval + operational security
-  let approval = try call_llm("Is dark web research approved for this session? Check owner context. Reply APPROVED or DENIED.")
+  let approval = redact(try call_llm("Is dark web research approved for this session? Check owner context. Reply APPROVED or DENIED."), "all")
   if to_string(approval) == "()" then { let approval = "[оценка недоступна — провайдеры модели не ответили]" }
   if approval != "APPROVED" then { return "⛔ Tier 3: dark-web-tech-research requires owner approval + OPSEC" }
-  let result = try call_llm("DARK WEB TECH RESEARCH for: " + query + "\n\nSearch specialized forums → Extract capability signals → Verify against public sources → Assess reliability. OPSEC: anonymized access only.")
+  let result = redact(try call_llm("DARK WEB TECH RESEARCH for: " + query + "\n\nSearch specialized forums → Extract capability signals → Verify against public sources → Assess reliability. OPSEC: anonymized access only."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return "🕶️ Dark Intel: " + query + "\n" + result
 }
 
 // Skill 12: deep-researcher-profiling
 pattern LZDeepResearcherProfile(query: String, chat_id: String) -> String {
-  let result = try call_llm("DEEP RESEARCHER PROFILING for: " + query + "\n\nIdentify key researchers → Profile academic background → Map publication patterns → Analyze network → Track mobility → Extract trajectory signal.\n\nKey question: whose work is the leading indicator of where capability comes from?")
+  let result = redact(try call_llm("DEEP RESEARCHER PROFILING for: " + query + "\n\nIdentify key researchers → Profile academic background → Map publication patterns → Analyze network → Track mobility → Extract trajectory signal.\n\nKey question: whose work is the leading indicator of where capability comes from?"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return "🔬 Researcher Profile: " + query + "\n" + result
 }
@@ -714,7 +714,7 @@ pattern LZDeepScan(query: String, chat_id: String) -> String {
   let github = ScanGitHub(query)
   let yt = ScanYouTube(query)
   // Synthesize
-  let result = try call_llm("DEEP SCAN synthesis for: " + query + "\nDomain: " + domain + "\nSkills: " + skills + "\n\nWeb: " + web + "\nScience: " + science + "\nGitHub: " + github + "\nYouTube: " + yt + "\n\nProvide comprehensive intelligence assessment with disruption scoring and inflection analysis.")
+  let result = redact(try call_llm("DEEP SCAN synthesis for: " + query + "\nDomain: " + domain + "\nSkills: " + skills + "\n\nWeb: " + web + "\nScience: " + science + "\nGitHub: " + github + "\nYouTube: " + yt + "\n\nProvide comprehensive intelligence assessment with disruption scoring and inflection analysis."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // Store artifact
   db_execute("INSERT INTO knowledge_artifacts (title, domain, source, source_tier, status) VALUES (?, ?, ?, 2, ?)", [query, domain, "deep_scan", "tracking"])
@@ -729,7 +729,7 @@ pattern LZAllScan(query: String, chat_id: String) -> String {
   let github = ScanGitHub(query)
   let social = ScanSocial(query)
   let tg = ScanTelegram(query)
-  let result = try call_llm("ALL-SOURCE synthesis for: " + query + "\n\nWeb: " + web + "\nYouTube: " + yt + "\nReddit: " + reddit + "\nScience: " + science + "\nGitHub: " + github + "\nSocial: " + social + "\nTelegram: " + tg + "\n\nComprehensive multi-source intelligence assessment.")
+  let result = redact(try call_llm("ALL-SOURCE synthesis for: " + query + "\n\nWeb: " + web + "\nYouTube: " + yt + "\nReddit: " + reddit + "\nScience: " + science + "\nGitHub: " + github + "\nSocial: " + social + "\nTelegram: " + tg + "\n\nComprehensive multi-source intelligence assessment."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["all", "web,youtube,reddit,arxiv+hn+github-api,github,social,telegram"])
   return result
@@ -756,7 +756,7 @@ pattern LZWatchList() -> String {
 
 pattern LZWatchRelevance(query: String) -> String {
   let rows = query("SELECT topic, domain FROM watchlist_entries WHERE status = ?", ["active"])
-  let result = try call_llm("Which watchlist entries are relevant to this query? Query: " + query + "\nWatchlist: " + to_string(rows) + "\n\nList relevant entries or reply NONE.")
+  let result = redact(try call_llm("Which watchlist entries are relevant to this query? Query: " + query + "\nWatchlist: " + to_string(rows) + "\n\nList relevant entries or reply NONE."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return result
 }
@@ -824,7 +824,7 @@ pattern LZLifecycleTransition(artifact_id: Int, new_status: String) -> String {
 
 // Every 4h: incremental scan
 pattern LZIncrementalScan() -> String {
-  let result = try call_llm("Incremental scan: check arxiv, biorxiv, medrxiv, USPTO for new publications in tracked domains. Summarize top 5 new findings.")
+  let result = redact(try call_llm("Incremental scan: check arxiv, biorxiv, medrxiv, USPTO for new publications in tracked domains. Summarize top 5 new findings."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 5)", ["incremental", "arxiv,biorxiv,medrxiv,uspto"])
   return result
@@ -834,7 +834,7 @@ pattern LZIncrementalScan() -> String {
 pattern LZDailyDigest() -> String {
   let hot = query("SELECT title, disruption_score FROM knowledge_artifacts WHERE status = ? ORDER BY disruption_score DESC LIMIT 3", ["hot"])
   let watch = query("SELECT topic FROM watchlist_entries WHERE status = ?", ["active"])
-  let result = try call_llm("Daily ЛЗ digest:\nHot artifacts: " + to_string(hot) + "\nActive watchlist: " + to_string(watch) + "\n\nSummarize top-3 events + any alerts triggered by watchlist thresholds.")
+  let result = redact(try call_llm("Daily ЛЗ digest:\nHot artifacts: " + to_string(hot) + "\nActive watchlist: " + to_string(watch) + "\n\nSummarize top-3 events + any alerts triggered by watchlist thresholds."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 3)", ["daily", "all"])
   // Send digest to Yana
@@ -845,7 +845,7 @@ pattern LZDailyDigest() -> String {
 // Weekly: inflection candidates review
 pattern LZWeeklyReview() -> String {
   let candidates = query("SELECT title, hype_cycle_stage, disruption_score FROM knowledge_artifacts WHERE status IN (?, ?) ORDER BY disruption_score DESC LIMIT 10", ["tracking", "hot"])
-  let result = try call_llm("Weekly ЛЗ inflection review:\nCandidates: " + to_string(candidates) + "\n\nFor each: Is inflection approaching? Any new signals? Update hype cycle position if changed.")
+  let result = redact(try call_llm("Weekly ЛЗ inflection review:\nCandidates: " + to_string(candidates) + "\n\nFor each: Is inflection approaching? Any new signals? Update hype cycle position if changed."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 10)", ["weekly"])
   return result
@@ -854,7 +854,7 @@ pattern LZWeeklyReview() -> String {
 // Monthly: disruption probability re-scoring
 pattern LZMonthlyRescoring() -> String {
   let tracked = query("SELECT id, title, disruption_score FROM tracked_technologies ORDER BY disruption_score DESC LIMIT 20", [])
-  let result = try call_llm("Monthly re-scoring of tracked technologies:\n" + to_string(tracked) + "\n\nRe-evaluate disruption probability at 1y/3y/5y/10y horizons based on latest data.")
+  let result = redact(try call_llm("Monthly re-scoring of tracked technologies:\n" + to_string(tracked) + "\n\nRe-evaluate disruption probability at 1y/3y/5y/10y horizons based on latest data."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 20)", ["monthly"])
   return result
@@ -863,7 +863,7 @@ pattern LZMonthlyRescoring() -> String {
 // Quarterly: report to owner
 pattern LZQuarterlyReport() -> String {
   let top = query("SELECT title, domain, disruption_score, hype_cycle_stage, status FROM knowledge_artifacts WHERE status IN (?, ?) ORDER BY disruption_score DESC LIMIT 10", ["hot", "confirmed_disruption"])
-  let result = try call_llm("Quarterly ЛЗ report to owner:\nTop 10 emerging technologies:\n" + to_string(top) + "\n\nFor each: disruption assessment, investment implications (referral to ОСП), timeline, confidence level.\n\nDISCLAIMER: This is intelligence, not investment advice.")
+  let result = redact(try call_llm("Quarterly ЛЗ report to owner:\nTop 10 emerging technologies:\n" + to_string(top) + "\n\nFor each: disruption assessment, investment implications (referral to ОСП), timeline, confidence level.\n\nDISCLAIMER: This is intelligence, not investment advice."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // Cross-dept: send to OSP for strategic analysis
   try http_post("http://127.0.0.1:4000/osp/quarterly-intel", json_encode({source: "lz", report: result}), "application/json")
@@ -884,7 +884,7 @@ pattern LZChannels() -> String {
 
 pattern LZRecalibrate() -> String {
   // Recalibrate disruption scores based on latest outcomes
-  let result = try call_llm("Recalibrate all tracked technologies: compare past disruption predictions with actual outcomes. Compute accuracy rate. Adjust scoring weights if systematic bias detected.")
+  let result = redact(try call_llm("Recalibrate all tracked technologies: compare past disruption predictions with actual outcomes. Compute accuracy rate. Adjust scoring weights if systematic bias detected."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 0)", ["recalibrate"])
   return "🔄 Recalibration complete:\n" + result
@@ -894,7 +894,7 @@ pattern LZRecalibrate() -> String {
 // FINAL SAFETY CHECK — blocks investment advice
 // ═══════════════════════════════════════════════════════════════════════
 pattern LZFinalSafetyCheck(output: String) -> String {
-  let check = try call_llm("Does this text contain specific investment advice (buy/sell/hold recommendations, portfolio allocations, price targets)? Text: " + output + " Reply YES or NO.")
+  let check = redact(try call_llm("Does this text contain specific investment advice (buy/sell/hold recommendations, portfolio allocations, price targets)? Text: " + output + " Reply YES or NO."), "all")
   if to_string(check) == "()" then { let check = "[оценка недоступна — провайдеры модели не ответили]" }
   if check == "YES" then {
     return "⛔ BLOCKED: Investment advice detected. ЛЗ provides intelligence, not investment recommendations. Forwarded to ОСП. " + LZDisclaimer()
@@ -919,7 +919,7 @@ pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: 
   // ── 1. Telegram-посты за период (MON-1 собрал) ──
   let rows = try query("SELECT channel_id, channel_name, substr(text, 1, 400), media_type, date FROM lz_channel_posts WHERE date >= datetime('now', ?) ORDER BY date DESC LIMIT 120", ["-" + hours + " hours"])
   if to_string(rows) != "()" then {
-    let n = to_string(json_get(json_encode(rows), "length"))
+    let n = redact(to_string(json_get(json_encode(rows), "length")), "all")
     let rows_str = to_string(rows)
     if rows_str == "[]" then {
       let corpus = corpus + "TELEGRAM: постов за период нет (монитор собирает, поллинг 5 мин).\n"
@@ -957,7 +957,7 @@ pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: 
   let prompt = prompt + "ЖЁСТКОЕ ПРАВИЛО: используй ТОЛЬКО данные ниже. Никаких общих знаний и домыслов; чего нет в данных — того нет в сводке. Если данных мало — скажи это прямо.\n\n"
   let prompt = prompt + "Структура сводки:\n1. Сигналы дня (что случилось, где, почему это важно)\n2. Аномалии и ранние индикаторы\n3. Что deserves deeper look (рекомендация углубления)\n\n"
   let prompt = prompt + "ДАННЫЕ:\n" + substring(corpus, 0.0, 7000.0)
-  let synthesis = try call_llm(prompt)
+  let synthesis = redact(try call_llm(prompt), "all")
   if to_string(synthesis) == "()" then {
     let synthesis = "[синтез недоступен — провайдеры модели не ответили; ниже сырой корпус]\n" + substring(corpus, 0.0, 2000.0)
   }

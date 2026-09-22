@@ -1,3 +1,4 @@
+import dept/utils
 // Fosved Office v2 — Admin Dispatcher v2.0 (NATIVE)
 // 14 commands: status, build, fix, analyze, scan, tour, docs, graph, impact, proposals, narads, rollback, report, health
 // Night cycle: 7 phases (scan → analyze → graph → review → metrics → autofix → proposals → docs → health)
@@ -153,14 +154,14 @@ pattern AdminNotifyOwner(text: String, chat_id: String) -> String {
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════
 pattern SendAdminMessage(chat_id: String, text: String) -> String {
-  let token = env("TELEGRAM_BOT_TOKEN")
+  let token = TgToken()
   let body = json_encode({chat_id: to_float(chat_id), text: text})
   let result = http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
   return result
 }
 
 pattern SendAdminButtons(chat_id: String, text: String, approve_data: String, reject_data: String) -> String {
-  let token = env("TELEGRAM_BOT_TOKEN")
+  let token = TgToken()
   let body = json_encode({
     chat_id: to_float(chat_id),
     text: text,
@@ -176,7 +177,7 @@ pattern SendAdminButtons(chat_id: String, text: String, approve_data: String, re
 }
 
 pattern SendAdminTyping(chat_id: String) -> String {
-  let token = env("TELEGRAM_BOT_TOKEN")
+  let token = TgToken()
   let body = json_encode({chat_id: to_float(chat_id), action: "typing"})
   let _ = http_post("https://api.telegram.org/bot" + token + "/sendChatAction", body, "application/json")
   return "ok"
@@ -281,15 +282,15 @@ pattern BuildKnowledgeGraph() -> String {
 
   // FO-009: узлы не стираются — закрываются (история графа сохраняется)
   db_execute("UPDATE knowledge_graph SET valid_to = datetime('now') WHERE valid_to IS NULL")
-  db_execute("DELETE FROM knowledge_edges")
+  db_execute_with_grant(grant_issue("db:delete:knowledge_edges", 3600.0, "once"), "DELETE FROM knowledge_edges")
 
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
 
   // 1. Analyze app.mlog
-  let app_content = read_file("app.mlog")
+  let app_content = redact(read_file("app.mlog"), "all")
   let extract_prompt = disclaimer + "\n\nAnalyze this Metalogos code file. Extract:\n1. All pattern definitions (name only)\n2. All import statements\n3. All route definitions (path only)\n4. All db_execute CREATE TABLE statements (table name only)\n\nFormat each item on separate line:\nPATTERN: name\nIMPORT: module\nROUTE: /path\nTABLE: name"
-  let analysis = try call_llm(admin_profile + "\n\n" + extract_prompt, "File: app.mlog\n\n" + substring(app_content, 0, 3000))
+  let analysis = redact(try call_llm(admin_profile + "\n\n" + extract_prompt, "File: app.mlog\n\n" + substring(app_content, 0, 3000)), "all")
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(analysis) == "()" then { return "Сервис временно недоступен." }
   let result = SaveGraphNodes("app.mlog", to_string(analysis))
@@ -299,8 +300,8 @@ pattern BuildKnowledgeGraph() -> String {
   each f in dept_files {
     let fname = trim(to_string(f))
     if ends_with(fname, ".mlog") then {
-      let content = read_file("dept/" + fname)
-      let file_analysis = try call_llm(admin_profile + "\n\n" + extract_prompt, "File: dept/" + fname + "\n\n" + substring(content, 0, 3000))
+      let content = redact(read_file("dept/" + fname), "all")
+      let file_analysis = redact(try call_llm(admin_profile + "\n\n" + extract_prompt, "File: dept/" + fname + "\n\n" + substring(content, 0, 3000)), "all")
       if to_string(file_analysis) == "()" then { let file_analysis = "[оценка недоступна — провайдеры модели не ответили]" }
       if to_string(file_analysis) == "()" then { return "Сервис временно недоступен." }
       let _ = SaveGraphNodes("dept/" + fname, to_string(file_analysis))
@@ -310,8 +311,8 @@ pattern BuildKnowledgeGraph() -> String {
   // Count results
   let node_rows = query("SELECT COUNT(*) as cnt FROM knowledge_graph WHERE valid_to IS NULL", [])
   let edge_rows = query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
-  let node_count = to_string(try json_get(node_rows[0], "cnt", "0"))
-  let edge_count = to_string(try json_get(edge_rows[0], "cnt", "0"))
+  let node_count = redact(to_string(try json_get(node_rows[0], "cnt", "0")), "all")
+  let edge_count = redact(to_string(try json_get(edge_rows[0], "cnt", "0")), "all")
 
   let _ = AuditLog("graph_build_done", "admin", "nodes=" + node_count + " edges=" + edge_count)
 
@@ -353,9 +354,9 @@ pattern FindOrphans() -> String {
   let all_patterns = query("SELECT DISTINCT node_name FROM knowledge_graph WHERE valid_to IS NULL AND node_type = 'pattern'", [])
   let called = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE edge_type = 'calls'", [])
 
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
-  let llm_result = try call_llm(disclaimer + "\n\n" + admin_profile + "\n\nFind orphaned files and dead functions. Return a short summary.", "All files:\n" + to_string(all_files) + "\n\nImported files:\n" + to_string(imported) + "\n\nAll patterns:\n" + to_string(all_patterns) + "\n\nCalled patterns:\n" + to_string(called))
+  let llm_result = redact(try call_llm(disclaimer + "\n\n" + admin_profile + "\n\nFind orphaned files and dead functions. Return a short summary.", "All files:\n" + to_string(all_files) + "\n\nImported files:\n" + to_string(imported) + "\n\nAll patterns:\n" + to_string(all_patterns) + "\n\nCalled patterns:\n" + to_string(called)), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
@@ -369,25 +370,25 @@ pattern FindOrphans() -> String {
 // Admin Code Audit (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminCodeAudit() -> String {
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
 
   // Read key files for context
-  let app_content = read_file("app.mlog")
+  let app_content = redact(read_file("app.mlog"), "all")
   let mut files_summary = "app.mlog: " + to_string(length(app_content)) + " chars\n"
 
   let dept_files = list_dir("dept/")
   each f in dept_files {
     let fname = trim(to_string(f))
     if ends_with(fname, ".mlog") then {
-      let content = read_file("dept/" + fname)
+      let content = redact(read_file("dept/" + fname), "all")
       let files_summary = files_summary + "dept/" + fname + ": " + to_string(length(content)) + " chars\n"
     }
   }
 
   let audit_prompt = disclaimer + "\n\nAudit this codebase. Find:\n1. BUGS: undefined functions, crash points, race conditions\n2. DEAD CODE: unused files and functions\n3. DUPLICATION: similar code in multiple places\n4. SECURITY: SQL injection, XSS, open endpoints\n5. PERFORMANCE: unnecessary LLM calls, large contexts\n6. PROXY: any remaining CallLLMProxy references (MUST be replaced with call_llm)\n\nFormat: [SEVERITY:high/medium/low] FILE:path ISSUE:description FIX:suggestion\nOne per line. Be thorough."
 
-  let llm_result = try call_llm(admin_profile + "\n\n" + audit_prompt, "Files:\n" + files_summary + "\n\napp.mlog (first 2000 chars):\n" + substring(app_content, 0, 2000))
+  let llm_result = redact(try call_llm(admin_profile + "\n\n" + audit_prompt, "Files:\n" + files_summary + "\n\napp.mlog (first 2000 chars):\n" + substring(app_content, 0, 2000)), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let issues = to_string(llm_result)
@@ -409,11 +410,11 @@ pattern AdminMetricsAnalysis() -> String {
   let errors = query("SELECT dept, error_type, COUNT(*) as cnt FROM error_patterns WHERE created_at > datetime('now', '-24 hours') GROUP BY dept, error_type ORDER BY cnt DESC LIMIT 10", [])
   let cost = query("SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE created_at > datetime('now', '-24 hours')", [])
 
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
   let metrics_prompt = "Analyze office metrics for the last 24 hours:\n\nTasks by dept: " + to_string(tasks) + "\n\nErrors: " + to_string(errors) + "\n\nLLM cost: $" + to_string(cost) + "\n\nAnswer:\n1. Which departments are overloaded/idle?\n2. Which errors repeat?\n3. Is spending optimal?\n4. Any departments needing attention?"
 
-  let llm_result = try call_llm(disclaimer + "\n\n" + admin_profile, metrics_prompt)
+  let llm_result = redact(try call_llm(disclaimer + "\n\n" + admin_profile, metrics_prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
@@ -427,12 +428,12 @@ pattern AdminMetricsAnalysis() -> String {
 // Admin AutoFix — low risk only, with HARD GATES (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminAutoFix(issues: String) -> String {
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
 
   let fix_prompt = disclaimer + "\n\nFrom these issues select ONLY those that:\n- severity = low\n- Do NOT touch app.mlog\n- Do NOT touch webhook logic\n- Do NOT touch audit_log, lockdown, bin/mlog\n- Change < 10 lines\n- Type: dead code, typo, unused import\n\nFor each: FILE:path\nACTION:planned\nEND_FIX\n\nIf nothing fits, answer NONE."
 
-  let llm_result = try call_llm(admin_profile + "\n\n" + fix_prompt, issues)
+  let llm_result = redact(try call_llm(admin_profile + "\n\n" + fix_prompt, issues), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let plan = to_string(llm_result)
@@ -473,12 +474,12 @@ pattern AdminAutoFix(issues: String) -> String {
 // Admin Proposals (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminProposals() -> String {
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
 
   let proposal_prompt = disclaimer + "\n\nGenerate improvement proposals for the office based on recent activity.\nTypes:\n- NEW_CMD: new command needed (if request pattern repeats)\n- PROMPT_FIX: department prompt needs improvement\n- OPTIMIZE: duplication or inefficiency found\n- DEPRECATE: unused function can be removed\n- NATIVE_MIGRATE: CallLLMProxy references need migration to native call_llm\n\nFormat: TYPE:type\nTITLE:short title\nDESCRIPTION:details\nRISK:low/medium/high\nEND_PROPOSAL\n\nGenerate 2-3 actionable proposals."
 
-  let llm_result = try call_llm(admin_profile + "\n\n" + proposal_prompt, "Based on recent office activity, suggest improvements.")
+  let llm_result = redact(try call_llm(admin_profile + "\n\n" + proposal_prompt, "Based on recent office activity, suggest improvements."), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
@@ -533,24 +534,24 @@ pattern AdminNightCycle() -> String {
   let report = "NIGHT CYCLE REPORT\n\n"
 
   // Phase 1a: Scanner (Python UA — file inventory)
-  let scan_result = http_get("http://127.0.0.1:4000/admin-ua/scan")
-  let scan_summary = json_get(parse_json(scan_result), "summary", "Scanner failed")
+  let scan_result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan"), "all")
+  let scan_summary = redact(to_string(json_get(parse_json(scan_result), "summary", "Scanner failed")), "all")
   let report = report + "Phase 1a/7: Scanner\n" + scan_summary + "\n\n"
 
   // Phase 1b: Analyzer (Python UA — patterns, routes, imports)
-  let analyze_result = http_get("http://127.0.0.1:4000/admin-ua/analyze")
-  let analyze_summary = json_get(parse_json(analyze_result), "summary", "Analyzer failed")
+  let analyze_result = redact(http_get("http://127.0.0.1:4000/admin-ua/analyze"), "all")
+  let analyze_summary = redact(to_string(json_get(parse_json(analyze_result), "summary", "Analyzer failed")), "all")
   let report = report + "Phase 1b/7: Analyzer\n" + analyze_summary + "\n\n"
 
   // Phase 1c: Grapher (Python UA — knowledge graph → SQLite)
-  let graph_result = http_get("http://127.0.0.1:4000/admin-ua/graph")
-  let graph_summary = json_get(parse_json(graph_result), "summary", "Grapher failed")
+  let graph_result = redact(http_get("http://127.0.0.1:4000/admin-ua/graph"), "all")
+  let graph_summary = redact(to_string(json_get(parse_json(graph_result), "summary", "Grapher failed")), "all")
   let report = report + "Phase 1c/7: Grapher\n" + graph_summary + "\n\n"
 
   // Phase 2: Reviewer (Python UA — orphans, security, bugs, architecture)
-  let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
-  let review_summary = json_get(parse_json(review_result), "summary", "Reviewer failed")
-  let health = json_get(parse_json(review_result), "health_score", "?")
+  let review_result = redact(http_get("http://127.0.0.1:4000/admin-ua/review"), "all")
+  let review_summary = redact(to_string(json_get(parse_json(review_result), "summary", "Reviewer failed")), "all")
+  let health = redact(to_string(json_get(parse_json(review_result), "health_score", "?")), "all")
   let report = report + "Phase 2/7: Reviewer\n" + review_summary + "\n\n"
 
   // Phase 3: Metrics Analysis (native call_llm)
@@ -566,8 +567,8 @@ pattern AdminNightCycle() -> String {
   let report = report + "Phase 5/7: Proposals\n" + substring(proposals, 0, 500) + "\n\n"
 
   // Phase 6: Documenter (Python UA)
-  let docs_result = http_get("http://127.0.0.1:4000/admin-ua/docs")
-  let docs_count = json_get(parse_json(docs_result), "structure", "")
+  let docs_result = redact(http_get("http://127.0.0.1:4000/admin-ua/docs"), "all")
+  let docs_count = redact(to_string(json_get(parse_json(docs_result), "structure", "")), "all")
   let report = report + "Phase 6/7: Documenter\n" + substring(docs_count, 0, 300) + "\n\n"
 
   // Phase 7: Health summary + disclaimer
@@ -639,13 +640,13 @@ pattern AdminStatus() -> String {
 // /admin build — native call_llm narad generation with lifecycle
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminBuild(task: String, chat_id: String) -> String {
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
 
   // LLM generates detailed narad
   let build_prompt = disclaimer + "\n\nCreate a detailed narad for this office change:\n\n" + task + "\n\nProvide:\n1. Which files to change\n2. What exactly in each file\n3. Risk assessment (low/medium/high)\n4. Rollback plan\n5. Impact: which parts of the system are affected\n\nHARD RULE: Never propose changes to audit_log, lockdown, or bin/mlog."
 
-  let llm_result = try call_llm(admin_profile + "\n\n" + build_prompt, task)
+  let llm_result = redact(try call_llm(admin_profile + "\n\n" + build_prompt, task), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let narad_text = to_string(llm_result)
@@ -669,14 +670,14 @@ pattern AdminBuild(task: String, chat_id: String) -> String {
 // /admin fix — native call_llm bug fix with lifecycle
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminFix(bug_description: String, chat_id: String) -> String {
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
 
   let fix_prompt = disclaimer + "\n\nFix this bug in the Fosved Office. Analyze the code, find the problem, propose a fix.\n\nBug: " + bug_description + "\n\nFormat:\nFILE:path\nPROBLEM:description\nFIX:old code -> new code\nEND_FIX\n\nHARD RULE: Never modify audit_log, lockdown, or bin/mlog."
 
   // Read key files for context
-  let app_content = read_file("app.mlog")
-  let llm_result = try call_llm(admin_profile + "\n\n" + fix_prompt, "app.mlog:\n" + substring(app_content, 0, 3000))
+  let app_content = redact(read_file("app.mlog"), "all")
+  let llm_result = redact(try call_llm(admin_profile + "\n\n" + fix_prompt, "app.mlog:\n" + substring(app_content, 0, 3000)), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let fix_text = to_string(llm_result)
@@ -703,25 +704,25 @@ pattern AdminAnalyze() -> String {
   let _ = AuditLog("admin_analyze", "admin", "UA 6-subagent analysis started")
 
   // Sub-agent 1: Scanner (file inventory)
-  let scan_result = http_get("http://127.0.0.1:4000/admin-ua/scan")
-  let scan_summary = json_get(parse_json(scan_result), "summary", "Scanner failed")
+  let scan_result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan"), "all")
+  let scan_summary = redact(to_string(json_get(parse_json(scan_result), "summary", "Scanner failed")), "all")
 
   // Sub-agent 2: Analyzer (patterns, routes, imports)
-  let analyze_result = http_get("http://127.0.0.1:4000/admin-ua/analyze")
-  let analyze_summary = json_get(parse_json(analyze_result), "summary", "Analyzer failed")
+  let analyze_result = redact(http_get("http://127.0.0.1:4000/admin-ua/analyze"), "all")
+  let analyze_summary = redact(to_string(json_get(parse_json(analyze_result), "summary", "Analyzer failed")), "all")
 
   // Sub-agent 3: Grapher (knowledge graph → SQLite)
-  let graph_result = http_get("http://127.0.0.1:4000/admin-ua/graph")
-  let graph_summary = json_get(parse_json(graph_result), "summary", "Grapher failed")
+  let graph_result = redact(http_get("http://127.0.0.1:4000/admin-ua/graph"), "all")
+  let graph_summary = redact(to_string(json_get(parse_json(graph_result), "summary", "Grapher failed")), "all")
 
   // Sub-agent 4: Reviewer (orphans, security, bugs, architecture)
-  let review_result = http_get("http://127.0.0.1:4000/admin-ua/review")
-  let review_summary = json_get(parse_json(review_result), "summary", "Reviewer failed")
-  let health = json_get(parse_json(review_result), "health_score", "?")
+  let review_result = redact(http_get("http://127.0.0.1:4000/admin-ua/review"), "all")
+  let review_summary = redact(to_string(json_get(parse_json(review_result), "summary", "Reviewer failed")), "all")
+  let health = redact(to_string(json_get(parse_json(review_result), "health_score", "?")), "all")
 
   // Sub-agent 6: Documenter (auto-docs)
-  let docs_result = http_get("http://127.0.0.1:4000/admin-ua/docs")
-  let docs_structure = json_get(parse_json(docs_result), "structure", "")
+  let docs_result = redact(http_get("http://127.0.0.1:4000/admin-ua/docs"), "all")
+  let docs_structure = redact(to_string(json_get(parse_json(docs_result), "structure", "")), "all")
 
   let disclaimer = AdminDisclaimer()
   let result = "UA Analysis Complete (6 sub-agents)\n\n"
@@ -742,8 +743,8 @@ pattern AdminAnalyze() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminScan() -> String {
   let _ = AuditLog("admin_scan", "admin", "UA scan started")
-  let result = http_get("http://127.0.0.1:4000/admin-ua/scan")
-  let summary = json_get(parse_json(result), "summary", "Scan failed")
+  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan"), "all")
+  let summary = redact(to_string(json_get(parse_json(result), "summary", "Scan failed")), "all")
   let _ = AuditLog("admin_scan", "admin", "UA scan done")
   return summary
 }
@@ -754,16 +755,16 @@ pattern AdminScan() -> String {
 pattern AdminTour() -> String {
   let _ = AuditLog("admin_tour", "admin", "tour started")
 
-  let admin_profile = read_file("library/admin.md")
+  let admin_profile = redact(read_file("library/admin.md"), "all")
   let disclaimer = AdminDisclaimer()
 
   // Get scan data for context
-  let scan_result = http_get("http://127.0.0.1:4000/admin-ua/scan")
-  let scan_data = json_get(parse_json(scan_result), "summary", "")
+  let scan_result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan"), "all")
+  let scan_data = redact(to_string(json_get(parse_json(scan_result), "summary", "")), "all")
 
   let tour_prompt = disclaimer + "\n\nGenerate a guided architecture tour of Fosved Office based on scan data.\nStructure:\n1. Overview (total files, lines, departments)\n2. Core: app.mlog and routing\n3. Departments: each dept with patterns count\n4. Infrastructure: proxy, scheduler, utils\n5. Key metrics: graph nodes/edges, health score\n6. Notable: largest files, most connected, potential issues\n\nBe technical, concise, informative."
 
-  let llm_result = try call_llm(admin_profile + "\n\n" + tour_prompt, "Scan data:\n" + scan_data)
+  let llm_result = redact(try call_llm(admin_profile + "\n\n" + tour_prompt, "Scan data:\n" + scan_data), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
 
@@ -776,8 +777,8 @@ pattern AdminTour() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminDocs() -> String {
   let _ = AuditLog("admin_docs", "admin", "UA docs started")
-  let result = http_get("http://127.0.0.1:4000/admin-ua/docs")
-  let structure = json_get(parse_json(result), "structure", "Docs failed")
+  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/docs"), "all")
+  let structure = redact(to_string(json_get(parse_json(result), "structure", "Docs failed")), "all")
   let _ = AuditLog("admin_docs", "admin", "UA docs done")
   return substring(structure, 0.0, 3000.0)
 }
@@ -787,10 +788,10 @@ pattern AdminDocs() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminGraph() -> String {
   let _ = AuditLog("admin_graph", "admin", "UA graph build started")
-  let result = http_get("http://127.0.0.1:4000/admin-ua/graph")
-  let summary = json_get(parse_json(result), "summary", "Graph build failed")
-  let nodes = json_get(parse_json(result), "nodes", "0")
-  let edges = json_get(parse_json(result), "edges", "0")
+  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/graph"), "all")
+  let summary = redact(to_string(json_get(parse_json(result), "summary", "Graph build failed")), "all")
+  let nodes = redact(to_string(json_get(parse_json(result), "nodes", "0")), "all")
+  let edges = redact(to_string(json_get(parse_json(result), "edges", "0")), "all")
   let _ = AuditLog("admin_graph", "admin", "graph done: " + to_string(nodes) + " nodes, " + to_string(edges) + " edges")
   return summary
 }
@@ -806,9 +807,9 @@ pattern AdminImpact(file_path: String) -> String {
 
   let _ = AuditLog("admin_impact", "admin", "UA impact: " + file_path)
   let encoded_path = replace(file_path, " ", "%20")
-  let result = http_get("http://127.0.0.1:4000/admin-ua/impact?file=" + encoded_path)
-  let summary = json_get(parse_json(result), "summary", "Impact analysis failed")
-  let risk = json_get(parse_json(result), "risk", "unknown")
+  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/impact?file=" + encoded_path), "all")
+  let summary = redact(to_string(json_get(parse_json(result), "summary", "Impact analysis failed")), "all")
+  let risk = redact(to_string(json_get(parse_json(result), "risk", "unknown")), "all")
   let _ = AuditLog("admin_impact", "admin", "impact done: " + file_path + " risk=" + risk)
   return summary
 }
@@ -833,10 +834,10 @@ pattern AdminNarads() -> String {
   let rows = query("SELECT id, title, status, risk_level, created_at FROM narads ORDER BY id DESC LIMIT 10", [])
   let mut output = "Narads:\n"
   each row in rows {
-    let nid = to_string(try json_get(row, "id", ""))
-    let title = to_string(try json_get(row, "title", ""))
-    let status = to_string(try json_get(row, "status", ""))
-    let risk = to_string(try json_get(row, "risk_level", ""))
+    let nid = redact(to_string(try json_get(row, "id", "")), "all")
+    let title = redact(to_string(try json_get(row, "title", "")), "all")
+    let status = redact(to_string(try json_get(row, "status", "")), "all")
+    let risk = redact(to_string(try json_get(row, "risk_level", "")), "all")
     let output = output + nid + " [" + status + "|" + risk + "] " + substring(title, 0, 60) + "\n"
   }
   let _ = AuditLog("admin_narads_view", "admin", "narads viewed")
@@ -849,7 +850,7 @@ pattern AdminNarads() -> String {
 pattern AdminRollback(narad_id: String) -> String {
   // Get current status
   let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
-  let current_status = to_string(try json_get(current[0], "status", "unknown"))
+  let current_status = redact(to_string(try json_get(current[0], "status", "unknown")), "all")
 
   // Lifecycle gate
   let new_status = AdminGateNaradTransition(current_status, "rollback")
@@ -908,7 +909,7 @@ pattern AdminHealth() -> String {
   }
 
   // 4. LLM proxy reachable?
-  let proxy_check = try http_get("http://127.0.0.1:4000/health")
+  let proxy_check = redact(try http_get("http://127.0.0.1:4000/health"), "all")
   if to_string(proxy_check) == "()" then {
     let score = score - 2.0
     let issues = issues + "- LLM proxy (port 4000) unreachable\n"
@@ -949,7 +950,7 @@ pattern AdminHealth() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminApproveNarad(narad_id: String) -> String {
   let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
-  let current_status = to_string(try json_get(current[0], "status", "unknown"))
+  let current_status = redact(to_string(try json_get(current[0], "status", "unknown")), "all")
 
   let new_status = AdminGateNaradTransition(current_status, "approve")
   if new_status == "DENY" then {
@@ -966,7 +967,7 @@ pattern AdminApproveNarad(narad_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminRejectNarad(narad_id: String) -> String {
   let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
-  let current_status = to_string(try json_get(current[0], "status", "unknown"))
+  let current_status = redact(to_string(try json_get(current[0], "status", "unknown")), "all")
 
   let new_status = AdminGateNaradTransition(current_status, "reject")
   if new_status == "DENY" then {
@@ -985,7 +986,7 @@ pattern HandleAdmin(query: String, chat_id: String) -> String {
   let dept = "admin"
   let context = BuildContext(dept, query, chat_id)
   let disclaimer = AdminDisclaimer()
-  let llm_result = try call_llm(disclaimer + "\n\n" + context, query)
+  let llm_result = redact(try call_llm(disclaimer + "\n\n" + context, query), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)

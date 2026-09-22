@@ -67,7 +67,9 @@ def test_night_route_delegates_to_night_slot():
     body = APP[idx: idx + 700]
     assert "NightSlot()" in body
     assert "DELETE FROM chain_steps" not in body  # логика — в паттерне
-    assert 'db_execute("DELETE FROM chain_steps' in APP  # и она сохранилась
+    # №421: DELETE переехал в грант-контур (db_execute_with_grant, ADR-0155)
+    assert 'db_execute_with_grant(grant_issue("db:delete:chain_steps"' in APP
+    assert '"DELETE FROM chain_steps' in APP  # и сама логика сохранилась
 
 
 def test_bootstrap_is_idempotent_by_target():

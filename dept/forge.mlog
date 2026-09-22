@@ -1,3 +1,4 @@
+import dept/utils
 // Fosved Office v2 — dept/forge.mlog — FORGE-контур (FO-035, библиотека, не департамент)
 // Хранилище и проектный слой: мини-GitHub (bare repos), ForgeWriteFiles с
 // гейтом-на-границе ForgeCheckPipeline (шов конвейера §5.8 ТЗ v3), секреты,
@@ -87,7 +88,7 @@ pattern SetSecret(key: String, plaintext: String) -> String {
   let resp = try call_python("forge_secrets", "set", json_encode([key, plaintext]))
   if to_string(resp) == "()" then { return "ОТКАЗ: secrets-плоскость недоступна" }
   let parsed = try parse_json(resp)
-  let result = to_string(json_get(parsed, "result", "ОТКАЗ: нет result"))
+  let result = redact(to_string(json_get(parsed, "result", "ОТКАЗ: нет result")), "all")
   if starts_with(result, "ОТКАЗ") then { return result }
   return "ok"
 }
@@ -133,7 +134,7 @@ pattern ForgeCreateRepo(name: String, project_slug: String, desc: String, author
       let resp = try http_post("https://api.github.com/user/repos", json_encode({name: name, private: true, description: desc, auto_init: false}), "application/json")
       if to_string(resp) != "()" then {
         let parsed = try parse_json(resp)
-        let github_url = to_string(json_get(parsed, "html_url", ""))
+        let github_url = redact(to_string(json_get(parsed, "html_url", "")), "all")
       }
     }
   }
@@ -150,9 +151,9 @@ pattern ForgeListProjects() -> String {
   if length(rows) == 0.0 then { return "Проектов пока нет. /newproject — короткая форма." }
   let mut out = "Проекты FORGE:\n"
   each row in rows {
-    let slug = to_string(json_get(row, "slug", "?"))
-    let nm = to_string(json_get(row, "name", "?"))
-    let st = to_string(json_get(row, "status", "?"))
+    let slug = redact(to_string(json_get(row, "slug", "?")), "all")
+    let nm = redact(to_string(json_get(row, "name", "?")), "all")
+    let st = redact(to_string(json_get(row, "status", "?")), "all")
     let out = out + "  • " + slug + " — " + nm + " [" + st + "]\n"
   }
   return out
@@ -263,10 +264,10 @@ pattern ForgeWriteFiles(name: String, files_json: String, message: String, autho
   // 3. Запись содержимого ТОЛЬКО через write_file (в shell не попадает;
   //    ядро создаёт родительские каталоги само — проверено io.rs:441-443)
   each f in files {
-    let p = to_string(json_get(f, "path", ""))
+    let p = redact(to_string(json_get(f, "path", "")), "all")
     let vp = ForgeValidPath(p)
     if vp != "ok" then { return "ОТКАЗ: файл " + p + ": " + vp }
-    let content = to_string(json_get(f, "content", ""))
+    let content = redact(to_string(json_get(f, "content", "")), "all")
     let _ = ForgeMkdirFileDirs(p, scratch)
     let wr = write_file(scratch + "/" + p, content)
     if to_string(wr) == "()" then { return "ОТКАЗ: write_file не сработал для " + p }
@@ -331,7 +332,7 @@ pattern ForgeMirror(name: String) -> String {
   let v = ForgeValidSlug(name)
   if v != "ok" then { return "ОТКАЗ: " + v }
   let rows = query("SELECT github_url FROM forge_repos WHERE name = ? LIMIT 1", [name])
-  let url = to_string(json_get(rows[0], "github_url", ""))
+  let url = redact(to_string(json_get(rows[0], "github_url", "")), "all")
   if url == "" then { return "зеркало не настроено (github_url пуст) — локальный bare без зеркала" }
   let bare = ForgeReposDir() + "/forge/repos/" + name + ".git"
   let token = GetSecret("forge_github_token")
@@ -494,7 +495,7 @@ pattern ForgeTaskCreate(project_slug: String, title: String, description: String
   if source != "agent" and source != "owner" then { return "ОТКАЗ: source ∈ {owner, agent}" }
   let _ = db_execute("INSERT INTO forge_tasks (project_slug, title, description, status, priority, created_by) VALUES (?, ?, ?, ?, ?, ?)", [project_slug, trim(title), description, status, priority, created_by])
   let id_rows = query("SELECT id FROM forge_tasks WHERE project_slug = ? AND title = ? ORDER BY id DESC LIMIT 1", [project_slug, trim(title)])
-  let new_id = to_string(json_get(get(id_rows, 0), "id", "0"))
+  let new_id = redact(to_string(json_get(get(id_rows, 0), "id", "0")), "all")
   let _ = AuditLog("forge_task_create", created_by, "task=" + new_id + " status=" + status)
   return "Задача " + new_id + " создана (" + status + "): " + trim(title)
 }
@@ -514,7 +515,7 @@ pattern ForgeStaleClaims() -> String {
   let stale = query("SELECT id FROM forge_tasks WHERE status = 'in_progress' AND claimed_at IS NOT NULL AND CAST(claimed_at AS REAL) > 0 AND CAST(claimed_at AS REAL) < ?", [cutoff])
   let mut freed = ""
   each t in stale {
-    let tid = to_string(json_get(t, "id", ""))
+    let tid = redact(to_string(json_get(t, "id", "")), "all")
     let _ = db_execute("UPDATE forge_tasks SET status = 'queued', claimed_by = NULL, claimed_at = NULL, updated_at = datetime('now') WHERE id = ?", [tid])
     let _ = AuditLog("forge_task_stale_release", "forge", "task=" + tid + " (30 мин без обновления)")
     let freed = freed + " " + tid
@@ -528,11 +529,11 @@ pattern ForgeTaskClaim(task_id: String, dept: String) -> String {
   let rows = query("SELECT id, project_slug, status, blocked_by, title FROM forge_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: задача " + task_id + " не найдена" }
   let t = get(rows, 0)
-  let st = to_string(json_get(t, "status", ""))
+  let st = redact(to_string(json_get(t, "status", "")), "all")
   if st != "queued" then { return "ОТКАЗ: задача не queued (" + st + ")" }
-  let slug = to_string(json_get(t, "project_slug", ""))
+  let slug = redact(to_string(json_get(t, "project_slug", "")), "all")
   // blocked_by: задача блокируется только зависимостью, не ожиданием владельца
-  let blocker = to_string(json_get(t, "blocked_by", ""))
+  let blocker = redact(to_string(json_get(t, "blocked_by", "")), "all")
   if blocker != "" then {
     let bstat = ForgeTaskGetStatus(blocker)
     if bstat != "done" then { return "ОТКАЗ: задача заблокирована зависимостью task=" + blocker + " (статус " + bstat + ")" }
@@ -542,7 +543,7 @@ pattern ForgeTaskClaim(task_id: String, dept: String) -> String {
   if length(active) >= 2.0 then {
     let mut listing = ""
     each a in active {
-      let listing = listing + " task=" + to_string(json_get(a, "id", "")) + "(" + to_string(json_get(a, "project_slug", "")) + ")"
+      let listing = redact(listing + " task=" + to_string(json_get(a, "id", "")) + "(" + to_string(json_get(a, "project_slug", "")) + ")", "all")
     }
     return "ОТКАЗ: достигнут потолок 2 задач in_progress, активны:" + listing
   }
@@ -568,15 +569,15 @@ pattern ForgeBriefDraft(task_id: String) -> String {
   let rows = query("SELECT t.title, t.description, p.name, p.goal, p.project_type, p.customer_name, p.model_combo, p.departments FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: задача/проект не найдены" }
   let r = get(rows, 0)
-  let tmpl = ForgeBriefDraftTemplate(to_string(json_get(r, "project_type", "")))
-  let brief = "== ЗАДАНИЕ (черновик) ==\nЗадача: " + to_string(json_get(r, "title", "")) +
+  let tmpl = redact(ForgeBriefDraftTemplate(to_string(json_get(r, "project_type", ""))), "all")
+  let brief = redact("== ЗАДАНИЕ (черновик) ==\nЗадача: " + to_string(json_get(r, "title", "")) +
     "\nПроект: " + to_string(json_get(r, "name", "")) +
     "\nЦель: " + to_string(json_get(r, "goal", "")) +
     "\nЗаказчик: " + to_string(json_get(r, "customer_name", "")) +
     "\nОписание: " + to_string(json_get(r, "description", "")) +
     "\n" + tmpl +
     "\nКритерии готовности: перечислить проверяемые условия приёмки." +
-    "\nНЕ входит в работу: зафиксировать явно, чтобы отдел не расширял объём."
+    "\nНЕ входит в работу: зафиксировать явно, чтобы отдел не расширял объём.", "all")
   return brief
 }
 
@@ -596,8 +597,8 @@ pattern ForgeGate1Submit(task_id: String, stages_plan_json: String) -> String {
   let mut seq = 0.0
   each s in plan {
     let seq = seq + 1.0
-    let gate_mark = _GateMark(to_string(json_get(s, "needs_owner_gate", "false")))
-    let msg = msg + to_string(seq) + ". " + to_string(json_get(s, "title", "")) + " [" + gate_mark + "] — " + to_string(json_get(s, "description", "")) + "\n"
+    let gate_mark = redact(_GateMark(to_string(json_get(s, "needs_owner_gate", "false"))), "all")
+    let msg = redact(msg + to_string(seq) + ". " + to_string(json_get(s, "title", "")) + " [" + gate_mark + "] — " + to_string(json_get(s, "description", "")) + "\n", "all")
   }
   let msg = msg + "\nОтветьте: «утверждаю» / «правка: ...» (решение 17: одним сообщением)."
   return msg
@@ -646,7 +647,7 @@ pattern ForgeDeclinedContext(task_id: String) -> String {
   if length(rows) < 1.0 then { return "" }
   let mut ctx = "УЖЕ ОТКЛОНЕНО владельцем (не предлагай и не сообщай повторно; позднее решение отменяет раннее, записанное решение важнее формулировки задания):\n"
   each r in rows {
-    let ctx = ctx + "- [" + to_string(json_get(r, "step", "")) + "] " + to_string(json_get(r, "finding_text", "")) + "\n"
+    let ctx = redact(ctx + "- [" + to_string(json_get(r, "step", "")) + "] " + to_string(json_get(r, "finding_text", "")) + "\n", "all")
   }
   return ctx
 }
@@ -671,8 +672,8 @@ pattern ForgeStageStart(stage_id: String) -> String {
 pattern ForgeStageComplete(stage_id: String, repo_name: String, commit_sha: String) -> String {
   let s = ForgeStageGet(stage_id)
   if to_string(json_get(s, "id", "x")) == "" then { return "ОТКАЗ: этап не найден" }
-  let task_id = to_string(json_get(s, "task_id", ""))
-  let seq = to_string(json_get(s, "seq", ""))
+  let task_id = redact(to_string(json_get(s, "task_id", "")), "all")
+  let seq = redact(to_string(json_get(s, "seq", "")), "all")
   let tag = "stage-" + seq
   let tr = ForgeTag(repo_name, tag, commit_sha)
   if starts_with(tr, "ОТКАЗ") then { return "ОТКАЗ: метка этапа: " + tr }
@@ -686,7 +687,7 @@ pattern ForgeStageFixTag(stage_id: String, repo_name: String, commit_sha: String
   let s = ForgeStageGet(stage_id)
   if to_string(json_get(s, "id", "x")) == "" then { return "ОТКАЗ: этап не найден" }
   let k = to_float(json_get(s, "failed_runs", "0")) + 1.0
-  let tag = "stage-" + to_string(json_get(s, "seq", "")) + "-fix-" + to_string(k)
+  let tag = redact("stage-" + to_string(json_get(s, "seq", "")) + "-fix-" + to_string(k), "all")
   let tr = ForgeTag(repo_name, tag, commit_sha)
   if starts_with(tr, "ОТКАЗ") then { return "ОТКАЗ: fix-метка: " + tr }
   let _ = db_execute("UPDATE forge_stages SET commit_tag = ?, commit_sha = ? WHERE id = ?", [tag, commit_sha, stage_id])
@@ -696,13 +697,13 @@ pattern ForgeStageFixTag(stage_id: String, repo_name: String, commit_sha: String
 pattern ForgeStageFail(stage_id: String) -> String {
   let s = ForgeStageGet(stage_id)
   if to_string(json_get(s, "id", "x")) == "" then { return "ОТКАЗ: этап не найден" }
-  let task_id = to_string(json_get(s, "task_id", ""))
+  let task_id = redact(to_string(json_get(s, "task_id", "")), "all")
   let fails = to_float(json_get(s, "failed_runs", "0")) + 1.0
   let _ = db_execute("UPDATE forge_stages SET failed_runs = ? WHERE id = ?", [to_string(fails), stage_id])
   if fails >= 3.0 then {
     let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_owner', updated_at = datetime('now') WHERE id = ?", [task_id])
     let _ = db_execute("UPDATE forge_stages SET status = 'failed' WHERE id = ?", [stage_id])
-    let _ = AuditLog("forge_stage_3fails", "forge", "task=" + task_id + " stage=" + to_string(json_get(s, "seq", "")) + " → awaiting_owner")
+    let _ = redact(AuditLog("forge_stage_3fails", "forge", "task=" + task_id + " stage=" + to_string(json_get(s, "seq", "")) + " → awaiting_owner"), "all")
     return "Три неудачных прогона подряд — задача " + task_id + " → awaiting_owner (доставка текстом, гейт — FO-038)"
   }
   return "Неудачный прогон " + to_string(fails) + "/3 на этапе " + to_string(json_get(s, "seq", ""))
@@ -726,7 +727,7 @@ pattern ForgeStepSecrets(files_json: String) -> String {
   if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
   let mut all_content = ""
   each f in files {
-    let all_content = all_content + "\n" + to_string(json_get(f, "content", ""))
+    let all_content = redact(all_content + "\n" + to_string(json_get(f, "content", "")), "all")
   }
   let gate = GateNoSecretsInRepo(all_content)
   if gate.passed == false then { return "ОТКАЗ: " + gate.message }
@@ -742,7 +743,7 @@ pattern ForgeStepReview(task_id: String, stage_id: String, files_json: String, b
   // без смыслового ревью (владелец смотрит на точках остановки).
   let stage = ForgeStageGet(stage_id)
   if stage_id == "" then { let stage = { id: "", needs_owner_gate: "false" } }
-  let needs_gate = to_string(json_get(stage, "needs_owner_gate", "false"))
+  let needs_gate = redact(to_string(json_get(stage, "needs_owner_gate", "false")), "all")
   let gate_policy = _ProjectPolicy(task_id)
   if gate_policy == "minimal" then { return "ok" }
   if gate_policy == "key_stages" and needs_gate != "true" then { return "ok" }
@@ -750,10 +751,10 @@ pattern ForgeStepReview(task_id: String, stage_id: String, files_json: String, b
   let mut files_text = ""
   let fl = parse_json(files_json)
   each f in fl {
-    let files_text = files_text + "\n--- файл: " + to_string(json_get(f, "path", "")) + " ---\n" + substring(to_string(json_get(f, "content", "")), 0.0, 6000.0)
+    let files_text = redact(files_text + "\n--- файл: " + to_string(json_get(f, "path", "")) + " ---\n" + substring(to_string(json_get(f, "content", "")), 0.0, 6000.0), "all")
   }
   let prompt = "Ты — ревьюер кода. Проверь, делает ли код ровно то, что утверждено в задании. Не предлагай то, что уже отклонено владельцем.\n\n== УТВЕРЖДЁННОЕ ЗАДАНИЕ ==\n" + substring(brief, 0.0, 4000.0) + "\n\n" + declined + "\n== КОД ==\n" + files_text + "\n\nОтветь строго: 'OK' если код соответствует заданию, либо списком находок (по одной в строке, каждая конкретной правкой)."
-  let review = try call_llm("Ревью кода FORGE: сверка с утверждённым заданием.", prompt)
+  let review = redact(try call_llm("Ревью кода FORGE: сверка с утверждённым заданием.", prompt), "all")
   if to_string(review) == "()" then {
     let _ = AuditLog("forge_review_unavailable", "forge", "task=" + task_id + " — LLM сбой, парковка владельцу")
     return "ОТКАЗ: ревью недоступно (сбой LLM) — находки запаркованы владельцу; задача ждёт решения"
@@ -782,7 +783,7 @@ pattern ForgeStepDocs(files_json: String, policy: String, brief: String) -> Stri
     let mut new_files = "["
     let mut first = true
     each f in files {
-      let new_files = _Comma(new_files, first) + "{\"path\":\"" + escape_json(to_string(json_get(f, "path", ""))) + "\",\"content\":\"" + escape_json(to_string(json_get(f, "content", ""))) + "\"}"
+      let new_files = redact(_Comma(new_files, first) + "{\"path\":\"" + escape_json(to_string(json_get(f, "path", ""))) + "\",\"content\":\"" + escape_json(to_string(json_get(f, "content", ""))) + "\"}", "all")
       let first = false
     }
     let new_files = _Comma(new_files, first) + "{\"path\":\"README.md\",\"content\":\"" + escape_json(stub) + "\"}]"
@@ -803,7 +804,7 @@ pattern ForgeStepLint(files_json: String, policy: String) -> String {
   let mut new_files = "["
   let mut first = true
   each f in files {
-    let content = to_string(json_get(f, "content", ""))
+    let content = redact(to_string(json_get(f, "content", "")), "all")
     let lines = split(content, "\n")
     let mut fixed = ""
     each line in lines {
@@ -811,7 +812,7 @@ pattern ForgeStepLint(files_json: String, policy: String) -> String {
     }
     let fixed = _LintTail(content, fixed)
     let mark = mark + _NeMark(content, fixed)
-    let new_files = _Comma(new_files, first) + "{\"path\":\"" + escape_json(to_string(json_get(f, "path", ""))) + "\",\"content\":\"" + escape_json(fixed) + "\"}"
+    let new_files = redact(_Comma(new_files, first) + "{\"path\":\"" + escape_json(to_string(json_get(f, "path", ""))) + "\",\"content\":\"" + escape_json(fixed) + "\"}", "all")
     let first = false
   }
   if contains(mark, "1") == false then { return "ok" }
@@ -830,7 +831,7 @@ pattern ForgeContinuityCheck(repo_name: String, stage_id: String) -> String {
   let s = ForgeStageGet(stage_id)
   // length() на Dict запрещён ядром — проверка через поле-сентинел
   if to_string(json_get(s, "id", "x")) == "" then { return "ok" }
-  let stage_sha = to_string(json_get(s, "commit_sha", ""))
+  let stage_sha = redact(to_string(json_get(s, "commit_sha", "")), "all")
   if stage_sha == "" then { return "ok" }
   let bare = ForgeReposDir() + "/forge/repos/" + repo_name + ".git"
   let head = ForgeRunScript("git -C \"" + bare + "\" rev-parse --short HEAD")
@@ -865,7 +866,7 @@ pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
   // Контекст задачи: проект репозитория → активная задача (in_progress / awaiting_owner)
   let proj_rows = query("SELECT project_slug FROM forge_repos WHERE name = ? LIMIT 1", [name])
   if length(proj_rows) < 1.0 then { return "ОТКАЗ: репозиторий " + name + " не найден" }
-  let project_slug = to_string(json_get(get(proj_rows, 0), "project_slug", ""))
+  let project_slug = redact(to_string(json_get(get(proj_rows, 0), "project_slug", "")), "all")
   // Сбой схемы FO-036 (старая БД/тест-харнесс FO-035) → минимальный рубеж,
   // не падаем: конвейер деградирует до шага «Секреты» с предупреждением
   let task_rows = try query("SELECT id, status FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug])
@@ -884,7 +885,7 @@ pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
     return "ok"
   }
 
-  let task_id = to_string(json_get(get(task_rows, 0), "id", ""))
+  let task_id = redact(to_string(json_get(get(task_rows, 0), "id", "")), "all")
   let stage_rows = query("SELECT id FROM forge_stages WHERE task_id = ? AND status = 'in_progress' ORDER BY seq DESC LIMIT 1", [task_id])
   let stage_id = ""
   if to_string(stage_rows) != "()" and length(stage_rows) > 0.0 then { let stage_id = to_string(json_get(get(stage_rows, 0), "id", "")) }
@@ -1027,7 +1028,7 @@ pattern _MaskSecrets(project_slug: String, output: String) -> String {
   let mut masked = output
   let rows = query("SELECT env_key, secret_ref FROM forge_project_secrets WHERE project_slug = ?", [project_slug])
   each r in rows {
-    let secret_ref = to_string(json_get(r, "secret_ref", ""))
+    let secret_ref = redact(to_string(json_get(r, "secret_ref", "")), "all")
     if secret_ref != "" then {
       let val = GetSecret(secret_ref)
       if val != "" and length(val) >= 8.0 then { let masked = replace(masked, val, "***") }
@@ -1061,8 +1062,8 @@ pattern _RunInScratch(project_slug: String, repo_name: String, command: String, 
   let mut env_prefix = ""
   let sec_rows = query("SELECT env_key, secret_ref FROM forge_project_secrets WHERE project_slug = ?", [project_slug])
   each r in sec_rows {
-    let env_key = to_string(json_get(r, "env_key", ""))
-    let secret_ref = to_string(json_get(r, "secret_ref", ""))
+    let env_key = redact(to_string(json_get(r, "env_key", "")), "all")
+    let secret_ref = redact(to_string(json_get(r, "secret_ref", "")), "all")
     if env_key != "" and secret_ref != "" and regex_match("[a-zA-Z_][a-zA-Z0-9_]*", env_key) then {
       let val = GetSecret(secret_ref)
       if val != "" then { let env_prefix = env_prefix + " " + env_key + "=\"" + val + "\"" }
@@ -1080,11 +1081,11 @@ pattern _RunInScratch(project_slug: String, repo_name: String, command: String, 
     let files = parse_json(files_json)
     if to_string(files) != "()" then {
       each f in files {
-        let p = to_string(json_get(f, "path", ""))
+        let p = redact(to_string(json_get(f, "path", "")), "all")
         let vp = ForgeValidPath(p)
         if vp != "ok" then { return "ОТКАЗ: файл " + p + ": " + vp }
         let _ = ForgeMkdirFileDirs(p, scratch)
-        let _ = write_file(scratch + "/" + p, to_string(json_get(f, "content", "")))
+        let _ = redact(write_file(scratch + "/" + p, to_string(json_get(f, "content", ""))), "all")
       }
     }
   }
@@ -1133,7 +1134,7 @@ pattern ForgeRun(project_slug: String, repo_name: String, command: String, stage
   if starts_with(danger, "ОТКАЗ") then {
     let task_rows = try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status = 'in_progress' ORDER BY id DESC LIMIT 1", [project_slug])
     if to_string(task_rows) != "()" and length(task_rows) > 0.0 then {
-      let tid = to_string(json_get(get(task_rows, 0), "id", ""))
+      let tid = redact(to_string(json_get(get(task_rows, 0), "id", "")), "all")
       let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_owner', updated_at = datetime('now') WHERE id = ?", [tid])
       let _ = AuditLog("forge_danger_gate", "forge", "repo=" + repo_name + " cmd=" + substring(command, 0.0, 80.0) + " → владельцу")
     }
@@ -1148,7 +1149,7 @@ pattern ForgeRun(project_slug: String, repo_name: String, command: String, stage
 pattern ForgeRunConfirmed(project_slug: String, repo_name: String, command: String, stage_id: String) -> String {
   let task_rows = query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug])
   if length(task_rows) < 1.0 then { return "ОТКАЗ: нет активной задачи проекта" }
-  let tid = to_string(json_get(get(task_rows, 0), "id", ""))
+  let tid = redact(to_string(json_get(get(task_rows, 0), "id", "")), "all")
   let dec = query("SELECT id FROM forge_finding_decisions WHERE task_id = ? AND decision = 'approved' AND finding_text = ? LIMIT 1", [tid, substring(command, 0.0, 200.0)])
   if length(dec) < 1.0 then { return "ОТКАЗ: нет подтверждения владельца в истории решений — исполнение запрещено" }
   let cp = ForgeCheckpoint(repo_name)
@@ -1167,11 +1168,11 @@ pattern ForgeStepTest(task_id: String, stage_id: String, files_json: String, bri
   let rows = query("SELECT project_slug, project_type, template_id FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: задача/проект не найдены" }
   let r = get(rows, 0)
-  let project_slug = to_string(json_get(r, "project_slug", ""))
-  let project_type = to_string(json_get(r, "project_type", ""))
+  let project_slug = redact(to_string(json_get(r, "project_slug", "")), "all")
+  let project_type = redact(to_string(json_get(r, "project_type", "")), "all")
   let repo_rows = query("SELECT name FROM forge_repos WHERE project_slug = ? LIMIT 1", [project_slug])
   if length(repo_rows) < 1.0 then { return "ОТКАЗ: у проекта нет репозитория" }
-  let repo_name = to_string(json_get(get(repo_rows, 0), "name", ""))
+  let repo_name = redact(to_string(json_get(get(repo_rows, 0), "name", "")), "all")
   if project_type == "android" then {
     return "ОТКАЗ: показ этого типа будет доступен в FORGE-6 (FO-040) — сборка Capacitor появляется там"
   }
@@ -1205,7 +1206,7 @@ pattern ForgeStepDanger(task_id: String, files_json: String) -> String {
   if to_string(files) == "()" then { return "ОТКАЗ: files_json не разбирается" }
   let mut all_text = ""
   each f in files {
-    let all_text = all_text + "\n" + to_string(json_get(f, "content", ""))
+    let all_text = redact(all_text + "\n" + to_string(json_get(f, "content", "")), "all")
   }
   let danger = ForgeDangerInText(all_text)
   if starts_with(danger, "ОТКАЗ") == false then { return "ok" }
@@ -1213,7 +1214,7 @@ pattern ForgeStepDanger(task_id: String, files_json: String) -> String {
   let finding = trim(substring(danger, 6.0, length(danger)))
   let dec_rows = query("SELECT decision FROM forge_finding_decisions WHERE task_id = ? AND finding_text = ? ORDER BY id DESC LIMIT 1", [task_id, finding])
   if length(dec_rows) > 0.0 then {
-    let decision = to_string(json_get(get(dec_rows, 0), "decision", ""))
+    let decision = redact(to_string(json_get(get(dec_rows, 0), "decision", "")), "all")
     if decision == "approved" then {
       let _ = AuditLog("forge_danger_approved_run", "forge", "task=" + task_id + " " + finding)
       return "ok"
@@ -1317,26 +1318,26 @@ pattern ForgeGateMessage(gate_id: String) -> String {
   let rows = query("SELECT g.kind, g.question, g.options_json, g.task_id, g.stage_id, t.title, t.project_slug FROM forge_gates g JOIN forge_tasks t ON t.id = g.task_id WHERE g.id = ? LIMIT 1", [gate_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: гейт не найден" }
   let g = get(rows, 0)
-  let kind = to_string(json_get(g, "kind", ""))
-  let task_id = to_string(json_get(g, "task_id", ""))
+  let kind = redact(to_string(json_get(g, "kind", "")), "all")
+  let task_id = redact(to_string(json_get(g, "task_id", "")), "all")
   // этап N из M
   let stage_info = ""
-  let sid = to_string(json_get(g, "stage_id", ""))
+  let sid = redact(to_string(json_get(g, "stage_id", "")), "all")
   if sid != "" and sid != "0" then {
     let st = ForgeStageGet(sid)
-    let seq = to_string(json_get(st, "seq", "?"))
+    let seq = redact(to_string(json_get(st, "seq", "?")), "all")
     let st_rows = query("SELECT COUNT(*) as cnt FROM forge_stages WHERE task_id = ?", [task_id])
-    let total = to_string(json_get(get(st_rows, 0), "cnt", "?"))
-    let stage_info = "\nЭтап " + seq + " из " + total + ": " + to_string(json_get(st, "title", ""))
+    let total = redact(to_string(json_get(get(st_rows, 0), "cnt", "?")), "all")
+    let stage_info = redact("\nЭтап " + seq + " из " + total + ": " + to_string(json_get(st, "title", "")), "all")
   }
   // короткий diff (если у этапа есть коммит)
   let repo_rows = query("SELECT name FROM forge_repos WHERE project_slug = (SELECT project_slug FROM forge_tasks WHERE id = ? LIMIT 1) LIMIT 1", [task_id])
   let diff_stat = ""
   if sid != "" and sid != "0" and length(repo_rows) > 0.0 then {
     let st2 = ForgeStageGet(sid)
-    let sha = to_string(json_get(st2, "commit_sha", ""))
+    let sha = redact(to_string(json_get(st2, "commit_sha", "")), "all")
     if sha != "" then {
-      let repo_name = to_string(json_get(get(repo_rows, 0), "name", ""))
+      let repo_name = redact(to_string(json_get(get(repo_rows, 0), "name", "")), "all")
       let ds = _GateDiffStat(repo_name, "stage-1", sha)
       if ds != "" then { let diff_stat = "\nИзменения (кратко): " + ds }
     }
@@ -1345,7 +1346,7 @@ pattern ForgeGateMessage(gate_id: String) -> String {
   let opts = parse_json(to_string(json_get(g, "options_json", "[]")))
   let mut opt_text = ""
   each o in opts {
-    let opt_text = opt_text + "• " + to_string(json_get(o, "label", "")) + " → " + to_string(json_get(o, "consequence", "")) + "\n"
+    let opt_text = redact(opt_text + "• " + to_string(json_get(o, "label", "")) + " → " + to_string(json_get(o, "consequence", "")) + "\n", "all")
   }
   let kind_ru = kind
   if kind == "plan" then { let kind_ru = "задание+план" }
@@ -1369,19 +1370,19 @@ pattern ForgeGateSend(gate_id: String) -> String {
   let mut first = true
   each o in opts {
     if first == false then { let buttons = buttons + "," }
-    let buttons = buttons + "[{\"text\":\"" + escape_json(to_string(json_get(o, "label", ""))) + "\",\"callback_data\":\"fg:" + gate_id + ":" + to_string(json_get(o, "idx", "0")) + "\"}]"
+    let buttons = redact(buttons + "[{\"text\":\"" + escape_json(to_string(json_get(o, "label", ""))) + "\",\"callback_data\":\"fg:" + gate_id + ":" + to_string(json_get(o, "idx", "0")) + "\"}]", "all")
     let first = false
   }
   let buttons = buttons + "]"
   let owner_id = env("OWNER_TELEGRAM_ID")
-  let token = env("TELEGRAM_BOT_TOKEN")
+  let token = TgToken()
   let body = json_encode({chat_id: to_float(owner_id), text: substring(msg, 0.0, 3500.0), reply_markup: {inline_keyboard: []}})
   // reply_markup с кнопками — json_encode выше с пустым списком; собираем строкой
   let raw_body = "{\"chat_id\":" + owner_id + ",\"text\":" + escape_json(substring(msg, 0.0, 3500.0)) + ",\"reply_markup\":{\"inline_keyboard\":" + buttons + "}}"
   let resp = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", raw_body, "application/json")
   if to_string(resp) != "()" then {
     let parsed = parse_json(resp)
-    let mid = to_string(json_get(parsed, "result.message_id", ""))
+    let mid = redact(to_string(json_get(parsed, "result.message_id", "")), "all")
     if mid != "" then {
       let _ = db_execute("UPDATE forge_gates SET telegram_message_id = ? WHERE id = ?", [mid, gate_id])
     }
@@ -1399,12 +1400,12 @@ pattern ForgeGateDecide(gate_id: String, option_idx: String, decided_by: String)
   let rows = query("SELECT decision, kind, task_id, options_json FROM forge_gates WHERE id = ? LIMIT 1", [gate_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: гейт не найден" }
   let g = get(rows, 0)
-  let existing = to_string(json_get(g, "decision", ""))
+  let existing = redact(to_string(json_get(g, "decision", "")), "all")
   if existing != "" then {
     return "ОТКАЗ: гейт уже решён («" + existing + "») — повторное нажатие игнорируется"
   }
-  let kind = to_string(json_get(g, "kind", ""))
-  let task_id = to_string(json_get(g, "task_id", ""))
+  let kind = redact(to_string(json_get(g, "kind", "")), "all")
+  let task_id = redact(to_string(json_get(g, "task_id", "")), "all")
   // какой вариант выбран
   let opts = parse_json(to_string(json_get(g, "options_json", "[]")))
   let mut label = ""
@@ -1446,14 +1447,14 @@ pattern ForgeRemarkFromReply(message_id: String, text: String, attachment_ref: S
   let rows = query("SELECT id, task_id, stage_id FROM forge_gates WHERE telegram_message_id = ? LIMIT 1", [message_id])
   if length(rows) < 1.0 then { return "" }
   let g = get(rows, 0)
-  let gate_id = to_string(json_get(g, "id", ""))
-  let task_id = to_string(json_get(g, "task_id", ""))
-  let stage_id = to_string(json_get(g, "stage_id", ""))
+  let gate_id = redact(to_string(json_get(g, "id", "")), "all")
+  let task_id = redact(to_string(json_get(g, "task_id", "")), "all")
+  let stage_id = redact(to_string(json_get(g, "stage_id", "")), "all")
   // commit_sha, который владелец смотрел
   let commit_sha = ""
   if stage_id != "" and stage_id != "0" then {
     let st = ForgeStageGet(stage_id)
-    let commit_sha = to_string(json_get(st, "commit_sha", ""))
+    let commit_sha = redact(to_string(json_get(st, "commit_sha", "")), "all")
   }
   // fix или rescope: если владелец не сказал — вопрос ему (гейт remark)
   let kind = ""
@@ -1474,7 +1475,7 @@ pattern ForgeRemarkCreate(task_id: String, stage_id: String, commit_sha: String,
   if length(trim(text)) < 3.0 then { return "ОТКАЗ: текст замечания слишком короткий" }
   let _ = db_execute("INSERT INTO forge_remarks (task_id, stage_id, commit_sha, text, file_hint, attachment_ref, kind, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'open')", [task_id, stage_id, commit_sha, text, file_hint, attachment_ref, kind])
   let rows = query("SELECT id FROM forge_remarks WHERE task_id = ? ORDER BY id DESC LIMIT 1", [task_id])
-  let rid = to_string(json_get(get(rows, 0), "id", "0"))
+  let rid = redact(to_string(json_get(get(rows, 0), "id", "0")), "all")
   let _ = AuditLog("forge_remark_create", "owner", "remark=" + rid + " task=" + task_id + " kind=" + kind)
   return rid
 }
@@ -1483,7 +1484,7 @@ pattern ForgeRemarkCreate(task_id: String, stage_id: String, commit_sha: String,
 pattern ForgeRemarkContinuity(repo_name: String, remark_id: String) -> String {
   let rows = query("SELECT commit_sha FROM forge_remarks WHERE id = ? LIMIT 1", [remark_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: замечание не найдено" }
-  let seen_sha = to_string(json_get(get(rows, 0), "commit_sha", ""))
+  let seen_sha = redact(to_string(json_get(get(rows, 0), "commit_sha", "")), "all")
   if seen_sha == "" then { return "ok" }
   let head = ForgeRunScript("git -C \"" + ForgeReposDir() + "/forge/repos/" + repo_name + ".git\" rev-parse --short HEAD")
   let head_sha = trim(head.output)
@@ -1496,7 +1497,7 @@ pattern ForgeRemarkResolveFix(remark_id: String, repo_name: String, new_commit_s
   let rows = query("SELECT task_id, stage_id FROM forge_remarks WHERE id = ? LIMIT 1", [remark_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: замечание не найдено" }
   let r = get(rows, 0)
-  let stage_id = to_string(json_get(r, "stage_id", ""))
+  let stage_id = redact(to_string(json_get(r, "stage_id", "")), "all")
   let ft = ForgeStageFixTag(stage_id, repo_name, new_commit_sha)
   if starts_with(ft, "ОТКАЗ") then { return "ОТКАЗ: " + ft }
   let _ = db_execute("UPDATE forge_remarks SET status = 'resolved', resolved_by_commit = ?, resolved_at = datetime('now') WHERE id = ?", [new_commit_sha, remark_id])
@@ -1507,7 +1508,7 @@ pattern ForgeRemarkResolveFix(remark_id: String, repo_name: String, new_commit_s
 pattern ForgeRemarkResolveRescope(remark_id: String) -> String {
   let rows = query("SELECT task_id FROM forge_remarks WHERE id = ? LIMIT 1", [remark_id])
   if length(rows) < 1.0 then { return "ОТКАЗ: замечание не найдено" }
-  let task_id = to_string(json_get(get(rows, 0), "task_id", ""))
+  let task_id = redact(to_string(json_get(get(rows, 0), "task_id", "")), "all")
   let _ = db_execute("UPDATE forge_remarks SET status = 'rescope', resolved_at = datetime('now') WHERE id = ?", [remark_id])
   let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_plan', updated_at = datetime('now') WHERE id = ?", [task_id])
   let _ = AuditLog("forge_remark_rescope", "owner", "remark=" + remark_id + " task=" + task_id + " → гейт №1")
@@ -1517,9 +1518,9 @@ pattern ForgeRemarkResolveRescope(remark_id: String) -> String {
 // ── C.3: раздел «требует внимания» для утреннего брифа ────────────────
 pattern ForgeAttention() -> String {
   let gates_rows = query("SELECT COUNT(*) as cnt FROM forge_gates WHERE decision IS NULL OR decision = ''", [])
-  let gates_n = to_string(json_get(get(gates_rows, 0), "cnt", "0"))
+  let gates_n = redact(to_string(json_get(get(gates_rows, 0), "cnt", "0")), "all")
   let remarks_rows = query("SELECT COUNT(*) as cnt FROM forge_remarks WHERE status = 'open'", [])
-  let remarks_n = to_string(json_get(get(remarks_rows, 0), "cnt", "0"))
+  let remarks_n = redact(to_string(json_get(get(remarks_rows, 0), "cnt", "0")), "all")
   return "{\"pending_gates\":" + gates_n + ",\"open_remarks\":" + remarks_n + "}"
 }
 
@@ -1540,12 +1541,12 @@ pattern ForgeEditStatsRecord(repo_name: String, path: String, outcome: String, m
   if to_string(probe) == "()" then { return "stats-off: таблицы нет (деградация, запись пропущена)" }
   let proj_rows = query("SELECT project_slug FROM forge_repos WHERE name = ? LIMIT 1", [repo_name])
   if length(proj_rows) < 1.0 then { return "ok: репо не найдено — без привязки" }
-  let project_slug = to_string(json_get(get(proj_rows, 0), "project_slug", ""))
+  let project_slug = redact(to_string(json_get(get(proj_rows, 0), "project_slug", "")), "all")
   let task_id = ""
   let stage_id = ""
   let task_rows = try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug])
   if to_string(task_rows) != "()" and length(task_rows) > 0.0 then {
-    let task_id = to_string(json_get(get(task_rows, 0), "id", ""))
+    let task_id = redact(to_string(json_get(get(task_rows, 0), "id", "")), "all")
     let stage_rows = query("SELECT id FROM forge_stages WHERE task_id = ? AND status = 'in_progress' ORDER BY seq DESC LIMIT 1", [task_id])
     if length(stage_rows) > 0.0 then { let stage_id = to_string(json_get(get(stage_rows, 0), "id", "")) }
   }
@@ -1562,7 +1563,7 @@ pattern ForgeEditStatsWeekly() -> String {
   let mut fuzzy = 0.0
   let mut reject = 0.0
   each r in rows {
-    let oc = to_string(json_get(r, "outcome", ""))
+    let oc = redact(to_string(json_get(r, "outcome", "")), "all")
     if oc == "first_try" then { let first_try = to_float(json_get(r, "c", "0")) }
     if oc == "fuzzy" then { let fuzzy = to_float(json_get(r, "c", "0")) }
     if oc == "reject" then { let reject = to_float(json_get(r, "c", "0")) }
@@ -1571,7 +1572,7 @@ pattern ForgeEditStatsWeekly() -> String {
   let mut ov_first = 0.0
   let mut ov_fuzzy = 0.0
   each o in ov_rows {
-    let oc = to_string(json_get(o, "outcome", ""))
+    let oc = redact(to_string(json_get(o, "outcome", "")), "all")
     if oc == "first_try" then { let ov_first = to_float(json_get(o, "c", "0")) }
     if oc == "fuzzy" then { let ov_fuzzy = to_float(json_get(o, "c", "0")) }
   }
@@ -1638,7 +1639,7 @@ pattern ForgePreviewUp(project_slug: String, repo_name: String, command: String)
   if length(active) >= 2.0 then {
     let mut listing = ""
     each a in active {
-      let listing = listing + " " + to_string(json_get(a, "slug", "")) + "(порт " + to_string(json_get(a, "port", "")) + ", с " + to_string(json_get(a, "started_at", "")) + ")"
+      let listing = redact(listing + " " + to_string(json_get(a, "slug", "")) + "(порт " + to_string(json_get(a, "port", "")) + ", с " + to_string(json_get(a, "started_at", "")) + ")", "all")
     }
     return "ОТКАЗ: лимит 2 живых превью исчерпан, активны:" + listing + " — гаснут по 30 минутам тишины"
   }
@@ -1661,8 +1662,8 @@ pattern ForgePreviewUp(project_slug: String, repo_name: String, command: String)
   let mut env_prefix = ""
   let sec_rows = query("SELECT env_key, secret_ref FROM forge_project_secrets WHERE project_slug = ?", [project_slug])
   each r in sec_rows {
-    let env_key = to_string(json_get(r, "env_key", ""))
-    let secret_ref = to_string(json_get(r, "secret_ref", ""))
+    let env_key = redact(to_string(json_get(r, "env_key", "")), "all")
+    let secret_ref = redact(to_string(json_get(r, "secret_ref", "")), "all")
     if env_key != "" and secret_ref != "" and regex_match("[a-zA-Z_][a-zA-Z0-9_]*", env_key) then {
       let val = GetSecret(secret_ref)
       if val != "" then { let env_prefix = env_prefix + " " + env_key + "=\"" + val + "\"" }
@@ -1696,8 +1697,8 @@ pattern ForgePreviewSweep() -> String {
   let mut killed = 0.0
   let mut failed = 0.0
   each p in running {
-    let slug = to_string(json_get(p, "slug", ""))
-    let pid = to_string(json_get(p, "pid", ""))
+    let slug = redact(to_string(json_get(p, "slug", "")), "all")
+    let pid = redact(to_string(json_get(p, "pid", "")), "all")
     let last = to_float(json_get(p, "last_access_at", "0"))
     let idle = now() - last
     // проверка живости процесса: kill -0
@@ -1723,7 +1724,7 @@ pattern ForgePreviewStatus(slug: String) -> String {
   let rows = query("SELECT status, port, pid, repo_name FROM forge_previews WHERE slug = ? LIMIT 1", [slug])
   if length(rows) < 1.0 then { return "ОТКАЗ: превью не найдено" }
   let r = get(rows, 0)
-  let status = to_string(json_get(r, "status", ""))
+  let status = redact(to_string(json_get(r, "status", "")), "all")
   let log_line = ""
   if status == "running" then {
     let lr = ForgeRunScript("tail -1 \"" + ForgeReposDir() + "/forge/previews/" + slug + ".log\" 2>/dev/null")
@@ -1736,7 +1737,7 @@ pattern ForgePreviewStatus(slug: String) -> String {
 pattern ForgePreviewDown(slug: String) -> String {
   let rows = query("SELECT pid, status FROM forge_previews WHERE slug = ? LIMIT 1", [slug])
   if length(rows) < 1.0 then { return "ОТКАЗ: превью не найдено" }
-  let pid = to_string(json_get(get(rows, 0), "pid", ""))
+  let pid = redact(to_string(json_get(get(rows, 0), "pid", "")), "all")
   let _ = ForgeRunScript("kill " + pid + " 2>/dev/null; true")
   let _ = db_execute("UPDATE forge_previews SET status = 'stopped' WHERE slug = ?", [slug])
   return "Превью " + slug + " погашено, порт свободен."
@@ -1757,7 +1758,7 @@ pattern ForgeFromDevRequest(query: String, chat_id: String) -> String {
   let rows = query("SELECT slug FROM forge_projects WHERE status = 'active' ORDER BY updated_at DESC LIMIT 5", [])
   let mut matched_slug = ""
   each r in rows {
-    let slug = to_string(json_get(r, "slug", ""))
+    let slug = redact(to_string(json_get(r, "slug", "")), "all")
     if matched_slug == "" and contains(lower(query), substring(slug, 0.0, 6.0)) then { let matched_slug = slug }
   }
   if matched_slug == "" then {

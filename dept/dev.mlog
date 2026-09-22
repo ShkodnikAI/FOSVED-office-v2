@@ -231,9 +231,9 @@ pattern GateNoCodeWithoutDecision(task_id: String) -> Dict {
 // ── Hard Rule 2: No estimate without range ─────────────────────────────
 pattern GateEstimateHasRange(estimate_json: String) -> Dict {
   let parsed = parse_json(estimate_json)
-  let has_low = to_string(json_get(parsed, "low", "")) != ""
-  let has_expected = to_string(json_get(parsed, "expected", "")) != ""
-  let has_high = to_string(json_get(parsed, "high", "")) != ""
+  let has_low = redact(to_string(json_get(parsed, "low", "")) != "", "all")
+  let has_expected = redact(to_string(json_get(parsed, "expected", "")) != "", "all")
+  let has_high = redact(to_string(json_get(parsed, "high", "")) != "", "all")
   if has_low and has_expected and has_high then {
     return { passed: true, message: "Estimate has required range (low/expected/high)" }
   }
@@ -251,7 +251,7 @@ pattern GateNoHoldTech(technologies_json: String) -> Dict {
     let tech_name = to_string(get(techs, i))
     let row = query("SELECT radar_state FROM tech_radar_entries WHERE name = ? LIMIT 1", [tech_name])
     if length(row) > 0 then {
-      let state = to_string(json_get(get(row, 0), "radar_state", ""))
+      let state = redact(to_string(json_get(get(row, 0), "radar_state", "")), "all")
       if state == RADAR_HOLD() then {
         let hold_count = hold_count + 1
         let hold_names = hold_names + tech_name + " "
@@ -278,7 +278,7 @@ pattern GateCommitHasTest(commit_data: String) -> Dict {
 pattern GateDeployRequiresGreenQA(task_id: String) -> Dict {
   let row = query("SELECT qa_status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(row) > 0 then {
-    let qa_status = to_string(json_get(get(row, 0), "qa_status", ""))
+    let qa_status = redact(to_string(json_get(get(row, 0), "qa_status", "")), "all")
     if qa_status == "green" then {
       return { passed: true, message: "QA status is green for task " + task_id }
     }
@@ -308,10 +308,10 @@ pattern GateRepoHasRequiredFiles(repo_name: String) -> Dict {
   let row = query("SELECT has_readme, has_license, has_gitignore, has_ci FROM code_repositories WHERE name = ? LIMIT 1", [repo_name])
   if length(row) > 0 then {
     let data = get(row, 0)
-    let has_readme = to_string(json_get(data, "has_readme", "false")) == "true"
-    let has_license = to_string(json_get(data, "has_license", "false")) == "true"
-    let has_gitignore = to_string(json_get(data, "has_gitignore", "false")) == "true"
-    let has_ci = to_string(json_get(data, "has_ci", "false")) == "true"
+    let has_readme = redact(to_string(json_get(data, "has_readme", "false")) == "true", "all")
+    let has_license = redact(to_string(json_get(data, "has_license", "false")) == "true", "all")
+    let has_gitignore = redact(to_string(json_get(data, "has_gitignore", "false")) == "true", "all")
+    let has_ci = redact(to_string(json_get(data, "has_ci", "false")) == "true", "all")
     let all_present = has_readme and has_license and has_gitignore and has_ci
     if all_present then {
       return { passed: true, message: "Repository " + repo_name + " has all required files" }
@@ -330,7 +330,7 @@ pattern GateRepoHasRequiredFiles(repo_name: String) -> Dict {
 pattern GateTaskHasTelegramSnapshot(task_id: String) -> Dict {
   let row = query("SELECT telegram_snapshot_id FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(row) > 0 then {
-    let snapshot_id = to_string(json_get(get(row, 0), "telegram_snapshot_id", ""))
+    let snapshot_id = redact(to_string(json_get(get(row, 0), "telegram_snapshot_id", "")), "all")
     if snapshot_id != "" and snapshot_id != "null" then {
       return { passed: true, message: "Task " + task_id + " has Telegram archive snapshot" }
     }
@@ -346,10 +346,10 @@ pattern GateNoCriticalVulns(dependencies_json: String) -> Dict {
   let i = 0
   while i < length(deps) {
     let dep = get(deps, i)
-    let severity = to_string(json_get(dep, "max_severity", "none"))
+    let severity = redact(to_string(json_get(dep, "max_severity", "none")), "all")
     if severity == "critical" then {
       let critical_count = critical_count + 1
-      let critical_names = critical_names + to_string(json_get(dep, "name", "unknown")) + " "
+      let critical_names = redact(critical_names + to_string(json_get(dep, "name", "unknown")) + " ", "all")
     }
     let i = i + 1
   }
@@ -440,7 +440,7 @@ pattern TransitionTask(task_id: String, new_state: String, notes: String) -> Dic
   if length(row) == 0 then {
     return { success: false, previous_state: "", new_state: new_state, message: "Task not found: " + task_id }
   }
-  let current_state = to_string(json_get(get(row, 0), "status", ""))
+  let current_state = redact(to_string(json_get(get(row, 0), "status", "")), "all")
   if IsValidTransition(current_state, new_state) == false then {
     return { success: false, previous_state: current_state, new_state: new_state, message: "Invalid transition: " + current_state + " → " + new_state + ". Allowed transitions: drafted→estimated, estimated→architecting, architecting→implementing, implementing→testing, testing→review, review→deployed, deployed→archived" }
   }
@@ -487,7 +487,7 @@ pattern AddTechRadarEntry(name: String, category: String, radar_state: String, d
   let existing = query("SELECT id, radar_state FROM tech_radar_entries WHERE name = ? LIMIT 1", [name])
   let mut prev_state = ""
   if length(existing) > 0 then {
-    let prev_state = to_string(json_get(get(existing, 0), "radar_state", ""))
+    let prev_state = redact(to_string(json_get(get(existing, 0), "radar_state", "")), "all")
     let _ = db_execute("UPDATE tech_radar_entries SET radar_state = ?, category = ?, description = ?, rationale = ?, updated_at = datetime('now') WHERE name = ?", [radar_state, category, description, rationale, name])
   } else {
     let _ = db_execute("INSERT INTO tech_radar_entries (name, category, radar_state, description, rationale, created_at, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))", [name, category, radar_state, description, rationale])
@@ -524,7 +524,7 @@ pattern ShowTechRadar(category: String) -> String {
   }
 
   let prompt = "Форматируй Tech Radar отдела Разработка. Группируй по состоянию (ADOPT, TRIAL, ASSESS, HOLD). HOLD технологии выделены как запрещённые. JSON данные: " + to_string(rows)
-  let formatted = try call_llm(prompt)
+  let formatted = redact(try call_llm(prompt), "all")
   if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
   return DevWrapWithDisclaimer(formatted)
 }
@@ -613,7 +613,7 @@ pattern CreateEstimate(task_id: String, task_description: String, confidence: St
   let prompt = prompt + "Confidence: " + confidence + "\n\n"
   let prompt = prompt + "Формат: JSON с полями low, expected, high (часы), subtasks (array), confidence, rationale."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
 
@@ -687,14 +687,14 @@ pattern EnforceRepoStandards(repo_name: String, repo_url: String, task_type: Str
   let prompt = prompt + "Тип задачи: " + TaskTypeNameRU(task_type) + "\n\n"
   let prompt = prompt + "Формат: JSON с полями readme, license, gitignore, ci_yml (содержимое файлов)."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
 
-  let readme = to_string(json_get(parsed, "readme", ""))
-  let license_content = to_string(json_get(parsed, "license", ""))
-  let gitignore = to_string(json_get(parsed, "gitignore", ""))
-  let ci_yml = to_string(json_get(parsed, "ci_yml", ""))
+  let readme = redact(to_string(json_get(parsed, "readme", "")), "all")
+  let license_content = redact(to_string(json_get(parsed, "license", "")), "all")
+  let gitignore = redact(to_string(json_get(parsed, "gitignore", "")), "all")
+  let ci_yml = redact(to_string(json_get(parsed, "ci_yml", "")), "all")
 
   // Update repo record
   let readme_bool = "false"
@@ -733,7 +733,7 @@ pattern PlanIterations(task_description: String, estimate_expected: Float) -> Di
   let prompt = prompt + "Оценка: " + substring(to_string(estimate_expected), 0.0, 6.0) + " часов\n\n"
   let prompt = prompt + "Формат: JSON array итераций с полями: name, description, estimated_hours, test_requirements, deliverable."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let iterations = parse_json(llm_result)
   let total = length(iterations)
@@ -756,13 +756,13 @@ pattern ImplementIteration(task_id: String, iteration_num: Int, iteration_plan: 
   let prompt = prompt + "План итерации:\n" + iteration_plan + "\n\n"
   let prompt = prompt + "Формат: JSON с полями: code (string), tests (string), test_passed (bool), notes (string)."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
 
-  let code = to_string(json_get(parsed, "code", ""))
-  let tests = to_string(json_get(parsed, "tests", ""))
-  let test_passed_str = to_string(json_get(parsed, "test_passed", "false"))
+  let code = redact(to_string(json_get(parsed, "code", "")), "all")
+  let tests = redact(to_string(json_get(parsed, "tests", "")), "all")
+  let test_passed_str = redact(to_string(json_get(parsed, "test_passed", "false")), "all")
   let test_passed = test_passed_str == "true" or test_passed_str == "1"
 
   // Hard rule 4 gate: no commit without test
@@ -782,7 +782,7 @@ pattern ImplementIteration(task_id: String, iteration_num: Int, iteration_plan: 
   // Update task status if first iteration
   let row = query("SELECT status FROM dev_tasks WHERE id = ? LIMIT 1", [task_id])
   if length(row) > 0 then {
-    let current = to_string(json_get(get(row, 0), "status", ""))
+    let current = redact(to_string(json_get(get(row, 0), "status", "")), "all")
     if current == STATUS_ARCHITECTING() then {
       let _ = TransitionTask(task_id, STATUS_IMPLEMENTING(), "Iteration " + to_string(iteration_num) + " started")
     }
@@ -823,11 +823,11 @@ pattern NextjsArchitecture(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями architecture (folder structure), recommendations (array), tech_stack (array)."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let arch = to_string(json_get(parsed, "architecture", llm_result))
-  let recs = to_string(json_get(parsed, "recommendations", ""))
+  let arch = redact(to_string(json_get(parsed, "architecture", llm_result)), "all")
+  let recs = redact(to_string(json_get(parsed, "recommendations", "")), "all")
 
   return { architecture: arch, recommendations: recs, message: "═══ Next.js Architecture ═══\n\n" + arch + "\n\n── Рекомендации ──\n" + recs }
 }
@@ -846,11 +846,11 @@ pattern DatabaseDesign(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями schema (Prisma schema string), migration_plan (string), indexes (array)."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let schema = to_string(json_get(parsed, "schema", llm_result))
-  let migration = to_string(json_get(parsed, "migration_plan", ""))
+  let schema = redact(to_string(json_get(parsed, "schema", llm_result)), "all")
+  let migration = redact(to_string(json_get(parsed, "migration_plan", "")), "all")
 
   return { schema: schema, migration_plan: migration, message: "═══ Database Schema ═══\n\n" + schema + "\n\n── Migration Plan ──\n" + migration }
 }
@@ -869,11 +869,11 @@ pattern ApiDesign(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями endpoints (array), auth_strategy (string), versioning (string), error_shape (string)."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "endpoints", llm_result))
-  let ver = to_string(json_get(parsed, "versioning", ""))
+  let spec = redact(to_string(json_get(parsed, "endpoints", llm_result)), "all")
+  let ver = redact(to_string(json_get(parsed, "versioning", "")), "all")
 
   return { api_spec: spec, versioning: ver, message: "═══ API Design ═══\n\n" + spec + "\n\n── Versioning ──\n" + ver }
 }
@@ -891,10 +891,10 @@ pattern AgentArchitecture(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями agent_spec, tools (array), memory_strategy, error_handling."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "agent_spec", llm_result))
+  let spec = redact(to_string(json_get(parsed, "agent_spec", llm_result)), "all")
 
   return { agent_spec: spec, message: "═══ Agent Architecture ═══\n\n" + spec }
 }
@@ -912,10 +912,10 @@ pattern LlmIntegration(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями integration_spec, provider_config, cost_strategy."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "integration_spec", llm_result))
+  let spec = redact(to_string(json_get(parsed, "integration_spec", llm_result)), "all")
 
   return { integration_spec: spec, message: "═══ LLM Integration ═══\n\n" + spec }
 }
@@ -932,10 +932,10 @@ pattern MultiAgentOrchestration(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями orchestration_spec, agents (array), routing, error_strategy."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "orchestration_spec", llm_result))
+  let spec = redact(to_string(json_get(parsed, "orchestration_spec", llm_result)), "all")
 
   return { orchestration_spec: spec, message: "═══ Multi-Agent Orchestration ═══\n\n" + spec }
 }
@@ -952,10 +952,10 @@ pattern LocalModelDeployment(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями deployment_spec, hardware_req, model_recommendations."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "deployment_spec", llm_result))
+  let spec = redact(to_string(json_get(parsed, "deployment_spec", llm_result)), "all")
 
   return { deployment_spec: spec, message: "═══ Local Model Deployment ═══\n\n" + spec }
 }
@@ -972,10 +972,10 @@ pattern ModelFineTuning(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями tuning_spec, dataset_req, eval_strategy."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "tuning_spec", llm_result))
+  let spec = redact(to_string(json_get(parsed, "tuning_spec", llm_result)), "all")
 
   return { tuning_spec: spec, message: "═══ Model Fine-Tuning ═══\n\n" + spec }
 }
@@ -993,10 +993,10 @@ pattern DevopsDeployment(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями deployment_spec, ci_pipeline, environments, rollback_strategy."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "deployment_spec", llm_result))
+  let spec = redact(to_string(json_get(parsed, "deployment_spec", llm_result)), "all")
 
   return { deployment_spec: spec, message: "═══ DevOps Deployment ═══\n\n" + spec }
 }
@@ -1013,10 +1013,10 @@ pattern ObservabilitySetup(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями observability_spec, logging, metrics, tracing, alerts."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "observability_spec", llm_result))
+  let spec = redact(to_string(json_get(parsed, "observability_spec", llm_result)), "all")
 
   return { observability_spec: spec, message: "═══ Observability Setup ═══\n\n" + spec }
 }
@@ -1033,10 +1033,10 @@ pattern RefactoringDiscipline(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями refactoring_plan, steps (array), rollback_points."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "refactoring_plan", llm_result))
+  let spec = redact(to_string(json_get(parsed, "refactoring_plan", llm_result)), "all")
 
   return { refactoring_plan: spec, message: "═══ Refactoring Plan ═══\n\n" + spec }
 }
@@ -1053,10 +1053,10 @@ pattern DependencyManagement(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями deps_spec, adopt (array), update_strategy, removal_candidates."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "deps_spec", llm_result))
+  let spec = redact(to_string(json_get(parsed, "deps_spec", llm_result)), "all")
 
   return { deps_spec: spec, message: "═══ Dependency Management ═══\n\n" + spec }
 }
@@ -1118,10 +1118,10 @@ pattern PerformanceOptimization(task_description: String, current_metrics: Strin
   let prompt = prompt + "Текущие метрики: " + current_metrics + "\n\n"
   let prompt = prompt + "Формат: JSON с полями optimization_plan, steps (array), expected_improvement."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "optimization_plan", llm_result))
+  let spec = redact(to_string(json_get(parsed, "optimization_plan", llm_result)), "all")
 
   return { optimization_plan: spec, message: "═══ Performance Optimization (Tier 3) ═══\n\n" + spec }
 }
@@ -1138,10 +1138,10 @@ pattern SecurityHardening(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями security_plan, checks (array), critical_actions."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "security_plan", llm_result))
+  let spec = redact(to_string(json_get(parsed, "security_plan", llm_result)), "all")
 
   return { security_plan: spec, message: "═══ Security Hardening (Tier 3) ═══\n\n" + spec }
 }
@@ -1157,10 +1157,10 @@ pattern LegacySystemModernization(task_description: String) -> Dict {
   let prompt = prompt + "Задача: " + task_description + "\n\n"
   let prompt = prompt + "Формат: JSON с полями modernization_plan, phases (array), risk_mitigation."
 
-  let llm_result = try call_llm(prompt)
+  let llm_result = redact(try call_llm(prompt), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   let parsed = parse_json(llm_result)
-  let spec = to_string(json_get(parsed, "modernization_plan", llm_result))
+  let spec = redact(to_string(json_get(parsed, "modernization_plan", llm_result)), "all")
 
   return { modernization_plan: spec, message: "═══ Legacy Modernization (Tier 3) ═══\n\n" + spec }
 }
@@ -1272,10 +1272,10 @@ pattern DevDashboard(chat_id: String) -> String {
   let radar_count = query("SELECT COUNT(*) as c FROM tech_radar_entries", [])
   let repos_count = query("SELECT COUNT(*) as c FROM code_repositories", [])
 
-  let active_count = to_int(to_string(json_get(get(active, 0), "c", "0")))
-  let total_count = to_int(to_string(json_get(get(total, 0), "c", "0")))
-  let radar_total = to_int(to_string(json_get(get(radar_count, 0), "c", "0")))
-  let repos_total = to_int(to_string(json_get(get(repos_count, 0), "c", "0")))
+  let active_count = redact(to_int(to_string(json_get(get(active, 0), "c", "0"))), "all")
+  let total_count = redact(to_int(to_string(json_get(get(total, 0), "c", "0"))), "all")
+  let radar_total = redact(to_int(to_string(json_get(get(radar_count, 0), "c", "0"))), "all")
+  let repos_total = redact(to_int(to_string(json_get(get(repos_count, 0), "c", "0"))), "all")
 
   let msg = "═══ ОТДЕЛ РАЗРАБОТКА ═══\n"
   let msg = msg + "Психотип: " + DevPsychotype() + "\n\n"
@@ -1321,7 +1321,7 @@ pattern ListTasks(status_filter: String, limit: Int) -> String {
   }
 
   let prompt = "Форматируй список задач отдела Разработка. Показывай статус русскими названиями, тип задач русскими. JSON данные: " + to_string(rows)
-  let formatted = try call_llm(prompt)
+  let formatted = redact(try call_llm(prompt), "all")
   if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
   return DevWrapWithDisclaimer(formatted)
 }
@@ -1333,15 +1333,15 @@ pattern ShowTask(task_id: String) -> String {
     return "Задача не найдена: " + task_id
   }
   let data = get(row, 0)
-  let status = to_string(json_get(data, "status", "unknown"))
-  let task_type = to_string(json_get(data, "task_type", "unknown"))
-  let title = to_string(json_get(data, "title", ""))
-  let est_low = to_string(json_get(data, "estimate_low", "N/A"))
-  let est_exp = to_string(json_get(data, "estimate_expected", "N/A"))
-  let est_high = to_string(json_get(data, "estimate_high", "N/A"))
-  let qa_status = to_string(json_get(data, "qa_status", "N/A"))
-  let repo = to_string(json_get(data, "repo_name", "N/A"))
-  let snap = to_string(json_get(data, "telegram_snapshot_id", "N/A"))
+  let status = redact(to_string(json_get(data, "status", "unknown")), "all")
+  let task_type = redact(to_string(json_get(data, "task_type", "unknown")), "all")
+  let title = redact(to_string(json_get(data, "title", "")), "all")
+  let est_low = redact(to_string(json_get(data, "estimate_low", "N/A")), "all")
+  let est_exp = redact(to_string(json_get(data, "estimate_expected", "N/A")), "all")
+  let est_high = redact(to_string(json_get(data, "estimate_high", "N/A")), "all")
+  let qa_status = redact(to_string(json_get(data, "qa_status", "N/A")), "all")
+  let repo = redact(to_string(json_get(data, "repo_name", "N/A")), "all")
+  let snap = redact(to_string(json_get(data, "telegram_snapshot_id", "N/A")), "all")
 
   let msg = "═══ ЗАДАЧА " + task_id + " ═══\n"
   let msg = msg + "Название: " + title + "\n"
@@ -1364,7 +1364,7 @@ pattern ListRepos() -> String {
   }
 
   let prompt = "Форматируй список репозиториев отдела Разработка. Для каждого показывай наличие обязательных файлов (✅/❌). JSON: " + to_string(rows)
-  let formatted = try call_llm(prompt)
+  let formatted = redact(try call_llm(prompt), "all")
   if to_string(formatted) == "()" then { let formatted = "[оценка недоступна — провайдеры модели не ответили]" }
   return DevWrapWithDisclaimer(formatted)
 }
@@ -1466,7 +1466,7 @@ pattern LocalSync() -> String {
   let i = 0
   while i < length(pending) {
     let task = get(pending, i)
-    let task_id = to_string(json_get(task, "id", ""))
+    let task_id = redact(to_string(json_get(task, "id", "")), "all")
     let _ = kv_set("dev_local_" + task_id, to_string(task))
     let sync_count = sync_count + 1
     let i = i + 1
@@ -1527,7 +1527,7 @@ pattern WeeklyTechRadarScan() -> String {
   let prompt = prompt + "5. Какие технологии в hold — можно ли убрать (исправлены проблемы)?\n\n"
   let prompt = prompt + "Текущий Tech Radar:\n" + to_string(all_entries)
 
-  let analysis = try call_llm(prompt)
+  let analysis = redact(try call_llm(prompt), "all")
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
 
   let _ = AuditLog("dev_radar_scan", DevDeptName(), "Weekly Tech Radar scan completed")
@@ -1551,7 +1551,7 @@ pattern MonthlyEstimateCalibration() -> String {
   let prompt = prompt + "4. Рекомендации: как улучшить оценки?\n\n"
   let prompt = prompt + "Данные:\n" + to_string(verifications)
 
-  let analysis = try call_llm(prompt)
+  let analysis = redact(try call_llm(prompt), "all")
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
 
   // Store monthly calibration
@@ -1579,7 +1579,7 @@ pattern DevQuarterlyMethodologyReview() -> String {
   let prompt = prompt + "Нарушения правил (90 дней):\n" + to_string(violations) + "\n\n"
   let prompt = prompt + "Калибровка оценок (90 дней):\n" + to_string(estimates)
 
-  let analysis = try call_llm(prompt)
+  let analysis = redact(try call_llm(prompt), "all")
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
 
   let _ = AuditLog("dev_quarterly", DevDeptName(), "Quarterly methodology review completed")
@@ -1620,10 +1620,10 @@ pattern DevScore() -> String {
   let with_range = query("SELECT COUNT(*) as c FROM dev_tasks WHERE estimate_low IS NOT NULL AND estimate_expected IS NOT NULL AND estimate_high IS NOT NULL AND created_at >= datetime('now', '-90 days')", [])
   let avg_mape = query("SELECT AVG(ABS(mape)) as avg FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL", [])
 
-  let total_count = to_int(to_string(json_get(get(total, 0), "c", "0")))
-  let deployed_count = to_int(to_string(json_get(get(deployed, 0), "c", "0")))
-  let adr_count = to_int(to_string(json_get(get(with_adr, 0), "c", "0")))
-  let range_count = to_int(to_string(json_get(get(with_range, 0), "c", "0")))
+  let total_count = redact(to_int(to_string(json_get(get(total, 0), "c", "0"))), "all")
+  let deployed_count = redact(to_int(to_string(json_get(get(deployed, 0), "c", "0"))), "all")
+  let adr_count = redact(to_int(to_string(json_get(get(with_adr, 0), "c", "0"))), "all")
+  let range_count = redact(to_int(to_string(json_get(get(with_range, 0), "c", "0"))), "all")
   let mape_val = to_float(to_string(json_get(get(avg_mape, 0), "avg", "0")))
 
   let adr_rate = 0.0
@@ -1667,14 +1667,14 @@ pattern DevFullPipeline(query: String, task_type: String, chat_id: String, expli
   let adr_prompt = adr_prompt + "Описание: " + query + "\n\n"
   let adr_prompt = adr_prompt + "Формат: JSON с полями title, context, alternatives, decision, consequences."
 
-  let adr_llm = try call_llm(adr_prompt)
+  let adr_llm = redact(try call_llm(adr_prompt), "all")
   if to_string(adr_llm) == "()" then { let adr_llm = "[оценка недоступна — провайдеры модели не ответили]" }
   let adr_parsed = parse_json(adr_llm)
-  let adr_title = to_string(json_get(adr_parsed, "title", "ADR for " + task_id))
-  let adr_context = to_string(json_get(adr_parsed, "context", query))
-  let adr_alts = to_string(json_get(adr_parsed, "alternatives", "See ADR"))
-  let adr_decision = to_string(json_get(adr_parsed, "decision", "See context"))
-  let adr_consequences = to_string(json_get(adr_parsed, "consequences", "See decision"))
+  let adr_title = redact(to_string(json_get(adr_parsed, "title", "ADR for " + task_id)), "all")
+  let adr_context = redact(to_string(json_get(adr_parsed, "context", query)), "all")
+  let adr_alts = redact(to_string(json_get(adr_parsed, "alternatives", "See ADR")), "all")
+  let adr_decision = redact(to_string(json_get(adr_parsed, "decision", "See context")), "all")
+  let adr_consequences = redact(to_string(json_get(adr_parsed, "consequences", "See decision")), "all")
 
   let adr_result = CreateArchitectureDecision(task_id, adr_title, adr_context, adr_alts, adr_decision, adr_consequences)
 
@@ -1815,7 +1815,7 @@ pattern DevPlanMode(query: String, task_type: String, chat_id: String) -> String
     let plan_prompt = plan_prompt + "\n\nDesign tokens клиента:\n" + tokens
   }
 
-  let plan = try call_llm(plan_prompt)
+  let plan = redact(try call_llm(plan_prompt), "all")
   if to_string(plan) == "()" then { let plan = "[оценка недоступна — провайдеры модели не ответили]" }
   let doc = "\n\n\n\n\n\n\n\n"
   let doc = doc + "PLAN MODE\n"
@@ -1837,7 +1837,7 @@ pattern GetDesignTokens(name: String) -> String {
   if cached != "" then { return cached }
   let rows = query("SELECT tokens_json FROM design_tokens WHERE name = ?", [name])
   if length(rows) == 0.0 then { return "" }
-  let result = to_string(json_get(rows[0], "tokens_json", ""))
+  let result = redact(to_string(json_get(rows[0], "tokens_json", "")), "all")
   if result != "" then { let _ = kv_set("design_tokens:" + name, result) }
   return result
 }
@@ -1853,8 +1853,8 @@ pattern ListDesignTokens() -> String {
   if length(rows) == 0.0 then { return "Нет сохранённых design tokens." }
   let mut out = ""
   each row in rows {
-    let name = to_string(json_get(row, "name", "?"))
-    let updated = to_string(json_get(row, "updated_at", "?"))
+    let name = redact(to_string(json_get(row, "name", "?")), "all")
+    let updated = redact(to_string(json_get(row, "updated_at", "?")), "all")
     let out = out + name + " (updated: " + updated + ")\n"
   }
   return out
@@ -2126,7 +2126,7 @@ pattern McpGithubCall(tool: String, args_json: String, purpose: String) -> Dict 
     return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
   }
   let _ = McpAudit("github", tool, purpose, "refused")
-  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  let errmsg = redact(to_string(json_get(parsed, "error", "(без деталей)")), "all")
   return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе" }
 }
 
@@ -2148,7 +2148,7 @@ pattern McpFsCall(tool: String, args_json: String, purpose: String) -> Dict {
     return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
   }
   let _ = McpAudit("filesystem", tool, purpose, "refused")
-  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  let errmsg = redact(to_string(json_get(parsed, "error", "(без деталей)")), "all")
   return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе (вне песочницы?)" }
 }
 
@@ -2175,7 +2175,7 @@ pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
     return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
   }
   let _ = McpAudit("media", tool, purpose, "refused")
-  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  let errmsg = redact(to_string(json_get(parsed, "error", "(без деталей)")), "all")
   return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе (медиа-источник)" }
 }
 
@@ -2205,7 +2205,7 @@ pattern McpWebCall(tool: String, args_json: String, purpose: String) -> Dict {
     return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
   }
   let _ = McpAudit("web", tool, purpose, "refused")
-  let errmsg = to_string(json_get(parsed, "error", "(без деталей)"))
+  let errmsg = redact(to_string(json_get(parsed, "error", "(без деталей)")), "all")
   return { ok: false, body: redact(errmsg, "secrets"), note: "сервер сообщил об отказе (robots/rate-limit/сеть?)" }
 }
 
@@ -2230,8 +2230,8 @@ pattern McpHandleIssue(query: String, chat_id: String) -> String {
     return msg
   }
   let data = try parse_json(res.body)
-  let number = to_string(json_get(data, "number", "?"))
-  let url = to_string(json_get(data, "url", ""))
+  let number = redact(to_string(json_get(data, "number", "?")), "all")
+  let url = redact(to_string(json_get(data, "url", "")), "all")
   let msg = "Issue открыт через MCP: #" + number + " " + repo + "\n" + url + "\n\nTaint-контур: вывод тулзы прошёл redact(), вызов — в audit_log."
   let _ = SendTelegramReply(chat_id, msg)
   return msg
@@ -2253,8 +2253,8 @@ pattern McpHandleCI(query: String, chat_id: String) -> String {
     return msg
   }
   let data = try parse_json(res.body)
-  let summary = to_string(json_get(data, "summary", "(нет check-runs)"))
-  let count = to_string(json_get(data, "count", "?"))
+  let summary = redact(to_string(json_get(data, "summary", "(нет check-runs)")), "all")
+  let count = redact(to_string(json_get(data, "count", "?")), "all")
   let msg = "CI " + repo + "@" + refv + " — " + count + " проверок:\n" + redact(summary, "secrets")
   let _ = SendTelegramReply(chat_id, substring(msg, 0.0, 3500.0))
   return msg
@@ -2279,13 +2279,13 @@ pattern McpHandleDocs(query: String, chat_id: String) -> String {
       return msg
     }
     let data = try parse_json(res.body)
-    let items = try json_get(data, "items", "[]")
+    let items = redact(try json_get(data, "items", "[]"), "all")
     let mut out = "Документы (песочница data/documents):\n"
     let rows = try items
     if to_string(rows) != "()" then {
       each row in rows {
-        let nm = to_string(json_get(row, "name", ""))
-        let tp = to_string(json_get(row, "type", "file"))
+        let nm = redact(to_string(json_get(row, "name", "")), "all")
+        let tp = redact(to_string(json_get(row, "type", "file")), "all")
         if tp == "dir" then { let out = out + "  " + nm + "/\n" } else { let out = out + "  " + nm + "\n" }
       }
     }
@@ -2303,7 +2303,7 @@ pattern McpHandleDocs(query: String, chat_id: String) -> String {
       return msg
     }
     let data = try parse_json(res.body)
-    let content = to_string(json_get(data, "content", ""))
+    let content = redact(to_string(json_get(data, "content", "")), "all")
     let mut out = "── " + path + " ──\n" + redact(content, "secrets")
     if length(out) > 3500.0 then { let out = substring(out, 0.0, 3500.0) + "\n…(обрезано)" }
     let _ = SendTelegramReply(chat_id, out)

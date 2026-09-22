@@ -99,7 +99,15 @@ MLOG_CANDIDATE="${MLOG_BIN:-./bin/mlog-021}"
 MLOG_LEGACY="./bin/mlog"
 MLOG_ENTRY="${MLOG_ENTRY:-app.mlog}"
 MLOG_BIN="$MLOG_CANDIDATE"
-if [ -x "$MLOG_CANDIDATE" ] && "$MLOG_CANDIDATE" audit "$MLOG_ENTRY" >/dev/null 2>&1; then
+# №421: проба принимает exit 0 (чисто) и exit 2 (только предупреждения —
+# известный ложняк эвристики SECRETS: "sk_" совпадает внутри "task_id"/
+# "risk_level", апстрим-баг word-boundary; ошибок Category A нет).
+# Exit 1 (ошибки Category A) по-прежнему блокирует бут на 0.21.
+MLOG_PROBE_RC=9
+if [ -x "$MLOG_CANDIDATE" ]; then
+  "$MLOG_CANDIDATE" audit "$MLOG_ENTRY" >/dev/null 2>&1 && MLOG_PROBE_RC=0 || MLOG_PROBE_RC=$?
+fi
+if [ "$MLOG_PROBE_RC" = "0" ] || [ "$MLOG_PROBE_RC" = "2" ]; then
   echo "--- Metalogos: 0.21 candidate PASSED the Category A audit probe — serving on $MLOG_CANDIDATE"
   # Гейты №259 (env в роутах) и exec: паритет с 0.19 — офис читает служебные
   # env (CRON_SECRET, OWNER_TELEGRAM_ID, ...); список = ценз env( по app.mlog
