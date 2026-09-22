@@ -246,8 +246,9 @@ Reverse Proxy (Flask)
 ```
 .
 ├── app.mlog                  # Главный роутер (~4800 строк)
-├── bin/mlog                  # Metalogos v0.19.0 бинарник (x86-64, Rust, прод)
+├── bin/mlog                  # Metalogos v0.19.0 бинарник (x86-64, Rust, легаси-фолбэк)
 ├── bin/mlog-020              # Metalogos 0.20.0 wave-3 (main 29de25a) — стейджинг-догфуд (FO-050)
+├── bin/mlog-021              # Metalogos 0.21.0 (52f2aa7) — ПРОД-кандидат, guard-переход №419/№421
 ├── llm_proxy.py              # Тонкий фасад-сборщик (FO-008), точка входа
 ├── proxy/                    # 27 модулей, ~12400 строк — вся логика LLM-прокси
 │   ├── core.py                    # Flask-приложение, auth, конфиг
@@ -367,13 +368,17 @@ docker run -p 10000:10000 --env-file .env fosved
    одном окне безопасен (дедуп №418).
 
 Подробности и статус перехода прод на 0.21 — `docs/render-dashboard.md`,
-секция «Native cron Metalogos».
+секция «Native cron Metalogos». **Статус (наряд №421, PR #310):** аудит 0.21
+погашен (0 ошибок Category-A), проба entrypoint принимает exit 0/2 — прод
+перерезается на 0.21 автоматом при деплое; нативный cron бутстрапится при
+старте. Оставшиеся предупреждения аудита — задокументированный апстрим-ложняк
+SECRETS («sk_» совпадает внутри «task_id»/«risk_level» — нужен word-boundary).
 
 ## Технологический стек
 
 | Компонент | Технология |
 |---|---|
-| Ядро | Metalogos v0.19.0 (Rust DSL, ~394 встроенных функции: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory) |
+| Ядро | Metalogos 0.21.0 (Rust DSL, ~400 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory, label-lattice + гранты; легаси-фолбэк 0.19.0, см. entrypoint guard-переход) |
 | Прокси-слой | Python 3.12 + Flask, разбит на пакет `proxy/` (27 модулей) |
 | База данных | SQLite, 68 таблиц |
 | Голос STT | Whisper |
