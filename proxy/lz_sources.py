@@ -31,6 +31,9 @@ if _GH_TOKEN:
 
 def arxiv_search(query, max_results=8, since_days=90):
     """arXiv API (Atom). Возврат: [{source,title,url,published,meta}]."""
+    # №426: mlog передаёт числа float'ами (JSON 6 → 6.0) — arXiv отвечает
+    # 400 на max_results=6.0 (int-контракт API; лог владельца 22.09 14:26).
+    max_results = int(max_results)
     q = urllib.parse.quote(query)
     url = f"http://export.arxiv.org/api/query?search_query=all:{q}&start=0&max_results={max_results}&sortBy=submittedDate&sortOrder=descending"
     try:
@@ -63,6 +66,8 @@ def arxiv_search(query, max_results=8, since_days=90):
 
 def hn_search(query, max_results=8, since_days=30):
     """HN Algolia (статьи/обсуждения). Возврат: [{source,title,url,points,comments,published}]."""
+    # №426: hitsPerPage=6.0 → 400 от Algolia (тот же float-класс, см. arxiv)
+    max_results = int(max_results)
     since = int((datetime.now(timezone.utc) - timedelta(days=since_days)).timestamp())
     url = ("https://hn.algolia.com/api/v1/search_by_date?query=" + urllib.parse.quote(query)
            + f"&tags=story&numericFilters=created_at_i>{since}&hitsPerPage={max_results}")
@@ -85,6 +90,8 @@ def hn_search(query, max_results=8, since_days=30):
 
 def github_repo_search(query, max_results=8, since_days=180):
     """GitHub Search API: тренд-репо по теме (звёзды/давность). Возврат: [{source,name,url,stars,pushed,desc}]."""
+    # №426: per_page — int-контракт GitHub API (тот же float-класс)
+    max_results = int(max_results)
     since = (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime("%Y-%m-%d")
     q = f"{query} pushed:>{since}"
     url = ("https://api.github.com/search/repositories?q=" + urllib.parse.quote(q)
