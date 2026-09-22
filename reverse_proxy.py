@@ -2,7 +2,10 @@
 """Reverse proxy for Fosved Office v2.
 Routes requests between Metalogos (10001) and LLM Proxy (4000)."""
 
+import logging
 import os
+import re
+
 import requests
 from flask import Flask, request, Response, jsonify
 
@@ -12,6 +15,42 @@ MLOG_URL = "http://127.0.0.1:10001"
 LLM_URL = "http://127.0.0.1:4000"
 PORT = int(os.environ.get("PORT", 10000))
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+
+# ── №423: маскирование секретов в access-логах прокси ──────────────────────
+# Контекст: CRON_SECRET ходит в query string у внешних кронов (cron-job.org),
+# а dev-сервер werkzeug пишет в лог строку запроса ЦЕЛИКОМ — инцидент
+# 2026-09-22: «GET /cron/morning?secret=...» в логе Render. Решение владельца —
+# секрет не ротировать, поэтому единственная компенсация: больше не печатать
+# чувствительные query-параметры. Затрагивает только ЛОГИ, не обработку запросов.
+SENSITIVE_QUERY_RE = re.compile(
+    r"([?&](?:secret|token|password|api_key|apikey)=)[^&\s]*",
+    re.IGNORECASE,
+)
+
+
+class QuerySecretMasker(logging.Filter):
+    """Redacts secret=/token=/password= query values in access-log records.
+
+    Works on the werkzeug logger (который пишет строки вида
+    `"GET /cron/morning?secret=X HTTP/1.1" 403`). Record переписывается
+    до хендлеров, так что в Render stdout уходит уже замаскированная строка.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True  # битая запись не должна ронять логирование
+        if "=" not in message:
+            return True
+        masked = SENSITIVE_QUERY_RE.sub(r"\1<redacted>", message)
+        if masked != message:
+            record.msg = masked
+            record.args = ()
+        return True
+
+
+logging.getLogger("werkzeug").addFilter(QuerySecretMasker())
 
 # Routes that go to LLM Proxy (Mini App + dashboards + archive + scheduler + learning)
 LLM_ROUTES_PREFIXES = [
