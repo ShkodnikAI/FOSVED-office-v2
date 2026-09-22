@@ -131,8 +131,12 @@ def test_entrypoint_guarded_cutover():
     # Гейты №259 №419: allowlist env для 0.21-пути (ценз по app.mlog+dept).
     assert "METALOGOS_ENV_ALLOWLIST" in ENTRYPOINT
     assert "CRON_SECRET" in ENTRYPOINT and "OWNER_TELEGRAM_ID" in ENTRYPOINT
-    # Бутстрап реестра — только на 0.21-пути и только с секретом.
-    assert "schedules/bootstrap?secret=${CRON_SECRET}" in ENTRYPOINT
+    # Бутстрап реестра — только на 0.21-пути и только с секретом;
+    # №425: секрет в URL — только percent-кодированным (--data-urlencode:
+    # 0.21 декодирует query, литеральный '+' сырой вставкой честно давал 403).
+    assert '-G "http://127.0.0.1:10001/schedules/bootstrap"' in ENTRYPOINT
+    assert '--data-urlencode "secret=${CRON_SECRET}"' in ENTRYPOINT
+    assert "schedules/bootstrap?secret=${CRON_SECRET}" not in ENTRYPOINT
     # VM-дефолт ADR-0171 отложен для офиса: VM-хендлеры 0.21 не видят db_decl
     # соединение (находка №419) — офисный путь на интерпретаторе.
     assert "METALOGOS_SERVE_BACKEND" in ENTRYPOINT

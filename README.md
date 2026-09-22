@@ -359,11 +359,13 @@ docker run -p 10000:10000 --env-file .env fosved
    `/schedules/bootstrap` — реестр перерегистрируется идемпотентно по `target`:
    неизменные задания получают `KEEP` (история `run_count`/`last_run` сохраняется),
    изменённые — `REMOVE-STALE`+`ADD`, выключенные — `REMOVE`.
-4. Проверка без рестарта:
-   `curl "https://fosved-office-v2.onrender.com/schedules/list?secret=$CRON_SECRET"`
-   — стор + сверка с реестром; `.../schedules/bootstrap?secret=...` — ручной
-   перезапуск бутстрапа; `POST .../schedules/create|remove` — точечные правки
-   поверх стора (та же CRON_SECRET-авторизация, что у `/cron/*`).
+4. Проверка без рестарта (№425: секрет в URL — только percent-кодированным:
+   0.21 и Flask декодируют query, литеральный '+' сырой вставкой даёт 403):
+   `curl -sG "https://fosved-office-v2.onrender.com/schedules/list" --data-urlencode "secret=$CRON_SECRET"`
+   — стор + сверка с реестром; `.../schedules/bootstrap` с тем же
+   `--data-urlencode` — ручной перезапуск бутстрапа; `POST
+   .../schedules/create|remove` — точечные правки поверх стора (та же
+   CRON_SECRET-авторизация, что у `/cron/*`).
 5. HTTP-роуты `/cron/*` остаются ручным/аварийным триггером; двойной запуск в
    одном окне безопасен (дедуп №418).
 
