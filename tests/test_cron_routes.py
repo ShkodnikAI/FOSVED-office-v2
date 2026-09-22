@@ -55,11 +55,18 @@ def test_backup_route_uses_vacuum_into():
 
 def test_night_tick_chains_all_nightly_jobs():
     # cron-job.org free лимит по числу задач: диспетчер /cron/night-tick —
-    # ОДНА внешняя задача, обходит все ночные роуты сам (секрет-чек обязателен)
+    # ОДНА внешняя задача, обходит все ночные роуты сам (секрет-чек обязателен).
+    # №422: тело роута перенесено в pattern NightTickCore (route-исполнитель
+    # 0.21 теряет mut-контекст в ветвлениях) — цепочка проверяется в паттерне,
+    # а роут обязан её вызывать.
     idx = APP.find('route "/cron/night-tick"')
     assert idx > 0
-    body = APP[idx:idx + 1600]
-    assert "CRON_SECRET" in body                      # гвард секрета
+    route_body = APP[idx:idx + 700]
+    assert "CRON_SECRET" in route_body                # гвард секрета в роуте
+    assert "NightTickCore(" in route_body             # делегирование ядру цепочки
+    pat = APP.find("pattern NightTickCore(")
+    assert pat > 0
+    body = APP[pat:pat + 1600]
     assert '"backup"' in body
     assert '"indicator-reminders"' in body
     assert '"shop-tick"' in body

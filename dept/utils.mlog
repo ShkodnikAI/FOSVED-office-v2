@@ -193,14 +193,14 @@ pattern PublishToArchive(doc_id: String, dept: String, title: String, content: S
   // 4. Send to archive channel via Telegram
   let token = TgToken()
   let body = json_encode({chat_id: to_float(channel_id), text: record})
-  let result = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+  let result = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
   let mut msg_id = ""
   if to_string(result) != "()" then {
     let parsed = parse_json(result)
     let ok = redact(to_string(json_get(parsed, "ok", "")), "all")
     if ok == "true" then {
       let result_msg = redact(to_string(json_get(parsed, "result", "")), "all")
-      let msg_id = redact(to_string(try json_get(result_msg, "message_id", "")), "all")
+      let msg_id = redact(to_string(TryVal(try json_get(result_msg, "message_id", ""))), "all")
     }
   }
 
@@ -214,7 +214,7 @@ pattern PublishToArchive(doc_id: String, dept: String, title: String, content: S
 // ── Publish daily digest to archive channel ──────────────────────────
 pattern PublishDailyDigest() -> String {
   let body = json_encode({trigger: "scheduler"})
-  let _ = try http_post("http://127.0.0.1:4000/archive/daily-digest", body, "application/json")
+  let _ = TryVal(try http_post("http://127.0.0.1:4000/archive/daily-digest", body, "application/json"))
   let _ = AuditLog("daily_digest_channel", "scheduler", "")
   return "ok"
 }
@@ -224,7 +224,7 @@ pattern PublishDailyDigest() -> String {
 pattern ClassifyCorrection(text: String, dept: String) -> String {
   let dept_prompt = redact(read_file("library/" + dept + ".md"), "all")
   let classify_prompt = dept_prompt + "\n\nYou are a quality control classifier. Analyze the user's correction text and classify the error type. Also suggest how to fix it going forward. Output JSON only: {\"error_type\": \"TOO_GENERAL|WRONG_FACTS|WRONG_DEPT|BAD_FORMAT|MISSING_CONTEXT|OTHER\", \"suggestion\": \"your suggestion\"}. Language: Russian."
-  let llm_result = redact(try call_llm(classify_prompt, "Классифицируй эту коррекцию:\n\n" + text + "\n\nВерни только JSON."), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(classify_prompt, "Классифицируй эту коррекцию:\n\n" + text + "\n\nВерни только JSON."))), "all")
   if to_string(llm_result) == "()" then {
     // Fallback: save as OTHER
     db_execute("INSERT INTO error_patterns (dept, error_type, query_text) VALUES (?1, 'OTHER', ?2)", [dept, substring(text, 0, 2000)])
@@ -240,7 +240,7 @@ pattern ClassifyCorrection(text: String, dept: String) -> String {
   let suggestion = reply
   if json_start >= 0.0 and json_end > json_start then {
     let json_str = substring(reply, json_start, json_end + 1.0)
-    let parsed = try parse_json(json_str)
+    let parsed = TryVal(try parse_json(json_str))
     if to_string(parsed) != "()" then {
       let et = redact(to_string(json_get(parsed, "error_type", "OTHER")), "all")
       if et != "" then { let error_type = et }
@@ -268,11 +268,11 @@ pattern RecordPositiveExample(dept: String, query: String, response: String) -> 
 pattern GetLearningStats() -> String {
   // Corrections count (7d, non-positive)
   let corr_rows = query("SELECT COUNT(*) as c FROM adapt_corrections WHERE created_at >= datetime('now', '-7 days') AND corr_type != 'positive'", [])
-  let corrections_7d = redact(to_string(try json_get(corr_rows[0], "c", "0")), "all")
+  let corrections_7d = redact(to_string(TryVal(try json_get(corr_rows[0], "c", "0"))), "all")
 
   // Positive examples total
   let pos_rows = query("SELECT COUNT(*) as c FROM adapt_corrections WHERE corr_type = 'positive'", [])
-  let positive_total = redact(to_string(try json_get(pos_rows[0], "c", "0")), "all")
+  let positive_total = redact(to_string(TryVal(try json_get(pos_rows[0], "c", "0"))), "all")
 
   // Error pattern breakdown
   let pattern_rows = query("SELECT error_type, COUNT(*) as c FROM error_patterns GROUP BY error_type ORDER BY c DESC", [])
@@ -298,7 +298,7 @@ pattern DebriefDepartment(dept: String) -> String {
   // Generate debrief via LLM
   let dept_prompt = redact(read_file("library/" + dept + ".md"), "all")
   let debrief_prompt = dept_prompt + "\n\nGenerate a debrief for the " + dept + " department based on the last 30 days of corrections. Identify patterns, recurring errors, and suggest improvements. Language: Russian."
-  let llm_result = redact(try call_llm(debrief_prompt, "Коррекции за 30 дней:\n" + corrections_data), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(debrief_prompt, "Коррекции за 30 дней:\n" + corrections_data))), "all")
   if to_string(llm_result) == "()" then { return "Debrief unavailable (LLM error)." }
   let reply = redact(to_string(json_get(parse_json(llm_result), "content", "")), "all")
 
@@ -334,7 +334,7 @@ pattern SendVoiceReply(chat_id: String, text: String, dept: String) -> String {
   let voice_name = kv_get("tts_voice")
   if length(voice_name) < 3.0 then { let voice_name = "ru-RU-DmitryNeural" }
   let tts_body = json_encode({text: tts_text, voice: voice_name, chat_id: chat_id})
-  let _ = try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json")
+  let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
   let _ = AuditLog("tts_reply", dept, "len=" + to_string(length(tts_text)) + " orig_len=" + to_string(length(text)))
   return "ok"
 }
@@ -384,12 +384,12 @@ pattern McpAuditFor(dept: String, server: String, tool: String, purpose: String,
 
 pattern McpMarketsCall(dept: String, tool: String, args_json: String, purpose: String) -> Dict {
   let _ = McpAuditFor(dept, "markets", tool, purpose, "attempt")
-  let out = try mcp_call(McpMarketsServerCmd(), [], tool, args_json)
+  let out = TryVal(try mcp_call(McpMarketsServerCmd(), [], tool, args_json))
   if to_string(out) == "()" then {
     let _ = McpAuditFor(dept, "markets", tool, purpose, "error")
     return { ok: false, body: "", note: "MCP-сервер markets недоступен (гейт ядра/сбой/таймаут). Fallback: сообщить, что данные сейчас недоступны, не выдумывать цифры." }
   }
-  let parsed = try parse_json(to_string(out))
+  let parsed = TryVal(try parse_json(to_string(out)))
   if to_string(parsed) == "()" then {
     let _ = McpAuditFor(dept, "markets", tool, purpose, "error")
     return { ok: false, body: redact(to_string(out), "secrets"), note: "ответ сервера не JSON" }
@@ -407,6 +407,16 @@ pattern McpMarketsCall(dept: String, tool: String, args_json: String, purpose: S
 // env() для токена читается ТОЛЬКО здесь; вызывающие получают результат
 // вызова паттерна (шов аудита: label-трекинг не идёт сквозь вызов —
 // probe-проверено 0.21). Рантайм-поведение не меняется.
+// ── №422: семантика try в 0.21 ──────────────────────────────────────────
+// 0.21 оборачивает результат try в TryResult-структуру даже на успехе
+// (0.19 был прозрачен: успех = значение, неуспех = Unit/"()").
+// TryVal достаёт .value и восстанавливает контракт 0.19 для ~570
+// try-сайтов офиса: успех = само значение, неуспех = Unit → to_string "()" 
+// (существующие проверки `to_string(x) == "()"` работают как раньше).
+pattern TryVal(x: String) -> String {
+  return x.value
+}
+
 pattern TgToken() -> String {
   return env("TELEGRAM_BOT_TOKEN")
 }

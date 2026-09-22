@@ -206,7 +206,9 @@ pattern BuildReport(dept: String, query: String, reply: String, chat_id: String)
     return reply
   }
   let doc_id = "doc-" + to_string(now())
-  let css = redact(try read_file("report_css.txt"), "all")
+  // №422: try оборачивает в TryResult — redact(Struct) падает даже на успехе;
+  // файл в репо — читаем без try (как /version читает VERSION)
+  let css = redact(read_file("report_css.txt"), "all")
   if css == "()" then { let css = "" }
   let name = DeptName(dept)
   let start = DeptColorStart(dept)
@@ -233,7 +235,7 @@ pattern BuildReport(dept: String, query: String, reply: String, chat_id: String)
   let html = html + "<div class=\"report-container\">" + header + meta + body_block + disclaimer + "</div>"
   let html = html + "</body></html>"
 
-  let _ = try query("INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))", [doc_id, dept, query, query, reply, html, confidence])
+  let _ = TryVal(try query("INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))", [doc_id, dept, query, query, reply, html, confidence]))
 
   let reply_len = length(reply)
   if reply_len > 800.0 then {
@@ -269,7 +271,8 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
   let reply_len = length(reply)
   if reply_len > 800.0 then {
     let doc_id = "doc-" + to_string(now())
-    let css = redact(try read_file("report_css.txt"), "all")
+    // №422: см. выше — без try
+    let css = redact(read_file("report_css.txt"), "all")
     if css == "()" then { let css = "" }
     let name = DeptName(dept)
     let start = DeptColorStart(dept)
@@ -299,7 +302,7 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
     let html = html + "<div class=\"report-container\">" + header + meta + body_block + disclaimer + "</div>"
     let html = html + "</body></html>"
 
-    let _ = try query("INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))", [doc_id, dept, query, query, reply, html, confidence])
+    let _ = TryVal(try query("INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))", [doc_id, dept, query, query, reply, html, confidence]))
 
     // Send report: Mini App button by default; .html file only when report_delivery=file
     let short = substring(reply, 0.0, 200.0) + "..."
@@ -334,17 +337,17 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
           }]]
         }
       })
-      let _ = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
+      let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
     } else {
       let file_body = json_encode({doc_id: doc_id, chat_id: chat_id, caption: short_with_dept})
-      let file_res = try http_post("http://127.0.0.1:4000/tg-send-report-file", file_body, "application/json")
+      let file_res = TryVal(try http_post("http://127.0.0.1:4000/tg-send-report-file", file_body, "application/json"))
       if to_string(file_res) == "()" then {
         let _ = SendTelegramReply(chat_id, short_with_dept)
       }
     }
 
     // AUTO-ARCHIVE: publish to archive channel if enabled
-    let auto_archive = try kv_get("auto_archive")
+    let auto_archive = TryVal(try kv_get("auto_archive"))
     if to_string(auto_archive) == "true" then {
       let _ = PublishToArchive(doc_id, dept, query, reply)
     }
@@ -378,7 +381,7 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
   if action == "note" then {
     let note_text = redact(to_string(json_get(parse_json(payload), "text", "")), "all")
     if note_text != "" and doc_id != "" then {
-      let _ = try query("INSERT INTO miniapp_notes (doc_id, note_text, created_at) VALUES (?, ?, datetime('now'))", [doc_id, note_text])
+      let _ = TryVal(try query("INSERT INTO miniapp_notes (doc_id, note_text, created_at) VALUES (?, ?, datetime('now'))", [doc_id, note_text]))
       send_message(chat_id, "Note added.")
     }
     return "ok"
@@ -401,7 +404,7 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
       let raw = redact(to_string(json_get(parse_json(to_string(rows)), "[0].raw_text", "")), "all")
       let ctx = BuildContext("osp", to_string(title), chat_id)
       let jprompt = "Ты — журналист-аналитик. Перепиши отчёт в журналистскую статью: без служебных реквизитов (ID, confidence, методология), без бейджей [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ], живой язык, лид-абзац, структура лид→контекст→основа→вывод, 1000-1500 слов."
-      let _pr = redact(try call_llm(ctx + "\n\n" + jprompt, raw), "all")
+      let _pr = redact(to_string(TryVal(try call_llm(ctx + "\n\n" + jprompt, raw))), "all")
       if to_string(_pr) == "()" then { let _pr = "[оценка недоступна — провайдеры модели не ответили]" }
       if to_string(_pr) == "()" then { return "Сервис временно недоступен." }
       let reply = to_string(_pr)
@@ -421,7 +424,7 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
       if level == "3" then { let instr = "Глубокое препарирование. 8-10 слоёв. ACH 5 гипотез. Premortem. Кантильон." }
       if level == "4" then { let instr = "Полное + Red Team. 12+ слоёв. ACH, premortem, кантильон. После анализа — сам себе Red Team: слепые пятна и контраргументы." }
       let ctx = BuildContext("osp", to_string(title), chat_id)
-      let _pr = redact(try call_llm(ctx + "\n\n" + instr, "Углуби предыдущий анализ:\n" + raw), "all")
+      let _pr = redact(to_string(TryVal(try call_llm(ctx + "\n\n" + instr, "Углуби предыдущий анализ:\n" + raw))), "all")
       if to_string(_pr) == "()" then { let _pr = "[оценка недоступна — провайдеры модели не ответили]" }
       if to_string(_pr) == "()" then { return "Сервис временно недоступен." }
       let reply = to_string(_pr)
@@ -448,7 +451,7 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
       let raw = redact(to_string(json_get(parse_json(to_string(rows)), "[0].raw_text", "")), "all")
       let cprompt = "Ты — контр-аналитик. Построй максимально противоположный прогноз: найди слабые места исходного, альтернативный сценарий, те же факты с противоположной интерпретацией, оцени вероятность контр-сценария, индикаторы его реализации. Формат: ACH, минимум 3 контр-гипотезы."
       let ctx = BuildContext("osp", to_string(title), chat_id)
-      let _pr = redact(try call_llm(ctx + "\n\n" + cprompt, raw), "all")
+      let _pr = redact(to_string(TryVal(try call_llm(ctx + "\n\n" + cprompt, raw))), "all")
       if to_string(_pr) == "()" then { let _pr = "[оценка недоступна — провайдеры модели не ответили]" }
       if to_string(_pr) == "()" then { return "Сервис временно недоступен." }
       let reply = to_string(_pr)
