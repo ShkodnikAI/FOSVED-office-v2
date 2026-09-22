@@ -189,28 +189,28 @@ pattern HandleExpert(query: String, chat_id: String) -> String {
   // ── Default: full Expert pipeline (LLM with domain-enriched context) ──
   let context = BuildExpertContext(query, chat_id)
   let disclaimer = ExpertDisclaimer()
-  let llm_result = redact(try call_llm(context, query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(context, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
   // ── LLM-Verifier: score + conditional best-of-2 for substantive queries ──
   if length(query) > 80.0 then {
-    let ev_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Factual correctness of the domain data? Completeness: All requested aspects covered? Actionability: Usable for meeting preparation?"]))
+    let ev_resp = TryVal(try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Factual correctness of the domain data? Completeness: All requested aspects covered? Actionability: Usable for meeting preparation?"])))
     let mut ev_score = 0.5
     if to_string(ev_resp) != "()" and contains(to_string(ev_resp), "error") == false then {
-      let ev_parsed = try parse_json(ev_resp)
-      let ev_score = to_float(try json_get(ev_parsed, "result", "0.5"))
+      let ev_parsed = TryVal(try parse_json(ev_resp))
+      let ev_score = to_float(TryVal(try json_get(ev_parsed, "result", "0.5")))
       let _ = AuditLog("expert_verify_score", dept, "score=" + to_string(ev_score) + " query=" + substring(query, 0.0, 60.0))
     }
     // Conditional regeneration: if score < 0.55, generate 2nd candidate and select best-of-2
     if ev_score < 0.55 then {
-      let llm_result2 = redact(try call_llm(context, query), "all")
+      let llm_result2 = redact(to_string(TryVal(try call_llm(context, query))), "all")
       if to_string(llm_result2) != "()" then {
         let reply2 = to_string(llm_result2)
-        let sel_resp = try call_python("llm_verifier", "select", json_encode([query, json_encode([reply, reply2]), "Accuracy: Factual correctness? Completeness: All aspects covered? Actionability: Usable for meeting prep?"]))
+        let sel_resp = TryVal(try call_python("llm_verifier", "select", json_encode([query, json_encode([reply, reply2]), "Accuracy: Factual correctness? Completeness: All aspects covered? Actionability: Usable for meeting prep?"])))
         if to_string(sel_resp) != "()" and contains(to_string(sel_resp), "error") == false then {
-          let sel_parsed = try parse_json(sel_resp)
-          let best_idx = redact(to_int(try json_get(sel_parsed, "result", "0")), "all")
+          let sel_parsed = TryVal(try parse_json(sel_resp))
+          let best_idx = to_int(TryVal(try json_get(sel_parsed, "result", "0")))
           if best_idx == 1 then { let reply = reply2 }
           let _ = AuditLog("expert_bestof2", dept, "original_score=" + to_string(ev_score) + " selected=" + to_string(best_idx) + " query=" + substring(query, 0.0, 60.0))
         }
@@ -244,7 +244,7 @@ pattern ExpertSourcesFooter(context: String) -> String {
 // Решение: живой поиск — всем темам, авто-база знаний — только авто.)
 // ═══════════════════════════════════════════════════════════════════════
 pattern ExpertTavilySearch(query: String, chat_id: String) -> String {
-  let result = try http_post("http://127.0.0.1:4000/lz/tavily", json_encode({query: query, dept: "expert"}), "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/lz/tavily", json_encode({query: query, dept: "expert"}), "application/json"))
   if to_string(result) == "()" then { return "" }
   let reply = redact(to_string(json_get(parse_json(result), "response", "")), "all")
   return to_string(reply)
@@ -259,7 +259,7 @@ pattern ExpertTavilySearch(query: String, chat_id: String) -> String {
 pattern ExpertPlanSubQueries(query: String, initial_results: String) -> String {
   if initial_results == "" then { return "" }
   let plan_prompt = "Ты помогаешь спланировать короткий фактический поиск перед деловой встречей. По теме и по результату первого широкого поиска — сформулируй 2-4 узких, конкретных под-вопроса, которые стоит проверить отдельно (например: конкретные цифры, имена конкурентов, недавние события). Один под-вопрос на строку, без нумерации и пояснений — только сами вопросы, ничего больше."
-  let plan_result = redact(try call_llm(plan_prompt, "Тема: " + query + "\n\nПервый широкий поиск дал:\n" + substring(initial_results, 0.0, 2000.0)), "all")
+  let plan_result = redact(to_string(TryVal(try call_llm(plan_prompt, "Тема: " + query + "\n\nПервый широкий поиск дал:\n" + substring(initial_results, 0.0, 2000.0)))), "all")
   if to_string(plan_result) == "()" then { return "" }
   return to_string(plan_result)
 }
@@ -319,7 +319,7 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
   // не было реализовано вообще. Работает теперь, что таблица
   // knowledge_artifacts реально существует (см. хотфикс #234).
   let mut cross_section = ""
-  let la_rows = try query("SELECT title, domain, status, disruption_score FROM knowledge_artifacts WHERE title LIKE ? ORDER BY updated_at DESC LIMIT 3", ["%" + query + "%"])
+  let la_rows = TryVal(try query("SELECT title, domain, status, disruption_score FROM knowledge_artifacts WHERE title LIKE ? ORDER BY updated_at DESC LIMIT 3", ["%" + query + "%"]))
   if to_string(la_rows) != "()" and length(la_rows) > 0.0 then {
     let mut lz_lines = ""
     each row in la_rows {
@@ -329,7 +329,7 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
     }
     let cross_section = cross_section + "\n\n=== Уже отслеживается Лабораторией Знаний ===\n" + lz_lines
   }
-  let osp_rows = try query("SELECT topic, status FROM analysis WHERE topic LIKE ? ORDER BY created_at DESC LIMIT 3", ["%" + query + "%"])
+  let osp_rows = TryVal(try query("SELECT topic, status FROM analysis WHERE topic LIKE ? ORDER BY created_at DESC LIMIT 3", ["%" + query + "%"]))
   if to_string(osp_rows) != "()" and length(osp_rows) > 0.0 then {
     let mut osp_lines = ""
     each row in osp_rows {
@@ -486,7 +486,7 @@ pattern ExpertAutomotiveLookup(query: String, chat_id: String) -> String {
   let auto_kb = ExpertAutomotiveKB()
   let system_prompt = "Ты — Эксперт-автомобилист отдела Fosved. Специализация: российский авторынок, сравнительный анализ автомобилей, расчёт остаточной стоимости и стоимости владения. Отвечай конкретно, с цифрами. Используй данные из базы знаний.\n\n" + auto_kb
   let disclaimer = ExpertDisclaimer()
-  let llm_result = redact(try call_llm(system_prompt, query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(system_prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
@@ -507,14 +507,14 @@ pattern ExpertCompareVehicles(query: String, chat_id: String) -> String {
   let compare_prompt = compare_prompt + "4. КРАСНЫЕ ФЛАГИ: что может увеличить реальные затраты сверх расчётных\n\n"
   let compare_prompt = compare_prompt + "Используй данные из базы знаний. Все цифры — для российского рынка 2024-2026.\n\n" + auto_kb
   let disclaimer = ExpertDisclaimer()
-  let llm_result = redact(try call_llm(compare_prompt, "Сравни: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(compare_prompt, "Сравни: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
   // Save comparison to DB
   let save_body = json_encode({vehicles: query, result: substring(reply, 0.0, 2000.0), dept: "expert"})
-  let _ = try http_post("http://127.0.0.1:4000/archive/save", save_body, "application/json")
+  let _ = TryVal(try http_post("http://127.0.0.1:4000/archive/save", save_body, "application/json"))
 
   let _ = RecordAssistantMessage(chat_id, "expert", reply)
   let _ = AuditLog("expert_compare", "expert", "compare: " + substring(query, 0.0, 100.0))
@@ -690,7 +690,7 @@ pattern ExpertGenerateChart(chart_type: String, query: String, chat_id: String) 
 
   // Call Python chart generator
   let body = json_encode({chart_type: chart_type, data: parse_json(chart_data), vehicle: query})
-  let result = try http_post("http://127.0.0.1:4000/expert/chart", body, "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/expert/chart", body, "application/json"))
 
   if to_string(result) == "()" then {
     // Fallback: return data as text
@@ -731,18 +731,18 @@ pattern ExpertCreateBriefing(topic: String, depth: String, chat_id: String) -> S
 
   let disclaimer = ExpertDisclaimer()
   // ── Deep briefing: best-of-2 with LLM-Verifier select ──
-  let llm_result = redact(try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Ошибка генерации брифинга." }
   let reply = to_string(llm_result)
   if depth == "3" then {
-    let llm_result2 = redact(try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic), "all")
+    let llm_result2 = redact(to_string(TryVal(try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic))), "all")
     if to_string(llm_result2) != "()" then {
       let reply2 = to_string(llm_result2)
-      let sel_resp = try call_python("llm_verifier", "select", json_encode(["Подготовь брифинг на тему: " + topic, json_encode([reply, reply2]), "Completeness: All 4 phases covered (immersion, deconstruction, failure modes, combat questions)? Depth: Sufficient technical detail? Actionability: Usable combat questions with expected answers?"]))
+      let sel_resp = TryVal(try call_python("llm_verifier", "select", json_encode(["Подготовь брифинг на тему: " + topic, json_encode([reply, reply2]), "Completeness: All 4 phases covered (immersion, deconstruction, failure modes, combat questions)? Depth: Sufficient technical detail? Actionability: Usable combat questions with expected answers?"])))
       if to_string(sel_resp) != "()" and contains(to_string(sel_resp), "error") == false then {
-        let sel_parsed = try parse_json(sel_resp)
-        let best_idx = redact(to_int(try json_get(sel_parsed, "result", "0")), "all")
+        let sel_parsed = TryVal(try parse_json(sel_resp))
+        let best_idx = to_int(TryVal(try json_get(sel_parsed, "result", "0")))
         if best_idx == 1 then { let reply = reply2 }
         let _ = AuditLog("expert_briefing_bestof2", "expert", "id=" + brief_id + " selected=" + to_string(best_idx))
       }

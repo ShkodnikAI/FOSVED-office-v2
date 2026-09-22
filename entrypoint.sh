@@ -115,6 +115,12 @@ if [ "$MLOG_PROBE_RC" = "0" ] || [ "$MLOG_PROBE_RC" = "2" ]; then
   # дашборде Render (см. docs/render-dashboard.md, секция native cron).
   export METALOGOS_ENV_ALLOWLIST="${METALOGOS_ENV_ALLOWLIST:-CEREBRAS_API_KEY,CRON_SECRET,DATABASE_URL,DEEPSEEK_API_KEY,FNP_CUSTOMER,FNP_GOAL,FNP_NAME,FNP_SLUG,FNP_TYPE,FORGE_GITHUB_OWNER,FORGE_REPOS_DIR,FORGE_RUN_ENABLED,FORGE_RUN_VLIMIT_KB,GROQ_API_KEY,INTERNAL_API_TOKEN,KIMI_API_KEY,LOCKDOWN_PASSWORD,METALOGOS_EXEC_TIMEOUT_SECS,OWNER_TELEGRAM_ID,RENDER_URL,SAKANA_API_KEY,SHOP_ENABLED,TAVILY_API_KEY,TELEGRAM_ARCHIVE_CHANNEL_ID,TELEGRAM_BOT_TOKEN,ZAI_API_KEY}"
   export METALOGOS_SERVE_ALLOW_EXEC="${METALOGOS_SERVE_ALLOW_EXEC:-1}"
+  # №422: SSRF-гвард 0.21 по умолчанию режет http_get/http_post на 127.0.0.1 —
+  # а это ШТАТНЫЙ внутренний канал офиса (mlog -> свой LLM-прокси на :4000,
+  # ~40 сайтов вызовов: /ask, news, tts, /cron/*-цепочки). Без флага офис на
+  # 0.21 отвечает только на команды без LLM — репродукция в отчёте №422.
+  # Публичная поверхность не меняется: наружу смотрит только reverse-прокси.
+  export METALOGOS_HTTP_ALLOW_PRIVATE="${METALOGOS_HTTP_ALLOW_PRIVATE:-1}"
   # ADR-0171 дефолт — VM, но VM-хендлеры 0.21 не видят db-соединение (db_decl):
   # office-путь держим на интерпретаторе до починки апстрима (находка №419).
   export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-interpreter}"
@@ -156,7 +162,18 @@ done
 # 0.21; внешние cron-job.org продолжают дёргать /cron/*-роуты как раньше.
 if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
   echo "--- №419: bootstrapping native schedules (dept/schedules.mlog -> cron store)"
-  BOOT_REPORT=$(curl -sf "http://127.0.0.1:10001/schedules/bootstrap?secret=${CRON_SECRET}" 2>/dev/null || echo "")
+  # №422: на холодном старте 0.21 serve может не успеть ответить на первый запрос
+  # (гонка инициализации kv/БД — в бут-логе 2026-09-22 бутстрап отпал через 160 мс
+  # после «listening»). Три попытки с паузой 2 с; секрет в URL не печатаем.
+  BOOT_REPORT=""
+  for BOOT_ATTEMPT in 1 2 3; do
+    BOOT_REPORT=$(curl -sf --max-time 90 "http://127.0.0.1:10001/schedules/bootstrap?secret=${CRON_SECRET}" 2>/dev/null || true)
+    if [ -n "$BOOT_REPORT" ]; then break; fi
+    if [ "$BOOT_ATTEMPT" != "3" ]; then
+      echo "  bootstrap attempt ${BOOT_ATTEMPT}: no answer — retry in 2s"
+      sleep 2
+    fi
+  done
   if [ -n "$BOOT_REPORT" ]; then
     echo "  bootstrap: ${BOOT_REPORT}"
     case "$BOOT_REPORT" in
@@ -164,16 +181,21 @@ if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
       *) echo "  native schedules OK" ;;
     esac
   else
-    echo "  !!! schedules/bootstrap did not answer — native schedules NOT registered (external crons remain the executor)"
+    echo "  !!! schedules/bootstrap did not answer after 3 attempts — native schedules NOT registered (external crons remain the executor)"
   fi
 fi
 
 echo "--- Version check ---"
-curl -sf http://127.0.0.1:10001/version 2>/dev/null || echo "version endpoint not available"
+# №422: /version за RequireInternalAuth — без token-параметра роут честно отвечает
+# 401 и проверка всегда падала («version endpoint not available» в бут-логе).
+curl -sf --max-time 30 "http://127.0.0.1:10001/version?token=${INTERNAL_API_TOKEN:-}" 2>/dev/null || echo "version endpoint not available"
 
 echo "--- Department import validation ---"
 for DEPT_ROUTE in "/health" "/version"; do
-  curl -sf "http://127.0.0.1:10001${DEPT_ROUTE}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
+  # №422: /version требует token; токен ТОЛЬКО в URL запроса, в лог не печатаем
+  EXTRA=""
+  if [ "$DEPT_ROUTE" = "/version" ] && [ -n "${INTERNAL_API_TOKEN:-}" ]; then EXTRA="?token=${INTERNAL_API_TOKEN}"; fi
+  curl -sf --max-time 30 "http://127.0.0.1:10001${DEPT_ROUTE}${EXTRA}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
 done
 echo "  Testing handler resolution via /webhook/telegram dry-run..."
 TEST_RESULT=$(curl -s -X POST http://127.0.0.1:10001/webhook/telegram \

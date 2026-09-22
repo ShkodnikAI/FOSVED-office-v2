@@ -78,7 +78,7 @@ pattern MorningBrief() -> String {
     cost_yesterday: cost_yesterday,
     top_depts: top_depts
   })
-  let _ = try http_post("http://127.0.0.1:4000/scheduler/morning-brief", payload, "application/json")
+  let _ = TryVal(try http_post("http://127.0.0.1:4000/scheduler/morning-brief", payload, "application/json"))
 
   // Audit
   let _ = AuditLog("morning_brief", "scheduler", "morning brief triggered (mlog SQL: " + dialog_24h + " dialogs, " + narads_pending + " pending narads)")
@@ -115,7 +115,7 @@ pattern EveningSummary() -> String {
   let yana_profile = redact(read_file("library/yana.md"), "all")
 
   // --- Native LLM call ---
-  let llm_result = redact(try call_llm(yana_profile, prompt), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(yana_profile, prompt))), "all")
 
   if to_string(llm_result) != "()" then {
     let reply = to_string(llm_result)
@@ -169,7 +169,7 @@ pattern WeeklyDigest() -> String {
   let prompt = prompt + "Выдели тренды, проблемы, рекомендации."
 
   // --- Native LLM call ---
-  let llm_result = redact(try call_llm(yana_profile, prompt), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(yana_profile, prompt))), "all")
 
   if to_string(llm_result) != "()" then {
     let reply = to_string(llm_result)
@@ -197,15 +197,15 @@ pattern MonthlyReview() -> String {
   each dept in depts {
     // Task count (30 days)
     let task_rows = query("SELECT COUNT(*) as cnt FROM channel_archive WHERE dept = ? AND archived_at > datetime('now', '-30 days')", [dept])
-    let task_count = redact(to_string(try json_get(task_rows[0], "cnt", "0")), "all")
+    let task_count = redact(to_string(TryVal(try json_get(task_rows[0], "cnt", "0"))), "all")
 
     // Average satisfaction (30 days)
     let sat_rows = query("SELECT ROUND(AVG(metric_value), 1) as avg_score FROM dept_metrics WHERE dept = ? AND metric_name = 'satisfaction' AND created_at > datetime('now', '-30 days')", [dept])
-    let avg_sat = redact(to_string(try json_get(sat_rows[0], "avg_score", "0")), "all")
+    let avg_sat = redact(to_string(TryVal(try json_get(sat_rows[0], "avg_score", "0"))), "all")
 
     // Corrections (30 days)
     let corr_rows = query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE dept = ? AND created_at > datetime('now', '-30 days')", [dept])
-    let corr_count = redact(to_string(try json_get(corr_rows[0], "cnt", "0")), "all")
+    let corr_count = redact(to_string(TryVal(try json_get(corr_rows[0], "cnt", "0"))), "all")
 
     let metrics_summary = metrics_summary + dept + ": " + task_count + " задач, оценка " + avg_sat + ", " + corr_count + " коррекций\n"
   }
@@ -223,7 +223,7 @@ pattern MonthlyReview() -> String {
   let prompt = prompt + "5. Предложить рекалибровку для отделов с оценкой < 3"
 
   // --- Native LLM call ---
-  let llm_result = redact(try call_llm(yana_profile, prompt), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(yana_profile, prompt))), "all")
 
   if to_string(llm_result) != "()" then {
     let reply = to_string(llm_result)
@@ -251,8 +251,8 @@ pattern ControlCheck() -> String {
   let mut checks_done = 0.0
 
   each row in controls {
-    let ctrl_key = redact(to_string(try json_get(row, "key", "")), "all")
-    let ctrl_val = redact(to_string(try json_get(row, "value", "")), "all")
+    let ctrl_key = redact(to_string(TryVal(try json_get(row, "key", ""))), "all")
+    let ctrl_val = redact(to_string(TryVal(try json_get(row, "value", ""))), "all")
 
     // Value format: "daily|Topic" / "weekly|Topic" / "monthly|Topic"
     let _pipe = "|"
@@ -271,7 +271,7 @@ pattern ControlCheck() -> String {
       let pred_rows = query("SELECT raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
       let mut original_prediction = ""
       if length(to_string(pred_rows)) > 2.0 then {
-        let original_prediction = redact(to_string(try json_get(pred_rows[0], "raw_text", "")), "all")
+        let original_prediction = redact(to_string(TryVal(try json_get(pred_rows[0], "raw_text", ""))), "all")
       }
 
       // Append to checks data
@@ -291,7 +291,7 @@ pattern ControlCheck() -> String {
 
   // --- Native LLM call to verify predictions ---
   let verify_prompt = osp_profile + "\n\nТы — ОСП. Проверь следующие прогнозы на актуальность. Для каждого: совпал ли прогноз с реальностью? Если нет — почему? Укажи новые индикаторы для наблюдения.\n\nФормат: [ПРОГНОЗ ПОДТВЕРЖДЁН] / [ПРОГНОЗ НЕ ПОДТВЕРЖДЁН] / [ТРЕБУЕТ ПРОВЕРКИ]"
-  let llm_result = redact(try call_llm(verify_prompt, checks_data), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(verify_prompt, checks_data))), "all")
 
   if to_string(llm_result) != "()" then {
     let reply = to_string(llm_result)
@@ -317,7 +317,7 @@ pattern YanaSelfLearn() -> String {
 
   // --- Native LLM call for self-improvement ---
   let prompt = yana_profile + "\n\nТы — Яна. Проанализируй свои недавние коррекции. Выдели паттерны ошибок, предложи конкретные улучшения для каждого отдела. Язык: русский."
-  let llm_result = redact(try call_llm(prompt, "Мои коррекции за 7 дней:\n" + corrections_data), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Мои коррекции за 7 дней:\n" + corrections_data))), "all")
 
   if to_string(llm_result) != "()" then {
     let insights = to_string(llm_result)
@@ -350,7 +350,7 @@ pattern MonthlyDebrief(dept: String) -> String {
 // ---------------------------------------------------------------------------
 pattern ReminderCheck() -> String {
   let payload = json_encode("")
-  let result = try http_post("http://127.0.0.1:4000/scheduler/reminder-check", payload, "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/reminder-check", payload, "application/json"))
   if to_string(result) == "()" then { return "ok" }
   let sent = redact(to_string(json_get(parse_json(result), "sent", "0")), "all")
   if sent != "0" then {
@@ -397,34 +397,34 @@ pattern ControlSlot() -> String {
 pattern AdminReplySlot() -> String {
   let _ = AuditLog("cron_admin_reply", "admin", "admin morning reply triggered by native cron")
   let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
-  let result = try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0)
+  let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0))
   return "admin-reply ok"
 }
 
 pattern LzDailySlot() -> String {
   let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by native cron")
   let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
-  let result = try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0)
+  let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0))
   return "lz-daily ok"
 }
 
 pattern ShopTickSlot() -> String {
   if env("SHOP_ENABLED") != "1" then { return "shop skip (SHOP_ENABLED != 1)" }
   let _ = AuditLog("cron_shop_tick", "shop", "shop-tick triggered by native cron")
-  let result = try http_post("http://127.0.0.1:4000/scheduler/watch-sweep", "{}", "application/json", 240.0)
+  let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/watch-sweep", "{}", "application/json", 240.0))
   return "shop-tick ok"
 }
 
 pattern GoldenEvalsSlot() -> String {
   let _ = AuditLog("cron_golden_evals", "qa", "golden evals triggered by native cron")
-  let result = try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 240.0)
+  let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 240.0))
   return "golden-evals ok"
 }
 
 pattern IndicatorRemindersSlot() -> String {
   let _ = AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by native cron")
   let body = json_encode({days_ahead: 7})
-  let result = try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body, "application/json", 240.0)
+  let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body, "application/json", 240.0))
   return "indicator-reminders ok"
 }
 
@@ -459,15 +459,15 @@ pattern NightTickSlot() -> String {
   let qs = "?secret=" + env("CRON_SECRET")
 
   let mut report = "night-tick:"
-  let r_backup = redact(try http_get(base + "backup" + qs, 300.0), "all")
+  let r_backup = redact(to_string(TryVal(try http_get(base + "backup" + qs, 300.0))), "all")
   if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else { report = report + " backup=ok" }
-  let r_ind = redact(try http_get(base + "indicator-reminders" + qs, 300.0), "all")
+  let r_ind = redact(to_string(TryVal(try http_get(base + "indicator-reminders" + qs, 300.0))), "all")
   if to_string(r_ind) == "()" then { report = report + " indicators=FAIL" } else { report = report + " indicators=ok" }
-  let r_shop = redact(try http_get(base + "shop-tick" + qs, 300.0), "all")
+  let r_shop = redact(to_string(TryVal(try http_get(base + "shop-tick" + qs, 300.0))), "all")
   if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
-  let r_evals = redact(try http_get(base + "golden-evals" + qs, 300.0), "all")
+  let r_evals = redact(to_string(TryVal(try http_get(base + "golden-evals" + qs, 300.0))), "all")
   if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
-  let r_night = redact(try http_get(base + "night" + qs, 600.0), "all")
+  let r_night = redact(to_string(TryVal(try http_get(base + "night" + qs, 600.0))), "all")
   if to_string(r_night) == "()" then { report = report + " night=запущен(фоном)" } else { report = report + " night=ok" }
   let _ = AuditLog("cron_night_tick", "system", report)
   let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)

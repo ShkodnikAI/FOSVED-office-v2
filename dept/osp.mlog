@@ -291,25 +291,25 @@ pattern OSPVerifyIndicatorAPI(indicator_id: String, result: Boolean) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPRouteToFinance(thesis: String, forecast: String) -> String {
   let payload = json_encode({source: "osp", thesis: thesis, forecast: forecast})
-  let result = try http_post("http://127.0.0.1:4000/dept/finance/cross-check", payload, "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/dept/finance/cross-check", payload, "application/json"))
   if to_string(result) == "()" then { return "Finance unavailable" }
   return json_get(parse_json(result), "assessment", "Finance check failed")
 }
 pattern OSPRouteToExpert(analysis_id: Int, context: String) -> String {
   let payload = json_encode({source: "osp", analysis_id: analysis_id, context: context})
-  let result = try http_post("http://127.0.0.1:4000/dept/expert/briefing", payload, "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/dept/expert/briefing", payload, "application/json"))
   if to_string(result) == "()" then { return "Expert unavailable" }
   return json_get(parse_json(result), "briefing", "Expert check failed")
 }
 pattern OSPRouteToLZ(technology: String, question: String) -> String {
   let payload = json_encode({source: "osp", technology: technology, question: question})
-  let result = try http_post("http://127.0.0.1:4000/dept/lz/assess", payload, "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/dept/lz/assess", payload, "application/json"))
   if to_string(result) == "()" then { return "LZ unavailable" }
   return json_get(parse_json(result), "assessment", "LZ check failed")
 }
 pattern OSPRouteToLegal(thesis: String, jurisdiction: String) -> String {
   let payload = json_encode({source: "osp", thesis: thesis, jurisdiction: jurisdiction})
-  let result = try http_post("http://127.0.0.1:4000/dept/legal/regulatory", payload, "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/dept/legal/regulatory", payload, "application/json"))
   if to_string(result) == "()" then { return "Legal unavailable" }
   return json_get(parse_json(result), "assessment", "Legal check failed")
 }
@@ -357,7 +357,7 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   let depth = OSPAutoEscalate(query, 1)
   let context = BuildOSPContext(query, domain, chat_id)
   let context = OSPDisclaimer() + "\n\n" + context + "\n\n=== PROJECT PARAMS ===\nDepth: " + to_string(depth) + " Domain: " + domain + "\n"
-  let llm_result = redact(try call_llm(context, query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(context, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
@@ -365,11 +365,11 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   let safety = OSPFinalSafetyCheck(reply)
   if safety != "PASS" then { let reply = reply + "\n\n[SAFETY: " + safety + "]" }
   // ── LLM-Verifier: confidence scoring for strategic analysis ──
-  let ov_resp = try call_python("llm_verifier", "score", json_encode([query, reply, "Analytical rigor: Logic and evidence quality? Probability calibration: Reasonable confidence levels? Actionability: Decision-relevant conclusions?"]))
+  let ov_resp = TryVal(try call_python("llm_verifier", "score", json_encode([query, reply, "Analytical rigor: Logic and evidence quality? Probability calibration: Reasonable confidence levels? Actionability: Decision-relevant conclusions?"])))
   let mut ov_score = 0.0
   if to_string(ov_resp) != "()" and contains(to_string(ov_resp), "error") == false then {
-    let ov_parsed = try parse_json(ov_resp)
-    let ov_score = to_float(try json_get(ov_parsed, "result", "0.5"))
+    let ov_parsed = TryVal(try parse_json(ov_resp))
+    let ov_score = to_float(TryVal(try json_get(ov_parsed, "result", "0.5")))
     let _ = AuditLog("osp_verify_score", dept, "score=" + to_string(ov_score) + " domain=" + domain + " depth=" + to_string(depth))
   }
   let reply = reply + "\n\n" + OSPDisclaimerBottom() + OSPSourcesFooter(context)
@@ -431,7 +431,7 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   let now_info = YanaNowInfo()
   let domain_kb = OSPDomainKB(domain)
   let news = ""
-  let news_result = try http_post("http://127.0.0.1:4000/news/fresh", json_encode({query: query, dept: "osp", limit: 5}), "application/json")
+  let news_result = TryVal(try http_post("http://127.0.0.1:4000/news/fresh", json_encode({query: query, dept: "osp", limit: 5}), "application/json"))
   if to_string(news_result) != "()" then { let news = json_get(parse_json(news_result), "news", "") }
   // FRED (McpMarketsCall) — для monetary/financial: общие RSS-ленты
   // /news/fresh не дают числовых макро-рядов (доходность облигаций,
@@ -559,7 +559,7 @@ pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nБЫСТРЫЙ АНАЛИЗ (depth=0). 200-300 слов. Суть — риск — действие."
-  let llm_result = redact(try call_llm(prompt, query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result) + "\n\n" + OSPDisclaimerBottom()
@@ -572,7 +572,7 @@ pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней."
-  let llm_result = redact(try call_llm(prompt, query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -590,7 +590,7 @@ pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез."
-  let llm_result = redact(try call_llm(prompt, query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -608,7 +608,7 @@ pattern OSPWargame(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nWARGAME (depth=2). Стороны→Интересы→Силы→Ходы→Дерево→Schelling points→Нэш→Наша стратегия→Red flags."
-  let llm_result = redact(try call_llm(prompt, query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result) + "\n\n" + OSPDisclaimerBottom()
@@ -623,7 +623,7 @@ pattern OSPWargame(query: String, chat_id: String) -> String {
 pattern OSPRegimeScan(query: String, chat_id: String) -> String {
   let context = BuildOSPContext(query, "monetary", chat_id)
   let prompt = context + "\n\nМАКРО-РЕЖИМ: текущий режим, индикаторы, ЦБ, cross-asset, Cantillon, narrative-vs-reality, I&W перехода."
-  let llm_result = redact(try call_llm(prompt, "Macro regime: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Macro regime: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -636,7 +636,7 @@ pattern OSPRegimeScan(query: String, chat_id: String) -> String {
 pattern OSPCantillonScan(query: String, chat_id: String) -> String {
   let context = BuildOSPContext(query, "monetary", chat_id)
   let prompt = context + "\n\nКАНТИЛЬОН: эмиссия→порядок получения→кто первый→кто последний→cross-border→последствия."
-  let llm_result = redact(try call_llm(prompt, "Cantillon: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Cantillon: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -649,7 +649,7 @@ pattern OSPNarrativeScan(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
   let prompt = context + "\n\nНАРРАТИВ vs ПОТОКИ: нарратив→реальные потоки→расхождения→сигнал→spillover→действия."
-  let llm_result = redact(try call_llm(prompt, "Narrative vs flows: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Narrative vs flows: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -666,7 +666,7 @@ pattern OSPVerify(query: String, chat_id: String) -> String {
   if length(rows) == 0 then { return "Нет анализов для верификации: " + query }
   let context = BuildOSPContext(query, "general", chat_id)
   let prompt = context + "\n\nВЕРИФИКАЦИЯ: предсказали→произошло→Brier→систематическая ошибка→corrigendum."
-  let llm_result = redact(try call_llm(prompt, "Верифицируй: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Верифицируй: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -685,7 +685,7 @@ pattern OSPCalibrationScore(chat_id: String) -> String {
   if length(brier_rows) > 0 then { let avg_brier = to_string(get(get(brier_rows, 0), "avg_brier")) }
   let context = BuildOSPContext("калибровка", "general", chat_id)
   let prompt = context + "\n\nКАЛИБРОВКА. Всего: " + t_count + " Верифицировано: " + v_count + " Avg Brier: " + avg_brier + " Цели: Y1≤0.25 Y2≤0.20 Y3≤0.18"
-  let llm_result = redact(try call_llm(prompt, "Калибровочный скор ОСП"), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Калибровочный скор ОСП"))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -697,7 +697,7 @@ pattern OSPCalibrationScore(chat_id: String) -> String {
 pattern OSPRecalibrate(chat_id: String) -> String {
   let context = BuildOSPContext("рекалибровка", "general", chat_id)
   let prompt = context + "\n\nРЕКАЛИБРОВКА: повторяющиеся ошибки→недоиспользуемые навыки→калибровочные смещения→3 конкретных изменения."
-  let llm_result = redact(try call_llm(prompt, "Рекалибровка ОСП"), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Рекалибровка ОСП"))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -714,7 +714,7 @@ pattern OSPRedteam(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
   let prompt = context + "\n\nRED TEAM: доминирующий тезис→5 аргументов ПРОТИВ→вероятности→асимметрия→рекомендация."
-  let llm_result = redact(try call_llm(prompt, "Red team: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Red team: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result) + "\n\n" + OSPDisclaimerBottom()
@@ -727,7 +727,7 @@ pattern OSPRegisterBet(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nАСИММЕТРИЧНАЯ СТАВКА: тезис→bounded downside→upside→ratio≥3:1→EV→условия выхода→горизонт→исполнение."
-  let llm_result = redact(try call_llm(prompt, "Ставка: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Ставка: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -748,7 +748,7 @@ pattern OSPWatch(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
   let prompt = context + "\n\nI&W: индикаторы 30/60/90/180/365 дней, пороги, действие при активации."
-  let llm_result = redact(try call_llm(prompt, "Watch: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Watch: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -780,7 +780,7 @@ pattern OSPAlertEscalation(scenario_id: Int, level: String) -> String {
 pattern OSPProfile(query: String, chat_id: String) -> String {
   let context = BuildOSPContext(query, "political", chat_id)
   let prompt = context + "\n\nDEEP PROFILING: биография→сеть→коммуникация→психология→leverage/vulnerabilities→предсказание→трек-рекорд. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]"
-  let llm_result = redact(try call_llm(prompt, "Profile: " + query), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Profile: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
@@ -794,14 +794,14 @@ pattern OSPProfile(query: String, chat_id: String) -> String {
 // SEARCH & RECORDING
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPTavilySearch(query: String, chat_id: String) -> String {
-  let result = try http_post("http://127.0.0.1:4000/lz/tavily", json_encode({query: query, dept: "osp"}), "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/lz/tavily", json_encode({query: query, dept: "osp"}), "application/json"))
   if to_string(result) == "()" then { return "Tavily недоступен." }
   let reply = redact(to_string(json_get(parse_json(result), "response", "Search failed.")), "all")
   let _ = RecordAssistantMessage(chat_id, "osp", reply)
   return reply
 }
 pattern OSPTelegramSearch(query: String, chat_id: String) -> String {
-  let result = try http_post("http://127.0.0.1:4000/lz/telegram", json_encode({query: query, dept: "osp"}), "application/json")
+  let result = TryVal(try http_post("http://127.0.0.1:4000/lz/telegram", json_encode({query: query, dept: "osp"}), "application/json"))
   if to_string(result) == "()" then { return "Telegram недоступен." }
   let reply = redact(to_string(json_get(parse_json(result), "response", "Search failed.")), "all")
   let _ = RecordAssistantMessage(chat_id, "osp", reply)

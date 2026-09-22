@@ -16,7 +16,7 @@ pattern QuestCreate(title: String, quest_type: String, total_steps: String, dead
 
   // Create checkpoints via Python endpoint (Metalogos has no loop)
   let payload = json_encode({quest_id: qid, total_steps: total_steps})
-  let _ = try http_post("http://127.0.0.1:4000/api/quest/create-checkpoints", payload, "application/json")
+  let _ = TryVal(try http_post("http://127.0.0.1:4000/api/quest/create-checkpoints", payload, "application/json"))
 
   let _ = AuditLog("quest_create", "quest", "id=" + qid + " title=" + title + " type=" + quest_type)
   return qid
@@ -35,7 +35,7 @@ pattern QuestList(chat_id: String) -> String {
 
   // Delegate formatting to Python for loop-based rendering
   let payload = json_encode({rows: rows})
-  let resp = try http_post("http://127.0.0.1:4000/api/quest/format-list", payload, "application/json")
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/api/quest/format-list", payload, "application/json"))
   if to_string(resp) != "()" and to_string(resp) != "" then {
     return to_string(resp)
   }
@@ -50,7 +50,7 @@ pattern QuestList(chat_id: String) -> String {
 // ---------------------------------------------------------------------------
 pattern QuestStatus(qid: String) -> String {
   let payload = json_encode({quest_id: qid})
-  let resp = try http_post("http://127.0.0.1:4000/api/quest/format-status", payload, "application/json")
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/api/quest/format-status", payload, "application/json"))
   if to_string(resp) != "()" and to_string(resp) != "" then {
     return to_string(resp)
   }
@@ -65,8 +65,8 @@ pattern QuestAdvanceStep(qid: String) -> String {
   if length(rows) == 0.0 then { return "Zadacha ne najdena." }
 
   let r = rows[0]
-  let cstep = to_float(try json_get(r, "current_step", "0"))
-  let tstep = to_float(try json_get(r, "total_steps", "0"))
+  let cstep = to_float(TryVal(try json_get(r, "current_step", "0")))
+  let tstep = to_float(TryVal(try json_get(r, "total_steps", "0")))
 
   if cstep >= tstep then {
     db_execute("UPDATE quests SET status = 'completed', updated_at = datetime('now') WHERE id = ?1", [qid])
@@ -89,8 +89,8 @@ pattern QuestApproveStep(qid: String, approved_by: String) -> String {
   if length(rows) == 0.0 then { return "Zadacha ne najdena." }
 
   let r = rows[0]
-  let cstep = redact(to_string(try json_get(r, "current_step", "0")), "all")
-  let tstep = to_float(try json_get(r, "total_steps", "0"))
+  let cstep = redact(to_string(TryVal(try json_get(r, "current_step", "0"))), "all")
+  let tstep = to_float(TryVal(try json_get(r, "total_steps", "0")))
 
   // Approve current step
   db_execute("UPDATE quest_checkpoints SET status = 'approved', approved_by = ?1, approved_at = datetime('now') WHERE quest_id = ?2 AND step_num = ?3",
@@ -119,7 +119,7 @@ pattern QuestAddFile(qid: String, filename: String, file_type: String, storage_p
   let vrows = query("SELECT MAX(version) as max_v FROM quest_files WHERE quest_id = ?1 AND filename = ?2", [qid, filename])
   let mut ver = 1.0
   if length(vrows) > 0.0 then {
-    let max_v = to_float(try json_get(vrows[0], "max_v", "0"))
+    let max_v = to_float(TryVal(try json_get(vrows[0], "max_v", "0")))
     if max_v > 0.0 then {
       let ver = max_v + 1.0
     }
@@ -157,7 +157,7 @@ pattern QuestSendPackage(qid: String, recipient: String, subject: String) -> Str
   let f_json = json_encode(f_rows)
 
   let q_rows = query("SELECT title, quest_type FROM quests WHERE id = ?1", [qid])
-  let q_title = redact(to_string(try json_get(q_rows[0], "title", "Bez nazvanija")), "all")
+  let q_title = redact(to_string(TryVal(try json_get(q_rows[0], "title", "Bez nazvanija"))), "all")
 
   let payload = json_encode({
     quest_id: qid,
@@ -167,7 +167,7 @@ pattern QuestSendPackage(qid: String, recipient: String, subject: String) -> Str
     files: f_json
   })
 
-  let resp = try http_post("http://127.0.0.1:4000/api/quest/send-package", payload, "application/json")
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/api/quest/send-package", payload, "application/json"))
   let _ = AuditLog("quest_send_package", "quest", "id=" + qid + " to=" + recipient)
   return "Paket otpravlen na " + recipient + "."
 }
@@ -182,7 +182,7 @@ pattern QuestGenerateDocument(qid: String, template: String, data: String) -> St
     data: data
   })
 
-  let resp = try http_post("http://127.0.0.1:4000/api/quest/generate", payload, "application/json")
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/api/quest/generate", payload, "application/json"))
 
   // If Python returns a filename, register it in quest_files
   let resp_str = to_string(resp)

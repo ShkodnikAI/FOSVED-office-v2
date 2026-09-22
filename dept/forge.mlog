@@ -63,7 +63,7 @@ pattern ForgeRunScript(script: String) -> Dict {
   // абсолютные пути ядро отвергает SANDBOX_VIOLATION — проверено)
   let script_path = "forge-tmp/run_" + stamp + ".sh"
   let _ = write_file(script_path, script)
-  let out = try exec("bash forge-tmp/run_" + stamp + ".sh > forge-tmp/run_" + stamp + ".out 2>&1; code=$?; head -c 20000 forge-tmp/run_" + stamp + ".out; echo \"___EXIT:$code\"")
+  let out = TryVal(try exec("bash forge-tmp/run_" + stamp + ".sh > forge-tmp/run_" + stamp + ".out 2>&1; code=$?; head -c 20000 forge-tmp/run_" + stamp + ".out; echo \"___EXIT:$code\""))
   if to_string(out) == "()" then {
     return { exit_code: -1.0, output: "exec сбой (гейт ядра/таймаут)" }
   }
@@ -85,18 +85,18 @@ pattern ForgeRunScript(script: String) -> Dict {
 // AES-256-GCM, ключ env FORGE_MASTER_KEY (64 hex); отсутствие/битый ключ —
 // громкая ошибка, не молчаливое хранение в открытом виде.
 pattern SetSecret(key: String, plaintext: String) -> String {
-  let resp = try call_python("forge_secrets", "set", json_encode([key, plaintext]))
+  let resp = TryVal(try call_python("forge_secrets", "set", json_encode([key, plaintext])))
   if to_string(resp) == "()" then { return "ОТКАЗ: secrets-плоскость недоступна" }
-  let parsed = try parse_json(resp)
+  let parsed = TryVal(try parse_json(resp))
   let result = redact(to_string(json_get(parsed, "result", "ОТКАЗ: нет result")), "all")
   if starts_with(result, "ОТКАЗ") then { return result }
   return "ok"
 }
 
 pattern GetSecret(key: String) -> String {
-  let resp = try call_python("forge_secrets", "get", json_encode([key]))
+  let resp = TryVal(try call_python("forge_secrets", "get", json_encode([key])))
   if to_string(resp) == "()" then { return "" }
-  let parsed = try parse_json(resp)
+  let parsed = TryVal(try parse_json(resp))
   if to_string(parsed) == "()" then { return "" }
   return to_string(json_get(parsed, "result", ""))
 }
@@ -131,9 +131,9 @@ pattern ForgeCreateRepo(name: String, project_slug: String, desc: String, author
   if token != "" then {
     let owner_repo = env("FORGE_GITHUB_OWNER")
     if owner_repo != "" then {
-      let resp = try http_post("https://api.github.com/user/repos", json_encode({name: name, private: true, description: desc, auto_init: false}), "application/json")
+      let resp = TryVal(try http_post("https://api.github.com/user/repos", json_encode({name: name, private: true, description: desc, auto_init: false}), "application/json"))
       if to_string(resp) != "()" then {
-        let parsed = try parse_json(resp)
+        let parsed = TryVal(try parse_json(resp))
         let github_url = redact(to_string(json_get(parsed, "html_url", "")), "all")
       }
     }
@@ -639,7 +639,7 @@ pattern ForgeFindingsDecline(task_id: String, stage_id: String, step: String, fi
 
 // ── C.8: чтение истории решений (сбой не останавливает конвейер) ────────
 pattern ForgeDeclinedContext(task_id: String) -> String {
-  let rows = try query("SELECT step, finding_text FROM forge_finding_decisions WHERE task_id = ? AND decision = 'declined' ORDER BY id DESC LIMIT 20", [task_id])
+  let rows = TryVal(try query("SELECT step, finding_text FROM forge_finding_decisions WHERE task_id = ? AND decision = 'declined' ORDER BY id DESC LIMIT 20", [task_id]))
   if to_string(rows) == "()" then {
     let _ = AuditLog("forge_history_warn", "forge", "история решений недоступна — конвейер продолжил (советует, не блокирует)")
     return ""
@@ -754,7 +754,7 @@ pattern ForgeStepReview(task_id: String, stage_id: String, files_json: String, b
     let files_text = redact(files_text + "\n--- файл: " + to_string(json_get(f, "path", "")) + " ---\n" + substring(to_string(json_get(f, "content", "")), 0.0, 6000.0), "all")
   }
   let prompt = "Ты — ревьюер кода. Проверь, делает ли код ровно то, что утверждено в задании. Не предлагай то, что уже отклонено владельцем.\n\n== УТВЕРЖДЁННОЕ ЗАДАНИЕ ==\n" + substring(brief, 0.0, 4000.0) + "\n\n" + declined + "\n== КОД ==\n" + files_text + "\n\nОтветь строго: 'OK' если код соответствует заданию, либо списком находок (по одной в строке, каждая конкретной правкой)."
-  let review = redact(try call_llm("Ревью кода FORGE: сверка с утверждённым заданием.", prompt), "all")
+  let review = redact(to_string(TryVal(try call_llm("Ревью кода FORGE: сверка с утверждённым заданием.", prompt))), "all")
   if to_string(review) == "()" then {
     let _ = AuditLog("forge_review_unavailable", "forge", "task=" + task_id + " — LLM сбой, парковка владельцу")
     return "ОТКАЗ: ревью недоступно (сбой LLM) — находки запаркованы владельцу; задача ждёт решения"
@@ -869,7 +869,7 @@ pattern ForgeCheckPipeline(name: String, files_json: String) -> String {
   let project_slug = redact(to_string(json_get(get(proj_rows, 0), "project_slug", "")), "all")
   // Сбой схемы FO-036 (старая БД/тест-харнесс FO-035) → минимальный рубеж,
   // не падаем: конвейер деградирует до шага «Секреты» с предупреждением
-  let task_rows = try query("SELECT id, status FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug])
+  let task_rows = TryVal(try query("SELECT id, status FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug]))
   if to_string(task_rows) == "()" then {
     let _ = AuditLog("forge_pipeline_warn", "forge", "repo=" + name + ": таблицы FO-036 недоступны — рубеж деградировал до «Секреты»")
     let task_rows = []
@@ -1132,7 +1132,7 @@ pattern ForgeRun(project_slug: String, repo_name: String, command: String, stage
   // опасные паттерны на команде → гейт владельцу (B.2), не молчаливая блокировка
   let danger = ForgeDangerInText(command)
   if starts_with(danger, "ОТКАЗ") then {
-    let task_rows = try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status = 'in_progress' ORDER BY id DESC LIMIT 1", [project_slug])
+    let task_rows = TryVal(try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status = 'in_progress' ORDER BY id DESC LIMIT 1", [project_slug]))
     if to_string(task_rows) != "()" and length(task_rows) > 0.0 then {
       let tid = redact(to_string(json_get(get(task_rows, 0), "id", "")), "all")
       let _ = db_execute("UPDATE forge_tasks SET status = 'awaiting_owner', updated_at = datetime('now') WHERE id = ?", [tid])
@@ -1235,7 +1235,7 @@ pattern ForgeOfficeReps(project_slug: String) -> String {
   let checks = ""
   // 1. гейты объявлены и вызываемы (CheckAllHardRules); сбой схемы dev —
   // реплика честно пропускается с отметкой, не падение
-  let gates = try CheckAllHardRules()
+  let gates = TryVal(try CheckAllHardRules())
   if to_string(gates) == "()" then {
     let checks = "реплика: гейты — ПРОПУЩЕНА (схема dev недоступна)"
   } else {
@@ -1379,7 +1379,7 @@ pattern ForgeGateSend(gate_id: String) -> String {
   let body = json_encode({chat_id: to_float(owner_id), text: substring(msg, 0.0, 3500.0), reply_markup: {inline_keyboard: []}})
   // reply_markup с кнопками — json_encode выше с пустым списком; собираем строкой
   let raw_body = "{\"chat_id\":" + owner_id + ",\"text\":" + escape_json(substring(msg, 0.0, 3500.0)) + ",\"reply_markup\":{\"inline_keyboard\":" + buttons + "}}"
-  let resp = try http_post("https://api.telegram.org/bot" + token + "/sendMessage", raw_body, "application/json")
+  let resp = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", raw_body, "application/json"))
   if to_string(resp) != "()" then {
     let parsed = parse_json(resp)
     let mid = redact(to_string(json_get(parsed, "result.message_id", "")), "all")
@@ -1537,14 +1537,14 @@ pattern ForgeAttention() -> String {
 // ForgeCheckPipeline: repo → project → активная задача → этап)
 pattern ForgeEditStatsRecord(repo_name: String, path: String, outcome: String, marker: String) -> String {
   if outcome != "first_try" and outcome != "fuzzy" and outcome != "reject" then { return "ОТКАЗ: outcome ∈ {first_try, fuzzy, reject}" }
-  let probe = try query("SELECT COUNT(*) as c FROM forge_edit_stats", [])
+  let probe = TryVal(try query("SELECT COUNT(*) as c FROM forge_edit_stats", []))
   if to_string(probe) == "()" then { return "stats-off: таблицы нет (деградация, запись пропущена)" }
   let proj_rows = query("SELECT project_slug FROM forge_repos WHERE name = ? LIMIT 1", [repo_name])
   if length(proj_rows) < 1.0 then { return "ok: репо не найдено — без привязки" }
   let project_slug = redact(to_string(json_get(get(proj_rows, 0), "project_slug", "")), "all")
   let task_id = ""
   let stage_id = ""
-  let task_rows = try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug])
+  let task_rows = TryVal(try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug]))
   if to_string(task_rows) != "()" and length(task_rows) > 0.0 then {
     let task_id = redact(to_string(json_get(get(task_rows, 0), "id", "")), "all")
     let stage_rows = query("SELECT id FROM forge_stages WHERE task_id = ? AND status = 'in_progress' ORDER BY seq DESC LIMIT 1", [task_id])
@@ -1556,7 +1556,7 @@ pattern ForgeEditStatsRecord(repo_name: String, path: String, outcome: String, m
 
 // недельный срез: доля first-try + вердикт по формату (для телеметрии/брифа)
 pattern ForgeEditStatsWeekly() -> String {
-  let probe = try query("SELECT COUNT(*) as c FROM forge_edit_stats", [])
+  let probe = TryVal(try query("SELECT COUNT(*) as c FROM forge_edit_stats", []))
   if to_string(probe) == "()" then { return "" }
   let rows = query("SELECT outcome, COUNT(*) as c FROM forge_edit_stats WHERE created_at > datetime('now', '-7 days') GROUP BY outcome", [])
   let mut first_try = 0.0
