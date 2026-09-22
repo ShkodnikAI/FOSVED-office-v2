@@ -88,6 +88,20 @@ def test_github_parses_search(mock_http):
     assert "5300" in items[0]["meta"]
 
 
+def test_float_max_results_coerced_to_int(mock_http):
+    """№426: mlog передаёт числа float'ами (JSON 6 → 6.0) — внешние API
+    отвечают 400 на нецелые paging-параметры (arXiv max_results, Algolia
+    hitsPerPage, GitHub per_page; подтверждено пробой 22.09: 6.0 → 400,
+    6 → 200). Коэрсинг int() в источниках обязателен."""
+    lzs.arxiv_search("electric vehicles news", max_results=6.0)
+    lzs.hn_search("electric vehicles news", max_results=6.0)
+    lzs.github_repo_search("electrolyte", max_results=6.0)
+    arxiv_url, hn_url, gh_url = mock_http  # порядок вызовов фиксирован
+    assert "max_results=6&" in arxiv_url and "max_results=6.0" not in arxiv_url
+    assert hn_url.endswith("hitsPerPage=6")
+    assert gh_url.endswith("per_page=6")
+
+
 def test_api_scan_dedupes_and_writes_trace(mock_http, monkeypatch):
     traces = []
     monkeypatch.setattr(lzs, "_write_llm_trace", lambda rec: traces.append(rec))
