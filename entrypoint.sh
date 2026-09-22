@@ -181,7 +181,11 @@ if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
   # после «listening»). Три попытки с паузой 2 с; секрет в URL не печатаем.
   BOOT_REPORT=""
   for BOOT_ATTEMPT in 1 2 3; do
-    BOOT_REPORT=$(curl -sf --max-time 90 "http://127.0.0.1:10001/schedules/bootstrap?secret=${CRON_SECRET}" 2>/dev/null || true)
+    # №425: 0.21 percent-декодирует query ('+' → пробел, %XX → байты,
+    # url_decode_fallback server.rs) — сырая вставка секрета с '+' честно
+    # даёт 403 (проба scripts/probe021qp.sh: raw=403, enc=200 KEEP×7).
+    # Секрет только в URL внутреннего curl, в лог не печатаем.
+    BOOT_REPORT=$(curl -sf --max-time 90 -G "http://127.0.0.1:10001/schedules/bootstrap" --data-urlencode "secret=${CRON_SECRET}" 2>/dev/null || true)
     if [ -n "$BOOT_REPORT" ]; then break; fi
     if [ "$BOOT_ATTEMPT" != "3" ]; then
       echo "  bootstrap attempt ${BOOT_ATTEMPT}: no answer — retry in 2s"
@@ -202,14 +206,18 @@ fi
 echo "--- Version check ---"
 # №422: /version за RequireInternalAuth — без token-параметра роут честно отвечает
 # 401 и проверка всегда падала («version endpoint not available» в бут-логе).
-curl -sf --max-time 30 "http://127.0.0.1:10001/version?token=${INTERNAL_API_TOKEN:-}" 2>/dev/null || echo "version endpoint not available"
+# №425: token — через --data-urlencode (0.21 декодирует query, см. бутстрап выше).
+curl -sf --max-time 30 -G "http://127.0.0.1:10001/version" --data-urlencode "token=${INTERNAL_API_TOKEN:-}" 2>/dev/null || echo "version endpoint not available"
 
 echo "--- Department import validation ---"
 for DEPT_ROUTE in "/health" "/version"; do
-  # №422: /version требует token; токен ТОЛЬКО в URL запроса, в лог не печатаем
-  EXTRA=""
-  if [ "$DEPT_ROUTE" = "/version" ] && [ -n "${INTERNAL_API_TOKEN:-}" ]; then EXTRA="?token=${INTERNAL_API_TOKEN}"; fi
-  curl -sf --max-time 30 "http://127.0.0.1:10001${DEPT_ROUTE}${EXTRA}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
+  # №422: /version требует token; №425: токен — через --data-urlencode
+  # (сырая вставка в query ломается о декодирование 0.21), в лог не печатаем
+  if [ "$DEPT_ROUTE" = "/version" ] && [ -n "${INTERNAL_API_TOKEN:-}" ]; then
+    curl -sf --max-time 30 -G "http://127.0.0.1:10001/version" --data-urlencode "token=${INTERNAL_API_TOKEN}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
+  else
+    curl -sf --max-time 30 "http://127.0.0.1:10001${DEPT_ROUTE}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
+  fi
 done
 echo "  Testing handler resolution via /webhook/telegram dry-run..."
 TEST_RESULT=$(curl -s -X POST http://127.0.0.1:10001/webhook/telegram \

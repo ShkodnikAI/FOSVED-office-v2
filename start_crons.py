@@ -17,6 +17,7 @@ import time
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import argparse
 
 # ── Конфигурация ──────────────────────────────────────────────────────────
@@ -52,7 +53,9 @@ def call_endpoint(url, timeout, label):
 def run_news():
     """Собрать новости: RSS + GDELT (бесплатно, без ключей)."""
     print("\n📡 Сбор новостей (RSS + GDELT)...")
-    url = f"{BASE_URL}/cron/collect-news?secret={CRON_SECRET}"
+    # №425: секрет может содержать '+'/%XX — в URL только percent-кодировкой
+    # (Flask и mlog 0.21 декодируют query; сырая вставка ломает сравнение)
+    url = f"{BASE_URL}/cron/collect-news?secret={urllib.parse.quote(CRON_SECRET, safe='')}"
     return call_endpoint(url, NEWS_TIMEOUT, "News collect")
 
 

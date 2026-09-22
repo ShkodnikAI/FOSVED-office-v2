@@ -286,11 +286,34 @@ def generate_image_endpoint():
 # lives in git history if a rollback to the Python path is ever needed again.
 # RENDER_URL приходит из proxy.core (импорт в шапке модуля) — один источник.
 
+# ── №425: CRON_SECRET-auth с учётом URL-декодирования query ─────────────
+def cron_secret_ok() -> bool:
+    """Auth /cron/* и /scheduler/* с учётом декодирования query-строки.
+
+    Flask request.args percent-декодирует значения ('+' -> ' ', %XX -> байты),
+    а mlog http_* и entrypoint вставляют секрет в URL RAW — литеральный '+'
+    приходил как пробел и честно не совпадал (двойное декодирование: на приёме
+    у Flask и у mlog 0.21, см. url_decode_fallback server.rs). Сравниваем
+    декодированное значение ИЛИ сырую выжимку secret= из query_string без
+    '+'->space — совпадение любого = авторизован. Прежний контракт сохранён:
+    оба пустых = pass-through (паритет с mlog RequireInternalAuth).
+    """
+    expected = os.environ.get("CRON_SECRET", "")
+    provided = request.args.get("secret", "")
+    if provided == expected:
+        return True
+    if not expected:
+        return False
+    for part in request.query_string.decode("utf-8", "replace").split("&"):
+        if part.startswith("secret=") and part[len("secret="):] == expected:
+            return True
+    return False
+
+
 # ── Cron endpoint ──
 @app.route("/cron/collect-news", methods=["GET"])
 def cron_collect_news():
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     rss_count = collect_rss()
     gdelt_count = collect_gdelt_themes()
@@ -304,8 +327,7 @@ def cron_collect_news():
 @app.route("/cron/backup", methods=["GET"])
 def cron_backup():
     """Nightly backup cron: VACUUM INTO + integrity check + retention."""
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     _rotate_service_logs()  # FO-007: ротация журналов перед бэкапом
     import subprocess
@@ -330,8 +352,7 @@ def cron_backup():
 # /scheduler/morning-brief (надёжный триггер BRIEF-1).
 @app.route("/cron/backup-forge", methods=["GET"])
 def cron_backup_forge():
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     from proxy.forge_backup import run_forge_backup, store_backup_summary
     result = run_forge_backup(force_smoke=request.args.get("smoke", "0") == "1")
@@ -347,8 +368,7 @@ def cron_backup_forge():
 # такт в фоне (narad_queue.trigger_async).
 @app.route("/cron/narad-tick", methods=["GET"])
 def cron_narad_tick():
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     from proxy.narad_queue import tick
     try:
@@ -365,8 +385,7 @@ def cron_narad_tick():
 # Kill-switch SHOP_ENABLED=0 выключает такт полностью.
 @app.route("/cron/shop-tick", methods=["GET"])
 def cron_shop_tick():
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     from proxy.shop_watch import tick_shop_watches
     try:
@@ -629,8 +648,7 @@ def shop_dossier_page(dossier_id):
 # Защита: CRON_SECRET в query (читается mlog из env).
 @app.route("/forge/export-state", methods=["POST"])
 def forge_export_state():
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     d = request.get_json(force=True, silent=True) or {}
     from proxy.forge_backup import export_forge_state
@@ -642,8 +660,7 @@ def forge_export_state():
 # data/tool_output/ с ретеншном 7 дней (env FOSVED_TOOL_OUTPUT_RETENTION_DAYS).
 @app.route("/cron/cleanup-tool-output", methods=["GET"])
 def cron_cleanup_tool_output():
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     removed = cleanup_tool_output_files()
     _log_audit("tool_output_cleanup", {"removed": removed}, "system")
@@ -981,8 +998,7 @@ def cron_consolidate_memory():
     - backfill=true + days=N: одноразовый прогон последних N дней (порциями день×департамент)
     - backup=true: сначала scripts/backup_db.py (бэкап FO-001) — обязателен для backfill
     """
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     d = request.get_json(silent=True) or {}
     days = int(d.get("days", 1))
@@ -1168,8 +1184,7 @@ def scheduler_golden_evals():
     Регрессия = avg < GOLDEN_MIN_SCORE (0.6) или падение >= 0.15 против предыдущего прогона.
     Регрессия → audit_log + мгновенный алерт владельцу в Telegram.
     """
-    secret = request.args.get("secret", "")
-    if secret != os.environ.get("CRON_SECRET", ""):
+    if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
     d = request.get_json(silent=True) or {}
     dept_list = d.get("depts") or sorted(p.stem for p in _GOLDEN_DIR.glob("*.json"))
