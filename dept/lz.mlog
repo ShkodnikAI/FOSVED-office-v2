@@ -123,7 +123,12 @@ pattern LZGateOSPReferral(query: String) -> String {
   let result = redact(to_string(TryVal(try call_llm("Does this query involve investment recommendations or portfolio implications? Query: " + query + " Reply YES or NO."))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if result == "YES" then {
-    TryVal(try http_post("http://127.0.0.1:4000/osp/analyze", json_encode({source: "lz", query: query, type: "investment_implication"}), "application/json"))
+    // №318: в query — ОДНОСТОРОННИЙ redact-hash секрета (№327/ADR-0161):
+    // public-метка (нет private-egress), URL-safe (hex — нет '+'/' ' — не
+    // ломается на декоде 0.21 и перекодировке прокси), секрет не светится
+    // даже в логах. Таймаут 5с — fire-and-forget: анализ продолжается на
+    // сервере, результат приходит владельцу в TG независимо от этого вызова.
+    TryVal(try http_post("http://127.0.0.1:4000/osp/analyze?secret=" + redact(env("CRON_SECRET"), "hash_only"), json_encode({source: "lz", query: query, type: "investment_implication"}), "application/json", 5.0))
     return "REFERRED: investment query sent to OSP"
   }
   return "PASS: no investment implication"
@@ -280,7 +285,8 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   let result = redact(to_string(TryVal(try call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать». Если это involves investment — начни ответ со слова INVEST_REFERRAL.", query + "\nContext: " + context + live))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if starts_with(result, "INVEST_REFERRAL") then {
-    let _ = TryVal(try http_post("http://127.0.0.1:4000/osp/analyze", json_encode({source: "lz", query: query, domain: domain}), "application/json"))
+    // №318: redact-hash секрета в query + fire-and-forget (см. LZGateOSPReferral)
+    let _ = TryVal(try http_post("http://127.0.0.1:4000/osp/analyze?secret=" + redact(env("CRON_SECRET"), "hash_only"), json_encode({source: "lz", query: query, domain: domain}), "application/json", 5.0))
     return disclaimer + "\n🔄 Передано в ОСП для инвестиционного анализа"
   }
 
