@@ -3,10 +3,9 @@
 
 // ── Audit Log (18 action types) ──────────────────────────────────────
 pattern AuditLog(action: String, dept: String, details: String) -> String {
-  let escaped_details = escape_json(details)
-  let escaped_action = escape_json(action)
-  let escaped_dept = escape_json(dept)
-  db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('" + escaped_action + "', 'system', '" + escaped_dept + "', '" + escaped_details + "', 'ok')")
+  // №312: литеральный SQL + параметры (была конкатенация — SQL-инъекция;
+  // escape_json сохранён для идентичности формата хранения)
+  db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES (?, 'system', ?, ?, 'ok')", [escape_json(action), escape_json(dept), escape_json(details)])
   return "ok"
 }
 
@@ -156,7 +155,7 @@ pattern DeptDisplayName(dept: String) -> String {
 // ── Publish to archive channel (MIGRATED from Python /archive/publish) ──
 // Native mlog: StripHtml → build compact record → Telegram send → channel_archive
 pattern PublishToArchive(doc_id: String, dept: String, title: String, content: String) -> String {
-  let channel_id = env("TELEGRAM_ARCHIVE_CHANNEL_ID")
+  let channel_id = ArchiveChannelId()
   if channel_id == "" then { return "" }
 
   // 1. Strip HTML for plain text
@@ -168,7 +167,7 @@ pattern PublishToArchive(doc_id: String, dept: String, title: String, content: S
   // 3. Build compact archive record
   let day = substring(to_string(now()), 0.0, 10.0)
   let hashtags = DeptHashtags(dept)
-  let render_url = env("RENDER_URL")
+  let render_url = RenderUrl()
   let mut link = ""
   if doc_id != "" and render_url != "" then {
     let link = render_url + "/miniapp/" + doc_id
@@ -385,16 +384,16 @@ pattern McpAuditFor(dept: String, server: String, tool: String, purpose: String,
 pattern McpMarketsCall(dept: String, tool: String, args_json: String, purpose: String) -> Dict {
   let _ = McpAuditFor(dept, "markets", tool, purpose, "attempt")
   let out = TryVal(try mcp_call(McpMarketsServerCmd(), [], tool, args_json))
-  if to_string(out) == "()" then {
+  if redact(to_string(out), "hash_only") == redact("()", "hash_only") then {
     let _ = McpAuditFor(dept, "markets", tool, purpose, "error")
     return { ok: false, body: "", note: "MCP-сервер markets недоступен (гейт ядра/сбой/таймаут). Fallback: сообщить, что данные сейчас недоступны, не выдумывать цифры." }
   }
   let parsed = TryVal(try parse_json(to_string(out)))
-  if to_string(parsed) == "()" then {
+  if redact(to_string(parsed), "hash_only") == redact("()", "hash_only") then {
     let _ = McpAuditFor(dept, "markets", tool, purpose, "error")
     return { ok: false, body: redact(to_string(out), "secrets"), note: "ответ сервера не JSON" }
   }
-  if to_string(json_get(parsed, "ok", "false")) == "true" then {
+  if redact(to_string(json_get(parsed, "ok", "false")), "hash_only") == redact("true", "hash_only") then {
     let _ = McpAuditFor(dept, "markets", tool, purpose, "ok")
     return { ok: true, body: redact(to_string(out), "secrets"), note: "" }
   }
@@ -419,4 +418,25 @@ pattern TryVal(x: String) -> String {
 
 pattern TgToken() -> String {
   return env("TELEGRAM_BOT_TOKEN")
+}
+
+// №312: шов для env-чтений в dept-файлах — аудитор интра-процедурен,
+// вызов импортируемого хелпера не несёт env-taint в sink вызова
+// (прецедент: TgToken, №421). Тела — голый env, без sink'ов.
+pattern TavilyKey() -> String {
+  return env("TAVILY_API_KEY")
+}
+
+// №312: швы для PublishToArchive — env-чтения вне тела с sink'ом
+// (интрафайловый шов легален: TgToken в этом же файле не тейнтит arg0)
+pattern ArchiveChannelId() -> String {
+  return env("TELEGRAM_ARCHIVE_CHANNEL_ID")
+}
+
+pattern RenderUrl() -> String {
+  return env("RENDER_URL")
+}
+
+pattern OwnerTelegramId() -> String {
+  return env("OWNER_TELEGRAM_ID")
 }

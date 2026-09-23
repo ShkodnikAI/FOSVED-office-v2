@@ -276,10 +276,13 @@ pattern OSPClassifyError(forecast: String, actual: String) -> String {
 // API ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPArchiveAPI(status: String, domain: String, limit: Int) -> String {
-  let q = "SELECT id, topic, status, created_at FROM analysis WHERE 1=1"
-  if status != "" then { let q = q + " AND status = '" + status + "'" }
-  let q = q + " ORDER BY created_at DESC LIMIT " + to_string(limit)
-  return json_encode(query(q, []))
+  // №312: параметризованный запрос (была конкатенация status — SQL-инъекция).
+  // Попутно починен латентный баг: прежний `let q = q + ...` внутри if создавал
+  // shadow-биндинг, умиравший с веткой — фильтр по status никогда не применялся.
+  if status != "" then {
+    return json_encode(query("SELECT id, topic, status, created_at FROM analysis WHERE status = ? ORDER BY created_at DESC LIMIT ?", [status, limit]))
+  }
+  return json_encode(query("SELECT id, topic, status, created_at FROM analysis ORDER BY created_at DESC LIMIT ?", [limit]))
 }
 pattern OSPVerifyIndicatorAPI(indicator_id: String, result: Boolean) -> String {
   let _ = db_execute("UPDATE indicator SET result = ?, verified_at = datetime('now') WHERE id = ?", [to_string(result), indicator_id])
@@ -487,66 +490,66 @@ pattern OSPDomainKB(domain: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern LoadOSPEnrichedSkills(query: String, domain: String) -> String {
   let t = lower(query)
-  let result = ""
+  let mut result = ""
   let budget = OSPSkillBudget(1)
   // Tier 1 always
-  let mut s = read_file("skills/deconstruct/SKILL.md")
-  if s != "" and length(result) < budget then { let result = result + "\n--- deconstruct ---\n" + s }
+  let s = redact(read_file("skills/deconstruct/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- deconstruct ---\n" + s }
   let s = redact(read_file("skills/awareness-frame/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- awareness-frame ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- awareness-frame ---\n" + s }
   let s = redact(read_file("skills/root-cause-mapping/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- root-cause-mapping ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- root-cause-mapping ---\n" + s }
   let s = redact(read_file("skills/forces-and-potentials/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- forces-and-potentials ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- forces-and-potentials ---\n" + s }
   let s = redact(read_file("skills/strategic-maneuvers/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- strategic-maneuvers ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- strategic-maneuvers ---\n" + s }
   let s = redact(read_file("skills/two-paths-synthesis/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- two-paths-synthesis ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- two-paths-synthesis ---\n" + s }
   let s = redact(read_file("skills/decision-tree-forecast/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- decision-tree-forecast ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- decision-tree-forecast ---\n" + s }
   let s = redact(read_file("skills/reflexive-impact/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- reflexive-impact ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- reflexive-impact ---\n" + s }
   let s = redact(read_file("skills/calibration/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- calibration ---\n" + s }
-  let mut s = read_file("skills/system-health-diagnostics/SKILL.md")
-  if s != "" and length(result) < budget then { let result = result + "\n--- system-health-diagnostics ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- calibration ---\n" + s }
+  let s = redact(read_file("skills/system-health-diagnostics/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- system-health-diagnostics ---\n" + s }
   // Tier 2 by domain
   if domain == "financial" and length(result) < budget then {
     let s = redact(read_file("skills/cross-asset-divergence/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- cross-asset-divergence ---\n" + s }
+    if s != "" then { result = result + "\n--- cross-asset-divergence ---\n" + s }
     let s = redact(read_file("skills/asymmetric-bet-structure/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- asymmetric-bet-structure ---\n" + s }
+    if s != "" then { result = result + "\n--- asymmetric-bet-structure ---\n" + s }
   }
   if domain == "monetary" and length(result) < budget then {
     let s = redact(read_file("skills/macro-regime-id/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- macro-regime-id ---\n" + s }
+    if s != "" then { result = result + "\n--- macro-regime-id ---\n" + s }
     let s = redact(read_file("skills/cantillon/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- cantillon ---\n" + s }
+    if s != "" then { result = result + "\n--- cantillon ---\n" + s }
   }
   if contains(t, "нарратив") or contains(t, "поток") then {
     let s = redact(read_file("skills/narrative-vs-flows/SKILL.md"), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- narrative-vs-flows ---\n" + s }
+    if s != "" and length(result) < budget then { result = result + "\n--- narrative-vs-flows ---\n" + s }
   }
   if contains(t, "цикл") or contains(t, "фаза") then {
     let s = redact(read_file("skills/cycle-position/SKILL.md"), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- cycle-position ---\n" + s }
+    if s != "" and length(result) < budget then { result = result + "\n--- cycle-position ---\n" + s }
   }
   if contains(t, "персона") or contains(t, "лидер") then {
     let s = redact(read_file("skills/deep-profiling/SKILL.md"), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- deep-profiling ---\n" + s }
+    if s != "" and length(result) < budget then { result = result + "\n--- deep-profiling ---\n" + s }
   }
   if contains(t, "индикатор") or contains(t, "watch") then {
     let s = redact(read_file("skills/iw-watchlist/SKILL.md"), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- iw-watchlist ---\n" + s }
+    if s != "" and length(result) < budget then { result = result + "\n--- iw-watchlist ---\n" + s }
   }
   // Tier 3
   if domain == "military" and length(result) < budget then {
     let s = redact(read_file("skills/order-of-battle/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- order-of-battle ---\n" + s }
+    if s != "" then { result = result + "\n--- order-of-battle ---\n" + s }
   }
   if contains(t, "redteam") or contains(t, "red-team") then {
     let s = redact(read_file("skills/red-team/SKILL.md"), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- red-team ---\n" + s }
+    if s != "" and length(result) < budget then { result = result + "\n--- red-team ---\n" + s }
   }
   if result == "" then { return "No skills loaded." }
   return result
@@ -757,7 +760,8 @@ pattern OSPWatch(query: String, chat_id: String) -> String {
   return reply
 }
 pattern OSPUnwatch(query: String, chat_id: String) -> String {
-  let _ = db_execute("DELETE FROM watchlist_scenarios WHERE scenario_label = ?", [substring(query, 0, 100)])
+  // №312: DELETE — irreversible-content, через грант (№421/ADR-0155)
+  let _ = TryVal(try db_execute_with_grant(grant_issue("db:delete:watchlist_scenarios", 3600.0, "once"), "DELETE FROM watchlist_scenarios WHERE scenario_label = ?", [substring(query, 0, 100)]))
   let _ = AuditLog("osp_unwatch", "osp", "removed")
   return "Удалено из watchlist: " + query
 }

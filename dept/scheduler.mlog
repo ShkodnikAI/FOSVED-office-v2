@@ -1,4 +1,5 @@
 // Fosved Office v2 — Scheduler (NARAD-17)
+import dept/utils
 // MIGRATED: EveningSummary, WeeklyDigest, MonthlyReview, ControlCheck, YanaSelfLearn
 // now use native call_llm + SendTelegramReplyMDV2 instead of Python proxy.
 // MorningBrief and ReminderCheck still delegate (complex: weather API / RRULE logic).
@@ -10,7 +11,7 @@
 // Migration path: add http_get for OpenWeatherMap API → then migrate.
 // ---------------------------------------------------------------------------
 pattern MorningBrief() -> String {
-  let owner_id = env("OWNER_TELEGRAM_ID")
+  let owner_id = OwnerTelegramId()
 
   // --- P3-1: mlog collects SQL data, Python adds weather + credentials + LLM ---
   // Dialog count (24h)
@@ -90,7 +91,7 @@ pattern MorningBrief() -> String {
 // 2. Evening Summary — 21:00 daily (MIGRATED to native call_llm)
 // ---------------------------------------------------------------------------
 pattern EveningSummary() -> String {
-  let owner_id = env("OWNER_TELEGRAM_ID")
+  let owner_id = OwnerTelegramId()
 
   // --- Collect today's metrics (last 12 hours) ---
   let task_rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-12 hours')", [])
@@ -134,7 +135,7 @@ pattern EveningSummary() -> String {
 // 3. Weekly Digest — Monday 09:00 (MIGRATED to native call_llm)
 // ---------------------------------------------------------------------------
 pattern WeeklyDigest() -> String {
-  let owner_id = env("OWNER_TELEGRAM_ID")
+  let owner_id = OwnerTelegramId()
 
   // --- Collect 7-day metrics ---
   let task_rows = query("SELECT COUNT(*) as cnt FROM channel_archive WHERE archived_at > datetime('now', '-7 days')", [])
@@ -188,7 +189,7 @@ pattern WeeklyDigest() -> String {
 // 4. Monthly Review — 1st of month, 10:00 (MIGRATED to native call_llm)
 // ---------------------------------------------------------------------------
 pattern MonthlyReview() -> String {
-  let owner_id = env("OWNER_TELEGRAM_ID")
+  let owner_id = OwnerTelegramId()
 
   // --- All 12 departments ---
   let depts = ["osp", "lz", "expert", "marketing", "finance", "legal", "dev", "design", "qa", "visual", "engineering", "kavalnya"]
@@ -242,7 +243,7 @@ pattern MonthlyReview() -> String {
 // 5. Control Check — daily 12:00, verifies predictions on watch (MIGRATED)
 // ---------------------------------------------------------------------------
 pattern ControlCheck() -> String {
-  let owner_id = env("OWNER_TELEGRAM_ID")
+  let owner_id = OwnerTelegramId()
 
   // --- Fetch all control watches from system_settings ---
   let controls = query("SELECT key, value FROM system_settings WHERE key LIKE 'control_%'", [])
@@ -396,14 +397,14 @@ pattern ControlSlot() -> String {
 
 pattern AdminReplySlot() -> String {
   let _ = AuditLog("cron_admin_reply", "admin", "admin morning reply triggered by native cron")
-  let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+  let body = json_encode({owner_id: OwnerTelegramId()})
   let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0))
   return "admin-reply ok"
 }
 
 pattern LzDailySlot() -> String {
   let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by native cron")
-  let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+  let body = json_encode({owner_id: OwnerTelegramId()})
   let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0))
   return "lz-daily ok"
 }

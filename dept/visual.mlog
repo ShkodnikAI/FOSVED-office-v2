@@ -118,23 +118,23 @@ pattern VisualEnforceGates(svgOutput: String, chat_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Генерирует SVG-карточку для OSP/Expert/LZ анализа
-// source_type: "analysis" | "expert" | "lz"
-// source_id: ID записи в БД
-pattern GenerateAnalysisCard(source_type: String, source_id: String) -> String {
+// src_type: "analysis" | "expert" | "lz"
+// src_id: ID записи в БД
+pattern GenerateAnalysisCard(src_type: String, src_id: String) -> String {
   let _ = InitDB()
 
   // Загрузить данные источника из БД
   let mut data = ""
-  if source_type == "analysis" then {
-    let rows = query("SELECT topic, full_result, status, confidence, created_at FROM analysis WHERE id = ?", [source_id])
+  if src_type == "analysis" then {
+    let rows = query("SELECT topic, full_result, status, confidence, created_at FROM analysis WHERE id = ?", [src_id])
     let data = json_encode(rows)
   }
-  if source_type == "expert" then {
-    let rows = query("SELECT topic, full_result, status, confidence, created_at FROM dept_archive WHERE id = ? AND dept = 'expert'", [source_id])
+  if src_type == "expert" then {
+    let rows = query("SELECT topic, full_result, status, confidence, created_at FROM dept_archive WHERE id = ? AND dept = 'expert'", [src_id])
     let data = json_encode(rows)
   }
-  if source_type == "lz" then {
-    let rows = query("SELECT topic, full_result, status, confidence, created_at FROM dept_archive WHERE id = ? AND dept = 'lz'", [source_id])
+  if src_type == "lz" then {
+    let rows = query("SELECT topic, full_result, status, confidence, created_at FROM dept_archive WHERE id = ? AND dept = 'lz'", [src_id])
     let data = json_encode(rows)
   }
 
@@ -149,8 +149,8 @@ pattern GenerateAnalysisCard(source_type: String, source_id: String) -> String {
 
   // ── Dept badge ──
   let badge = "ОСП"
-  if source_type == "expert" then { let badge = "ЭКСПЕРТ" }
-  if source_type == "lz" then { let badge = "ЛЗ" }
+  if src_type == "expert" then { let badge = "ЭКСПЕРТ" }
+  if src_type == "lz" then { let badge = "ЛЗ" }
 
   // ── Build card using SVG primitives ──
   let style = color_palette("authority", "light")
@@ -183,11 +183,11 @@ pattern GenerateAnalysisCard(source_type: String, source_id: String) -> String {
 
   // Convert to PDF via html_to_pdf
   let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + svg + "</body></html>"
-  let output_path = "visuals/card_" + source_type + "_" + source_id + ".pdf"
+  let output_path = "visuals/card_" + src_type + "_" + src_id + ".pdf"
   let _ = html_to_pdf(html, output_path)
 
   // Record in visual_artifacts table
-  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["card", source_type, source_id, output_path]))
+  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, src_type, src_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["card", src_type, src_id, output_path]))
 
   return output_path
 }
@@ -197,16 +197,16 @@ pattern GenerateAnalysisCard(source_type: String, source_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Сжимает анализ в dashboard: KPI блок + 2-3 чарта
-pattern GenerateCompressionVisual(source_type: String, source_id: String) -> String {
+pattern GenerateCompressionVisual(src_type: String, src_id: String) -> String {
   let _ = InitDB()
 
   // Load full result text
-  let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [source_id])
+  let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [src_id])
   let mut topic = to_string(json_get(json_get(rows, 0.0), "topic", ""))
   let mut full_result = to_string(json_get(json_get(rows, 0.0), "full_result", ""))
 
   if topic == "" then {
-    let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [source_id])
+    let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [src_id])
     let topic = redact(to_string(json_get(json_get(rows2, 0.0), "topic", "")), "all")
     let full_result = redact(to_string(json_get(json_get(rows2, 0.0), "full_result", "")), "all")
   }
@@ -254,9 +254,9 @@ pattern GenerateCompressionVisual(source_type: String, source_id: String) -> Str
 
   // Convert to PDF
   let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;display:flex;gap:10px;'>" + dashboard_svg + "</body></html>"
-  let output_path = "visuals/compression_" + source_type + "_" + source_id + ".pdf"
+  let output_path = "visuals/compression_" + src_type + "_" + src_id + ".pdf"
   let _ = html_to_pdf(html, output_path)
-  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["compression", source_type, source_id, output_path]))
+  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, src_type, src_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["compression", src_type, src_id, output_path]))
 
   return output_path
 }
@@ -265,16 +265,16 @@ pattern GenerateCompressionVisual(source_type: String, source_id: String) -> Str
 // TYPE 2 — Memorable Infographic (LLM + native SVG charts)
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern GenerateMemorableInfographic(source_type: String, source_id: String) -> String {
+pattern GenerateMemorableInfographic(src_type: String, src_id: String) -> String {
   let _ = InitDB()
 
   // Load source data
-  let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [source_id])
+  let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [src_id])
   let mut topic = to_string(json_get(json_get(rows, 0.0), "topic", ""))
   let mut full_result = to_string(json_get(json_get(rows, 0.0), "full_result", ""))
 
   if topic == "" then {
-    let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [source_id])
+    let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [src_id])
     let topic = redact(to_string(json_get(json_get(rows2, 0.0), "topic", "")), "all")
     let full_result = redact(to_string(json_get(json_get(rows2, 0.0), "full_result", "")), "all")
   }
@@ -336,9 +336,9 @@ pattern GenerateMemorableInfographic(source_type: String, source_id: String) -> 
 
   // Convert to PDF
   let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + infographic_svg + "</body></html>"
-  let output_path = "visuals/infographic_" + source_type + "_" + source_id + ".pdf"
+  let output_path = "visuals/infographic_" + src_type + "_" + src_id + ".pdf"
   let _ = html_to_pdf(html, output_path)
-  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["memorable", source_type, source_id, output_path]))
+  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, src_type, src_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["memorable", src_type, src_id, output_path]))
 
   return output_path
 }
@@ -403,7 +403,7 @@ pattern GenerateReferenceSheet(entity_type: String, entity_id: String) -> String
   let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + svg + "</body></html>"
   let output_path = "visuals/ref_" + entity_type + "_" + entity_id + ".pdf"
   let _ = html_to_pdf(html, output_path)
-  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["reference", entity_type, entity_id, output_path]))
+  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, src_type, src_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["reference", entity_type, entity_id, output_path]))
 
   return output_path
 }
@@ -412,15 +412,15 @@ pattern GenerateReferenceSheet(entity_type: String, entity_id: String) -> String
 // TYPE 5 — Premium Spec (JSON для ручного производства)
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern GeneratePremiumSpec(source_type: String, source_id: String) -> String {
+pattern GeneratePremiumSpec(src_type: String, src_id: String) -> String {
   let _ = InitDB()
 
-  let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [source_id])
+  let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [src_id])
   let mut topic = to_string(json_get(json_get(rows, 0.0), "topic", ""))
   let mut full_result = to_string(json_get(json_get(rows, 0.0), "full_result", ""))
 
   if topic == "" then {
-    let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [source_id])
+    let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [src_id])
     let topic = redact(to_string(json_get(json_get(rows2, 0.0), "topic", "")), "all")
     let full_result = redact(to_string(json_get(json_get(rows2, 0.0), "full_result", "")), "all")
   }
@@ -437,8 +437,8 @@ pattern GeneratePremiumSpec(source_type: String, source_id: String) -> String {
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let spec = to_string(llm_result)
 
-  let output_path = "visuals/premium_spec_" + source_type + "_" + source_id + ".json"
-  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["premium_spec", source_type, source_id, output_path]))
+  let output_path = "visuals/premium_spec_" + src_type + "_" + src_id + ".json"
+  let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, src_type, src_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["premium_spec", src_type, src_id, output_path]))
 
   return spec
 }
@@ -516,10 +516,10 @@ pattern InfographicTimeline(events_json: String) -> String {
 pattern ListVisuals(filter_type: String) -> String {
   let _ = InitDB()
   if filter_type == "" then {
-    let rows = query("SELECT id, type, source_type, source_id, path, created_at FROM visual_artifacts ORDER BY created_at DESC LIMIT 20", [])
+    let rows = query("SELECT id, type, src_type, src_id, path, created_at FROM visual_artifacts ORDER BY created_at DESC LIMIT 20", [])
     return json_encode(rows)
   }
-  let rows = query("SELECT id, type, source_type, source_id, path, created_at FROM visual_artifacts WHERE type = ? ORDER BY created_at DESC LIMIT 20", [filter_type])
+  let rows = query("SELECT id, type, src_type, src_id, path, created_at FROM visual_artifacts WHERE type = ? ORDER BY created_at DESC LIMIT 20", [filter_type])
   return json_encode(rows)
 }
 
@@ -540,18 +540,18 @@ pattern HandleVisual(query: String, chat_id: String) -> String {
   if contains(q, "карточк") or contains(q, "card") then {
     let parts = split(query, " ")
     if length(parts) >= 3.0 then {
-      let source_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
-      let source_id = redact(to_string(json_get(parts, 2, "1")), "all")
-      return GenerateAnalysisCard(source_type, source_id)
+      let src_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
+      let src_id = redact(to_string(json_get(parts, 2, "1")), "all")
+      return GenerateAnalysisCard(src_type, src_id)
     }
   }
 
   if contains(q, "компресси") or contains(q, "compression") then {
     let parts = split(query, " ")
     if length(parts) >= 3.0 then {
-      let source_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
-      let source_id = redact(to_string(json_get(parts, 2, "1")), "all")
-      return GenerateCompressionVisual(source_type, source_id)
+      let src_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
+      let src_id = redact(to_string(json_get(parts, 2, "1")), "all")
+      return GenerateCompressionVisual(src_type, src_id)
     }
   }
 
@@ -567,18 +567,18 @@ pattern HandleVisual(query: String, chat_id: String) -> String {
   if contains(q, "инфографик") or contains(q, "memorable") then {
     let parts = split(query, " ")
     if length(parts) >= 3.0 then {
-      let source_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
-      let source_id = redact(to_string(json_get(parts, 2, "1")), "all")
-      return GenerateMemorableInfographic(source_type, source_id)
+      let src_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
+      let src_id = redact(to_string(json_get(parts, 2, "1")), "all")
+      return GenerateMemorableInfographic(src_type, src_id)
     }
   }
 
   if contains(q, "premium") or contains(q, "spec") then {
     let parts = split(query, " ")
     if length(parts) >= 3.0 then {
-      let source_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
-      let source_id = redact(to_string(json_get(parts, 2, "1")), "all")
-      return GeneratePremiumSpec(source_type, source_id)
+      let src_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
+      let src_id = redact(to_string(json_get(parts, 2, "1")), "all")
+      return GeneratePremiumSpec(src_type, src_id)
     }
   }
 

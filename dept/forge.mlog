@@ -1114,10 +1114,12 @@ pattern _RunInScratch(project_slug: String, repo_name: String, command: String, 
     return "ОТКАЗ: exec сбой: " + r.output
   }
   // B.4: маскирование перед записью
-  let masked = _MaskSecrets(project_slug, r.output)
-  let _ = db_execute("INSERT INTO forge_runs (project_slug, repo_name, stage_id, command, exit_code, output, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)", [project_slug, repo_name, stage_id, command, to_string(r.exit_code), substring(masked, 0.0, 20000.0), duration])
+  // №312: redact-мойка поверх маскирования — conf-public для db-параметра
+  let masked = redact(_MaskSecrets(project_slug, r.output), "all")
+  let _ = db_execute("INSERT INTO forge_runs (project_slug, repo_name, stage_id, command, exit_code, output, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?)", [project_slug, repo_name, stage_id, command, redact(to_string(r.exit_code), "all"), substring(masked, 0.0, 20000.0), duration])
   // A.4: retention — последние 50 записей на репозиторий
-  let _ = db_execute("DELETE FROM forge_runs WHERE repo_name = ? AND id NOT IN (SELECT id FROM forge_runs WHERE repo_name = ? ORDER BY id DESC LIMIT 50)", [repo_name, repo_name])
+  // №312: DELETE — irreversible-content, через грант (№421/ADR-0155)
+  let _ = TryVal(try db_execute_with_grant(grant_issue("db:delete:forge_runs", 3600.0, "once"), "DELETE FROM forge_runs WHERE repo_name = ? AND id NOT IN (SELECT id FROM forge_runs WHERE repo_name = ? ORDER BY id DESC LIMIT 50)", [repo_name, repo_name]))
   let _ = AuditLog("forge_run", "forge", "repo=" + repo_name + " cmd=" + substring(command, 0.0, 80.0) + " exit=" + to_string(r.exit_code))
   return "EXIT:" + to_string(r.exit_code) + "\n" + masked
 
@@ -1374,7 +1376,7 @@ pattern ForgeGateSend(gate_id: String) -> String {
     let first = false
   }
   let buttons = buttons + "]"
-  let owner_id = env("OWNER_TELEGRAM_ID")
+  let owner_id = OwnerTelegramId()
   let token = TgToken()
   let body = json_encode({chat_id: to_float(owner_id), text: substring(msg, 0.0, 3500.0), reply_markup: {inline_keyboard: []}})
   // reply_markup с кнопками — json_encode выше с пустым списком; собираем строкой

@@ -229,21 +229,15 @@ pattern FinanceExtractBusinessForm(query: String) -> String {
 
 // GET /finance/forecasts?jurisdiction=BY&resultType=forecast&limit=20
 pattern FinanceForecastsAPI(jurisdiction: String, result_type: String, limit: Int) -> String {
-  let q = "SELECT id, short_title, confidence, result_type, status, jurisdiction, business_form, amount, currency, verification_date, created_at FROM financial_forecasts WHERE 1=1"
-  if jurisdiction != "" then { let q = q + " AND jurisdiction = '" + jurisdiction + "'" }
-  if result_type != "" then { let q = q + " AND result_type = '" + result_type + "'" }
-  let q = q + " ORDER BY created_at DESC LIMIT " + to_string(limit)
-  let rows = query(q, [])
-  return json_encode(rows)
+  // №312: литеральный SQL + нумерованные параметры (конкатенация = SQL-инъекция;
+  // прежний shadow-in-if вообще не применял фильтры — латентный баг)
+  return json_encode(query("SELECT id, short_title, confidence, result_type, status, jurisdiction, business_form, amount, currency, verification_date, created_at FROM financial_forecasts WHERE (?1 = '' OR jurisdiction = ?1) AND (?2 = '' OR result_type = ?2) ORDER BY created_at DESC LIMIT ?3", [jurisdiction, result_type, limit]))
 }
 
 // GET /finance/invoices?status=overdue&limit=20
 pattern FinanceInvoicesAPI(status: String, limit: Int) -> String {
-  let q = "SELECT id, invoice_number, client_name, amount, currency, status, due_date, jurisdiction FROM invoices WHERE 1=1"
-  if status != "" then { let q = q + " AND status = '" + status + "'" }
-  let q = q + " ORDER BY due_date ASC LIMIT " + to_string(limit)
-  let rows = query(q, [])
-  return json_encode(rows)
+  // №312: литеральный SQL + параметры (см. FinanceForecastsAPI)
+  return json_encode(query("SELECT id, invoice_number, client_name, amount, currency, status, due_date, jurisdiction FROM invoices WHERE (?1 = '' OR status = ?1) ORDER BY due_date ASC LIMIT ?2", [status, limit]))
 }
 
 // GET /finance/metrics — MAPE snapshot
@@ -461,42 +455,42 @@ pattern BuildFinanceContext(query: String, jurisdiction: String, business_form: 
 
 pattern LoadFinanceSkills(query: String, depth: Int) -> String {
   let t = lower(query)
-  let result = ""
+  let mut result = ""
   let budget = FinanceSkillBudget(depth)
 
   // ── Tier 1: Methodological core (always loaded) ──
-  let mut s = read_file("skills/fosved/finance/cashflow-forecasting/SKILL.md")
-  if s != "" and length(result) < budget then { let result = result + "\n--- cashflow-forecasting ---\n" + s }
+  let s = redact(read_file("skills/fosved/finance/cashflow-forecasting/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- cashflow-forecasting ---\n" + s }
   let s = redact(read_file("skills/fosved/finance/invoice-lifecycle-management/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- invoice-lifecycle-management ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- invoice-lifecycle-management ---\n" + s }
   let s = redact(read_file("skills/fosved/finance/unit-economics-calculation/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- unit-economics-calculation ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- unit-economics-calculation ---\n" + s }
   let s = redact(read_file("skills/fosved/finance/revenue-recognition-discipline/SKILL.md"), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- revenue-recognition-discipline ---\n" + s }
-  let mut s = read_file("skills/fosved/finance/forecast-verification-protocol/SKILL.md")
-  if s != "" and length(result) < budget then { let result = result + "\n--- forecast-verification-protocol ---\n" + s }
+  if s != "" and length(result) < budget then { result = result + "\n--- revenue-recognition-discipline ---\n" + s }
+  let s = redact(read_file("skills/fosved/finance/forecast-verification-protocol/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- forecast-verification-protocol ---\n" + s }
 
   // ── Tier 2: Domain depth (by operation type) ──
   // Tax / multi-jurisdiction
   if (contains(t, "налог") or contains(t, "tax") or contains(t, "ндс") or contains(t, "vat") or contains(t, "комплаенс") or contains(t, "декларац") or contains(t, "profit tax")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/finance/tax-compliance-multi-jurisdiction/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- tax-compliance-multi-jurisdiction ---\n" + s }
+    if s != "" then { result = result + "\n--- tax-compliance-multi-jurisdiction ---\n" + s }
   }
   // Multi-currency
   if (contains(t, "валют") or contains(t, "currency") or contains(t, "eur") or contains(t, "usd") or contains(t, "byn") or contains(t, "rub") or contains(t, "конверт") or contains(t, "курс") or contains(t, "hedg")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/finance/multi-currency-handling/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- multi-currency-handling ---\n" + s }
+    if s != "" then { result = result + "\n--- multi-currency-handling ---\n" + s }
   }
   // MRR/ARR
   if (contains(t, "mrr") or contains(t, "arr") or contains(t, "churn") or contains(t, "подписк") or contains(t, "recurring") or contains(t, "saa")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/finance/mrr-arr-reporting/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- mrr-arr-reporting ---\n" + s }
+    if s != "" then { result = result + "\n--- mrr-arr-reporting ---\n" + s }
   }
 
   // ── Tier 3: Special techniques (by explicit request) ──
   if (contains(t, "runway") or contains(t, "burn") or contains(t, "безубыточн") or contains(t, "ранвей")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/finance/runway-and-burn-analysis/SKILL.md"), "all")
-    if s != "" then { let result = result + "\n--- runway-and-burn-analysis ---\n" + s }
+    if s != "" then { result = result + "\n--- runway-and-burn-analysis ---\n" + s }
   }
 
   if result == "" then { return "No Finance skills loaded." }
@@ -561,11 +555,8 @@ pattern FinanceInvoiceHandler(query: String, chat_id: String) -> String {
   if contains(t, "open") or contains(t, "открыт") then { let filter_status = "issued" }
   if contains(t, "paid") or contains(t, "оплачен") then { let filter_status = "paid" }
 
-  let q = "SELECT id, invoice_number, client_name, amount, currency, status, due_date, jurisdiction FROM invoices"
-  if filter_status != "" then { let q = q + " WHERE status = '" + filter_status + "'" }
-  let q = q + " ORDER BY due_date ASC LIMIT 15"
-
-  let invoices = query(q, [])
+  // №312: литеральный SQL + параметры (см. FinanceForecastsAPI)
+  let invoices = query("SELECT id, invoice_number, client_name, amount, currency, status, due_date, jurisdiction FROM invoices WHERE (?1 = '' OR status = ?1) ORDER BY due_date ASC LIMIT 15", [filter_status])
 
   if length(invoices) == 0.0 then {
     let context = BuildFinanceContext(query, jurisdiction, business_form, chat_id)

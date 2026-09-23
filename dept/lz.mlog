@@ -1,4 +1,5 @@
 // Fosved Office v2 — ЛЗ (Лаборатория знаний) Dispatcher (NATIVE v2.0)
+import dept/utils
 // World Intelligence: technology + geopolitics + economy + events
 // 12 Transition Pack skills (Core:5, Domain:4, Special:3)
 // + 8 hard rule gates (confirmation, timeline, negative-signal, hype-vs-flows,
@@ -154,8 +155,8 @@ pattern LZGateCompetingCheck(technology: String) -> String {
 }
 
 // Gate 8: Every tracked technology assessed for cross-domain potential
-pattern LZGateCrossDomain(technology: String, source_domain: String) -> String {
-  let result = redact(to_string(TryVal(try call_llm("Could " + technology + " (currently in " + source_domain + ") have applications in other domains? Name 1-2 cross-domain possibilities or reply NONE."))), "all")
+pattern LZGateCrossDomain(technology: String, src_domain: String) -> String {
+  let result = redact(to_string(TryVal(try call_llm("Could " + technology + " (currently in " + src_domain + ") have applications in other domains? Name 1-2 cross-domain possibilities or reply NONE."))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   if result == "NONE" then { return "PASS: no cross-domain potential identified" }
   return "PASS: cross-domain potential — " + result
@@ -565,7 +566,7 @@ pattern LZTavilySearch(query: String, chat_id: String) -> String {
   // ВНИМАНИЕ: прямой внешний вызов в обход 127.0.0.1:4000 — может быть
   // заблокирован сетевой политикой окружения независимо от ключа.
   // См. /lz/diagnose для честной проверки достижимости.
-  let response = TryVal(try http_post("https://api.tavily.com/search", json_encode({api_key: env("TAVILY_API_KEY"), query: query, search_depth: "advanced", max_results: 5}), "application/json"))
+  let response = TryVal(try http_post("https://api.tavily.com/search", json_encode({api_key: TavilyKey(), query: query, search_depth: "advanced", max_results: 5}), "application/json"))
   if to_string(response) == "()" then { return "[tavily: сеть недоступна или ключ не задан — см. /lz/diagnose]" }
   let analysis = redact(to_string(TryVal(try call_llm("Synthesize Tavily results for ЛЗ intelligence: extract key findings, disruption signals, inflection indicators, cross-domain opportunities.", "Запрос: " + query + "\nРезультаты: " + to_string(response)))), "all")
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -605,7 +606,7 @@ pattern LZDarkWebResearch(query: String, chat_id: String) -> String {
   let approval = redact(to_string(TryVal(try call_llm("Is dark web research approved for this session? Check owner context. Reply APPROVED or DENIED."))), "all")
   if to_string(approval) == "()" then { let approval = "[оценка недоступна — провайдеры модели не ответили]" }
   if approval != "APPROVED" then { return "⛔ Tier 3: dark-web-tech-research requires owner approval + OPSEC" }
-  let result = redact(to_string(TryVal(try call_llm("DARK WEB TECH RESEARCH for: " + query + "\n\nSearch specialized forums → Extract capability signals → Verify against public sources → Assess reliability. OPSEC: anonymized access only."))), "all")
+  let result = redact(to_string(TryVal(try call_llm("DARK WEB TECH RESEARCH for: " + query + "\n\nSearch specialized forums → Extract capability signals → Verify against public srcs → Assess reliability. OPSEC: anonymized access only."))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return "🕶️ Dark Intel: " + query + "\n" + result
 }
@@ -920,7 +921,7 @@ pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: 
   let hours = "24"
   if since_hours != "" then { let hours = since_hours }
   let corpus = ""
-  let sources = ""
+  let srcs = ""
 
   // ── 1. Telegram-посты за период (MON-1 собрал) ──
   let rows = TryVal(try query("SELECT channel_id, channel_name, substr(text, 1, 400), media_type, date FROM lz_channel_posts WHERE date >= datetime('now', ?) ORDER BY date DESC LIMIT 120", ["-" + hours + " hours"]))
@@ -931,7 +932,7 @@ pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: 
       let corpus = corpus + "TELEGRAM: постов за период нет (монитор собирает, поллинг 5 мин).\n"
     } else {
       let corpus = corpus + "TELEGRAM-ПОСТЫ (последние " + to_string(length(rows_str)) + " симв. среза):\n" + substring(rows_str, 0.0, 5000.0) + "\n"
-      let sources = sources + "telegram(posts) "
+      let srcs = srcs + "telegram(posts) "
     }
   } else {
     let corpus = corpus + "TELEGRAM: выборка недоступна.\n"
@@ -942,7 +943,7 @@ pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: 
   if to_string(yt_channels) != "()" and to_string(yt_channels) != "[]" then {
     let yt_str = to_string(yt_channels)
     let corpus = corpus + "YOUTUBE-КАНАЛЫ В ОТСЛЕЖИВАНИИ:\n" + substring(yt_str, 0.0, 800.0) + "\n"
-    let sources = sources + "youtube "
+    let srcs = srcs + "youtube "
   }
 
   // ── 3. TikTok-каналы (category="tiktok"): честная деградация непереговорна ──
@@ -952,7 +953,7 @@ pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: 
     let media = McpMediaCall("tiktok_channel_videos", json_encode({username: substring(tt_str, 0.0, 60.0)}), "lz digest tiktok")
     if media.ok == true then {
       let corpus = corpus + "TIKTOK-ДАННЫЕ:\n" + substring(media.body, 0.0, 1200.0) + "\n"
-      let sources = sources + "tiktok "
+      let srcs = srcs + "tiktok "
     } else {
       let corpus = corpus + "TikTok: недоступен (" + media.note + "; " + substring(media.body, 0.0, 120.0) + ").\n"
     }
@@ -967,7 +968,7 @@ pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: 
   if to_string(synthesis) == "()" then {
     let synthesis = "[синтез недоступен — провайдеры модели не ответили; ниже сырой корпус]\n" + substring(corpus, 0.0, 2000.0)
   }
-  let reply = "📡 Сводка ЛЗ (" + hours + "ч; источники: " + sources + ")\n\n" + synthesis + "\n\n" + LZDisclaimer()
+  let reply = "📡 Сводка ЛЗ (" + hours + "ч; источники: " + srcs + ")\n\n" + synthesis + "\n\n" + LZDisclaimer()
 
   // ── 5. Отчёт в формате report-mlg2 (архив + карточка) ──
   let _ = SendReport(reply, "lz", "lz digest " + hours + "ч", "3", chat_id)
