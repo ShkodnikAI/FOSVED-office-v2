@@ -16,8 +16,11 @@ Render НЕТ и НЕ БЫЛО** — всего 4 сервиса: prod web, stag
 
 **Преемник (2026-09-22, наряд №420):** исполнитель расписаний = **нативный cron
 Metalogos** (№418/№419); waker (бодрствование free-инстанса Render) = **GitHub
-Actions** `.github/workflows/keepalive.yml`; cron-job.org выводится из исполнения
-(cutover-чеклист — в секции waker ниже).
+Actions**; cron-job.org выводится из исполнения (cutover-чеклист — в секции
+waker ниже). **2026-09-23, FO-051:** waker переехал в ПУБЛИЧНЫЙ репозиторий
+Metalogos- (`.github/workflows/waker.yml`, GH-hosted `ubuntu-latest`, `*/10`) —
+офисный `keepalive.yml` демонтирован (self-hosted раннер офлайн; надгробие —
+в секции waker ниже).
 
 **✅ Миграция исполнена (2026-09-22, наряд №421, PR #310):** Category-A аудит
 0.21 погашен (`mlog-021 audit app.mlog` → 0 ошибок; 20 предупреждений —
@@ -111,8 +114,10 @@ CRON_SECRET (засветился на скрине → ротация посл�
 catch-up `run_once|skip`, per-job IANA TZ, payload-контракт, рестарт-персистность
 через KV-стор `data/metalogos_kv.db`). Внешний cron-job.org выводится из
 исполнения; keep-alive (бодрствование free-инстанса Render) — waker на
-GitHub Actions (наряд №420), потому что нативный тик не генерирует входящий
-трафик и не считает время мёртвого контейнера.
+GitHub Actions в публичном Metalogos- (наряд №420; с 2026-09-23 —
+`.github/workflows/waker.yml` репозитория Metalogos-, FO-051), потому что
+нативный тик не генерирует входящий трафик и не считает время мёртвого
+контейнера.
 
 **Реестр заданий владельца (SSOT): `dept/schedules.mlog`** — «внесение задания =
 правка файла → деплой → бутстрап перерегистрирует стор идемпотентно по target».
@@ -134,7 +139,7 @@ GitHub Actions (наряд №420), потому что нативный тик 
 | night-tick | `0 5 * * *` | NightTickSlot (цепочка backup → indicators → shop → evals → night) | «Night Cycle»/night-tick |
 | weekly-digest | `0 9 * * 1` | WeeklySlot | «Weekly Digest» (понедельники) |
 | lz-daily | `10 9 * * *` | LzDailySlot | cron-job.org «LZ daily» |
-| keep-alive | `*/10 * * * *` | GH Actions `.github/workflows/keepalive.yml` (№420) | «Keep Alive» |
+| keep-alive | `*/10 * * * *` | GH Actions **Metalogos-** `.github/workflows/waker.yml` (№420; переезд FO-051, 2026-09-23) | «Keep Alive» |
 
 **HTTP-фолбэк (п.4 наряда):** все `/cron/*`-роуты остаются ручным/аварийным
 триггером; дедуп окон №418 делает двойной запуск (HTTP + нативный тик в одном
@@ -181,8 +186,10 @@ Category A аудит app.mlog на 0.21 блокирует бут: долг №
 **Итоговая схема:** бизнес-расписания исполняет **нативный cron Metalogos**
 (реестр `dept/schedules.mlog`, дедуп окон/catch-up/TZ — №418, бутстрап и живая
 поверхность — №419); бодрствование free-инстанса Render обеспечивает **waker на
-GitHub Actions** (`.github/workflows/keepalive.yml`) — нативный тик не генерирует
-входящий трафик и не считает время мёртвого контейнера. Внешний cron-job.org
+GitHub Actions** (с 2026-09-23 — `.github/workflows/waker.yml` ПУБЛИЧНОГО
+репозитория Metalogos-, FO-051; офисный `keepalive.yml` демонтирован, см.
+надгробие ниже) — нативный тик не генерирует входящий трафик и не считает время
+мёртвого контейнера. Внешний cron-job.org
 выводится из исполнения (cutover-чеклист ниже). Это преемница вердикта #255:
 исполнитель расписаний = нативный cron Metalogos; waker = GH Actions.
 
@@ -195,6 +202,36 @@ concurrency-группа `keep-alive` с `cancel-in-progress` (перекрыт�
 `https://fosved-office-v2-staging.onrender.com/health` — неблокирующий
 (`continue-on-error`), пока FO-050 активен: стейджинг на free-плане может быть
 намеренно спящим/выключенным. Waker НЕ дёргает `/cron/*`-бизнес-маршруты.
+
+**Waker-переезд (2026-09-23, FO-051) — надгробие офисного `keepalive.yml`:**
+
+Парный наряд Metalogos- gh#629 перенёс waker в ПУБЛИЧНЫЙ репозиторий
+Metalogos- (`.github/workflows/waker.yml`): GH-hosted `ubuntu-latest` бесплатен
+на публичном репо и не зависит от офисной квоты минут (#306). В main
+Metalogos- с 2026-09-23, ≥2 успешных прогона с prod `/health → 200`
+(runs 35850804764/35850999980). Офисный `.github/workflows/keepalive.yml`
+демонтирован (файл удалён) — решено «по месту», без замены:
+
+- **Причина демонтажа:** workflow исполнялся на `runs-on: [self-hosted,
+  linux, x64]` — раннер офлайн, ни одного completed-прогона с
+  2026-09-22T21:13Z; schedule-тики висели `queued` и снимались
+  concurrency-группой следующим тиком (наблюдение 23.09: 06:44Z queued;
+  01:45Z/23:36Z/21:13Z cancelled).
+- **Почему удаление, а не «оставить `workflow_dispatch`»:** ручной пинг на
+  мёртвом self-hosted раннере зависал бы `queued` вечно (зомби-кнопка);
+  перевод офисного workflow на GH-hosted — смена биллинг-постуры приватного
+  репо, решение владельца (#306), вне границ FO-051. Рабочий ручной пинг —
+  `workflow_dispatch` в waker.yml Metalogos- (или curl `/health` с любой
+  машины — эндпойнт публичен).
+- **Двойных будильников нет:** единственный waker — Metalogos- `waker.yml`;
+  граница №420 сохранена (только `/health`; бизнес-расписания исполняет
+  нативный cron — №418/№419, реестр `dept/schedules.mlog`).
+- **Вердикт #255 не меняется:** исполнитель расписаний = нативный cron
+  Metalogos-; waker = только будильник.
+- **Статус self-hosted раннера:** офлайн с 2026-09-22T21:13Z; офисный CI
+  (`.github/workflows/ci.yml` — тоже self-hosted) стоит: push/PR-прогоны
+  `queued`/`cancelled` (см. #306). Квота/биллинг office Actions — решение
+  владельца (#306).
 
 **Дрейф расписания GH Actions (задокументировано, приемлемо):** `schedule` —
 best-effort, задержки под нагрузкой достигают минут и больше. Для keep-alive это
@@ -216,9 +253,10 @@ best-effort, задержки под нагрузкой достигают ми�
    секция выше): живые — **Admin Reply**, **Morning Brief**; остальные уже на
    паузе с августа (Control Check, Evening Summary, Night Cycle, Weekly
    Digest); «Monthly Review» отсутствует.
-4. Keep-alive GH Actions остаётся единственной внешней зависимостью офиса
-   (workflow уже в main; прогоны позеленеют после починки квоты Actions —
-   офисная issue #306).
+4. Keep-alive GH Actions остаётся единственной внешней зависимостью офиса.
+   **2026-09-23, FO-051:** waker переехал в публичный Metalogos- (GH-hosted
+   `ubuntu-latest` — от офисной квоты Actions #306 больше не зависит;
+   воркфлоу в main Metalogos-, ≥2 успешных прогона с prod `/health → 200`).
 5. *Rollback-путь:* включить задачи cron-job.org обратно (те же URL; после
    ротации CRON_SECRET — обновить секрет в URL задач, иначе задачи начнут
    получать 401). Нативный контур при этом не ломается: дедуп окон №418 делает
