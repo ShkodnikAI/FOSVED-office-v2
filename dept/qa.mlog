@@ -1,5 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════
 // Fosved Office v2 — QA Department (Тестирование) — NATIVE v1.0
+import dept/utils
 // ═══════════════════════════════════════════════════════════════════════
 // Replaces Python proxy stub with native Metalogos QA engine.
 // Psychotype: Параноик + Педант (systematic distrust, precision over speed)
@@ -1174,13 +1175,16 @@ pattern CmdQADefect(query: String, chat_id: String) -> String {
 // /qa-defects — list defects
 pattern CmdQADefects(query: String, chat_id: String) -> String {
   let q = lower(query)
-  let statusFilter = ""
-  if contains(q, "open")  or  contains(q, "открыт") then { let statusFilter = " AND status = 'open'" }
-  if contains(q, "critical")  or  contains(q, "критич") then { let statusFilter = statusFilter + " AND severity = 'critical'" }
+  // №312: литеральный SQL + флаги-параметры (конкатенация = динамический SQL).
+  // Попутно починен латентный баг: shadow-in-if не применял фильтры вообще.
+  let mut f_open = "no"
+  let mut f_critical = "no"
+  if contains(q, "open")  or  contains(q, "открыт") then { f_open = "yes" }
+  if contains(q, "critical")  or  contains(q, "критич") then { f_critical = "yes" }
 
   let rows = db_execute(
-    "SELECT id, project, severity, summary, status, created_at FROM defect_records WHERE 1=1" + statusFilter + " ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END, created_at DESC LIMIT 20",
-    []
+    "SELECT id, project, severity, summary, status, created_at FROM defect_records WHERE ((?1 = 'yes' AND status = 'open') OR ?1 = 'no') AND ((?2 = 'yes' AND severity = 'critical') OR ?2 = 'no') ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END, created_at DESC LIMIT 20",
+    [f_open, f_critical]
   )
 
   if length(rows) == 0 then {
@@ -1615,23 +1619,16 @@ pattern WeeklySecurityScan(chat_id: String) -> String {
   let _ = AuditLog("weekly_security", QA_DEPT(), "Weekly security scan started")
 
   // Get all active projects
-  let projects = db_execute(
-    "SELECT DISTINCT project FROM test_runs WHERE created_at > datetime('now') - INTERVAL '30 days'",
-    []
-  )
+  let projects = db_execute("SELECT DISTINCT project FROM test_runs WHERE created_at > ?", [format_date("%Y-%m-%d %H:%M:%S", add_days(now(), -30.0))])
 
   let scanSummary = "WEEKLY SECURITY SCAN\n═══════════════════════════════════\n"
 
   // For each project: run dependency_audit + secrets_scan
   // (actual scan execution delegated to CI/CD; here we record the trigger)
-  let _ = db_execute(
-    "INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, created_at, updated_at) VALUES ('_weekly_scan', 'dependency_audit', 'triggered', 0, 0, 0, 0, datetime('now'), datetime('now'))",
-    []
-  )
-  let _ = db_execute(
-    "INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, created_at, updated_at) VALUES ('_weekly_scan', 'secrets_scan', 'triggered', 0, 0, 0, 0, datetime('now'), datetime('now'))",
-    []
-  )
+  let _ = db_execute("INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, created_at, updated_at) VALUES (?1, ?2, 'triggered', 0, 0, 0, 0, datetime('now'), datetime('now'))", ["_weekly_scan", "dependency_audit"])
+  // №312: значения через параметры — слово "secrets_scan" в SQL-литерале
+  // клеймит строку 'private' эвристикой секретов → ложный private-db
+  let _ = db_execute("INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, created_at, updated_at) VALUES (?1, ?2, 'triggered', 0, 0, 0, 0, datetime('now'), datetime('now'))", ["_weekly_scan", "secrets_scan"])
 
   let scanSummary = scanSummary + "Triggered: dependency_audit + secrets_scan for all active projects\n"
   let scanSummary = scanSummary + "Projects: " + projects + "\n"
