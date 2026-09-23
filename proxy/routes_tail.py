@@ -310,6 +310,48 @@ def cron_secret_ok() -> bool:
     return False
 
 
+# ── №426: санкционированный passthrough реестра нативного cron (/schedules/*) ──
+# list/bootstrap живут на loopback:10001 (mlog serve) и сквозь прокси не видны —
+# владелец не может живьём проверить реестр ни перерегистрировать его без
+# рестарта (бут 2026-09-23T07:29Z: бутстрап «no answer»×3, гейт ① кутовера
+# заблокирован). Auth — тот же cron_secret_ok() (№425: decoded-OR-raw); ответ
+# mlog транслируется вербатим со статусом; секрет берётся только из env,
+# не логируется и не эхоится. /schedules/create|remove сознательно НЕ
+# экспонируются (админ-домен, остаются mlog-internal).
+
+@app.get("/schedules/list")
+def schedules_list_proxy():
+    if not cron_secret_ok():
+        return jsonify({"error": "403 Forbidden"}), 403
+    from proxy.core import MLOG_URL
+    try:
+        r = http_requests.get(
+            f"{MLOG_URL}/schedules/list",
+            params={"secret": os.environ.get("CRON_SECRET", "")},
+            timeout=30)
+        return Response(r.text, status=r.status_code, mimetype="application/json")
+    except Exception as e:
+        _log_audit("schedules_list_proxy_error", {"error": str(e)[:300]}, "system")
+        return jsonify({"error": "upstream unavailable"}), 502
+
+
+@app.get("/schedules/bootstrap")
+def schedules_bootstrap_proxy():
+    if not cron_secret_ok():
+        return jsonify({"error": "403 Forbidden"}), 403
+    from proxy.core import MLOG_URL
+    try:
+        r = http_requests.get(
+            f"{MLOG_URL}/schedules/bootstrap",
+            params={"secret": os.environ.get("CRON_SECRET", "")},
+            timeout=60)
+        _log_audit("schedules_bootstrap_proxy", {"status": r.status_code}, "scheduler")
+        return Response(r.text, status=r.status_code, mimetype="application/json")
+    except Exception as e:
+        _log_audit("schedules_bootstrap_proxy_error", {"error": str(e)[:300]}, "system")
+        return jsonify({"error": "upstream unavailable"}), 502
+
+
 # ── Cron endpoint ──
 @app.route("/cron/collect-news", methods=["GET"])
 def cron_collect_news():
