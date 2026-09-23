@@ -2522,6 +2522,40 @@ mlogserver {
     return respond(result)
   }
 
+  // ── №318: LZ→OSP мост — POST /osp/analyze ──────────────────────────────
+  // Роут обещан LZ Native v2.0 (dept/lz.mlog:129,290), ранее не существовал:
+  // обе стороны глотали 404 через TryVal, OSP-обогащение молча отсутствовало.
+  // Auth — в query ОДНОСТОРОННИЙ redact-hash секрета (№327/ADR-0161):
+  // вызывающая сторона шлёт redact(env,"hash_only") = "[HASH:x16] hex";
+  // сервер сравнивает hash(полученного) vs hash(ожидаемого hash) — обе
+  // стороны через hash-compare, детерминированный SHA256. Секрет НЕ ходит
+  // по сети вовсе (односторонний хеш), public-метка redact-выхода не даёт
+  // private-egress, hex-тело URL-safe (нет '+'/' ' — не ломается на декоде
+  // 0.21 и перекодировке прокси). Проба: scripts/probe318qp.{mlog,sh}.
+  // Анализ выполняется ДО respond (может занять минуты) — вызывающая
+  // сторона ставит короткий таймаут и не читает ответ; доставка результата —
+  // SendTelegramReply владельцу (или chat_id из тела).
+  // query="ping" — проба живости без LLM-расхода (контракт №318).
+  route "/osp/analyze" method=POST {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if redact(received, "hash_only") != redact(expected, "hash_only") then { return respond("403 Forbidden") }
+    let data = json_body()
+    let query = redact(to_string(json_get(data, "query", "")), "all")
+    if redact(query, "hash_only") == redact("", "hash_only") then { return respond("400 empty query") }
+    if redact(query, "hash_only") == redact("ping", "hash_only") then { return respond("200 osp-analyze: ok") }
+    let mut chat_id = redact(to_string(json_get(data, "chat_id", "")), "all")
+    if redact(chat_id, "hash_only") == redact("", "hash_only") then { let chat_id = redact(env("OWNER_TELEGRAM_ID"), "all") }
+    if redact(chat_id, "hash_only") == redact("", "hash_only") then { return respond("400 no chat_id") }
+    let _ = InitDB()
+    let _ = AuditLog("osp_analyze", "osp", "bridge source=" + redact(to_string(json_get(data, "source", "?")), "all") + " type=" + redact(to_string(json_get(data, "type", "")), "all") + " domain=" + redact(to_string(json_get(data, "domain", "")), "all"))
+    let reply = HandleOSP(query, chat_id)
+    let _ = SendTelegramReply(chat_id, reply)
+    return respond("200 analysis complete")
+  }
+
   // ============================================================
   // FO-035 D: веб /repos — панель проектов (стиль «Диспетчерская»,
   // узкий экран, query-роуты exact-match, ForgeEscape на всё)

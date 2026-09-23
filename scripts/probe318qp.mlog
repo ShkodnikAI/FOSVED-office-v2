@@ -1,0 +1,51 @@
+// №318-проба: auth /osp/analyze через query_param при секрете с '+'/' '.
+// Матрица:
+//   (A) env='Shkod+probe42' (литеральный '+', кейс владельца №423/№425):
+//         raw '+'   → 403 mismatch (доказательство проблемы: 0.21 '+'→пробел)
+//         %2B       → 200 match  (дизайн-фикс: энкодинг перед вставкой в URL)
+//         неверный  → 403 mismatch; без секрета → 403 mismatch
+//         selfcheck → полный mlang-конвейер: env → replace → http_get (реальный
+//                     клиент, METALOGOS_HTTP_ALLOW_PRIVATE=1) → декод сервера →
+//                     query_param → hash-compare. Проверяет, что клиент НЕ
+//                     перекодирует %2B повторно.
+//   (B) env='Shkod probe+42' ('+' И пробел): chained-replace → 200.
+//   (C) env unset (allowlist задан) → 403 empty-env (матрица №423).
+//   (D) env unset (allowlist не задан) → 500 ENV_NOT_PERMITTED (матрица №423).
+// Побочных эффектов нет: HandleOSP/SendTelegramReply вырезаны.
+
+// 0.21: try возвращает TryResult — TryVal достаёт .value (dept/utils.mlog:416,
+// дословно: VM-компилятор требует определения в файле пробы, import туда не собирается)
+pattern TryVal(x: String) -> String {
+  return x.value
+}
+
+mlogserver {
+  port: 10001
+  host: "127.0.0.1"
+
+route "/qp" method=GET {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 empty-env") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if redact(received, "hash_only") != redact(expected, "hash_only") then { return respond("403 mismatch") }
+    return respond("200 match")
+}
+
+// Полный конвейер вызывающей стороны (идиома lz.mlog №318): redact-hash
+// секрета в URL, затем реальный http_get своего же сервера.
+route "/selfcheck" method=GET {
+    let r = TryVal(try http_get("http://127.0.0.1:10001/qp?secret=" + redact(env("CRON_SECRET"), "hash_only")))
+    let s = to_string(r)
+    // ВАЖНО: respond("200 match") отдаёт ТЕЛО "match" — parse_status_line съедает
+    // первый токен как статус. Сравниваем тело, не полную строку.
+    if redact(s, "hash_only") == redact("match", "hash_only") then { return respond("200 selfcheck-match") }
+    if redact(s, "hash_only") == redact("()", "hash_only") then { return respond("200 selfcheck-http-failed") }
+    return respond("200 selfcheck-mismatch")
+}
+
+route "/" method=GET {
+    return respond("probe 318 alive")
+}
+
+}
