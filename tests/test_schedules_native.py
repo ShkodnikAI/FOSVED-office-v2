@@ -148,6 +148,9 @@ def test_entrypoint_guarded_cutover():
     assert "METALOGOS_SERVE_BACKEND" in ENTRYPOINT
 
 
-def test_binary_021_vendored():
-    b = REPO_ROOT / "bin" / "mlog-021"
-    assert b.exists() and b.stat().st_size > 10_000_000, "bin/mlog-021 не вендорен"
+def test_binary_prev_good_vendored():
+    # N023 (ADR-0006): прошлый-хороший 0.22.0 вендорен как тест-гвард
+    # (роль mlog-021 из ADR-0005); 0.21 выведен из репо, история git хранит.
+    b = REPO_ROOT / "bin" / "mlog-022"
+    assert b.exists() and b.stat().st_size > 10_000_000, "bin/mlog-022 не вендорен"
+    assert not (REPO_ROOT / "bin" / "mlog-021").exists(), "mlog-021 должен быть выведен (ADR-0006)"
