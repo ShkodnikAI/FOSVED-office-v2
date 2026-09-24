@@ -58,8 +58,12 @@ def test_route_dispatches_handle_osp_and_tg():
 
 
 def test_lz_bridge_has_exactly_two_sites():
-    assert LZ.count("127.0.0.1:4000/osp/analyze?secret=") == 2, \
-        "мост LZ→OSP: ровно 2 вызывающих сайта (LZGateOSPReferral + HandleLZ)"
+    # naryad-355: роут /osp/analyze — нативный serve (:10001), не Flask (:4000);
+    # прежний адрес :4000/osp/analyze был 404 на каждый вызов
+    assert LZ.count("127.0.0.1:10001/osp/analyze?secret=") == 2, \
+        "мост LZ→OSP: ровно 2 вызывающих сайта на serve :10001 (LZGateOSPReferral + HandleLZ)"
+    assert LZ.count("127.0.0.1:4000/osp/analyze") == 0, \
+        "мёртвый Flask-адрес должен исчезнуть полностью"
 
 
 def test_lz_bridge_sends_one_way_hash_not_secret():
@@ -67,7 +71,7 @@ def test_lz_bridge_sends_one_way_hash_not_secret():
     # hex — URL-safe: нет '+'/' ', не ломается на декоде 0.21/прокси)
     assert LZ.count('?secret=" + redact(env("CRON_SECRET"), "hash_only")') == 2, \
         "оба сайта обязаны слать redact-hash, не сам секрет"
-    for tail in LZ.split("127.0.0.1:4000/osp/analyze?secret=")[1:]:
+    for tail in LZ.split("127.0.0.1:10001/osp/analyze?secret=")[1:]:
         chunk = tail[:600]
         assert '"application/json", 5.0))' in chunk, \
             "короткий таймаут 5.0 обязателен (fire-and-forget, UX интерактива)"
@@ -76,7 +80,7 @@ def test_lz_bridge_sends_one_way_hash_not_secret():
 def test_lz_bridge_body_carries_no_secret():
     # секрет в query (аргумент 0), НЕ в теле: env-значение в data-аргументе
     # http_post даёт taint private → Category-A private-egress (аудит №312)
-    for tail in LZ.split("127.0.0.1:4000/osp/analyze?secret=")[1:]:
+    for tail in LZ.split("127.0.0.1:10001/osp/analyze?secret=")[1:]:
         chunk = tail[:400]
         assert "secret:" not in chunk.split("json_encode")[1].split("}")[0], \
             "тело вызова не должно нести секрет (private-egress аудит)"

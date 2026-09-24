@@ -160,12 +160,21 @@ def yana_auto_memorize():
     if len(query) < 10 or len(reply) < 20:
         return jsonify({'status': 'skipped', 'reason': 'too short'})
     try:
+        # naryad-358: дата в промпте динамическая (Europe/Minsk — конвенция
+        # /now-time, routes_core.py). Была зашита «today being 2026-07-06» —
+        # относительные даты («напомни завтра») сохранялись от июля.
+        try:
+            from zoneinfo import ZoneInfo
+            _tz = ZoneInfo("Europe/Minsk")
+        except Exception:
+            _tz = timezone.utc
+        today_str = datetime.now(_tz).strftime("%Y-%m-%d")
         prompt = [
             {"role": "system", "content": "Extract 1-3 key facts worth remembering long-term from this conversation. "
                 "Only facts about the OWNER: name, location, preferences, decisions, obligations, relationships, projects, health. "
                 "Ignore: greetings, meta-comments, questions about system nature. "
                 "Output ONLY a JSON array of objects with keys: content (string), type (fact|preference|commitment|decision|context), confidence (0.5-1.0). "
-                "When a fact is a commitment or reminder with a date/time, include a \"date\" key with the date in YYYY-MM-DD HH:MM format (or YYYY-MM-DD if no time). If the date is relative (tomorrow, next week), calculate the actual date based on today being 2026-07-06. If nothing worth remembering, output: []"},
+                f"When a fact is a commitment or reminder with a date/time, include a \"date\" key with the date in YYYY-MM-DD HH:MM format (or YYYY-MM-DD if no time). If the date is relative (tomorrow, next week), calculate the actual date based on today being {today_str}. If nothing worth remembering, output: []"},
             {"role": "user", "content": f"User: {query[:500]}\nYana: {reply[:500]}"}
         ]
         result = _call_single_provider("groq", "openai/gpt-oss-20b", prompt, dept="yana", max_tokens=300, is_internal=True)
