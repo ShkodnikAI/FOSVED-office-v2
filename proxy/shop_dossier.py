@@ -14,9 +14,26 @@
 записи; досье повторно прогоняет canonical_url — защита от старых строк).
 
 Постер: 1080×1350, палитра «Диспетчерской» (токены miniapp/index.html:
-paper #EFEAE0, ink #1C1B18, stamp #A8321E…), RAM-friendly — одна
-картинка, никакого накопления буферов; шрифты системные DejaVu с
-честным фолбэком на PIL-дефолт (Dockerfile ставит fonts-dejavu-core).
+paper #EFEAE0, ink #1C1B18, stamp #A8321E…) — ПОСТЕР В ЭТУ ЭПОХУ НЕ
+ПЕРЕВОДИТСЯ (наряд #330: границы — только render_html; перекраска постера
+— отдельный наряд). RAM-friendly — одна картинка, никакого накопления
+буферов; шрифты системные DejaVu с честным фолбэком на PIL-дефолт
+(Dockerfile ставит fonts-dejavu-core).
+
+HTML-досье (render_html) — НАРЯД #330: токены FORGE-UI-0 (тёмная тема
+с красным акцентом — основной язык интерфейса, источник истины —
+miniapp/index.html через report_css.txt FORGE-UI-6; значения сверены,
+не изобретены). Legacy-алиасы (--paper/--stamp/--d…) сохранены по
+паттерну report_css.txt. Контраст статусных цветов проверен ПО
+ОТДЕЛЬНОСТИ на тёмном (#151517): желтый 11.6, зелёный 10.4, red-light
+(текст мелкий) 8.05, muted 5.3, ink 16+; чистый --red как текст ниже
+порога AA (4.1) — мелкий красный текст = --red-light, --red — только
+крупный счёт (градиент) и рамки.
+
+Фото товаров (наряд #329): WB-картинки собирает shop_collectors
+(image_url, basket-перебор), здесь только отрисовка: <img loading=lazy>,
+честный фолбэк-плейсхолдер через onerror (data-URI SVG «нет фото», без
+битой иконки браузера); оффер без ссылки → явный «нет фото», не пустота.
 
 Политика FO-007: в ядре нет except-блоков — JSON досье пишем/читаем
 сами, рендер пусть падает громко на ошибке данных, чем молча рисует
@@ -99,7 +116,8 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
     for s in scored["offers"]:
         row = _query("SELECT url, platform, price_byn, old_price_byn, "
                      "card_price_byn, delivery_days, delivery_cost_byn, "
-                     "installment_ok, rating, reviews_count, seller_id "
+                     "installment_ok, rating, reviews_count, seller_id, "
+                     "image_url "
                      "FROM shop_offers WHERE id=?", (s["id"],), fetch=True)
         if not row:
             continue
@@ -121,6 +139,7 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
             "installment_ok": bool(o["installment_ok"]),
             "rating": o["rating"], "reviews_count": o["reviews_count"],
             "seller_name": seller_name,
+            "image_url": o.get("image_url"),
             "total": s["total"], "group_scores": s["group_scores"],
             "honest": s["honest"], "stop_flags": s["stop_flags"],
         })
@@ -470,12 +489,40 @@ def render_poster(snapshot, out_path):
 
 
 # ── полное HTML-досье ────────────────────────────────────────────────────
+# Наряд #329: фолбэк-плейсхолдер — data-URI SVG (квоты безопасны: внутри
+# URI двойные кавычки = %22, пробелы = %20), подставляется через onerror;
+# битой иконки браузера и пустого места не остаётся.
+_IMG_FALLBACK_URI = ("data:image/svg+xml;charset=utf-8,%3Csvg "
+                     "xmlns=%22http://www.w3.org/2000/svg%22 width=%2272%22 "
+                     "height=%2272%22%3E%3Crect width=%22100%25%22 "
+                     "height=%22100%25%22 fill=%22%23232326%22/%3E%3Ctext "
+                     "x=%2250%25%22 y=%2254%25%22 fill=%22%238A8A8F%22 "
+                     "font-size=%2211%22 text-anchor=%22middle%22%3E"
+                     "нет%20фото%3C/text%3E%3C/svg%3E")
+
+
+def _esc(s):
+    return (str(s or "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _img_html(url):
+    """<img> для оффера; без ссылки — явный «нет фото» (не пустота)."""
+    if not url:
+        return '<span class="img-miss">нет фото</span>'
+    return ('<img src="' + _esc(url) + '" loading="lazy" alt="фото товара" '
+            'style="max-width:72px;max-height:72px;border-radius:6px;'
+            'display:block" '
+            "onerror=\"this.onerror=null;this.src='" + _IMG_FALLBACK_URI + "'\">")
+
+
 def render_html(snapshot):
-    """Полное HTML-досье: токены «Диспетчерской», ВСЕ офферы со
-    ссылками (кликабельность — слой 3), группы скоринга, история."""
-    e = (lambda s: str(s or "")
-         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-         .replace('"', "&quot;"))
+    """Полное HTML-досье: токены FORGE-UI-0 (наряд #330), ВСЕ офферы со
+    ссылками (кликабельность — слой 3), фото WB (#329), группы скоринга,
+    история. Структура таблиц/данных не менялась — только визуальная
+    обёртка и новая колонка «Фото»."""
+    e = _esc
     title = e(snapshot["product"].get("title"))
     v_score, v_text = verdict_display(snapshot)
     rows = []
@@ -490,6 +537,7 @@ def render_html(snapshot):
         flags = "".join(f'<div class="flag">⚠ {e(f["note"])}</div>'
                         for f in o.get("stop_flags"))
         rows.append(f"""<tr>
+<td>{_img_html(o.get('image_url'))}</td>
 <td><a href="{e(o['url'])}" rel="noopener">{e(o['platform'])}</a><br>
 <span class="muted">{e(o.get('seller_name'))}</span>{flags}</td>
 <td class="mono">{o['rank_price'] if o['rank_price'] is not None else '—'} BYN</td>
@@ -518,23 +566,48 @@ def render_html(snapshot):
 </table>{unscored_note}</div>''' if unscored_rows else "")
     return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Досье: {title}</title><style>
-:root{{--ink:#1C1B18;--paper:#EFEAE0;--paper-raised:#FBF8F2;--line:rgba(28,27,24,.14);
---stamp:#A8321E;--muted:#6B6558;--ok:#3D6B2C;--warn:#9C6B0B;--bad:#A8321E;
---d:'Newsreader',Georgia,serif;--b:'IBM Plex Sans',system-ui,sans-serif;
---m:'IBM Plex Mono',ui-monospace,monospace}}
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500&display=swap');
+/* Наряд #330: токены FORGE-UI-0 — источник истины miniapp/index.html
+   (сверены с report_css.txt FORGE-UI-6, не изобретены). Legacy-алиасы
+   (--paper/--paper-raised/--stamp/--ok/--warn/--bad/--d/--b) — по тому же
+   паттерну алиасов, что и в report_css.txt. */
+:root{{--bg:#0A0A0C;--surface:#151517;--surface2:#1C1C1F;
+--line:#232326;--line-strong:#2E2E33;
+--red:#E8262E;--red-dark:#B4151C;--red-light:#FF8A8F;
+--ink:#EDEDED;--muted:#8A8A8F;
+--green:#7ED957;--yellow:#F5C93E;
+--grad:linear-gradient(135deg,#E8262E,#FF8A8F);
+--f:'Poppins',system-ui,sans-serif;--m:'IBM Plex Mono',ui-monospace,monospace;
+--ok-soft:rgba(126,217,87,.12);--warn-soft:rgba(245,201,62,.12);--bad-soft:rgba(232,38,46,.12);
+--paper:var(--bg);--paper-raised:var(--surface);--stamp:var(--red);
+--ok:var(--green);--warn:var(--yellow);--bad:var(--red);
+--b:var(--f);--d:var(--f)}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:var(--b);background:var(--paper);color:var(--ink);padding:24px}}
-h1{{font-family:var(--d);font-size:1.8rem}}
-.card{{background:var(--paper-raised);border:1px solid var(--line);border-radius:12px;padding:20px;margin:16px 0}}
-.score{{font-family:var(--m);font-size:2.4rem;color:var(--stamp)}}
+body{{font-family:var(--f);background:var(--bg);color:var(--ink);padding:24px}}
+h1{{font-size:1.8rem;font-weight:700}}
+.card{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px;margin:16px 0}}
+.score{{font-family:var(--m);font-size:2.4rem;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}}
 table{{width:100%;border-collapse:collapse;margin:12px 0}} th,td{{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);font-size:.9rem;vertical-align:top}}
 th{{color:var(--muted);font-weight:500;text-transform:uppercase;font-size:.7rem;letter-spacing:1px}}
-a{{color:var(--stamp);text-decoration:none}} a:hover{{text-decoration:underline}}
+a{{color:var(--red-light);text-decoration:none}} a:hover{{text-decoration:underline}}
 .mono{{font-family:var(--m)}} .muted{{color:var(--muted);font-size:.8rem}}
-.status-red{{color:var(--bad)}} .status-yellow{{color:var(--warn)}}
-.badge{{font-family:var(--m);font-size:.8rem;padding:1px 8px;border-radius:4px;display:inline-block;background:rgba(61,107,44,.12);color:var(--ok)}}
-.flag{{color:var(--warn);font-size:.75rem}}
+/* Наряд #330 A.2: статусные цвета проверены по отдельности на тёмном:
+   мелкий красный текст — --red-light (8.0:1), жёлтый 11.6:1, зелёный 10.4:1 */
+.status-red{{color:var(--red-light)}} .status-yellow{{color:var(--yellow)}}
+.badge{{font-family:var(--m);font-size:.8rem;padding:1px 8px;border-radius:4px;display:inline-block;background:var(--ok-soft);color:var(--green)}}
+.flag{{color:var(--yellow);font-size:.75rem}}
 .meta{{color:var(--muted);font-size:.85rem;margin:8px 0}}
+.img-miss{{display:inline-block;font-size:.7rem;color:var(--muted);background:var(--surface2);border:1px dashed var(--line-strong);border-radius:6px;padding:6px 8px}}
+/* Печать — светлые print-стили (FORGE-UI-6 Smoke-6, тот же приём) */
+@media print {{
+  :root{{--bg:#FFFFFF;--surface:#FFFFFF;--surface2:#F2F0EC;--line:#DDDDDD;--line-strong:#BBBBBB;
+        --ink:#1A1A1C;--muted:#6B6B70;--red:#B4151C;--red-light:#8A1015;
+        --green:#1E6B34;--yellow:#8A6A0F;
+        --ok-soft:rgba(30,107,52,.10);--warn-soft:rgba(138,106,15,.10);--bad-soft:rgba(180,21,28,.08);
+        --paper:#FFFFFF;--paper-raised:#FFFFFF;--stamp:#B4151C;--ok:#1E6B34;--warn:#8A6A0F;--bad:#B4151C}}
+  body{{background:#FFFFFF;color:#1A1A1C}}
+  .score{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+}}
 </style></head><body>
 <h1>Досье: {title}</h1>
 <div class="meta">{e(snapshot['generated_at'])} · профиль {e(snapshot['profile'])} ·
@@ -544,7 +617,7 @@ a{{color:var(--stamp);text-decoration:none}} a:hover{{text-decoration:underline}
 <p style="margin-top:8px;font-size:1.1rem">{e(v_text)}</p>
 <p style="margin-top:8px">{badges_html}</p></div>
 <div class="card"><table>
-<tr><th>Оффер (дешевле — первым)</th><th>Реальная цена</th><th>Наличие</th><th>Честная скидка</th><th>Балл</th><th>Группы</th></tr>
+<tr><th>Фото</th><th>Оффер (дешевле — первым)</th><th>Реальная цена</th><th>Наличие</th><th>Честная скидка</th><th>Балл</th><th>Группы</th></tr>
 {''.join(rows)}
 </table></div>
 {unscored_block}
@@ -552,5 +625,7 @@ a{{color:var(--stamp);text-decoration:none}} a:hover{{text-decoration:underline}
 способа оплаты и доставки (rank_price). «Честная скидка» — процент к медиане
 истории цен, не к зачёркнутой «старой цене»; фейк — когда зачёркнутая выше
 обычной. Стоп-флаги (⚠) — дисквалификаторы вне баллов: аномальная цена,
-продавец без истории, запрет возврата, расхождение характеристик.</p></div>
+продавец без истории, запрет возврата, расхождение характеристик.
+Фото — карточка площадки (WB); «нет фото» — честный плейсхолдер, когда
+ссылка не построена или не открылась.</p></div>
 </body></html>"""
