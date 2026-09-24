@@ -53,11 +53,41 @@
     площадка обрывает соединения с датацентровых IP. Форма не снята —
     реализация вслепую запрещена нарядом; каркас честно отвечает
     kind:"recon_unreachable", форма снимется первым живым прогоном
-    (Render egress или браузер владельца).
+    (Render egress или браузер владельца);
+  - батч-2 источников (2026-09-24, наряды #335/#337/#338/#339 — живая
+    разведка из песочницы, robots проверен ПЕРВЫМ — красная линия SHOP-2):
+    7745.by (#335) — robots запрещает /search, но /catalog?search=
+    разрешён; однако тело сайта 403 с датацентровых IP (/, /catalog,
+    /catalog?search= — 403 при роботс/sitemap 200: динамика закрыта
+    GeoIP-фильтром, статика отдаётся). Форма не снята → честный
+    kind:"recon_unreachable";
+    shop.by (#337) — 403 на robots.txt И на сайт (HTTP/2 + браузерный
+    UA тоже 403) — robots unverifiable → консервативный отказ,
+    kind:"recon_unreachable";
+    tomas.by (#338) — robots живой: Disallow *?* , */poisk/,
+    */search/ — ВСЯ поисковая поверхность закрыта для честных
+    клиентов → kind:"robots_disallow_surface" (как 21vek #328);
+    unishop.by (#339) — robots запрещает /search; на / — капча-стена
+    reagate (антибот) → kind:"robots_disallow_surface" + note об
+    антиботе;
+  - Яндекс.Маркет (#340) — ЕДИНСТВЕННЫЙ из батча с официальным API:
+    контентный API для покупателей (базовый тариф 100 запросов/сутки).
+    Регистрация ключа — шаг владельца (A.1 наряда); сам хост
+    api.content.market.yandex.ru из песочницы рвёт соединения
+    (RemoteDisconnected — как tm.by), форма снимется первым живым
+    прогоном с реальным ключом. Реализовано ПОЛНОСТЬЮ, но честно:
+    без ключа — kind:"config_missing"; дневной счётчик 100/сутки в
+    kv + кэш повторов 5 мин (лимит не жжётся); парсер оборонительный
+    (несколько известных форм списка офферов; расхождение →
+    kind:"api_form_mismatch"). Транспорт — новая тулза
+    fetch_api_json в mcp_servers/web (Bearer-токен; robots к
+    авторизованным API не применяется по дизайну — см. докстринг
+    сервера).
 
 Все парсеры оборонительные: нет ожидаемых ключей → честный отказ с kind,
 ничего не падает. Политика FO-007: except-блоки не молчат — logging.warning.
 """
+import hashlib
 import json
 import logging
 import os
@@ -435,6 +465,14 @@ def collect_wb(query, page=1, rates=None):
 def collect_ozon(query, page=1):
     """Ozon (ozon.by) — поисковый API за антиботом; каркас.
 
+    Наряд #334 (2026-09-24): метод подтверждён двумя независимыми
+    реализациями — headless Chromium проходит челлендж один раз (~12 с),
+    дальше JSON из внутреннего composer-api. Контур реализован в
+    proxy/ozon_headless.py (Playwright по требованию, сессия/cookies с
+    TTL 6 ч в kv, браузер закрывается всегда), включается флагом
+    SHOP_OZON_HEADLESS=1 — выключен по умолчанию, т.к. A.1 наряда
+    требует реального замера памяти на Render free (512 MB) ДО включения.
+
     Живые пробы из песочницы 2026-09-16 (form-истина, не память):
       - честный клиент (urllib/curl, UA браузера): ЛЮБОЙ путь
         www.ozon.by|ozon.ru → 307-петля (?__rr=1 → ?__rr=2 → 403 +
@@ -445,12 +483,20 @@ def collect_ozon(query, page=1):
         реальный браузерный JS, из датацентра не проходит;
       - api-seller.ozon.ru жив, но требует Client-Id/Api-Key продавца
         и поиск по всему маркетплейсу не умеет (только свои товары).
-    Вывод: прямой egress закрыт на уровне JS-челленджа. Транспортный
-    вызов ниже оставлен живым: когда появится egress-решение (резидент-
-    проки/браузерный контур), сбор начнёт отвечать без правок здесь;
-    форма ответа снимется первым же прогоном (сейчас честный
-    kind:"api_form_unknown" — парсер вслепую не пишем).
+    Флаг выключен → транспортный вызов ниже жив как прежде: честный
+    kind:"antibot_blocked"/"api_form_unknown".
     """
+    from proxy.ozon_headless import flag_enabled
+    if flag_enabled():
+        from proxy.ozon_headless import collect_ozon_headless
+        res = collect_ozon_headless(query, page)
+        if res.get("ok"):
+            return res
+        if res.get("kind") == "api_form_unknown":
+            return res
+        # браузерный контур недоступен — падаем на честный транспортный отказ
+        log.warning("ozon headless недоступен (%s) — честный fallback на транспорт",
+                    res.get("kind"))
     url = ("https://www.ozon.by/api/composer-api.bx/page/json/v2?url="
            + urllib.parse.quote(f"/search/?text={query}&page={page}", safe=""))
     data = FETCH_JSON_FN("fetch_json", {"url": url})
@@ -666,6 +712,239 @@ def collect_onliner(query, page=1):
             "offers": offers}
 
 
+# ── батч-2 источников (#335/#337/#338/#339, 2026-09-24) ──────────────
+def collect_7745(query, page=1):
+    """7745.by — живая разведка 2026-09-24 (наряд #335).
+
+    robots.txt (200): Disallow /search — но /catalog?search= НЕ запрещён
+    (проверено по всем Disallow-паттернам) — путь был честный. Однако
+    тело сайта отдаёт 403 с датацентровых IP: /, /catalog,
+    /catalog?search=смартфон (URL-encoded) — 403, при том что
+    robots.txt и sitemap.xml (статика) — 200. Динамика закрыта
+    GeoIP-фильтром. Форма не снята — реализация вслепую запрещена
+    нарядом; каркас ждёт живого прогона с белого egress (Render может
+    отличаться) или браузера владельца.
+    """
+    return {"ok": False, "platform": "7745",
+            "error": "7745.by отдаёт 403 на / и /catalog?search= с датацентровых "
+                     "IP (robots/sitemap при этом 200 — GeoIP-фильтр динамики); "
+                     "форма поиска не снята — каркас ждёт живого прогона",
+            "kind": "recon_unreachable"}
+
+
+def collect_shopby(query, page=1):
+    """Shop.by — живая разведка 2026-09-24 (наряд #337).
+
+    robots.txt → 403 (и честным UA, и браузерным, и curl --http2),
+    сайт тоже 403 на всё. Robots unverifiable — консервативный отказ
+    (не можем подтвердить разрешение — не собираем; красная линия
+    SHOP-2). Форма снимется первым живым прогоном с белого egress.
+    """
+    return {"ok": False, "platform": "shopby",
+            "error": "shop.by отдаёт 403 на robots.txt и на сайт с датацентровых "
+                     "IP (HTTP/2 + браузерный UA тоже 403) — robots unverifiable, "
+                     "консервативный отказ по красной линии SHOP-2",
+            "kind": "recon_unreachable"}
+
+
+def collect_tomas(query, page=1, region="minsk"):
+    """Tomas.by — живой robots.txt 2026-09-24 (наряд #338).
+
+    User-agent: * запрещает *?* (все URL с query), */poisk/,
+    */search/, /filters/*, /ajax/* — ВСЯ поисковая поверхность закрыта
+    для честных клиентов (тот же класс запрета, что 21vek #328).
+    Дисциплина SHOP-2: robots уважается — сбор запрещён без явного
+    решения владельца. Региональные поддомены (minsk.tomas.by и др.)
+    — тот же robots на каждом.
+    """
+    return {"ok": False, "platform": "tomas",
+            "error": "robots.txt Tomas.by запрещает все URL с query (*?*) и пути "
+                     "*/poisk/, */search/ — поисковая поверхность закрыта для "
+                     "честных клиентов; нужно явное решение владельца",
+            "kind": "robots_disallow_surface"}
+
+
+def collect_unishop(query, page=1):
+    """UniShop.by — живой robots.txt + живая проба 2026-09-24 (наряд #339).
+
+    robots.txt (200): Disallow /search — поисковая поверхность закрыта.
+    Дополнительно живая проба /: капча-стена reagate (обязательное поле
+    reagate_captcha_value) — антибот на весь сайт с датацентровых IP.
+    Красная линия SHOP-2: robots уважается → сбор запрещён.
+    """
+    return {"ok": False, "platform": "unishop",
+            "error": "robots.txt UniShop.by запрещает /search; дополнительно сайт "
+                     "закрыт капчей reagate с датацентровых IP — сбор запрещён "
+                     "дисциплиной SHOP-2 без явного решения владельца",
+            "kind": "robots_disallow_surface"}
+
+
+# ── Яндекс.Маркет (#340): официальный контентный API ─────────────────
+YM_API_BASE = "https://api.content.market.yandex.ru"
+YM_API_VERSION = "v3.1.0"     # версия по официальной документации; живой
+#                              прогон с реальным ключом подтвердит/поправит
+YM_DAILY_LIMIT = 100          # базовый тариф контентного API (наряд #340)
+YM_COUNTER_KEY = "shop_ym_counter"
+YM_CACHE_TTL = 300            # 5 мин — повторные одинаковые запросы не жгут лимит
+
+
+def _ym_counter_read():
+    """Дневной счётчик (kv system_settings): авто-сброс в 00:00 UTC."""
+    raw = _setting_get(YM_COUNTER_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if not isinstance(data, dict) or data.get("date") != today:
+        data = {"date": today, "count": 0}
+    return data
+
+
+def _ym_counter_bump(n=1):
+    data = _ym_counter_read()
+    data["count"] = int(data.get("count") or 0) + n
+    _setting_set(YM_COUNTER_KEY, json.dumps(data))
+    return data["count"]
+
+
+def _ym_offers_from(body, rates):
+    """Оборонительный парсер: список офферов из нескольких известных форм.
+
+    Живой формат снимется первым прогоном с реальным ключом (хост из
+    песочницы недоступен — RemoteDisconnected, как tm.by). Известные
+    по документации формы: result.offers / result.items / offers /
+    items. Оффер: цена в price.value|price.amount|price (валюта
+    price.currency|price.currencyCode, дефолт RUB — Маркет RU/BY),
+    название name|fullName, ссылка url|link, продавец
+    seller.name|shopInfo.name, рейтинг rating 0..5, отзывы
+    reviewsCount|feedbacksCount. Отсутствие списка → None (вверху
+    решат как api_form_mismatch).
+    """
+    items = None
+    for path in (("result", "offers"), ("result", "items"), ("offers",), ("items",)):
+        node = body
+        for k in path:
+            if isinstance(node, dict) and k in node:
+                node = node[k]
+            else:
+                node = None
+                break
+        if isinstance(node, list):
+            items = node
+            break
+    if items is None:
+        return None
+    offers = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        pr = it.get("price")
+        amount = None
+        currency = "RUB"
+        if isinstance(pr, dict):
+            amount = _num(pr.get("value"))
+            if amount is None:
+                amount = _num(pr.get("amount"))
+            currency = str(pr.get("currency") or pr.get("currencyCode") or "RUB").upper()
+        elif pr is not None:
+            amount = _num(pr)
+        price_byn = to_byn(amount, currency, rates) if currency != "BYN" else amount
+        seller = it.get("seller") if isinstance(it.get("seller"), dict) else {}
+        shop = it.get("shopInfo") if isinstance(it.get("shopInfo"), dict) else {}
+        stock = it.get("stockState")
+        in_stock = 1  # форма неизвестна — дефолт «доступно» (не фейк-нуль)
+        if isinstance(stock, dict) and stock.get("inStock") is not None:
+            in_stock = 1 if _num(stock.get("inStock")) else 0
+        pid = it.get("id") or it.get("offerId")
+        if pid is None:
+            continue
+        rating = _num(it.get("rating"))
+        if rating is not None and rating > 5:
+            rating = rating / 10.0 if rating <= 50 else None
+        offers.append({
+            "platform": "ym",
+            "platform_code": str(pid),
+            "url": canonical_url(it.get("url") or it.get("link")
+                                 or f"https://market.yandex.ru/product--/{pid}"),
+            "title": it.get("fullName") or it.get("name") or it.get("text"),
+            "price_byn": price_byn,
+            "old_price_byn": None,
+            "in_stock": in_stock,
+            "rating": rating,
+            "reviews_count": int(_num(it.get("reviewsCount")) or _num(it.get("feedbacksCount")) or 0),
+            "seller_name": seller.get("name") or shop.get("name"),
+            "seller_platform_code": str(seller.get("id")) if seller.get("id") else None,
+            "seller_rating": _num(seller.get("rating")) or _num(shop.get("rating")),
+            "seller_deals": None, "seller_official": None,
+        })
+    return offers
+
+
+def collect_yandexmarket(query, page=1):
+    """Яндекс.Маркет — официальный контентный API (наряд #340).
+
+    Гейт честности: без YANDEX_MARKET_API_KEY — kind:"config_missing"
+    (регистрация ключа — шаг владельца A.1, из Беларуси доступность
+    подтверждает владелец). Дневной счётчик 100/сутки (базовый тариф)
+    в kv с авто-сбросом в 00:00 UTC; кэш повторов 5 мин — повторный
+    тот же запрос лимит НЕ жжёт. Транспорт — fetch_api_json
+    (Bearer-токен; токен в репо/логи/кэш-ключ не попадает). Парсер
+    оборонительный: расхождение живой формы → api_form_mismatch
+    (форма снимется первым прогоном).
+    """
+    key = os.environ.get("YANDEX_MARKET_API_KEY", "").strip()
+    if not key:
+        return {"ok": False, "platform": "ym",
+                "error": "YANDEX_MARKET_API_KEY не задан — контентный API требует "
+                         "регистрации ключа владельцем (наряд #340 A.1, шаг владельца)",
+                "kind": "config_missing"}
+    cache_key = "shop_ym_cache:" + hashlib.sha1(
+        f"{query}|{page}".encode("utf-8")).hexdigest()[:20]
+    raw = _setting_get(cache_key)
+    if raw:
+        try:
+            hit = json.loads(raw)
+            if (isinstance(hit, dict) and isinstance(hit.get("res"), dict)
+                    and (time.time() - (hit.get("ts") or 0)) < YM_CACHE_TTL):
+                return dict(hit["res"], cached=True)
+        except ValueError:
+            log.warning("ym кэш %s повреждён — игнорирую, иду в API", cache_key)
+    counter = _ym_counter_read()
+    if int(counter.get("count") or 0) >= YM_DAILY_LIMIT:
+        return {"ok": False, "platform": "ym",
+                "error": f"дневной лимит контентного API исчерпан ({YM_DAILY_LIMIT}/сутки, "
+                         "базовый тариф) — счётчик обнулится в 00:00 UTC",
+                "kind": "daily_limit"}
+    url = (f"{YM_API_BASE}/{YM_API_VERSION}/search?"
+           + urllib.parse.urlencode({"text": query, "page": str(page),
+                                     "sortBy": "PRICE"}))
+    r = FETCH_JSON_FN("fetch_api_json", {"url": url, "token": key})
+    if not r.get("ok"):
+        # счётчик НЕ бьётся: запрос до API не дошёл или отклонён до ответа
+        _audit("ym", f"search:{query}", "refused")
+        kind = r.get("kind", "transport")
+        note = {"http_401": "ключ невалиден/не принят (проверить регистрацию)",
+                "http_403": "прав недостаточно (проверить подключение контентного API)",
+                "http_429": "лимит API на их стороне"}.get(kind)
+        base = (r.get("error") or "").strip()
+        return {"ok": False, "platform": "ym", "url": url,
+                "error": f"{base} | {note}" if note and base else (base or note or "контентный API недоступен"),
+                "kind": kind}
+    _ym_counter_bump()          # 200-ответ — лимит израсходован
+    _audit("ym", f"search:{query}", "ok")
+    offers = _ym_offers_from(r.get("data") or {}, fx_rates())
+    if offers is None:
+        return {"ok": False, "platform": "ym", "url": url,
+                "error": "в ответе Content API не найден список офферов — живая форма "
+                         "снимется первым прогоном с реальным ключом",
+                "kind": "api_form_mismatch"}
+    res = {"ok": True, "platform": "ym", "url": url, "offers": offers}
+    _setting_set(cache_key, json.dumps({"ts": time.time(), "res": res},
+                                       ensure_ascii=False))
+    return res
+
+
 # ── 21vek (#328): robots запрещает поисковую поверхность ─────────────
 def collect_21vek(query):
     """Живой robots.txt 2026-09-24 (наряд #328): User-agent: * запрещает
@@ -705,6 +984,11 @@ COLLECTORS = {
     "onliner": collect_onliner,
     "21vek": collect_21vek,
     "tmby": collect_tmby,
+    "7745": collect_7745,
+    "shopby": collect_shopby,
+    "tomas": collect_tomas,
+    "unishop": collect_unishop,
+    "ym": collect_yandexmarket,
 }
 
 

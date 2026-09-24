@@ -288,6 +288,26 @@ pattern ExpertIsAutomotiveTopic(query: String) -> Bool {
 }
 
 
+// ── av.by (#336): реальные объявления о продаже авто для брифинга ─────
+// Решение владельца зафиксировано в наряде: НЕ Закупки (не shop_engine),
+// отдельная живая функция рядом с ExpertAutomotiveKB (справочник) и
+// двухфазным поиском. Вызывается ТОЛЬКО на автомобильной теме (гейт
+// ExpertIsAutomotiveTopic в BuildExpertContext — неавтомобильная тема
+// av.by не дёргает вообще, smoke-пункт 3 наряда).
+// Разведка 2026-09-24: cars.av.by закрыт WAF SafeLine (HTTP 468) с
+// серверных IP — питон-сторона честно деградирует и кэширует вердикт
+// (1 ч); форматирование — в proxy/avby_collector.py (паттерн lz_sources),
+// здесь только мост + redact (урок №268: недоверенные данные — через redact).
+pattern ExpertAvByListings(query: String) -> String {
+  let resp = TryVal(try call_python("avby_collector", "search_avby", json_encode([query])))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "" }
+  let text = redact(to_string(json_get(parsed, "result.text", "")), "all")
+  return to_string(text)
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════
 // EXPERT CONTEXT BUILDER — includes automotive domain (if relevant) + skills
 // ═══════════════════════════════════════════════════════════════════════
@@ -299,9 +319,14 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
   let facts = GetFacts("expert", "12")
   let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
-  let auto_kb = ""
+  let mut auto_kb = ""
   if ExpertIsAutomotiveTopic(query) == true then {
     let auto_kb = ExpertAutomotiveKB()
+    // av.by (#336): живые объявления — только на автомобильной теме
+    let avby_section = ExpertAvByListings(query)
+    if avby_section != "" then {
+      let auto_kb = auto_kb + "\n\n=== Реальные предложения av.by (живые объявления) ===\n" + avby_section
+    }
   }
   // Фаза 1 — быстрый широкий поиск по самой теме
   let initial = ExpertTavilySearch(query, chat_id)

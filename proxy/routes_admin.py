@@ -914,20 +914,31 @@ _SHOP_SOURCES_DDL = ("CREATE TABLE IF NOT EXISTS shop_sources (source_id TEXT PR
 # onliner — рабочий (динамическая категория по живому словарю);
 # 21vek — robots запрещает поисковую поверхность (красная линия SHOP-2);
 # tmby — площадка недоступна из песочницы (TLS-фильтрация датацентровых IP).
+# Батч-2 (наряды #335/#337/#338/#339/#340, живая разведка 2026-09-24):
+# 7745/shopby — GeoIP-блок 403 датацентровых IP (у 7745 robots/sitemap 200,
+# но динамика закрыта); tomas/unishop — robots запрещает поисковую поверхность
+# (у unishop дополнительно капча reagate); ym — официальная реализация готова,
+# ждёт API-ключ владельца (шаг A.1 наряда #340).
 _SHOP_SOURCE_STATUS = {
     "wb": ("работает", "ok"),
     "ozon": ("заблокирован антиботом", "warn"),
     "onliner": ("работает", "ok"),
     "21vek": ("robots запрещает сбор", "warn"),
     "tmby": ("нет доступа к площадке — нужна живая проба", "warn"),
+    "7745": ("нет доступа из датацентра — нужна живая проба", "warn"),
+    "shopby": ("нет доступа из датацентра — нужна живая проба", "warn"),
+    "tomas": ("robots запрещает сбор", "warn"),
+    "unishop": ("robots запрещает сбор", "warn"),
+    "ym": ("готов — ждёт API-ключ владельца", "warn"),
 }
 
 
 @app.get("/api/shop/sources")
 def api_shop_sources():
-    """FORGE-UI-9 (#202): источники Закупок — известные (wb/ozon/onliner/21vek/tmby,
-    наряд #331 B.3: пятый переключатель тем же паттерном) + свои магазины
-    (custom) из shop_sources. enabled — реальный флаг опроса."""
+    """FORGE-UI-9 (#202): источники Закупок — известные (wb/ozon/onliner/21vek/tmby
+    + батч-2 #335/#337/#338/#339/#340: 7745/shopby/tomas/unishop/ym — переключатели
+    тем же паттерном, список серверный) + свои магазины (custom) из shop_sources.
+    enabled — реальный флаг опроса."""
     try:
         _query(_SHOP_SOURCES_DDL)
         rows = {r["source_id"]: r for r in
@@ -935,7 +946,9 @@ def api_shop_sources():
         out = []
         for sid, label in [("wb", "Wildberries"), ("ozon", "Ozon"),
                            ("onliner", "Onliner"), ("21vek", "21vek"),
-                           ("tmby", "TM.by")]:
+                           ("tmby", "TM.by"), ("7745", "7745.by"),
+                           ("shopby", "Shop.by"), ("tomas", "Tomas.by"),
+                           ("unishop", "UniShop.by"), ("ym", "Яндекс.Маркет")]:
             r = rows.pop(sid, None)
             # статус — из серверной карты (один источник правды; ранее фронт
             # ссылался на несуществующую JS-константу SHOP_SOURCE_STATUS —

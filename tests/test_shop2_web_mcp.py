@@ -124,6 +124,19 @@ class _Stub(BaseHTTPRequestHandler):
         _Stub.hits[self.path] = _Stub.hits.get(self.path, 0) + 1
         if self.path.startswith("/page"):
             self._send(200, PAGE_HTML)
+        elif self.path.startswith("/apiauth"):
+            # #340: эхо заголовка Authorization (проверка Bearer-тулзы)
+            self._send(200, json.dumps({"auth": self.headers.get("Authorization", "")}),
+                       "application/json")
+        elif self.path.startswith("/privatejson"):
+            # robots Disallow: /private покрывает /privatejson (префикс) —
+            # fetch_api_json не проверяет robots (авторизованный API) → должен пройти
+            self._send(200, json.dumps({"api": True}), "application/json")
+        elif self.path.startswith("/api401"):
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{\"error\": \"unauthorized\"}")
         elif self.path.startswith("/api"):
             self._send(200, json.dumps(API_JSON), "application/json")
         elif self.path.startswith("/robots.txt"):
@@ -190,7 +203,7 @@ def test_initialize_tools_list_unknown_tool():
         m.initialize()
         resp = m.rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [t["name"] for t in resp["result"]["tools"]]
-        assert names == ["fetch_page", "fetch_json", "probe_url"]
+        assert names == ["fetch_page", "fetch_json", "fetch_api_json", "probe_url"]
         assert all("inputSchema" in t for t in resp["result"]["tools"])
         assert m.call("no_such_tool", {}, rid=9)["error"]["code"] == -32602
     finally:
@@ -233,6 +246,52 @@ def test_fetch_json_parses_and_rejects_non_json(stub_url):
         assert d2["ok"] is False and d2["kind"] == "not_json"
     finally:
         m.close()
+
+
+# ── fetch_api_json (#340): Bearer, robots-скип, кэш, 401, SSRF ───────────
+def test_fetch_api_json_bearer_robots_skip_cache(stub_url):
+    m = McpProc(_env_with_private())
+    try:
+        m.initialize()
+        d = result_data(m.call("fetch_api_json",
+                               {"url": f"{stub_url}/apiauth", "token": "ym-key-1234567890"}))
+        assert d["ok"] is True and d["data"]["auth"] == "Bearer ym-key-1234567890"
+        # кэш: второй вызов сеть не бьёт, токен не в кэш-ключе
+        d2 = result_data(m.call("fetch_api_json",
+                                {"url": f"{stub_url}/apiauth", "token": "ym-key-1234567890"}, rid=4))
+        assert d2["ok"] is True and d2.get("cached") is True
+        assert _Stub.hits.get("/apiauth", 0) == 1
+        # robots НЕ проверяется для авторизованного API: /privatejson
+        # покрыт Disallow:/private, но вызов проходит
+        d3 = result_data(m.call("fetch_api_json",
+                                {"url": f"{stub_url}/privatejson", "token": "t"}, rid=5))
+        assert d3["ok"] is True and d3["data"]["api"] is True
+    finally:
+        m.close()
+
+
+def test_fetch_api_json_401_is_data_and_ssrf_still_gated(stub_url):
+    m = McpProc(_env_with_private())
+    try:
+        m.initialize()
+        d = result_data(m.call("fetch_api_json",
+                               {"url": f"{stub_url}/api401", "token": "bad"}))
+        assert d["ok"] is False and d["kind"] == "http_401"
+        assert "unauthorized" not in json.dumps(d)  # тело ответа не отдаётся
+    finally:
+        m.close()
+    # SSRF-гейт остаётся: приватный адрес без лазейки запрещён
+    env = {k: v for k, v in os.environ.items()
+           if k != "FOSVED_MCP_WEB_ALLOW_PRIVATE"}
+    env["WEB_MIN_INTERVAL"] = "0"
+    m2 = McpProc(env)
+    try:
+        m2.initialize()
+        d2 = result_data(m2.call("fetch_api_json",
+                                 {"url": f"{stub_url}/apiauth", "token": "t"}, rid=4))
+        assert d2["ok"] is False and d2["kind"] == "ssrf"
+    finally:
+        m2.close()
 
 
 def test_robots_disallow_is_refused(stub_url):

@@ -1708,6 +1708,8 @@ CALL_PYTHON_ALLOWED = {
     "forge_secrets": {"set", "get"},
     # FORGE #221: детерминированные источники ЛЗ (arXiv/HN/GitHub) в общем пути /lz
     "lz_sources": {"lz_api_scan"},
+    # Наряд #336: реальные объявления av.by для Эксперта (НЕ Закупки)
+    "avby_collector": {"search_avby"},
     # Data processing
     "json": {"dumps", "loads"},
     "statistics": {"mean", "median", "stdev", "variance"},
