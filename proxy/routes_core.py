@@ -7,6 +7,7 @@ import re
 import json
 import time
 import uuid
+import base64
 import hashlib
 import html as html_lib
 from datetime import datetime, timedelta, timezone
@@ -699,6 +700,31 @@ def office_dashboard():
     html += '</table></div></body></html>'
     return Response(html, mimetype="text/html")
 
+
+
+@app.post("/download-telegram-file")
+def download_telegram_file():
+    """Download a Telegram file by file_path, return base64 (naryad #365).
+
+    Native PDF path in app.mlog calls this with {file_path} after
+    /getFile and expects {data: <base64>}. Same protection model as the
+    neighbouring /extract-document: no Bearer (mlog http_post() cannot
+    set headers), loopback-only in production (reverse_proxy does not
+    forward it; firewall).
+    """
+    d = request.get_json(force=True)
+    file_path = d.get("file_path", "")
+    if not file_path:
+        return jsonify({"status": "error", "message": "file_path is required"}), 400
+    blob = _tg_download_file(file_path)
+    if not blob:
+        _log_audit("telegram_file_download_error", {"file_path": file_path[:120]})
+        return jsonify({"status": "error",
+                        "message": "не удалось скачать файл из Telegram"}), 200
+    _log_audit("telegram_file_downloaded", {"file_path": file_path[:120],
+                                            "bytes": len(blob)})
+    return jsonify({"status": "ok",
+                    "data": base64.b64encode(blob).decode("ascii")})
 
 
 @app.post("/extract-document")

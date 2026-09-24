@@ -3242,12 +3242,13 @@ pattern WebhookBody() -> String {
           // Скачиваем binary через proxy (base64-кодированный)
           let dl_body = json_encode({file_path: file_path})
           let dl_result = TryVal(try http_post("http://127.0.0.1:4000/download-telegram-file", dl_body, "application/json", 120.0))
-          if redact(to_string(dl_result), "hash_only") == redact("()", "hash_only") then {
-            let _ = SendTelegramReply(chat_id, "Ошибка: скачивание файла не удалось.")
-            return respond("200 ok")
+          // НАРЯД #365 A.2: неудача скачивания — не выход, а запасной путь
+          // /extract-document. «Не удалось» — только если отказал и он.
+          let pdf_b64 = ""
+          if redact(to_string(dl_result), "hash_only") != redact("()", "hash_only") then {
+            let dl_parsed = parse_json(dl_result)
+            pdf_b64 = redact(to_string(json_get(dl_parsed, "data", "")), "all")
           }
-          let dl_parsed = parse_json(dl_result)
-          let pdf_b64 = redact(to_string(json_get(dl_parsed, "data", "")), "all")
           if pdf_b64 == "" then {
             // Fallback: используем старый extract-document
             let _ = SendTelegramReply(chat_id, "PDF получен. Извлекаю текст через прокси...")
