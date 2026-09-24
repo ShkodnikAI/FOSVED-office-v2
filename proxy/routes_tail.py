@@ -352,6 +352,106 @@ def schedules_bootstrap_proxy():
         return jsonify({"error": "upstream unavailable"}), 502
 
 
+# ── FO-053 (#325): санкционированный эндпоинт счётчиков активности ──────
+# Фид owner_activity для предиктивной эксплуатации (FO-052, office#323):
+# почасовые счётчики событий офиса за окно — ТОЛЬКО числа, никакого
+# содержимого сообщений, никаких chat_id/текстов (privacy by design,
+# гвард ниже; контент не читается, не логируется, не покидает прод).
+#
+# Auth: отдельный токен ACTIVITY_FEED_TOKEN (НЕ переиспользует CRON_SECRET),
+# сравнение decoded-OR-raw по паттерну cron_secret_ok() (урок №425).
+# ОТЛИЧИЕ от cron-паттерна, громко: оба пустых = ОТКАЗ (fail-closed) —
+# счётчики приватности не отдаются «случайно незаданным» токеном.
+_ACTIVITY_ROW_FIELDS = {"hour", "incoming_owner", "outgoing_office",
+                        "dept_llm_calls", "cron_slots"}
+
+
+def activity_token_ok() -> bool:
+    expected = os.environ.get("ACTIVITY_FEED_TOKEN", "")
+    if not expected:
+        return False  # fail-closed: токен не задан — эндпоинт закрыт
+    provided = request.args.get("token", "")
+    if provided == expected:
+        return True
+    # сырая выжимка token= из query_string без '+'->space (урок №425)
+    for part in request.query_string.decode("utf-8", "replace").split("&"):
+        if part.startswith("token=") and part[len("token="):] == expected:
+            return True
+    return False
+
+
+def assert_activity_payload_clean(payload):
+    """Privacy-гвард (FO-053): схема ответа — allowlist. Лишнее поле
+    (текст, chat_id, сниппет...) в любом ряду → ValueError, ответ НЕ
+    уходит. Гвард вызывается самим роутом (fail-closed), тесты гоняют
+    его мутациями."""
+    head_extra = (set(payload.keys())
+                  - {"ok", "window_hours", "generated_at", "hours"})
+    if head_extra:
+        raise ValueError(f"payload fields outside allowlist: {sorted(head_extra)}")
+    for row in payload.get("hours") or []:
+        extra = set(row.keys()) - _ACTIVITY_ROW_FIELDS
+        if extra:
+            raise ValueError(f"activity row fields outside allowlist: {sorted(extra)}")
+        for k, v in row.items():
+            if k == "hour":
+                if not isinstance(v, str) or len(v) < 13:
+                    raise ValueError("hour is not a timestamp string")
+            elif v is not None and not isinstance(v, int):
+                raise ValueError(f"field {k} is not an integer counter")
+
+
+@app.get("/metrics/activity")
+def metrics_activity():
+    if not activity_token_ok():
+        return jsonify({"error": "403 Forbidden"}), 403
+    try:
+        window_hours = int(request.args.get("hours", "168"))
+    except ValueError:
+        return jsonify({"error": "hours must be an integer"}), 400
+    window_hours = max(1, min(window_hours, 24 * 90))  # до 90 суток
+    from proxy.core import _query
+    since = f"datetime('now', '-{window_hours} hours')"
+    counters = {}
+    # входящие владельца / исходящие ответы (Dialog v2, зеркалится из mlog)
+    for row in (_query(f"SELECT strftime('%Y-%m-%dT%H:00:00', created_at) AS h, "
+                       f"SUM(role='user') AS inc, SUM(role='assistant') AS outg "
+                       f"FROM dialog_message WHERE created_at >= {since} "
+                       f"GROUP BY h", fetch=True) or []):
+        c = counters.setdefault(row["h"], {})
+        c["incoming_owner"] = int(row["inc"] or 0)
+        c["outgoing_office"] = int(row["outg"] or 0)
+    # вызовы отделов (LLM-активность — независимый сигнал жизни)
+    for row in (_query(f"SELECT strftime('%Y-%m-%dT%H:00:00', timestamp) AS h, "
+                       f"COUNT(*) AS n FROM audit_log "
+                       f"WHERE action='dept_query' AND timestamp >= {since} "
+                       f"GROUP BY h", fetch=True) or []):
+        counters.setdefault(row["h"], {})["dept_llm_calls"] = int(row["n"])
+    # исполненные слоты (cron-хендлеры пишут audit_log сами)
+    for row in (_query(f"SELECT strftime('%Y-%m-%dT%H:00:00', timestamp) AS h, "
+                       f"COUNT(*) AS n FROM audit_log "
+                       f"WHERE action LIKE 'cron_%' AND timestamp >= {since} "
+                       f"GROUP BY h", fetch=True) or []):
+        counters.setdefault(row["h"], {})["cron_slots"] = int(row["n"])
+    hours = []
+    for h in sorted(counters):
+        c = counters[h]
+        hours.append({"hour": h,
+                      "incoming_owner": c.get("incoming_owner", 0),
+                      "outgoing_office": c.get("outgoing_office", 0),
+                      "dept_llm_calls": c.get("dept_llm_calls", 0),
+                      "cron_slots": c.get("cron_slots", 0)})
+    payload = {"ok": True, "window_hours": window_hours,
+               "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "hours": hours}
+    try:
+        assert_activity_payload_clean(payload)
+    except ValueError as e:
+        log.error("activity feed privacy guard: %s", e)
+        return jsonify({"error": "privacy guard"}), 500
+    return jsonify(payload)
+
+
 # ── Cron endpoint ──
 @app.route("/cron/collect-news", methods=["GET"])
 def cron_collect_news():
