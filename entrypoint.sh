@@ -2,7 +2,7 @@
 echo "=== Fosved Office v2 Starting ==="
 export DATABASE_URL="${DATABASE_URL:-sqlite:${DATABASE_PATH:-./data}/fosved.db}"
 
-# Metalogos 0.19.0: VERSION file written from RENDER_GIT_COMMIT for /version route.
+# Metalogos: VERSION file written from RENDER_GIT_COMMIT for /version route.
 echo "${RENDER_GIT_COMMIT:-unknown}" > VERSION
 echo "--- VERSION file updated: $(cat VERSION) ---"
 
@@ -85,25 +85,24 @@ echo "--- FORGE: repos dir=${FORGE_REPOS_DIR}/forge/repos, scratch swept ---"
 # FO-014: песочница документов filesystem-MCP + каталог subprocess-аудита ядра
 # Наряд №395 (PR #191): бинарь и входной файл env-изированы для стейджинга.
 # Стейджинг VM-пилота (FO-050): MLOG_BIN=./bin/mlog-020, MLOG_ENTRY=dogfood_staging.mlog
-#   (или ./bin/mlog-021 + METALOGOS_SERVE_BACKEND=interpreter — наряд №419).
 #
-# Наряд №419 (Metalogos gh#572): guard-переход на 0.21.0.
-# Прод-кандидат — mlog-021; перед стартом идёт ПРОБА: "$MLOG_CANDIDATE" audit
-# $MLOG_ENTRY. 0.21-аудит Category A блокирует бут офиса (долг №327
-# UNTRUSTED_DECISION ~430 сайтов диалогового контура + 33 деструктивных сайта
-# без грант-контура — ценз в отчёте №419) ⇒ проба громко откатывает прод на
-# легаси-бинарь. Переход произойдёт АВТОМАТИЧЕСКИ той же пробой, когда
-# миграционный наряд (объём №395) прочистит аудит. Явный MLOG_BIN из env
-# пробу не отменяет, но откат не трогает (оператор сказал — так и едем).
-MLOG_CANDIDATE="${MLOG_BIN:-./bin/mlog-021}"
-MLOG_LEGACY="./bin/mlog"
+# Наряд №349 (2026-09-24): боевой бинарь — bin/mlog = 0.22.0 (переход 0.19→0.22,
+# ADR-0005). Guard-проба №419 сохранена: перед стартом "$MLOG_CANDIDATE" audit
+# аугментированной копии (мост №421); 0.22-аудит на app.mlog без моста — те же
+# 13 Category A долга №327 (private-db/egress), с мостом — чисто (проверено).
+# Явный MLOG_BIN из env пробу не отменяет, но откат не трогает.
+# Фолбэк — mlog-020 (0.20.0): последний бинарь с корректным try-контрактом И
+# lax-аудитом (грузит сырой app.mlog без моста). mlog-021 как фолбэк невозможен:
+# сырой app.mlog на его бут-аудите красный. 0.19 выведен из ротации.
+MLOG_CANDIDATE="${MLOG_BIN:-./bin/mlog}"
+MLOG_LEGACY="./bin/mlog-020"
 MLOG_ENTRY="${MLOG_ENTRY:-app.mlog}"
 MLOG_BIN="$MLOG_CANDIDATE"
 # №421: проба принимает exit 0 (чисто) и exit 2 (только предупреждения —
 # известный ложняк эвристики SECRETS: "sk_" совпадает внутри "task_id"/
 # "risk_level", апстрим-баг word-boundary; ошибок Category A нет).
-# Exit 1 (ошибки Category A) по-прежнему блокирует бут на 0.21.
-# №424-ценз и гейты — ОБЩИЕ для обеих ветвей (0.21 и 0.19-фолбэк).
+# Exit 1 (ошибки Category A) по-прежнему блокирует бут на кандидате.
+# №424-ценз и гейты — ОБЩИЕ для обеих ветвей (кандидат и фолбэк).
 # №427 (инцидент 2026-09-24): на фолбэк-пути allowlist не экспортировался —
 # env() в хендлерах 0.19 denied → /version 500 ENV_NOT_PERMITTED.
 METALOGOS_ENV_ALLOWLIST_CENSUS="CEREBRAS_API_KEY,CRON_SECRET,DATABASE_URL,DEEPSEEK_API_KEY,FNP_CUSTOMER,FNP_GOAL,FNP_NAME,FNP_SLUG,FNP_TYPE,FORGE_GITHUB_OWNER,FORGE_REPOS_DIR,FORGE_RUN_ENABLED,FORGE_RUN_VLIMIT_KB,GROQ_API_KEY,INTERNAL_API_TOKEN,KIMI_API_KEY,LOCKDOWN_PASSWORD,METALOGOS_EXEC_TIMEOUT_SECS,OWNER_TELEGRAM_ID,RENDER_URL,SAKANA_API_KEY,SHOP_ENABLED,TAVILY_API_KEY,TELEGRAM_ARCHIVE_CHANNEL_ID,TELEGRAM_BOT_TOKEN,ZAI_API_KEY"
@@ -122,28 +121,29 @@ done
 # END №424 env-allowlist guard
 echo "--- env-allowlist effective (names only): ${METALOGOS_ENV_ALLOWLIST}"
 export METALOGOS_SERVE_ALLOW_EXEC="${METALOGOS_SERVE_ALLOW_EXEC:-1}"
-# №422: SSRF-гвард 0.21 по умолчанию режет http_get/http_post на 127.0.0.1 —
+# №422: SSRF-гвард (с 0.21) по умолчанию режет http_get/http_post на 127.0.0.1 —
 # а это ШТАТНЫЙ внутренний канал офиса (mlog -> свой LLM-прокси на :4000,
 # ~40 сайтов вызовов: /ask, news, tts, /cron/*-цепочки). Без флага офис на
 # 0.21 отвечает только на команды без LLM — репродукция в отчёте №422.
 # Публичная поверхность не меняется: наружу смотрит только reverse-прокси.
 export METALOGOS_HTTP_ALLOW_PRIVATE="${METALOGOS_HTTP_ALLOW_PRIVATE:-1}"
-# ADR-0171 дефолт — VM, но VM-хендлеры 0.21 не видят db-соединение (db_decl):
+# ADR-0171 дефолт — VM, но VM-хендлеры 0.21+ не видят db-соединение (db_decl):
 # office-путь держим на интерпретаторе до починки апстрима (находка №419).
+# №349/B.1: пин ЯВНЫЙ и здесь, и в render.yaml — VM-дефолт 0.21+ не подхватывается.
 export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-interpreter}"
 
 # №427 (инцидент 2026-09-24, продолжение): один app.mlog на два бинаря
 # невозможен — мост `profile legacy { egress: permissive_with_audit }`
-# (№421) делает 0.21-пробу зелёной (egress-clearance → Info), но 0.19 эту
-# строку НЕ парсит (инцидент #333: boot break). #333 удалил строку →
-# 0.21-проба снова красная (10×SINK_CLEARANCE) → прод молча откатился на
-# 0.19 с закрытым env и битыми /health /version. Решение: пробуем и
-# сервервим АУГМЕНТИРОВАННУЮ копию (мост добавляется скриптом) на 0.21;
-# фолбэк 0.19 получает оригинал без моста.
+# (№421) делает пробу кандидата зелёной, но 0.19 эту строку НЕ парсит
+# (инцидент #333: boot break). История #333/#427 привела к №349: кандидат
+# теперь 0.22.0 в bin/mlog. Механика сохранена: пробуем и сервервим
+# АУГМЕНТИРОВАННУЮ копию (мост добавляется скриптом) на кандидате;
+# фолбэк получает оригинал без моста (0.20 мост тоже парсит, но сырой
+# файл проще и достаточно).
 MLOG_SERVE_FILE="$MLOG_ENTRY"
 MLOG_PROBE_RC=9
 if [ -x "$MLOG_CANDIDATE" ]; then
-  MLOG_AUG="${TMPDIR:-/tmp}/app_serve_021.mlog"
+  MLOG_AUG="${TMPDIR:-/tmp}/app_serve_candidate.mlog"
   if grep -q "^profile legacy" "$MLOG_ENTRY"; then
     cp "$MLOG_ENTRY" "$MLOG_AUG"
   else
@@ -155,14 +155,14 @@ if [ -x "$MLOG_CANDIDATE" ]; then
   fi
 fi
 if [ "$MLOG_PROBE_RC" = "0" ] || [ "$MLOG_PROBE_RC" = "2" ]; then
-  echo "--- Metalogos: 0.21 candidate PASSED the Category A audit probe — serving on $MLOG_CANDIDATE (file: $MLOG_SERVE_FILE)"
+  echo "--- Metalogos: candidate PASSED the Category A audit probe — serving on $MLOG_CANDIDATE (file: $MLOG_SERVE_FILE)"
 else
   if [ -x "$MLOG_CANDIDATE" ]; then
-    echo "!!! Metalogos №419: 0.21 candidate ($MLOG_CANDIDATE) FAILED the audit probe — Category A blocks the office boot (№327 debt, см. отчёт №419)"
-    echo "!!! GRADUAL CUTOVER: falling back to legacy $MLOG_LEGACY (0.19). External cron-job.org keeps firing /cron/* routes; native schedules activate after the migration naryad."
+    echo "!!! Metalogos №419/№349: candidate ($MLOG_CANDIDATE) FAILED the audit probe — Category A blocks the office boot (№327 debt, см. отчёт №419)"
+    echo "!!! GRADUAL CUTOVER: falling back to legacy $MLOG_LEGACY (0.20.0). External cron-job.org keeps firing /cron/* routes; native schedules activate after the migration naryad."
     "$MLOG_CANDIDATE" audit "$MLOG_ENTRY" 2>&1 | grep -m3 "ERROR" || true
   else
-    echo "!!! Metalogos №419: candidate $MLOG_CANDIDATE not found — falling back to legacy $MLOG_LEGACY"
+    echo "!!! Metalogos №419/№349: candidate $MLOG_CANDIDATE not found — falling back to legacy $MLOG_LEGACY"
   fi
   if [ -n "${MLOG_BIN_FORCE:-}" ]; then
     MLOG_BIN="$MLOG_CANDIDATE"
@@ -188,10 +188,10 @@ for i in {1..10}; do
   sleep 2
 done
 
-# ── Наряд №419: бутстрап реестра заданий (только на 0.21-пути) ─────────────
+# ── Наряд №419: бутстрап реестра заданий (только на пути кандидата) ────────
 # Реестр dept/schedules.mlog → нативный стор cron (идемпотентно по target).
 # На легаси-пути бутстрап не запускается: 4-аргументный cron_add/TZ — контракт
-# 0.21; внешние cron-job.org продолжают дёргать /cron/*-роуты как раньше.
+# 0.21+; внешние cron-job.org продолжают дёргать /cron/*-роуты как раньше.
 if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
   echo "--- №419: bootstrapping native schedules (dept/schedules.mlog -> cron store)"
   # №422: на холодном старте 0.21 serve может не успеть ответить на первый запрос
