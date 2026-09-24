@@ -114,9 +114,15 @@ def _shop_ddl():
 
 @pytest.fixture(autouse=True)
 def shop_db():
-    # DB-файл офиса = DATABASE_PATH/fosved.db (proxy/core.py: DB_FILE)
+    # DB-файл офиса = DATABASE_PATH/fosved.db (proxy/core.py: DB_FILE).
+    # Пересоздаём shop_* с ПОЛНОЙ живой схемой: другие тест-модули (UI9)
+    # в том же процессе создают урезанные версии этих таблиц — DROP+CREATE
+    # гарантирует честную схему независимо от порядка импортов.
     db_file = os.path.join(os.environ["DATABASE_PATH"], "fosved.db")
     conn = sqlite3.connect(db_file)
+    for t in ("shop_products", "shop_sellers", "shop_offers",
+              "shop_price_history", "shop_watches", "shop_dossiers"):
+        conn.execute(f"DROP TABLE IF EXISTS {t}")
     for stmt in _shop_ddl():
         try:
             conn.execute(stmt)
