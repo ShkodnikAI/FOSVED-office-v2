@@ -27,6 +27,8 @@
     точечные /rates/RUB?paramMode=1 отдают 404 — проверено) → резерв
     open.er-api.com (кросс через USD) → устаревший кэш → аварийные
     константы; отказ egress не роняет сбор (FO-007: лог, не молчание);
+  - WB фото (#329): image_url строится по формуле basket-{N} с живым
+    HEAD-перебором шардов (подробности — у wb_basket_for_vol);
   - catalog.api.onliner.by → жив, но слаги категорий не подобраны из
     песочницы: категория — env SHOP_ONLINER_CATEGORY; парсер оборонительный
     (форма по памяти, kind:"api_form_mismatch" при расхождении);
@@ -250,6 +252,93 @@ def _audit(platform, purpose, status):
         log.warning("audit_log недоступен: %s", e)
 
 
+# ── WB: фото товара (#329) — basket-хост по vol-диапазону ────────────────
+# Формула (подтверждена живыми HEAD-пробами 2026-09-24, наряд #329):
+#   https://basket-{N}.wbbasket.ru/vol{vol}/part{part}/{id}/images/big/1.webp
+# где vol=id//100000, part=id//1000, а basket-{N} НЕ выводится из id —
+# номер шарда WB расширяет по мере роста (живая проба: id 546061442 →
+# basket-28; id 1274546138 → нет ответа ни на basket-01..40 — шард ещё
+# шире либо фото нет). Поэтому перебор (вариант A.2 наряда, рекомендация
+# аудита — «надёжнее в долгосрочной перспективе»): HEAD по basket-01..40,
+# первый 200 — кэшируем vol→basket (hit 30 дней, miss 12 часов, чтобы
+# новые шарды подхватывались). Транспорт — probe_url MCP-web (#329:
+# статус без чтения тела, та же дисциплина SSRF/robots/rate-limit).
+WB_BASKET_CACHE_KEY = "shop_wb_basket_map"
+WB_BASKET_HIT_TTL = 30 * 24 * 3600
+WB_BASKET_MISS_TTL = 12 * 3600
+
+
+def _wb_basket_probe(basket, vol, part, pid):
+    """HEAD-проба одной ссылки; True только на HTTP 200."""
+    host = f"basket-{basket:02d}" if basket < 10 else f"basket-{basket}"
+    url = (f"https://{host}.wbbasket.ru/vol{vol}/part{part}/{pid}"
+           "/images/big/1.webp")
+    r = FETCH_JSON_FN("probe_url", {"url": url})
+    if not r.get("ok"):
+        return False
+    try:
+        return int(r.get("status") or 0) == 200
+    except (TypeError, ValueError):
+        return False
+
+
+def _wb_basket_map_read():
+    raw = _setting_get(WB_BASKET_CACHE_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _wb_basket_map_write(mapping):
+    _setting_set(WB_BASKET_CACHE_KEY, json.dumps(mapping, ensure_ascii=False))
+
+
+def wb_basket_for_vol(vol, pid=None):
+    """Номер basket-хоста для vol-диапазона (None — не найден в диапазоне).
+
+    Кэш в system_settings: {"vol:{vol}": {"basket": N|None, "ts": epoch}}.
+    Проба конкретного pid нужна, потому что 200 зависит и от наличия фото
+    у товара — но false-negative кэшируется всего на 12ч (miss), так что
+    появление фото/нового шарда подхватится при следующем сборе.
+    """
+    mapping = _wb_basket_map_read() or {}
+    entry = mapping.get(f"vol:{vol}")
+    now = time.time()
+    if entry:
+        ttl = WB_BASKET_HIT_TTL if entry.get("basket") is not None else WB_BASKET_MISS_TTL
+        if now - (entry.get("ts") or 0) < ttl:
+            return entry.get("basket")
+    found = None
+    if pid is not None:
+        part = int(pid) // 1000
+        for basket in range(1, 41):
+            if _wb_basket_probe(basket, vol, part, int(pid)):
+                found = basket
+                break
+    mapping[f"vol:{vol}"] = {"basket": found, "ts": now}
+    _wb_basket_map_write(mapping)
+    return found
+
+
+def wb_image_url(pid):
+    """Ссылка на фото WB для id товара (None — шарди не подобран)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    vol, part = pid // 100000, pid // 1000
+    basket = wb_basket_for_vol(vol, pid)
+    if basket is None:
+        return None
+    host = f"basket-{basket:02d}" if basket < 10 else f"basket-{basket}"
+    return (f"https://{host}.wbbasket.ru/vol{vol}/part{part}/{pid}"
+            "/images/big/1.webp")
+
+
 def _num(x):
     """Число из '129.00' / 129 / None. Нечисловое → None (без исключений)."""
     if x is None:
@@ -318,6 +407,7 @@ def collect_wb(query, page=1, rates=None):
             "seller_rating": _num(p.get("supplierRating")),
             "seller_deals": None,
             "seller_official": None,
+            "image_url": wb_image_url(pid),
         })
     return {"ok": True, "platform": "wb", "url": url, "offers": offers}
 
@@ -488,18 +578,20 @@ def refresh_product(product_id, platform, query, **kw):
             _query(
                 "UPDATE shop_offers SET url=?, price_byn=?, old_price_byn=?, "
                 "in_stock=?, installment_ok=?, rating=?, reviews_count=?, "
-                "seller_id=?, fetched_at=datetime('now') WHERE id=?",
+                "seller_id=?, image_url=COALESCE(?, image_url), "
+                "fetched_at=datetime('now') WHERE id=?",
                 (o["url"], o.get("price_byn"), o.get("old_price_byn"),
                  o.get("in_stock"), o.get("installment_ok"), o.get("rating"),
-                 o.get("reviews_count"), sid, oid))
+                 o.get("reviews_count"), sid, o.get("image_url"), oid))
         else:
             _query(
                 "INSERT INTO shop_offers (product_id, platform, platform_code, url, "
                 "price_byn, old_price_byn, in_stock, installment_ok, rating, "
-                "reviews_count, seller_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "reviews_count, seller_id, image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (product_id, platform, o["platform_code"], o["url"],
                  o.get("price_byn"), o.get("old_price_byn"), o.get("in_stock"),
-                 o.get("installment_ok"), o.get("rating"), o.get("reviews_count"), sid))
+                 o.get("installment_ok"), o.get("rating"), o.get("reviews_count"), sid,
+                 o.get("image_url")))
             back = _query(
                 "SELECT id FROM shop_offers WHERE platform=? AND platform_code=? "
                 "ORDER BY id DESC LIMIT 1",

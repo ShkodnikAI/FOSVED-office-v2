@@ -80,11 +80,15 @@ ONLINER_SNAPSHOT = {
 
 # ── тестовая БД: DDL прямо из app.mlog ──────────────────────────────────
 def _shop_ddl():
+    """CREATE + идемпотентные ALTER shop_* (db_execute И
+    db_execute_with_grant — паттерн #329), как исполняет офис."""
     ddl = (REPO_ROOT / "app.mlog").read_text(encoding="utf-8")
-    return [s for s in
-            __import__("re").findall(
-                r'db_execute\("(CREATE (?:TABLE|INDEX)[^"]+)"\)', ddl)
-            if "shop_" in s]
+    import re
+    stmts = re.findall(r'db_execute\("(CREATE (?:TABLE|INDEX)[^"]+)"\)', ddl)
+    stmts += re.findall(r'try db_execute\("(ALTER TABLE shop_[^"]+)"\)', ddl)
+    stmts += re.findall(r'try db_execute_with_grant\(grant_issue\([^)]*\), '
+                        r'"(ALTER TABLE shop_[^"]+)"\)', ddl)
+    return [s for s in stmts if "shop_" in s]
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +97,11 @@ def shop_db():
     db_file = os.path.join(os.environ["DATABASE_PATH"], "fosved.db")
     conn = sqlite3.connect(db_file)
     for stmt in _shop_ddl():
-        conn.execute(stmt)
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e):
+                raise  # CREATE уже несёт колонку — ALTER-дубль легален
     conn.commit()
     conn.close()
     _query("DELETE FROM shop_price_history")
@@ -109,9 +117,13 @@ def shop_db():
 
 @pytest.fixture(autouse=True)
 def stub_transport(monkeypatch):
-    """Транспорт подменён: URL → снапшот. Никакой сети."""
+    """Транспорт подменён: URL → снапшот. Никакой сети.
+    probe_url (#329) по умолчанию — честная 404-проба (как живой инструмент).
+    """
     def fake_fetch(tool, args):
         url = args.get("url", "")
+        if tool == "probe_url":
+            return {"ok": True, "url": url, "status": 404, "method": "HEAD"}
         if "search.wb.ru" in url:
             return {"ok": True, "url": url, "status": 200, "data": WB_SNAPSHOT}
         if "ozon.by" in url:
@@ -122,6 +134,16 @@ def stub_transport(monkeypatch):
             return {"ok": True, "url": url, "status": 200, "data": ONLINER_SNAPSHOT}
         return {"ok": False, "error": "неожиданный URL", "kind": "test"}
     monkeypatch.setattr(sc, "FETCH_JSON_FN", fake_fetch)
+
+
+@pytest.fixture(autouse=True)
+def basket_kv():
+    """kv для карты basket-шардов (#329): таблица общая с mlog, кэш чистый."""
+    _query("CREATE TABLE IF NOT EXISTS system_settings "
+           "(key TEXT PRIMARY KEY, value TEXT)")
+    _query("DELETE FROM system_settings WHERE key='shop_wb_basket_map'")
+    yield
+    _query("DELETE FROM system_settings WHERE key='shop_wb_basket_map'")
 
 
 @pytest.fixture(autouse=True)
@@ -246,6 +268,89 @@ def test_onliner_without_category_is_config_missing(monkeypatch):
 def test_21vek_is_honest_carrier():
     res = sc.collect_21vek("x")
     assert res["ok"] is False and res["kind"] == "not_implemented_live"
+
+
+# ── WB basket-шарды и image_url (#329) ──────────────────────────────────
+def _probe_stub(monkeypatch, hit_basket=None):
+    """Транспорт-стаб: probe_url даёт 200 только на hit_basket (счётчик
+    проб возвращается), fetch_json — живой WB-снапшот."""
+    calls = {"n": 0}
+
+    def fake(tool, args):
+        url = args.get("url", "")
+        if tool == "probe_url":
+            calls["n"] += 1
+            m = __import__("re").search(r"basket-(\d+)\.wbbasket", url)
+            status = 200 if (hit_basket is not None
+                             and m and int(m.group(1)) == hit_basket) else 404
+            return {"ok": True, "url": url, "status": status, "method": "HEAD"}
+        if "search.wb.ru" in url:
+            return {"ok": True, "url": url, "status": 200, "data": WB_SNAPSHOT}
+        return {"ok": False, "error": "неожиданный URL", "kind": "test"}
+
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
+    return calls
+
+
+def test_wb_basket_for_vol_probes_and_caches(monkeypatch):
+    calls = _probe_stub(monkeypatch, hit_basket=28)
+    assert sc.wb_basket_for_vol(5460, pid=546061442) == 28
+    assert calls["n"] == 28  # перебор 01..28, первый 200 — стоп
+    # второй вызов — из кэша, сеть не бьётся
+    assert sc.wb_basket_for_vol(5460, pid=546061442) == 28
+    assert calls["n"] == 28
+    raw = _query("SELECT value FROM system_settings WHERE key='shop_wb_basket_map'",
+                 fetch=True)[0]["value"]
+    assert "vol:5460" in raw and json.loads(raw)["vol:5460"]["basket"] == 28
+
+
+def test_wb_basket_for_vol_miss_is_honest_and_cached(monkeypatch):
+    calls = _probe_stub(monkeypatch, hit_basket=None)  # все 404
+    assert sc.wb_basket_for_vol(12745, pid=1274546138) is None
+    assert calls["n"] == 40  # честный перебор всего диапазона 01..40
+    assert sc.wb_basket_for_vol(12745, pid=1274546138) is None
+    assert calls["n"] == 40  # miss тоже кэшируется — шторма проб нет
+
+
+def test_wb_image_url_formula(monkeypatch):
+    _probe_stub(monkeypatch, hit_basket=28)
+    u = sc.wb_image_url(546061442)
+    assert u == ("https://basket-28.wbbasket.ru/vol5460/part546061/"
+                 "546061442/images/big/1.webp")
+    assert sc.wb_image_url(None) is None and sc.wb_image_url("мусор") is None
+
+
+def test_wb_image_url_without_basket_is_none(monkeypatch):
+    _probe_stub(monkeypatch, hit_basket=None)
+    assert sc.wb_image_url(1274546138) is None
+
+
+def test_collect_wb_offers_carry_image_url(monkeypatch):
+    _probe_stub(monkeypatch, hit_basket=28)
+    res = sc.collect_wb("кофемолка", rates={"RUB": 0.034})
+    assert res["ok"] is True
+    for o in res["offers"]:
+        vol = int(o["platform_code"]) // 100000
+        assert o["image_url"].startswith(f"https://basket-28.wbbasket.ru/vol{vol}/")
+        assert o["image_url"].endswith("/images/big/1.webp")
+
+
+def test_refresh_product_persists_image_url(monkeypatch):
+    _probe_stub(monkeypatch, hit_basket=28)
+    _query("INSERT INTO shop_products (title, query_text) VALUES ('т', 'кф')")
+    pid = _query("SELECT id FROM shop_products ORDER BY id DESC LIMIT 1",
+                 fetch=True)[0]["id"]
+    res = sc.refresh_product(pid, "wb", "кофемолка")
+    assert res["ok"] is True and res["offers"] == 2
+    row = _query("SELECT image_url FROM shop_offers WHERE product_id=? "
+                 "ORDER BY id LIMIT 1", (pid,), fetch=True)
+    assert row[0]["image_url"] and "basket-28" in row[0]["image_url"]
+    # повторный refresh (existing-ветка UPDATE) не теряет image_url
+    res2 = sc.refresh_product(pid, "wb", "кофемолка")
+    assert res2["ok"] is True
+    row2 = _query("SELECT image_url FROM shop_offers WHERE product_id=? "
+                  "ORDER BY id LIMIT 1", (pid,), fetch=True)
+    assert row2[0]["image_url"] == row[0]["image_url"]
 
 
 def test_unknown_platform():

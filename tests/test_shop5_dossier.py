@@ -45,11 +45,14 @@ KUFAR_URL = "https://www.kufar.by/item/1001?utm_medium=x"
 
 
 def _shop_ddl():
-    """CREATE + идемпотентные ALTER shop_* — ровно как исполняет офис."""
+    """CREATE + идемпотентные ALTER shop_* — ровно как исполняет офис
+    (ALTER через db_execute И через db_execute_with_grant, паттерн #329)."""
     ddl = (REPO_ROOT / "app.mlog").read_text(encoding="utf-8")
     import re
     creates = re.findall(r'db_execute\("(CREATE (?:TABLE|INDEX)[^"]+)"\)', ddl)
     alters = re.findall(r'try db_execute\("(ALTER TABLE shop_[^"]+)"\)', ddl)
+    alters += re.findall(r'try db_execute_with_grant\(grant_issue\([^)]*\), '
+                         r'"(ALTER TABLE shop_[^"]+)"\)', ddl)
     return [s for s in creates if "shop_" in s] + alters
 
 
@@ -221,9 +224,51 @@ def test_render_html_full_and_clickable(shop_db):
     assert "Досье: Кофемолка SM-200" in html
     for o in snap["offers"]:
         assert f"<a href=\"{o['url']}\"" in html
-    assert "--paper" in html  # токены «Диспетчерской»
+    assert "--paper" in html  # legacy-алиасы сохранены (паттерн report_css.txt)
     assert "фейк" in html  # честная скидка отмечена
     assert "Как читать" in html
+
+
+# ── наряд #330: токены FORGE-UI-0 вместо «Диспетчерской» ────────────────
+def test_render_html_fosved_tokens_not_dispetcherskaya(shop_db):
+    pid, _ = _seed_product()
+    html = sd.render_html(sd.build_snapshot(pid, save=False))
+    # точные значения из miniapp/index.html через report_css.txt (не изобретены)
+    assert "--bg:#0A0A0C" in html
+    assert "--surface:#151517" in html
+    assert "--red:#E8262E" in html and "--red-light:#FF8A8F" in html
+    assert "--ink:#EDEDED" in html and "--muted:#8A8A8F" in html
+    assert "--green:#7ED957" in html and "--yellow:#F5C93E" in html
+    # старая светлая тема «Диспетчерской» ушла полностью
+    assert "Newsreader" not in html and "IBM Plex Sans" not in html
+    assert "#EFEAE0" not in html and "#FBF8F2" not in html and "#A8321E" not in html
+    # контраст A.2: мелкий красный текст — red-light, не чистый red
+    assert ".status-red{color:var(--red-light)}" in html
+    assert ".status-yellow{color:var(--yellow)}" in html
+    assert "a{color:var(--red-light)" in html
+    # фон и поверхности — тёмные, печать — светлая (приём FORGE-UI-6)
+    assert "body{font-family:var(--f);background:var(--bg);color:var(--ink)" in html
+    assert "@media print" in html and "--bg:#FFFFFF" in html
+
+
+def test_render_html_offers_images_and_honest_placeholder(shop_db):
+    """Наряд #329: <img loading=lazy> для оффера с image_url; без ссылки —
+    явный «нет фото», без битой иконки (onerror → data-URI плейсхолдер)."""
+    pid, oids = _seed_product()
+    _query("UPDATE shop_offers SET image_url=? WHERE id=?",
+           ("https://basket-28.wbbasket.ru/vol4143/part414389/414389121/"
+            "images/big/1.webp", oids[0]))
+    snap = sd.build_snapshot(pid, save=False)
+    html = sd.render_html(snap)
+    assert '<th>Фото</th>' in html
+    assert 'loading="lazy"' in html
+    assert "basket-28.wbbasket.ru" in html
+    assert "onerror=\"this.onerror=null;this.src='" in html
+    assert "data:image/svg+xml" in html  # фолбэк-плейсхолдер
+    # оффер без ссылки — явный плейсхолдер, не пустота
+    assert html.count('class="img-miss"') >= 2  # kufar × 2 без фото
+    # снапшот прокидывает image_url (один срез — все форматы)
+    assert snap["offers"][0]["image_url"].startswith("https://basket-28")
 
 
 def test_dossier_token_stable_and_url(shop_db, monkeypatch):

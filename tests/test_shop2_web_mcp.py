@@ -13,6 +13,8 @@
   7. Кэш: повтор → cached:true, сеть не бьётся; rate-limit: пауза ≥ интервала.
   8. Гварды сборки: render.yaml ALLOWLIST += mcp_servers/web;
      dev.mlog содержит мост McpWebCall/McpWebServerCmd на тот же путь.
+  9. probe_url (#329): HEAD → статус без тела; 404 — это ДАННЫЕ (ok:true,
+     status=404); 405 → фолбэк GET; тело в ответ не попадает.
 """
 import json
 import os
@@ -95,8 +97,28 @@ class _Stub(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="text/html; charset=utf-8"):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        if self.path.startswith("/img"):
+            self.send_header("Content-Length", "99999")
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
+
+    def do_HEAD(self):
+        # #329: img — HEAD-проба картинки; /nohead — сервер без HEAD (405)
+        if self.path.startswith("/img"):
+            self.send_response(200)
+            self.send_header("Content-Type", "image/webp")
+            self.send_header("Content-Length", "99999")
+            self.end_headers()
+        elif self.path.startswith("/nohead"):
+            self.send_response(405)
+            self.end_headers()
+        elif self.path.startswith("/missing"):
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def do_GET(self):
         _Stub.hits[self.path] = _Stub.hits.get(self.path, 0) + 1
@@ -112,6 +134,8 @@ class _Stub(BaseHTTPRequestHandler):
             self._send(404, "nope", "text/plain")
         elif self.path.startswith("/text"):
             self._send(200, "just text, not json", "text/plain")
+        elif self.path.startswith("/nohead"):
+            self._send(200, "tiny body ok", "text/plain")
         else:
             self._send(404, "nf", "text/plain")
 
@@ -166,7 +190,7 @@ def test_initialize_tools_list_unknown_tool():
         m.initialize()
         resp = m.rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         names = [t["name"] for t in resp["result"]["tools"]]
-        assert names == ["fetch_page", "fetch_json"]
+        assert names == ["fetch_page", "fetch_json", "probe_url"]
         assert all("inputSchema" in t for t in resp["result"]["tools"])
         assert m.call("no_such_tool", {}, rid=9)["error"]["code"] == -32602
     finally:
@@ -304,6 +328,56 @@ def test_rate_limit_enforces_min_interval(stub_url):
         result_data(m.call("fetch_json", {"url": f"{stub_url}/api?x=1"}, rid=4))
         elapsed = time.monotonic() - t0
         assert elapsed >= 0.9, "второй запрос к тому же хосту прошёл без паузы"
+    finally:
+        m.close()
+
+
+# ── 9. probe_url (#329) ─────────────────────────────────────────────────
+def test_probe_url_head_status_without_body(stub_url):
+    m = McpProc(_env_with_private())
+    try:
+        m.initialize()
+        d = result_data(m.call("probe_url", {"url": f"{stub_url}/img/1.webp"}))
+        assert d["ok"] is True and d["status"] == 200
+        assert d["method"] == "HEAD"
+        assert d["content_type"] == "image/webp"
+        # тело НИКОГДА не возвращается — контракт инструмента
+        assert "raw" not in d and "content" not in d and "data" not in d
+        # 404 — данные «ссылки нет», а не сбой транспорта
+        d2 = result_data(m.call("probe_url", {"url": f"{stub_url}/missing"}, rid=4))
+        assert d2["ok"] is True and d2["status"] == 404
+    finally:
+        m.close()
+
+
+def test_probe_url_head_rejected_falls_back_to_get(stub_url):
+    m = McpProc(_env_with_private())
+    try:
+        m.initialize()
+        d = result_data(m.call("probe_url", {"url": f"{stub_url}/nohead"}))
+        assert d["ok"] is True and d["status"] == 200 and d["method"] == "GET"
+        assert "raw" not in d
+    finally:
+        m.close()
+
+
+def test_probe_url_respects_robots_and_ssrf(stub_url):
+    m = McpProc(_env_with_private())
+    try:
+        m.initialize()
+        d = result_data(m.call("probe_url", {"url": f"{stub_url}/private"}))
+        assert d["ok"] is False and d["kind"] == "robots_disallow"
+        assert _Stub.hits.get("/private", 0) == 0
+        env = {k: v for k, v in os.environ.items()
+               if k != "FOSVED_MCP_WEB_ALLOW_PRIVATE"}
+        env["WEB_MIN_INTERVAL"] = "0"
+        m2 = McpProc(env)
+        try:
+            m2.initialize()
+            d2 = result_data(m2.call("probe_url", {"url": f"{stub_url}/img"}, rid=4))
+            assert d2["ok"] is False and d2["kind"] == "ssrf"
+        finally:
+            m2.close()
     finally:
         m.close()
 
