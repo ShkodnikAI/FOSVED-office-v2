@@ -1,0 +1,47 @@
+// test_visual356.mlog — office#356: колонки visual_artifacts.
+// Схема verbatim app.mlog:264; INSERT verbatim dept/visual.mlog (5 генераторов,
+// БЕЗ TryVal — ошибка колонки должна падать громко, а не глотаться);
+// SELECT verbatim ListVisuals → вставленное читается по source_type/source_id.
+// Запуск: mkdir -p /tmp/visual-test356 && ./bin/mlog run test_visual356.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/visual-test356/v.db" }
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  // Схема verbatim (app.mlog InitDB, Visual Department)
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS visual_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, source_type TEXT, source_id TEXT, path TEXT, content_hash TEXT, template_version TEXT DEFAULT '1.0', created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("DELETE FROM visual_artifacts")
+
+  // 5 INSERT verbatim dept/visual.mlog после наряда (bare db_execute)
+  let _ = db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["card", "analysis", "11", "visuals/card_analysis_11.pdf"])
+  let _ = db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["compression", "expert", "22", "visuals/compression_expert_22.pdf"])
+  let _ = db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["memorable", "lz", "33", "visuals/infographic_lz_33.pdf"])
+  let _ = db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["reference", "osp", "44", "visuals/ref_osp_44.pdf"])
+  let _ = db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["premium_spec", "analysis", "55", "visuals/premium_spec_analysis_55.json"])
+
+  // SELECT verbatim ListVisuals (без фильтра)
+  let rows = query("SELECT id, type, source_type, source_id, path, created_at FROM visual_artifacts ORDER BY created_at DESC LIMIT 20", [])
+  let a1 = length(rows) == 5.0
+  let out = out + _Mark("a1_five_rows", a1)
+  // SELECT verbatim ListVisuals (с фильтром по type)
+  let rows_f = query("SELECT id, type, source_type, source_id, path, created_at FROM visual_artifacts WHERE type = ? ORDER BY created_at DESC LIMIT 20", ["card"])
+  let a2 = length(rows_f) == 1.0
+  let out = out + _Mark("a2_filter_card", a2)
+  // Поля читаются по новым именам
+  let r = get(rows_f, 0)
+  let a3 = (json_get(r, "source_type", "") == "analysis") and (json_get(r, "source_id", "") == "11")
+  let out = out + _Mark("a3_source_fields", a3)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
