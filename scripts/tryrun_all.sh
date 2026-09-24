@@ -12,9 +12,8 @@ HS=$!
 sleep 0.7
 
 : > $RES/tryrun_matrix.txt
-for BV in 019:/home/z/my-project/FOSVED-office-v2/bin/mlog \
-          021:/home/z/my-project/FOSVED-office-v2/bin/mlog-021 \
-          022:/home/z/my-project/mlog-build-v022/target/release/mlog; do
+for BV in 022:/home/z/my-project/FOSVED-office-v2/bin/mlog \
+          023:/home/z/my-project/mlog-023-candidate; do
   VER="${BV%%:*}"; BIN="${BV#*:}"
   echo "=== binary $VER ===" >> $RES/tryrun_matrix.txt
   for FX in $FIX/*.mlog; do
