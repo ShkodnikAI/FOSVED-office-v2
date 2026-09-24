@@ -93,10 +93,11 @@ def test_mlog_no_early_return_on_download_failure():
     # старый досрочный выход удалён
     assert "Ошибка: скачивание файла не удалось." not in app_text, \
         "досрочный выход при неудаче скачивания всё ещё в app.mlog"
-    # pdf_b64 инициализируется пустым и заполняется только при успехе скачивания
-    assert 'let pdf_b64 = ""' in app_text
+    # pdf_b64 инициализируется пустым и заполняется только при успехе скачивания.
+    # 'let mut' — с vm-compat (#369): VM-компилятор 0.23 требует mut на переприсваивание.
+    assert 'let mut pdf_b64 = ""' in app_text
     # ветка заполнения — по != ("()") (успех), иначе pdf_b64 остаётся пустым
-    idx = app_text.find('let pdf_b64 = ""')
+    idx = app_text.find('let mut pdf_b64 = ""')
     window = app_text[idx:idx + 400]
     assert 'redact("()", "hash_only")' in window
     assert '!= redact' in window

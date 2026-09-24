@@ -1,16 +1,307 @@
-// Fosved Office v2 — Context Manager (DEPRECATED — inlined into app.mlog)
-// This file is kept for reference only. All patterns are now defined in app.mlog
-// to bypass potential binary import caching issues.
-// DO NOT import this file.
+// Fosved Office v2 — Context Manager (dept/context)
+//
+// Восстановлен из app.mlog (расинлайнинг 0.23.0): импорт-механизм верифицирован
+// на 0.23 (PR #352 — serve-стенд, 27 dept-модулей), sibling-вызовы легальны
+// (прецедент dept/chain → HandleOSP/HandleExpert). Состав: BuildContext,
+// GetOwnerProfile, ReadDeptProfile, SelectSkillsByKeywords, LoadOspSkills.
+// app-зависимости (GetCompactedHistory, GetSteerContext, InitDB, …) резолвятся
+// глобально в serve-неймспейсе — как у всех dept-модулей.
+pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
+  let profile = ReadDeptProfile(dept)
 
-pattern _deprecated_BuildContext(dept: String, query: String, chat_id: String) -> String {
-  return "ERROR: this file is deprecated, BuildContext is inlined in app.mlog"
+  // OSP: use tier-based skill loading (LoadOspSkills), format from deconstruct skill
+  let skills = ""
+  if dept == "osp" then {
+    let skills = LoadOspSkills(query)
+  } else {
+    let skills = SelectSkillsByKeywords(dept, query)
+  }
+
+  let corrections = GetCorrections(dept)
+  // FOIP-003.6: Cross-dept inject + mid-turn steer
+  let injected = GetInjectedContext(dept)
+  let steer = GetSteerContext(dept)
+  // IDEA-4: Context Budget — use budgeted history (max 4000 tokens)
+  let dialog = GetBudgetedHistory(chat_id, "10", "4000", dept)
+  let memories = YanaRecallMemories(query)
+  let now_info = YanaNowInfo()
+
+  // IDEA-1: Read consensus memory (cross-session baton)
+  let consensus = ReadConsensus()
+  // IDEA-2: Recall past learnings for this dept+query
+  let learnings = RecallLearnings(dept, query)
+  // FO-019: Owner Profile — static/dynamic/buckets одним вызовом
+  let owner_profile = GetOwnerProfile(dept)
+  // IDEA-5: Expert Persona Injection
+  let mut persona = ""
+  if dept != "yana" then { let persona = GetExpertPersona(dept) }
+  // IDEA-6: Brand Contract for design dept
+  let mut brand = ""
+  if dept == "design" then { let brand = GetBrandContract() }
+  // IDEA-7: Sub-Agent resolution
+  let sub_agent = ResolveSubAgent(dept, query)
+
+  // Fresh news for OSP and LZ departments
+  let news = ""
+  if dept == "osp" or dept == "lz" then {
+    let news_body = json_encode({query: query, dept: dept, limit: 5})
+    let news_result = TryVal(try http_post("http://127.0.0.1:4000/news/fresh", news_body, "application/json"))
+    if to_string(news_result) != "()" then {
+      let news_parsed = TryVal(try parse_json(news_result))
+      if to_string(news_parsed) != "()" then {
+        let news = redact(to_string(json_get(news_parsed, "news", "")), "all")
+      }
+    }
+  }
+
+  // Guard all context variables against Unit from try
+  let s_memories = to_string(memories)
+  if s_memories == "()" then { let s_memories = "" }
+  let s_corrections = to_string(corrections)
+  if s_corrections == "()" then { let s_corrections = "" }
+  let s_dialog = to_string(dialog)
+  if s_dialog == "()" then { let s_dialog = "" }
+  let s_now = to_string(now_info)
+  if s_now == "()" then { let s_now = "" }
+  let s_skills = to_string(skills)
+  if s_skills == "()" then { let s_skills = "" }
+  let s_injected = to_string(injected)
+  if s_injected == "()" then { let s_injected = "" }
+  let s_steer = to_string(steer)
+  if s_steer == "()" then { let s_steer = "" }
+  let s_persona = to_string(persona)
+  if s_persona == "()" then { let s_persona = "" }
+  let s_brand = to_string(brand)
+  if s_brand == "()" then { let s_brand = "" }
+  let s_consensus = to_string(consensus)
+  if s_consensus == "()" then { let s_consensus = "" }
+  let s_learnings = to_string(learnings)
+  if s_learnings == "()" then { let s_learnings = "" }
+  let s_owner_profile = to_string(owner_profile)
+  if s_owner_profile == "()" then { let s_owner_profile = "" }
+  let s_sub_agent = to_string(sub_agent)
+  if s_sub_agent == "()" then { let s_sub_agent = "" }
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + s_now + "\n\n=== Active Skills ===\n" + s_skills + "\n\n=== Corrections ===\n" + s_corrections + "\n\n=== Cross-dept Context ===" + s_injected + "\n\n=== Steering ===" + s_steer + "\n\n=== Long-term Memory ===\n" + s_memories + "\n\n=== Recent Dialog ===\n" + s_dialog
+
+  // IDEA-5/6/7: Append persona, brand, sub-agent if present
+  if s_persona != "" then { let context = context + "\n\n" + s_persona }
+  if s_brand != "" then { let context = context + "\n\n" + s_brand }
+  if s_sub_agent != "" then { let context = context + "\n\n=== Sub-Agent Specialization ===\nТы работаешь в роли суб-агента: " + s_sub_agent + ". Применяй специализацию этого под-роли."
+  }
+  // IDEA-1/2: Append consensus and learnings
+  if s_consensus != "" then { let context = context + "\n\n=== Cross-Session Consensus (baton) ===\n" + s_consensus }
+  if s_learnings != "" then { let context = context + "\n\n" + s_learnings }
+  // FO-019: профиль владельца одним вызовом (вместо ad-hoc сборки)
+  if s_owner_profile != "" then { let context = context + "\n\n" + s_owner_profile }
+
+  // Append fresh news if available
+  if news != "" then {
+  // FOIP-003.10: Product context for marketing dept
+  if dept == "marketing" then {
+    let pc = kv_get("product_context:" + chat_id)
+    if pc == "" then { let pc = kv_get("product_context:default") }
+    if to_string(pc) != "()" then {
+      if pc != "" then {
+        let context = context + "\n\n=== Product Context ===\n" + pc
+      }
+    }
+  }
+    let context = context + "\n\n" + news + "\nУчитывай эти свежие события в своём анализе. Ссылайся на них если релевантны."
+  }
+
+  // Дублируем дату в самый конец контекста — чтобы LLM не забыл после 25K навыков
+  if dept == "osp" then {
+    let context = context + "\n\n=== ПОВТОР: ТЕКУЩАЯ ДАТА ===\n" + now_info + "\nВНИМАНИЕ: Все даты в препарировании, ID, прогнозы и индикаторы должны привязываться к этой дате. Запрещено использовать любые другие даты как текущие. Если в АРХИВЕ ПРОШЛЫХ СЕССИЙ есть похожее препарирование — это НЕ образец для переписывания. Проведи НОВЫЙ анализ на текущую дату с актуальными событиями. Дата в шапке, ID, все индикаторы и даты проверки — считай ТОЛЬКО от текущей даты, никогда от даты старого отчёта. КРИТИЧНО: дату в шапке отчёта («Дата препарирования», «Сейчас») копируй ПОСИМВОЛЬНО из значения выше, точь-в-точь, без округления, без сдвига на дни, без «примерно»."
+  }
+
+  // FORMAT_INSTRUCTION — ONLY for expert (OSP gets format from deconstruct skill)
+  if dept == "expert" then {
+    let format_instruction = "\n\n## ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)\n\nОтвечай РАЗВЁРНУТО. Ты — Эксперт, подготовка к встрече/переговорам. Структура:\n\n1. *Профиль контрагента* — кто, что, позиция на рынке, ключевые фигуры, масштаб\n2. *Контекст встречи* — цель, формат, участники с каждой стороны, история отношений\n3. *Ключевые факты и цифры* — что нужно знать перед встречей: рыночные данные, финансовые показатели, последние новости, публичные заявления\n4. *Позиция и рычаги* — их вероятная позиция, наши рычаги, их рычаги, зона возможного соглашения (ZOPA)\n5. *Боевые вопросы* — 7-10 вопросов для встречи: проверяющие, прощупывающие, сигнальные. Каждый вопрос с ожидаемым ответом (хороший/уклончивый/тревожный) и логикой: зачем задаём\n6. *Красные флаги* — на что обратить внимание: манипуляции, скрытые мотивы, противоречия в публичной информации\n7. *Рекомендуемая стратегия* — подход к переговорам, точки давления, готовность к компромиссу, BATNA\n8. *Decision points* — какие решения должны быть приняты на встрече, кто их принимает\n\nМаркируй уверенность: [ФАКТ] — подтверждённые данные, [ОЦЕНКА] — экспертная оценка, [РИСК] — потенциальная проблема.\nЯзык: русский. Не будь кратким. Препарируй встречу глубоко.\n"
+    let context = context + format_instruction
+  }
+
+  return context
 }
 
-pattern _deprecated_ReadDeptProfile(dept: String) -> String {
-  return ""
+// ── FO-019: Owner Profile (static/dynamic/buckets, один вызов) ──
+// Метафильтр dept: питон-сайд приоритизирует buckets по интересам департамента.
+// Best-effort: отказ/таймаут прокси → пустая строка, диалог не блокируется.
+pattern GetOwnerProfile(dept: String) -> String {
+  let body = json_encode({dept: dept})
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/profile/owner", body, "application/json", 3.0))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = TryVal(try parse_json(resp))
+  if to_string(parsed) == "()" then { return "" }
+  return to_string(json_get(parsed, "profile", ""))
 }
 
-pattern _deprecated_SelectSkillsByKeywords(dept: String, query: String) -> String {
-  return ""
+pattern ReadDeptProfile(dept: String) -> String {
+  let cached = kv_get("fc_profile_" + dept)
+  if cached != "" then { return cached }
+  let content = redact(read_file("library/" + dept + ".md"), "all")
+  if content != "" then { return content }
+  return "Department: " + dept + ". Act professionally."
+}
+
+// Skill loading for non-OSP departments — two-phase approach (WH-4):
+// Phase 1: core skills (first 3 in index) always loaded — guarantees dept always has guidance
+// Phase 2: remaining skills matched by query keywords appearing in skill content
+// Budget: 80000 chars (was 2000), per-skill limit: 15000 chars (was 500)
+pattern SelectSkillsByKeywords(dept: String, query: String) -> String {
+  let index_content = redact(read_file("skills_index/" + dept + ".txt"), "all")
+  if index_content == "" then { return "No skills loaded." }
+  let _nl = "\n"
+  let _sp = " "
+  let skills_list = split(trim(index_content), _nl)
+  let result = ""
+  let budget = 80000.0
+  let skill_limit = 15000.0
+  let core_count = 3.0
+  let i = 0.0
+
+  // Extract up to 6 significant keywords (>= 4 chars) from query for matching
+  let t = lower(query)
+  let words = split(t, _sp)
+  let mut kw0 = ""
+  let mut kw1 = ""
+  let mut kw2 = ""
+  let mut kw3 = ""
+  let mut kw4 = ""
+  let mut kw5 = ""
+  let mut wi = 0.0
+  each w in words {
+    if length(w) >= 4.0 then {
+      if wi == 0.0 then { kw0 = w }
+      if wi == 1.0 then { kw1 = w }
+      if wi == 2.0 then { kw2 = w }
+      if wi == 3.0 then { kw3 = w }
+      if wi == 4.0 then { kw4 = w }
+      if wi == 5.0 then { kw5 = w }
+      wi = wi + 1.0
+    }
+  }
+
+  each skill in skills_list {
+    if length(result) < budget then {
+      let skill_name = trim(skill)
+      let skill_content = redact(read_file("skills/" + skill_name + "/SKILL.md"), "all")
+      if skill_content != "" then {
+        if i < core_count then {
+          // Phase 1: core skills always loaded
+          let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
+        } else {
+          // Phase 2: match by any query keyword appearing in skill content
+          let sc = lower(skill_content)
+          if (kw0 != "" and contains(sc, kw0)) or (kw1 != "" and contains(sc, kw1)) or (kw2 != "" and contains(sc, kw2)) or (kw3 != "" and contains(sc, kw3)) or (kw4 != "" and contains(sc, kw4)) or (kw5 != "" and contains(sc, kw5)) then {
+            let result = result + "\n--- " + skill_name + " ---\n" + substring(skill_content, 0.0, skill_limit)
+          }
+        }
+      }
+    }
+    let i = i + 1.0
+  }
+  if result == "" then { return "Skills available for " + dept + ": " + index_content }
+  return result
+}
+
+// ── OSP tier-based skill loading (confirmed builtins only) ──
+// Tier 1 always, Tier 2 by topic triggers, Tier 3 by explicit triggers.
+// Budget: 25000 chars total. Path: skills/<name>/SKILL.md (flat, no osp/ subdir).
+pattern LoadOspSkills(query: String) -> String {
+  let t = lower(query)
+  let mut result = ""
+  let mut budget = 25000.0
+
+  // ── Tier 1: Methodological core (always) ──
+  let s = redact(read_file("skills/deconstruct/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- deconstruct ---\n" + s }
+  let s = redact(read_file("skills/awareness-frame/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- awareness-frame ---\n" + s }
+  let s = redact(read_file("skills/root-cause-mapping/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- root-cause-mapping ---\n" + s }
+  let s = redact(read_file("skills/forces-and-potentials/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- forces-and-potentials ---\n" + s }
+  let s = redact(read_file("skills/strategic-maneuvers/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- strategic-maneuvers ---\n" + s }
+  let s = redact(read_file("skills/two-paths-synthesis/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- two-paths-synthesis ---\n" + s }
+  let s = redact(read_file("skills/decision-tree-forecast/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- decision-tree-forecast ---\n" + s }
+  let s = redact(read_file("skills/reflexive-impact/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- reflexive-impact ---\n" + s }
+  let s = redact(read_file("skills/calibration/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- calibration ---\n" + s }
+  let s = redact(read_file("skills/system-health-diagnostics/SKILL.md"), "all")
+  if s != "" and length(result) < budget then { result = result + "\n--- system-health-diagnostics ---\n" + s }
+
+  // ── Tier 2: Domain depth (by topic triggers) ──
+  // Finance / markets
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "акци") or contains(t, "облигац") or contains(t, "крипто") or contains(t, "нефт") or contains(t, "gold") or contains(t, "золот")) and length(result) < budget then {
+    let s = redact(read_file("skills/cross-asset-divergence/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- cross-asset-divergence ---\n" + s }
+  }
+  if (contains(t, "рынок") or contains(t, "актив") or contains(t, "валют") or contains(t, "крипто") or contains(t, "нефт")) and length(result) < budget then {
+    let s = redact(read_file("skills/macro-regime-id/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- macro-regime-id ---\n" + s }
+    let s = redact(read_file("skills/cantillon/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- cantillon ---\n" + s }
+  }
+  // Person / leader
+  if (contains(t, "персона") or contains(t, "лидер") or contains(t, "президент") or contains(t, "глава") or contains(t, "министр") or contains(t, "губернатор") or contains(t, "ceo") or contains(t, "исчез")) and length(result) < budget then {
+    let s = redact(read_file("skills/deep-profiling/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- deep-profiling ---\n" + s }
+  }
+  // Narrative / media
+  if (contains(t, "нарратив") or contains(t, "пропаганд") or contains(t, "заявлен") or contains(t, "сми") or contains(t, "media") or contains(t, "информаци")) and length(result) < budget then {
+    let s = redact(read_file("skills/narrative-vs-flows/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- narrative-vs-flows ---\n" + s }
+  }
+  // Sources / verification
+  if (contains(t, "источник") or contains(t, "проверь") or contains(t, "правда") or contains(t, "фактчек")) and length(result) < budget then {
+    let s = redact(read_file("skills/source-triangulation/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- source-triangulation ---\n" + s }
+  }
+  // Investment / risk
+  if (contains(t, "ставк") or contains(t, "инвестиц") or contains(t, "риск") or contains(t, "портфель") or contains(t, "хедж")) and length(result) < budget then {
+    let s = redact(read_file("skills/asymmetric-bet-structure/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- asymmetric-bet-structure ---\n" + s }
+    let s = redact(read_file("skills/antifragility-design/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- antifragility-design ---\n" + s }
+  }
+  // Cycles
+  if (contains(t, "цикл") or contains(t, "фаза") or contains(t, "перелом") or contains(t, "кондратьев") or contains(t, "juglar")) and length(result) < budget then {
+    let s = redact(read_file("skills/cycle-position/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- cycle-position ---\n" + s }
+  }
+  // I&W
+  if (contains(t, "индикатор") or contains(t, "наблюден") or contains(t, "watch") or contains(t, "тревог")) and length(result) < budget then {
+    let s = redact(read_file("skills/iw-watchlist/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- iw-watchlist ---\n" + s }
+  }
+
+  // ── Tier 3: Special techniques (explicit triggers) ──
+  if (contains(t, "война") or contains(t, "армия") or contains(t, "фронт") or contains(t, "наступлен") or contains(t, "воен")) and length(result) < budget then {
+    let s = redact(read_file("skills/order-of-battle/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- order-of-battle ---\n" + s }
+  }
+  if (contains(t, "коллапс") or contains(t, "обвал") or contains(t, "транзит") or contains(t, "фазов")) and length(result) < budget then {
+    let s = redact(read_file("skills/phase-transition-detection/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- phase-transition-detection ---\n" + s }
+  }
+  if (contains(t, "переговор") or contains(t, "коалиц") or contains(t, "консенсус")) and length(result) < budget then {
+    let s = redact(read_file("skills/schelling-points/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- schelling-points ---\n" + s }
+  }
+  if (contains(t, "контр") or contains(t, "redteam") or contains(t, "red-team") or contains(t, "слеп")) and length(result) < budget then {
+    let s = redact(read_file("skills/red-team/SKILL.md"), "all")
+    if s != "" then { result = result + "\n--- red-team ---\n" + s }
+  }
+
+  if result == "" then { return "No OSP skills loaded." }
+  return result
+}
+
+pattern CompressDialog(chat_id: String) -> String {
+  let rows = query("SELECT COUNT(*) as cnt FROM dialog_history WHERE chat_id = ?", [chat_id])
+  return "ok"
 }
