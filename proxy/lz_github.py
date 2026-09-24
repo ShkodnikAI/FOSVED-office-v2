@@ -840,9 +840,9 @@ def lz_diagnose():
         except Exception as e:
             report.append({"source": "Tavily (живой веб-поиск)", "ok": False, "detail": f"сеть недоступна или таймаут: {e}"})
         report.append({
-            "source": "Tavily — ВАЖНО про LZTavilySearch в dept/lz.mlog",
-            "ok": False,
-            "detail": "текущая реализация в mlog зовёт api.tavily.com НАПРЯМУЮ, в обход внутреннего прокси 127.0.0.1:4000, которым пользуется весь остальной код — это может быть заблокировано сетевой политикой окружения независимо от валидности ключа. Плюс вызов без try — при любом сбое падает целиком, не отвечает мягко.",
+            "source": "Tavily — путь вызова из mlog",
+            "ok": True,
+            "detail": "mlog-отделы (ЛЗ/ОСП/Эксперт) зовут api.tavily.com напрямую через общий паттерн TavilySearch в dept/utils.mlog (office#354: один путь к Tavily; Flask-роут :4000/lz/tavily не используется — его никогда не существовало). Вызов обёрнут в try/TryVal — при сбое честная деградация, не падение.",
         })
 
     # 4. Telegram-мониторинг каналов

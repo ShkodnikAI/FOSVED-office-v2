@@ -427,6 +427,44 @@ pattern TavilyKey() -> String {
   return env("TAVILY_API_KEY")
 }
 
+// office#354: единый транспорт живого веб-поиска. Один путь к Tavily —
+// прямой http_post api.tavily.com (рабочий образец — ЛЗ, lz.mlog:569).
+// Наряд запретил второй путь через внутренний Flask-прокси на :4000 —
+// такого роута никогда не существовало, OSP/Эксперт из-за него не видели
+// живых данных.
+// Возвращает СЫРОЙ ответ Tavily (JSON-строку) или "()" при недоступности
+// сети/ключа — вызывающий сам решает, как честно деградировать.
+pattern TavilySearch(query: String, dept: String) -> String {
+  let response = TryVal(try http_post("https://api.tavily.com/search", json_encode({api_key: TavilyKey(), query: query, search_depth: "advanced", max_results: 5}), "application/json"))
+  return to_string(response)
+}
+
+// office#354: форматирование сырого ответа Tavily в читаемый блок с URL
+// (Эксперт кладёт в «Live Search (двухфазный)», ОСП — в ответ /osp tavily).
+// Недоверенные внешние данные — через redact по полям (урок №268).
+// Пустая строка = ответ не распарсился (вызывающий деградирует честно).
+pattern TavilyFormatBlock(response: String) -> String {
+  if response == "()" or response == "" then { return "" }
+  let parsed = TryVal(try parse_json(response))
+  if to_string(parsed) == "()" then { return "" }
+  let results = json_get(parsed, "results")
+  if to_string(results) == "()" then { return "" }
+  let count = length(results)
+  let mut out = ""
+  let mut i = 0.0
+  while i < count and i < 5.0 {
+    let r = get(results, i)
+    let title = redact(to_string(json_get(r, "title", "")), "all")
+    let url = redact(to_string(json_get(r, "url", "")), "all")
+    let content = redact(to_string(json_get(r, "content", "")), "all")
+    if url != "" then {
+      let out = out + "\n• " + title + "\n  " + url + "\n  " + content + "\n"
+    }
+    let i = i + 1.0
+  }
+  return out
+}
+
 // №312: швы для PublishToArchive — env-чтения вне тела с sink'ом
 // (интрафайловый шов легален: TgToken в этом же файле не тейнтит arg0)
 pattern ArchiveChannelId() -> String {

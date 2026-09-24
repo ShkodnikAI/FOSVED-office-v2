@@ -1,0 +1,53 @@
+// test_tavily354.mlog — office#354: единый паттерн TavilySearch/TavilyFormatBlock.
+// Проверки:
+//  a1 валидный fixture Tavily → блок содержит URL, title, content;
+//  a2 лимит 5 результатов (из 7 в fixture);
+//  a3 "()" (транспорт упал) → пустая строка;
+//  a4 мусор вместо JSON → пустая строка;
+//  a5 результат без url пропускается, не ломает блок;
+//  a6 транспорт возвращает строку без падения ("()" без сети / JSON-тело).
+// Запуск: mkdir -p /tmp/tavily-test354 && ./bin/mlog run test_tavily354.mlog
+db { url: "sqlite:/tmp/tavily-test354/t.db" }
+import dept/utils
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  // a1: валидный fixture
+  let fixture = "{\"query\":\"q\",\"results\":[{\"title\":\"T1\",\"url\":\"https://example.com/a\",\"content\":\"C1\"},{\"title\":\"T2\",\"url\":\"https://example.com/b\",\"content\":\"C2\"}]}"
+  let b1 = TavilyFormatBlock(fixture)
+  let a1 = contains(b1, "https://example.com/a") and contains(b1, "T1") and contains(b1, "C1")
+  let out = out + _Mark("a1_valid_fixture", a1)
+  // a2: лимит 5
+  let big = "{\"results\":[{\"title\":\"R1\",\"url\":\"https://x/1\",\"content\":\"c\"},{\"title\":\"R2\",\"url\":\"https://x/2\",\"content\":\"c\"},{\"title\":\"R3\",\"url\":\"https://x/3\",\"content\":\"c\"},{\"title\":\"R4\",\"url\":\"https://x/4\",\"content\":\"c\"},{\"title\":\"R5\",\"url\":\"https://x/5\",\"content\":\"c\"},{\"title\":\"R6\",\"url\":\"https://x/6\",\"content\":\"c\"},{\"title\":\"R7\",\"url\":\"https://x/7\",\"content\":\"c\"}]}"
+  let b2 = TavilyFormatBlock(big)
+  let a2 = contains(b2, "https://x/5") and (contains(b2, "https://x/6") == false)
+  let out = out + _Mark("a2_max5", a2)
+  // a3: "()" → пусто
+  let a3 = TavilyFormatBlock("()") == ""
+  let out = out + _Mark("a3_unit_empty", a3)
+  // a4: мусор → пусто
+  let a4 = TavilyFormatBlock("not json at all") == ""
+  let out = out + _Mark("a4_garbage_empty", a4)
+  // a5: элемент без url пропускается
+  let nourl = "{\"results\":[{\"title\":\"T9\",\"content\":\"C9\"},{\"title\":\"T8\",\"url\":\"https://ok/8\",\"content\":\"C8\"}]}"
+  let b5 = TavilyFormatBlock(nourl)
+  let a5 = contains(b5, "https://ok/8") and (contains(b5, "T9") == false)
+  let out = out + _Mark("a5_skip_no_url", a5)
+  // a6: транспорт — строка без падения
+  let resp = TavilySearch("office354 smoke", "test")
+  let a6 = (resp == "()") or starts_with(resp, "{")
+  let out = out + _Mark("a6_transport_string", a6)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
