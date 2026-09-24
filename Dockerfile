@@ -15,10 +15,10 @@ WORKDIR /office
 COPY requirements.txt /office/requirements.txt
 RUN pip3 install -r requirements.txt --break-system-packages
 
-# Metalogos v0.19.0 — прод-бинарь (WH-1: force cache invalidation to ensure latest binary)
-# Наряд №395 (PR #191): bin/mlog-020 (0.20.0, wave-3, main 29de25a) — ТОЛЬКО для
-# стейджинг-догфуда харнесса (FO-050). Прод остаётся на 0.19.0 до миграции
-# диалогового контура (№327) — отдельный наряд.
+# Metalogos v0.22.0 — прод-бинарь (наряд №349, переход 0.19.0→0.22.0, ADR-0005)
+# bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
+# грузит сырой app.mlog). bin/mlog-021 (0.21.0) остаётся вендоренным, но из
+# бут-пути выведен (raw app.mlog на его бут-аудите красный).
 COPY bin/mlog /usr/local/bin/mlog
 COPY bin/mlog-020 /usr/local/bin/mlog-020
 RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 && /usr/local/bin/mlog --version
@@ -27,10 +27,10 @@ COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
 COPY . .
 
-# Наряд №419 follow-up (проверка 0.21): бинарь 0.21 приходит через COPY . . —
+# №419 follow-up / №349: вендоренные бинари приходят через COPY . . —
 # exec-бит должен жить в самом git (100755); chmod ниже — страховка, чтобы
 # аудиторская проба entrypoint ("-x $MLOG_CANDIDATE") физически запускалась
-# в образе. Без него guard-переход молча вечно едет на легаси 0.19 и
+# в образе. Без него guard-переход молча вечно едет на фолбэк и
 # нативный cron никогда не бутстрапится (предусловие А cutover-чеклиста).
 RUN chmod +x /office/bin/mlog-021 && /office/bin/mlog-021 --version
 

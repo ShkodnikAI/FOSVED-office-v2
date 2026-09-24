@@ -122,12 +122,17 @@ def test_harness_imports_schedules_and_stays_clean():
 
 
 def test_entrypoint_guarded_cutover():
-    # Проба: 0.21-кандидат проходит Category A аудит →-serving; иначе громкий
-    # откат на легаси 0.19 (внешние cron-job.org продолжают работать).
+    # Проба: кандидат проходит Category A аудит → serving; иначе громкий
+    # откат на легаси (внешние cron-job.org продолжают работать).
+    # №349 (2026-09-24): кандидат = bin/mlog (0.22.0), фолбэк = mlog-020
+    # (0.20.0 — последний бинарь, грузящий сырой app.mlog: lax-аудит +
+    # корректный try-контракт; 0.21-сырец красный на бут-аудите, 0.19
+    # выведен из ротации, ADR-0005).
     assert "MLOG_CANDIDATE" in ENTRYPOINT
     assert 'MLOG_CANDIDATE" audit "$MLOG_ENTRY"' in ENTRYPOINT
     assert "GRADUAL CUTOVER" in ENTRYPOINT
-    assert 'MLOG_LEGACY="./bin/mlog"' in ENTRYPOINT
+    assert 'MLOG_CANDIDATE="${MLOG_BIN:-./bin/mlog}"' in ENTRYPOINT
+    assert 'MLOG_LEGACY="./bin/mlog-020"' in ENTRYPOINT
     # Гейты №259 №419: allowlist env для 0.21-пути (ценз по app.mlog+dept).
     assert "METALOGOS_ENV_ALLOWLIST" in ENTRYPOINT
     assert "CRON_SECRET" in ENTRYPOINT and "OWNER_TELEGRAM_ID" in ENTRYPOINT

@@ -403,7 +403,7 @@ docs/render-dashboard.md, §№424.
 
 | Компонент | Технология |
 |---|---|
-| Ядро | Metalogos 0.21.0 (Rust DSL, ~400 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory, label-lattice + гранты; легаси-фолбэк 0.19.0, см. entrypoint guard-переход) |
+| Ядро | Metalogos 0.22.0 (Rust DSL, ~400 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory, label-lattice + гранты; аварийный фолбэк 0.20.0, см. entrypoint guard-переход и ADR-0005) |
 | Прокси-слой | Python 3.12 + Flask, разбит на пакет `proxy/` (27 модулей) |
 | База данных | SQLite, 68 таблиц |
 | Голос STT | Whisper |
