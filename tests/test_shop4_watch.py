@@ -49,8 +49,9 @@ ONLINER_SNAP = {
     "products": [{
         "key": "kofemolka-sm-200", "name": "Кофемолка SM-200",
         "full_name": "Кофемолка SM-200",
-        "prices": {"price": {"amount": "220.00", "currency": "BYN"},
-                   "offers_count": 3},
+        "prices": {"price_min": {"amount": "220.00", "currency": "BYN"},
+                   "offers": {"count": 3}},
+        "reviews": {"rating": 45, "count": 7},
     }]
 }
 
@@ -256,12 +257,12 @@ def test_transport_down_tick_survives(monkeypatch, sent):
     assert "цель" in sent[0]
 
 
-def test_platforms_real_loop_wb_ozon_onliner_21vek():
+def test_platforms_real_loop_wb_ozon_onliner_21vek_tmby():
     """Такт реальных площадок. 2026-09-16: kufar выведен, ozon — каркас
     (антибот, отказ честный). 2026-09-21 (f281c20): onliner/21vek заведены
-    в реальный цикл опроса — настройки Mini App обещали переключатель,
-    который ничего не делал; гвард 16.09 под новый расклад не обновили."""
-    assert PLATFORMS_REAL == ("wb", "ozon", "onliner", "21vek")
+    в реальный цикл опроса. 2026-09-24 (#331 B.2): tmby — пятый, каркас
+    (площадка недоступна для разведки, отказ честный, такт живёт)."""
+    assert PLATFORMS_REAL == ("wb", "ozon", "onliner", "21vek", "tmby")
 
 
 def test_dashboard_doc_has_shop_cron_and_switch():

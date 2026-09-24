@@ -910,29 +910,41 @@ _SHOP_SOURCES_DDL = ("CREATE TABLE IF NOT EXISTS shop_sources (source_id TEXT PR
 
 # FORGE-UI-9 (#202): честные статусы известных источников (ограничения площадок
 # зафиксированы как есть; Ozon — «заблокирован антиботом», это не «выключено»)
+# Обновлено нарядами #327/#328/#331 (2026-09-24, живая разведка):
+# onliner — рабочий (динамическая категория по живому словарю);
+# 21vek — robots запрещает поисковую поверхность (красная линия SHOP-2);
+# tmby — площадка недоступна из песочницы (TLS-фильтрация датацентровых IP).
 _SHOP_SOURCE_STATUS = {
     "wb": ("работает", "ok"),
     "ozon": ("заблокирован антиботом", "warn"),
-    "onliner": ("нужен слаг категории", "warn"),
-    "21vek": ("нужна форма", "warn"),
+    "onliner": ("работает", "ok"),
+    "21vek": ("robots запрещает сбор", "warn"),
+    "tmby": ("нет доступа к площадке — нужна живая проба", "warn"),
 }
 
 
 @app.get("/api/shop/sources")
 def api_shop_sources():
-    """FORGE-UI-9 (#202): источники Закупок — известные (wb/ozon/onliner/21vek)
-    + свои магазины (custom) из shop_sources. enabled — реальный флаг опроса."""
+    """FORGE-UI-9 (#202): источники Закупок — известные (wb/ozon/onliner/21vek/tmby,
+    наряд #331 B.3: пятый переключатель тем же паттерном) + свои магазины
+    (custom) из shop_sources. enabled — реальный флаг опроса."""
     try:
         _query(_SHOP_SOURCES_DDL)
         rows = {r["source_id"]: r for r in
                 _query("SELECT * FROM shop_sources", fetch=True) or []}
         out = []
         for sid, label in [("wb", "Wildberries"), ("ozon", "Ozon"),
-                           ("onliner", "Onliner"), ("21vek", "21vek")]:
+                           ("onliner", "Onliner"), ("21vek", "21vek"),
+                           ("tmby", "TM.by")]:
             r = rows.pop(sid, None)
+            # статус — из серверной карты (один источник правды; ранее фронт
+            # ссылался на несуществующую JS-константу SHOP_SOURCE_STATUS —
+            # ReferenceError, который catch глотал в «Нет связи с API»)
+            status = _SHOP_SOURCE_STATUS.get(sid, ["", "muted"])
             out.append({"id": sid, "label": label, "custom": False,
                         "enabled": bool(r["enabled"]) if r else True,
-                        "url": (r["url"] if r else "") or ""})
+                        "url": (r["url"] if r else "") or "",
+                        "status": list(status)})
         for sid, r in rows.items():
             out.append({"id": sid, "label": sid, "custom": bool(r["custom"]),
                         "enabled": bool(r["enabled"]), "url": r["url"] or ""})

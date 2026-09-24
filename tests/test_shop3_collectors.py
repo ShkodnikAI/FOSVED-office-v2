@@ -69,13 +69,34 @@ ONLINER_SNAPSHOT = {
     "products": [
         {"key": "kofemolka-bosch-tsm6", "name": "Кофемолка Bosch TSM6",
          "full_name": "Кофемолка Bosch TSM6A013",
-         "prices": {"price": {"amount": "129.00", "currency": "BYN"},
-                    "offers_count": 4}},
+         "prices": {"price_min": {"amount": "129.00", "currency": "BYN"},
+                    "price_max": {"amount": "140.00", "currency": "BYN"},
+                    "offers": {"count": 4}},
+         "reviews": {"rating": 48, "count": 12}},
         {"key": "kofemolka-x", "name": "Кофемолка X",
-         "prices": {"price": {"amount": "89.50", "currency": "BYN"},
-                    "offers_count": 0}},
+         "prices": {"price_min": {"amount": "89.50", "currency": "BYN"},
+                    "offers": {"count": 0}}},
     ]
 }
+
+# Живой словарь схем Onliner (наряд #327): подмножество реального словаря
+# /schemas 2026-09-24 (полный снапшот 886 схем — в отчёте наряда)
+SCHEMAS_PAGE1 = {"schemas": [
+    {"key": "mobile", "name": "Мобильные телефоны"},
+    {"key": "phoneaccum", "name": "Аккумуляторы для телефонов"},
+    {"key": "featurephone", "name": "Кнопочные телефоны"},
+    {"key": "lawn", "name": "Семена трав, газон"},
+]}
+SCHEMAS_PAGE2 = {"schemas": [
+    {"key": "notebook", "name": "Ноутбуки"},
+    {"key": "notebatteries", "name": "Аккумуляторы для ноутбуков"},
+    {"key": "coffee", "name": "Кофеварки и кофемашины"},
+    {"key": "headphones", "name": "Наушники и гарнитуры"},
+    {"key": "mowers", "name": "Газонокосилки"},
+    {"key": "washingmachine", "name": "Стиральные машины"},
+    {"key": "vacuumcleaner", "name": "Пылесосы"},
+    {"key": "microvawe", "name": "Микроволновые печи"},
+]}
 
 
 # ── тестовая БД: DDL прямо из app.mlog ──────────────────────────────────
@@ -93,9 +114,15 @@ def _shop_ddl():
 
 @pytest.fixture(autouse=True)
 def shop_db():
-    # DB-файл офиса = DATABASE_PATH/fosved.db (proxy/core.py: DB_FILE)
+    # DB-файл офиса = DATABASE_PATH/fosved.db (proxy/core.py: DB_FILE).
+    # Пересоздаём shop_* с ПОЛНОЙ живой схемой: другие тест-модули (UI9)
+    # в том же процессе создают урезанные версии этих таблиц — DROP+CREATE
+    # гарантирует честную схему независимо от порядка импортов.
     db_file = os.path.join(os.environ["DATABASE_PATH"], "fosved.db")
     conn = sqlite3.connect(db_file)
+    for t in ("shop_products", "shop_sellers", "shop_offers",
+              "shop_price_history", "shop_watches", "shop_dossiers"):
+        conn.execute(f"DROP TABLE IF EXISTS {t}")
     for stmt in _shop_ddl():
         try:
             conn.execute(stmt)
@@ -138,12 +165,15 @@ def stub_transport(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def basket_kv():
-    """kv для карты basket-шардов (#329): таблица общая с mlog, кэш чистый."""
+    """kv для карты basket-шардов (#329) и словаря Onliner (#327):
+    таблица общая с mlog, кэш чистый."""
     _query("CREATE TABLE IF NOT EXISTS system_settings "
            "(key TEXT PRIMARY KEY, value TEXT)")
-    _query("DELETE FROM system_settings WHERE key='shop_wb_basket_map'")
+    _query("DELETE FROM system_settings WHERE key IN "
+           "('shop_wb_basket_map', 'shop_onliner_schemas')")
     yield
-    _query("DELETE FROM system_settings WHERE key='shop_wb_basket_map'")
+    _query("DELETE FROM system_settings WHERE key IN "
+           "('shop_wb_basket_map', 'shop_onliner_schemas')")
 
 
 @pytest.fixture(autouse=True)
@@ -249,25 +279,124 @@ def test_kufar_removed_ozon_registered():
 
 
 # ── Onliner / 21vek (честные ограничения) ───────────────────────────────
-def test_onliner_defensive_parse(tmp_path, monkeypatch):
+def _stub_with_schemas(monkeypatch, search_snapshot=None, fail_pages_from=None):
+    """Транспорт: /schemas — страницы словаря; search — снапшот.
+    fail_pages_from=N — страница N отказывает ОДИН раз (деградация
+    сети на первый вызов; следующий вызов продолжает)."""
+    pages = [SCHEMAS_PAGE1, SCHEMAS_PAGE2, {"schemas": []}]
+    calls = {"schemas": 0}
+
+    def fake(tool, args):
+        url = args.get("url", "")
+        if "/schemas?page=" in url:
+            calls["schemas"] += 1
+            n = int(url.rsplit("=", 1)[1])
+            if fail_pages_from and n >= fail_pages_from \
+                    and calls["schemas"] <= fail_pages_from:
+                return {"ok": False, "error": "тест-отказ", "kind": "network"}
+            return {"ok": True, "url": url, "status": 200, "data": pages[n - 1]}
+        if "search.wb.ru" in url:
+            return {"ok": True, "url": url, "status": 200, "data": WB_SNAPSHOT}
+        if "catalog.api.onliner.by/search" in url and search_snapshot is not None:
+            return {"ok": True, "url": url, "status": 200, "data": search_snapshot}
+        if "ozon.by" in url:
+            return {"ok": False, "error": "антибот (тест): 307-петля", "kind": "transport"}
+        if "onliner" in url:
+            return {"ok": True, "url": url, "status": 200, "data": ONLINER_SNAPSHOT}
+        return {"ok": False, "error": "неожиданный URL", "kind": "test"}
+
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
+    return calls
+
+
+# ── Onliner (#327): живая форма + динамическая категория ────────────
+def test_onliner_real_form_prices_and_reviews(monkeypatch):
+    """Живая форма 2026-09-24: prices.price_min (не prices.price!),
+    offers.count, reviews.rating 0..50."""
     monkeypatch.setenv("SHOP_ONLINER_CATEGORY", "coffeegrinder")
     res = sc.collect_onliner("кофемолка")
     assert res["ok"] is True and len(res["offers"]) == 2
     o = res["offers"][0]
     assert o["price_byn"] == 129.0  # BYN напрямую
+    assert o["in_stock"] == 1      # offers.count=4
+    assert o["rating"] == 4.8      # 48/10
+    assert o["reviews_count"] == 12
     assert o["url"].startswith("https://catalog.onliner.by/")
     assert res["offers"][1]["in_stock"] == 0
 
 
-def test_onliner_without_category_is_config_missing(monkeypatch):
-    monkeypatch.delenv("SHOP_ONLINER_CATEGORY", raising=False)
+def test_onliner_category_from_keyword_map(monkeypatch):
+    """Карта синонимов по живому словарю: «телефон» → mobile,
+    «газонокосилка» → mowers — значения проверены по словарю."""
+    _stub_with_schemas(monkeypatch, search_snapshot=ONLINER_SNAPSHOT)
+    res = sc.collect_onliner("телефон")
+    assert res["ok"] is True and res["category"] == "mobile"
+    res2 = sc.collect_onliner("газонокосилка")
+    assert res2["ok"] is True and res2["category"] == "mowers"
+
+
+def test_onliner_category_fuzzy_match_from_dictionary(monkeypatch):
+    """Запрос вне карты — нечёткое совпадение по именам живого словаря;
+    аксессуары «…для X» не выигрывают у основной категории."""
+    _stub_with_schemas(monkeypatch, search_snapshot=ONLINER_SNAPSHOT)
+    assert sc.onliner_resolve_category("микроволновка") == "microvawe"
+    assert sc.onliner_resolve_category("стиральная машина") == "washingmachine"
+    assert sc.onliner_resolve_category("аккумулятор") != "mobile"
+
+
+def test_onliner_no_category_is_honest(monkeypatch):
+    """Запрос без категории в словаре — честный no_category,
+    слаг наугад не подставляем (граница наряда #327)."""
+    _stub_with_schemas(monkeypatch)
+    res = sc.collect_onliner("трусы")
+    assert res["ok"] is False and res["kind"] == "no_category"
+
+
+def test_onliner_env_category_still_wins(monkeypatch):
+    """Legacy env SHOP_ONLINER_CATEGORY приоритетен (обратная совместимость)."""
+    _stub_with_schemas(monkeypatch)
+    monkeypatch.setenv("SHOP_ONLINER_CATEGORY", "coffeegrinder")
+    calls = 0
+    res = sc.collect_onliner("телефон")
+    assert res["ok"] is True and res["category"] == "coffeegrinder"
+
+
+def test_onliner_schema_dict_persists_cursor(monkeypatch):
+    """Дозагрузка словаря по курсору: отказ на стр.2 не теряет стр.1,
+    следующий вызов продолжает со стр.2 (бюджет таймаутов).
+    «газонокосилка»→mowers живёт на стр.2 — на первой её нет."""
+    calls = _stub_with_schemas(monkeypatch, fail_pages_from=2)
+    assert sc.onliner_resolve_category("газонокосилка") is None  # стр.2 не загружена
+    assert calls["schemas"] == 2  # стр.1 получена, стр.2 отказала
+    raw = json.loads(_query("SELECT value FROM system_settings WHERE "
+                            "key='shop_onliner_schemas'", fetch=True)[0]["value"])
+    assert raw["next_page"] == 2 and raw["complete"] is False
+    # второй вызов: продолжение — стр.2, стр.3 (пустая) → complete
+    assert sc.onliner_resolve_category("газонокосилка") == "mowers"
+    raw2 = json.loads(_query("SELECT value FROM system_settings WHERE "
+                             "key='shop_onliner_schemas'", fetch=True)[0]["value"])
+    assert raw2["complete"] is True
+
+
+def test_onliner_form_mismatch_is_loud(monkeypatch):
+    monkeypatch.setenv("SHOP_ONLINER_CATEGORY", "mobile")
+    monkeypatch.setattr(sc, "FETCH_JSON_FN",
+                        lambda t, a: {"ok": True, "data": {"unexpected": 1}})
     res = sc.collect_onliner("x")
-    assert res["ok"] is False and res["kind"] == "config_missing"
+    assert res["ok"] is False and res["kind"] == "api_form_mismatch"
 
 
-def test_21vek_is_honest_carrier():
+# ── 21vek (#328): robots-граница / tm.by (#331): недоступен ──────────
+def test_21vek_robots_surface_is_refused():
     res = sc.collect_21vek("x")
-    assert res["ok"] is False and res["kind"] == "not_implemented_live"
+    assert res["ok"] is False and res["kind"] == "robots_disallow_surface"
+    assert "robots" in res["error"]
+
+
+def test_tmby_is_honest_unreachable_carrier():
+    res = sc.collect("tmby", "x")
+    assert res["ok"] is False and res["kind"] == "recon_unreachable"
+    assert "tmby" in sc.COLLECTORS
 
 
 # ── WB basket-шарды и image_url (#329) ──────────────────────────────────
@@ -397,12 +526,12 @@ def test_refresh_upserts_offers_and_history():
 def test_onliner_offer_without_price_skips_history_row(monkeypatch):
     monkeypatch.setenv("SHOP_ONLINER_CATEGORY", "coffeegrinder")
     pid = _make_product()
-    ONLINER_SNAPSHOT["products"][0]["prices"]["price"]["amount"] = None
+    ONLINER_SNAPSHOT["products"][0]["prices"]["price_min"]["amount"] = None
     try:
         r = sc.refresh_product(pid, "onliner", "кофемолка")
         assert r["ok"] is True and r["history_rows"] == 1  # только у второго
     finally:
-        ONLINER_SNAPSHOT["products"][0]["prices"]["price"]["amount"] = "129.00"
+        ONLINER_SNAPSHOT["products"][0]["prices"]["price_min"]["amount"] = "129.00"
 
 
 def test_score_product_end_to_end(monkeypatch):

@@ -97,9 +97,15 @@ def test_disabled_source_not_polled(monkeypatch):
 
 def test_ozon_status_antibot_not_off():
     # жёлтый статус «заблокирован антиботом» — состояние, отличное от «выключено»
-    assert 'ozon": ("заблокирован антиботом", "warn")' in \
-        open(os.path.join(REPO_ROOT, "proxy", "routes_admin.py"), encoding="utf-8").read()
-    assert 'SHOP_SOURCE_STATUS[x.id]' in INDEX  # фронт рисует честный статус из карты
+    ra = open(os.path.join(REPO_ROOT, "proxy", "routes_admin.py"), encoding="utf-8").read()
+    assert 'ozon": ("заблокирован антиботом", "warn")' in ra
+    # наряды #327/#328/#331: статусы обновлены живой разведкой, tmby — пятый
+    assert '"tmby": ("нет доступа к площадке — нужна живая проба", "warn")' in ra
+    assert '"onliner": ("работает", "ok")' in ra
+    assert '"21vek": ("robots запрещает сбор", "warn")' in ra
+    # статус приходит из API (один источник правды); фронт больше не ссылается
+    # на несуществующую JS-константу SHOP_SOURCE_STATUS (ReferenceError)
+    assert 'x.status||["","muted"]' in INDEX
 
 
 def test_custom_source_registered_honestly():
@@ -218,6 +224,6 @@ def test_archive_deferred_honestly():
 
 
 def test_ui9_frontend_statics():
-    assert 'SHOP_SOURCE_STATUS[x.id]' in INDEX  # честные статусы площадок
+    assert 'x.status||["","muted"]' in INDEX  # честные статусы площадок из API
     assert '["best","Лучшее соотношение"' in INDEX and '["top3","Топ-3 по ценовым диапазонам"' in INDEX
     assert 'data-go="shopset"' in INDEX  # экран доступен из «Ещё»

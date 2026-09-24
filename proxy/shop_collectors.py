@@ -29,12 +29,31 @@
     константы; отказ egress не роняет сбор (FO-007: лог, не молчание);
   - WB фото (#329): image_url строится по формуле basket-{N} с живым
     HEAD-перебором шардов (подробности — у wb_basket_for_vol);
-  - catalog.api.onliner.by → жив, но слаги категорий не подобраны из
-    песочницы: категория — env SHOP_ONLINER_CATEGORY; парсер оборонительный
-    (форма по памяти, kind:"api_form_mismatch" при расхождении);
-  - 21vek.by — сайт жив, API-форма из песочницы не снята → каркас с
-    честным {"ok": false, "kind": "not_implemented_live"}; форма снимется
-    первым живым прогоном на Render и парсер добавится точечно.
+  - catalog.api.onliner.by (#327) — ЖИВ, форма снята живьём 2026-09-24
+    (пробы из песочницы исполнителя — хост отвечает без всякого
+    домен-allowlist, robots разрешает): цены в prices.price_min/price_max
+    (amount строкой, BYN), наличие = prices.offers.count, рейтинг =
+    reviews.rating (0..50 → /10) + reviews.count; html_url/full_name —
+    как было. ВАЖНО: прежний парсер читал prices.price — такого ключа
+    в живой форме НЕТ (все офферы уходили в unscored). Слаг категории
+    env SHOP_ONLINER_CATEGORY (legacy, приоритетен) → карта синонимов
+    (значения сверены с живым словарём) → живой словарь /schemas
+    (страницы по 20, 886 схем на 2026-09-24; дозагрузка по курсору,
+    ≤8 страниц за вызов — бюджет таймаутов; кэш kv 7 дней) →
+    не нашлось — честный kind:"no_category", слаг наугад не берём;
+  - 21vek.by (#328) — ЖИВОЙ robots.txt 2026-09-24: User-agent: *
+    Disallow: /search, /api/* и ВСЕ URL с query ("*?*") — поисковая
+    поверхность закрыта для честных клиентов, включая Googlebot.
+    Дисциплина SHOP-2 (robots уважается) сбор запрещает; каркас отвечает
+    честный kind:"robots_disallow_surface". Реализация возможна только
+    явным решением владельца отступить от robots-красной линии (#172) —
+    вопрос вынесен в отчёт наряда;
+  - tm.by (#331) — недоступен из песочницы исполнителя: TLS
+    «unexpected eof» на все 4 варианта (https/http × с/без www) —
+    площадка обрывает соединения с датацентровых IP. Форма не снята —
+    реализация вслепую запрещена нарядом; каркас честно отвечает
+    kind:"recon_unreachable", форма снимется первым живым прогоном
+    (Render egress или браузер владельца).
 
 Все парсеры оборонительные: нет ожидаемых ключей → честный отказ с kind,
 ничего не падает. Политика FO-007: except-блоки не молчат — logging.warning.
@@ -449,23 +468,164 @@ def collect_ozon(query, page=1):
             "kind": "api_form_unknown"}
 
 
-# ── Onliner ─────────────────────────────────────────────────────────────
-def collect_onliner(query, page=1):
-    """Каталог Onliner. Слаг категории — env SHOP_ONLINER_CATEGORY.
+# ── Onliner (#327): динамическая категория + живая форма ──────────────
+ONLINER_SCHEMAS_KEY = "shop_onliner_schemas"
+ONLINER_SCHEMAS_TTL = 7 * 24 * 3600
+ONLINER_SCHEMAS_PAGES_PER_CALL = 8   # бюджет таймаутов: 8×3с ≈ 24с/вызов
+ONLINER_SCHEMAS_PAGE_CAP = 80
+ONLINER_SCHEMAS_URL = "https://catalog.api.onliner.by/schemas?page={n}"
 
-    Форма ответа — по памяти (жирный минус, честно): парсер оборонительный,
-    расхождение → kind:"api_form_mismatch" — поправим с живого прогона.
+# Карта синонимов (вариант 1 наряда). ЗНАЧЕНИЯ сверены с живым словарём
+# /schemas 2026-09-24 (ключ существует, имя подтверждено); при ренейме
+# ключа площадкой запись честно деградирует (проверка наличия в словаре).
+# Расширение — новой записью с проверкой по живому словарю, не по памяти.
+ONLINER_KEYWORD_MAP = {
+    "телефон": "mobile", "смартфон": "mobile", "iphone": "mobile",
+    "android": "mobile", "ноутбук": "notebook", "наушники": "headphones",
+    "кофеварка": "coffee", "кофемашина": "coffee",
+    "стиральная": "washingmachine", "пылесос": "vacuumcleaner",
+    "холодильник": "refrigerator", "телевизор": "tv",
+    "газонокосилка": "mowers",
+}
+
+
+def _norm_words(s):
+    s = (s or "").lower().replace("ё", "е")
+    import re as _re
+    return _re.findall(r"[a-zа-я0-9]+", s)
+
+
+def _schema_match_score(query_words, schema):
+    """Скор совпадения запроса со схемой (0 — не совпадает).
+
+    Живая форма имён: «Мобильные телефоны», «Газонокосилки» — совпадение
+    по общему префиксу слов (стеммер не нужен при пороге min(len)-2);
+    бонус слову в начале имени; штраф совпадению в хвосте «…для X»
+    (аксессуары: «Аккумуляторы для телефонов» не должны выигрывать у
+    «Мобильные телефоны»).
     """
-    category = os.environ.get("SHOP_ONLINER_CATEGORY", "")
+    name_words = _norm_words(schema.get("name") or "")
+    best = 0
+    for_query = "для" in name_words
+    for w in query_words:
+        if len(w) < 4:
+            continue
+        for pos, v in enumerate(name_words):
+            c = len(__import__("os").path.commonprefix([w, v]))
+            if c >= max(4, min(len(w), len(v)) - 2):
+                score = c + max(0, 3 - pos)
+                if for_query and pos > name_words.index("для"):
+                    score -= 4
+                best = max(best, score)
+    return best
+
+
+def _onliner_schemas_cache_read():
+    raw = _setting_get(ONLINER_SCHEMAS_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if isinstance(data, dict) and isinstance(data.get("schemas"), list):
+        return data
+    return None
+
+
+def _onliner_schemas_cache_write(data):
+    _setting_set(ONLINER_SCHEMAS_KEY, json.dumps(data, ensure_ascii=False))
+
+
+def onliner_resolve_category(query, max_pages=None):
+    """Слаг категории Onliner для произвольного запроса (None — не нашли).
+
+    Порядок: env SHOP_ONLINER_CATEGORY (legacy, приоритетен) → карта
+    синонимов с проверкой по словарю → живой словарь /schemas
+    (дозагрузка по курсору ≤N страниц за вызов, персист между вызовами,
+    кэш 7 дней после полной выгрузки) → ничего не нашли — None.
+    Никогда не возвращает слаг, которого нет в живом словаре.
+    """
+    env_cat = os.environ.get("SHOP_ONLINER_CATEGORY", "").strip()
+    if env_cat:
+        return env_cat
+
+    cache = _onliner_schemas_cache_read() or {"schemas": [], "next_page": 1, "complete": False, "ts": 0}
+    schemas = [s for s in cache.get("schemas") or []
+               if isinstance(s, dict) and s.get("key")]
+    fresh = cache.get("complete") and (time.time() - (cache.get("ts") or 0)) < ONLINER_SCHEMAS_TTL
+
+    qwords = _norm_words(query)
+    # 1) карта синонимов — только если слаг живой в словаре
+    known_keys = {s["key"] for s in schemas} if fresh else None
+    if fresh and known_keys:
+        for w in qwords:
+            for kw, slug in ONLINER_KEYWORD_MAP.items():
+                if w.startswith(kw) and slug in known_keys:
+                    return slug
+
+    # 2) совпадение по словарю: свежий полный — сразу; неполный —
+    #    ищем в накопленном, затем дозагружаем ≤N страниц за вызов
+    if not fresh:
+        budget = max_pages or ONLINER_SCHEMAS_PAGES_PER_CALL
+        fetched_any = False
+        page = cache.get("next_page") or 1
+        while page <= ONLINER_SCHEMAS_PAGE_CAP and budget > 0:
+            r = FETCH_JSON_FN("fetch_json", {"url": ONLINER_SCHEMAS_URL.format(n=page)})
+            if not r.get("ok"):
+                log.warning("onliner /schemas стр.%s не получена: %s", page, r.get("error"))
+                break
+            chunk = ((r.get("data") or {}).get("schemas")) or []
+            schemas.extend(s for s in chunk if isinstance(s, dict) and s.get("key"))
+            fetched_any = True
+            page += 1
+            budget -= 1
+            if not chunk:
+                cache["complete"] = True
+                break
+        cache["schemas"] = schemas
+        cache["next_page"] = page
+        if fetched_any or cache.get("complete"):
+            cache["ts"] = time.time()
+            _onliner_schemas_cache_write(cache)
+
+    known_keys = {s["key"] for s in schemas}
+    # карта по накопленному словарю (даже если он ещё неполный)
+    for w in qwords:
+        for kw, slug in ONLINER_KEYWORD_MAP.items():
+            if w.startswith(kw) and slug in known_keys:
+                return slug
+    # 3) нечёткое совпадение по именам словаря (порог 7)
+    best, best_score = None, 0
+    for s in schemas:
+        sc = _schema_match_score(qwords, s)
+        if sc > best_score:
+            best, best_score = s["key"], sc
+    if best and best_score >= 7:
+        return best
+    if best:
+        log.info("onliner категория для %r не уверена (score=%s) — честный отказ", query, best_score)
+    return None
+
+
+def collect_onliner(query, page=1):
+    """Каталог Onliner — ЖИВАЯ форма (пробы 2026-09-24, наряд #327).
+
+    products[].prices: price_min/price_max {amount, currency}, offers.count;
+    reviews: rating 0..50 + count. Слаг категории — динамически
+    (onliner_resolve_category); не нашли — честный no_category, не слаг
+    наугад. Парсер оборонительный: расхождение формы → api_form_mismatch.
+    """
+    category = onliner_resolve_category(query)
     if not category:
         return {"ok": False, "platform": "onliner",
-                "error": "SHOP_ONLINER_CATEGORY не задан — слаг категории каталога "
-                         "определяется с живого прогона (песочница слаги не отдала)",
-                "kind": "config_missing"}
+                "error": f"категория Onliner для «{query}» не определена по живому "
+                         "словарю /schemas — слаг наугад не подставляем",
+                "kind": "no_category"}
     url = ("https://catalog.api.onliner.by/search/" + urllib.parse.quote(category)
            + "?" + urllib.parse.urlencode({"query": query, "products-page": str(page)}))
     data = FETCH_JSON_FN("fetch_json", {"url": url})
-    _audit("onliner", f"search:{query}", "ok" if data.get("ok") else "refused")
+    _audit("onliner", f"search:{query} cat:{category}", "ok" if data.get("ok") else "refused")
     if not data.get("ok"):
         return {"ok": False, "platform": "onliner", "error": data.get("error"),
                 "kind": data.get("kind", "transport"), "url": url}
@@ -480,10 +640,15 @@ def collect_onliner(query, page=1):
         key = p.get("key") or p.get("id")
         if key is None:
             continue
-        price = (p.get("prices") or {}).get("price") or {}
+        prices = p.get("prices") or {}
+        price = prices.get("price_min") or {}
         amount = _num(price.get("amount"))
         currency = (price.get("currency") or "BYN").upper()
         price_byn = to_byn(amount, currency, rates) if currency != "BYN" else amount
+        offers_count = _num((prices.get("offers") or {}).get("count")) or 0
+        reviews = p.get("reviews") or {}
+        rating = _num(reviews.get("rating"))
+        rating = rating / 10.0 if rating is not None else None  # 0..50 → 0..5
         offers.append({
             "platform": "onliner",
             "platform_code": str(key),
@@ -491,25 +656,47 @@ def collect_onliner(query, page=1):
             "title": p.get("full_name") or p.get("name"),
             "price_byn": price_byn,
             "old_price_byn": None,
-            "in_stock": 1 if (p.get("prices") or {}).get("offers_count") else 0,
-            "rating": _num(p.get("rating")),
-            "reviews_count": int(_num(p.get("reviews_count")) or 0),
+            "in_stock": 1 if offers_count else 0,
+            "rating": rating,
+            "reviews_count": int(_num(reviews.get("count")) or 0),
             "seller_name": None, "seller_platform_code": None,
             "seller_rating": None, "seller_deals": None, "seller_official": None,
         })
-    return {"ok": True, "platform": "onliner", "url": url, "offers": offers}
+    return {"ok": True, "platform": "onliner", "url": url, "category": category,
+            "offers": offers}
 
 
-# ── 21vek (каркас) ──────────────────────────────────────────────────────
+# ── 21vek (#328): robots запрещает поисковую поверхность ─────────────
 def collect_21vek(query):
-    """Каркас: API-форма не снята из песочницы (честно, #172).
-
-    Первый живой прогон на Render снимет форму (fetch_json на поисковый
-    эндпоинт), парсер добавится точечным PR.
+    """Живой robots.txt 2026-09-24 (наряд #328): User-agent: * запрещает
+    /search, /api/* и ВСЕ URL с query (*?*) — поисковая поверхность
+    21vek закрыта для честных клиентов. Красная линия SHOP-2 (#172):
+    robots уважается — сбор запрещён без явного решения владельца.
+    Вопрос вынесен в отчёт наряда: отступление от robots меняет
+    дисциплину сбора всего офиса, единолично не принимается.
     """
     return {"ok": False, "platform": "21vek",
-            "error": "API-форма 21vek не снята — каркас ждёт живого прогона на Render",
-            "kind": "not_implemented_live"}
+            "error": "robots.txt 21vek запрещает /search, /api/* и все URL "
+                     "с query (*?*) — сбор поисковой поверхности нарушает "
+                     "дисциплину SHOP-2; нужно явное решение владельца",
+            "kind": "robots_disallow_surface"}
+
+
+# ── tm.by (#331): площадка недоступна для разведки ───────────────────
+def collect_tmby(query):
+    """Живые пробы 2026-09-24 (наряд #331): TLS «unexpected eof» на все
+    4 варианта (https/http × tm.by/www.tm.by) — площадка обрывает
+    соединения с датацентровых IP (фильтрация на её стороне); DNS жив.
+    Форма поиска не снята — реализация вслепую запрещена нарядом
+    («сначала разведка, потом код», тот же принцип, что 21vek).
+    Форма снимется первым живым прогоном (Render egress может отличаться)
+    или из браузера владельца — тогда парсер добавится точечным PR.
+    """
+    return {"ok": False, "platform": "tmby",
+            "error": "tm.by недоступен из песочницы (TLS unexpected eof на все "
+                     "варианты), форма поиска не снята — каркас ждёт живого "
+                     "прогона/разведки владельца",
+            "kind": "recon_unreachable"}
 
 
 COLLECTORS = {
@@ -517,6 +704,7 @@ COLLECTORS = {
     "ozon": collect_ozon,
     "onliner": collect_onliner,
     "21vek": collect_21vek,
+    "tmby": collect_tmby,
 }
 
 
