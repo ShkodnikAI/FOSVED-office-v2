@@ -103,41 +103,59 @@ MLOG_BIN="$MLOG_CANDIDATE"
 # известный ложняк эвристики SECRETS: "sk_" совпадает внутри "task_id"/
 # "risk_level", апстрим-баг word-boundary; ошибок Category A нет).
 # Exit 1 (ошибки Category A) по-прежнему блокирует бут на 0.21.
+# №424-ценз и гейты — ОБЩИЕ для обеих ветвей (0.21 и 0.19-фолбэк).
+# №427 (инцидент 2026-09-24): на фолбэк-пути allowlist не экспортировался —
+# env() в хендлерах 0.19 denied → /version 500 ENV_NOT_PERMITTED.
+METALOGOS_ENV_ALLOWLIST_CENSUS="CEREBRAS_API_KEY,CRON_SECRET,DATABASE_URL,DEEPSEEK_API_KEY,FNP_CUSTOMER,FNP_GOAL,FNP_NAME,FNP_SLUG,FNP_TYPE,FORGE_GITHUB_OWNER,FORGE_REPOS_DIR,FORGE_RUN_ENABLED,FORGE_RUN_VLIMIT_KB,GROQ_API_KEY,INTERNAL_API_TOKEN,KIMI_API_KEY,LOCKDOWN_PASSWORD,METALOGOS_EXEC_TIMEOUT_SECS,OWNER_TELEGRAM_ID,RENDER_URL,SAKANA_API_KEY,SHOP_ENABLED,TAVILY_API_KEY,TELEGRAM_ARCHIVE_CHANNEL_ID,TELEGRAM_BOT_TOKEN,ZAI_API_KEY"
+# BEGIN №424 env-allowlist guard (extract-тест: tests/test_env_allowlist_guard.py)
+export METALOGOS_ENV_ALLOWLIST="${METALOGOS_ENV_ALLOWLIST:-$METALOGOS_ENV_ALLOWLIST_CENSUS}"
+# №424: оверрайд из дашборда Render затирал дефолт ЦЕЛИКОМ — живой пробой
+# 2026-09-22: CRON_SECRET читался (403-ветка), а env("INTERNAL_API_TOKEN")
+# давал 500 ENV_NOT_PERMITTED → /version лежала. Политика теперь: ценз —
+# нижняя граница; дашборд может только ДОБАВЛЯТЬ имена, не убирать.
+for ALLOWLIST_NAME in $(printf '%s' "$METALOGOS_ENV_ALLOWLIST_CENSUS" | tr ',' ' '); do
+  case ",${METALOGOS_ENV_ALLOWLIST}," in
+    *",${ALLOWLIST_NAME},"*) ;;
+    *) METALOGOS_ENV_ALLOWLIST="${METALOGOS_ENV_ALLOWLIST:+${METALOGOS_ENV_ALLOWLIST},}${ALLOWLIST_NAME}" ;;
+  esac
+done
+# END №424 env-allowlist guard
+echo "--- env-allowlist effective (names only): ${METALOGOS_ENV_ALLOWLIST}"
+export METALOGOS_SERVE_ALLOW_EXEC="${METALOGOS_SERVE_ALLOW_EXEC:-1}"
+# №422: SSRF-гвард 0.21 по умолчанию режет http_get/http_post на 127.0.0.1 —
+# а это ШТАТНЫЙ внутренний канал офиса (mlog -> свой LLM-прокси на :4000,
+# ~40 сайтов вызовов: /ask, news, tts, /cron/*-цепочки). Без флага офис на
+# 0.21 отвечает только на команды без LLM — репродукция в отчёте №422.
+# Публичная поверхность не меняется: наружу смотрит только reverse-прокси.
+export METALOGOS_HTTP_ALLOW_PRIVATE="${METALOGOS_HTTP_ALLOW_PRIVATE:-1}"
+# ADR-0171 дефолт — VM, но VM-хендлеры 0.21 не видят db-соединение (db_decl):
+# office-путь держим на интерпретаторе до починки апстрима (находка №419).
+export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-interpreter}"
+
+# №427 (инцидент 2026-09-24, продолжение): один app.mlog на два бинаря
+# невозможен — мост `profile legacy { egress: permissive_with_audit }`
+# (№421) делает 0.21-пробу зелёной (egress-clearance → Info), но 0.19 эту
+# строку НЕ парсит (инцидент #333: boot break). #333 удалил строку →
+# 0.21-проба снова красная (10×SINK_CLEARANCE) → прод молча откатился на
+# 0.19 с закрытым env и битыми /health /version. Решение: пробуем и
+# сервервим АУГМЕНТИРОВАННУЮ копию (мост добавляется скриптом) на 0.21;
+# фолбэк 0.19 получает оригинал без моста.
+MLOG_SERVE_FILE="$MLOG_ENTRY"
 MLOG_PROBE_RC=9
 if [ -x "$MLOG_CANDIDATE" ]; then
-  "$MLOG_CANDIDATE" audit "$MLOG_ENTRY" >/dev/null 2>&1 && MLOG_PROBE_RC=0 || MLOG_PROBE_RC=$?
+  MLOG_AUG="${TMPDIR:-/tmp}/app_serve_021.mlog"
+  if grep -q "^profile legacy" "$MLOG_ENTRY"; then
+    cp "$MLOG_ENTRY" "$MLOG_AUG"
+  else
+    { printf '%s\n' "profile legacy { egress: permissive_with_audit }"; cat "$MLOG_ENTRY"; } > "$MLOG_AUG"
+  fi
+  "$MLOG_CANDIDATE" audit "$MLOG_AUG" >/dev/null 2>&1 && MLOG_PROBE_RC=0 || MLOG_PROBE_RC=$?
+  if [ "$MLOG_PROBE_RC" = "0" ] || [ "$MLOG_PROBE_RC" = "2" ]; then
+    MLOG_SERVE_FILE="$MLOG_AUG"
+  fi
 fi
 if [ "$MLOG_PROBE_RC" = "0" ] || [ "$MLOG_PROBE_RC" = "2" ]; then
-  echo "--- Metalogos: 0.21 candidate PASSED the Category A audit probe — serving on $MLOG_CANDIDATE"
-  # Гейты №259 (env в роутах) и exec: паритет с 0.19 — офис читает служебные
-  # env (CRON_SECRET, OWNER_TELEGRAM_ID, ...); список = ценз env( по app.mlog
-  # и dept/*.mlog (наряд №419). Скомпрометированные значения ротируются в
-  # дашборде Render (см. docs/render-dashboard.md, секция native cron).
-  METALOGOS_ENV_ALLOWLIST_CENSUS="CEREBRAS_API_KEY,CRON_SECRET,DATABASE_URL,DEEPSEEK_API_KEY,FNP_CUSTOMER,FNP_GOAL,FNP_NAME,FNP_SLUG,FNP_TYPE,FORGE_GITHUB_OWNER,FORGE_REPOS_DIR,FORGE_RUN_ENABLED,FORGE_RUN_VLIMIT_KB,GROQ_API_KEY,INTERNAL_API_TOKEN,KIMI_API_KEY,LOCKDOWN_PASSWORD,METALOGOS_EXEC_TIMEOUT_SECS,OWNER_TELEGRAM_ID,RENDER_URL,SAKANA_API_KEY,SHOP_ENABLED,TAVILY_API_KEY,TELEGRAM_ARCHIVE_CHANNEL_ID,TELEGRAM_BOT_TOKEN,ZAI_API_KEY"
-  # BEGIN №424 env-allowlist guard (extract-тест: tests/test_env_allowlist_guard.py)
-  export METALOGOS_ENV_ALLOWLIST="${METALOGOS_ENV_ALLOWLIST:-$METALOGOS_ENV_ALLOWLIST_CENSUS}"
-  # №424: оверрайд из дашборда Render затирал дефолт ЦЕЛИКОМ — живой пробой
-  # 2026-09-22: CRON_SECRET читался (403-ветка), а env("INTERNAL_API_TOKEN")
-  # давал 500 ENV_NOT_PERMITTED → /version лежала. Политика теперь: ценз —
-  # нижняя граница; дашборд может только ДОБАВЛЯТЬ имена, не убирать.
-  for ALLOWLIST_NAME in $(printf '%s' "$METALOGOS_ENV_ALLOWLIST_CENSUS" | tr ',' ' '); do
-    case ",${METALOGOS_ENV_ALLOWLIST}," in
-      *",${ALLOWLIST_NAME},"*) ;;
-      *) METALOGOS_ENV_ALLOWLIST="${METALOGOS_ENV_ALLOWLIST:+${METALOGOS_ENV_ALLOWLIST},}${ALLOWLIST_NAME}" ;;
-    esac
-  done
-  # END №424 env-allowlist guard
-  echo "--- env-allowlist effective (names only): ${METALOGOS_ENV_ALLOWLIST}"
-  export METALOGOS_SERVE_ALLOW_EXEC="${METALOGOS_SERVE_ALLOW_EXEC:-1}"
-  # №422: SSRF-гвард 0.21 по умолчанию режет http_get/http_post на 127.0.0.1 —
-  # а это ШТАТНЫЙ внутренний канал офиса (mlog -> свой LLM-прокси на :4000,
-  # ~40 сайтов вызовов: /ask, news, tts, /cron/*-цепочки). Без флага офис на
-  # 0.21 отвечает только на команды без LLM — репродукция в отчёте №422.
-  # Публичная поверхность не меняется: наружу смотрит только reverse-прокси.
-  export METALOGOS_HTTP_ALLOW_PRIVATE="${METALOGOS_HTTP_ALLOW_PRIVATE:-1}"
-  # ADR-0171 дефолт — VM, но VM-хендлеры 0.21 не видят db-соединение (db_decl):
-  # office-путь держим на интерпретаторе до починки апстрима (находка №419).
-  export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-interpreter}"
+  echo "--- Metalogos: 0.21 candidate PASSED the Category A audit probe — serving on $MLOG_CANDIDATE (file: $MLOG_SERVE_FILE)"
 else
   if [ -x "$MLOG_CANDIDATE" ]; then
     echo "!!! Metalogos №419: 0.21 candidate ($MLOG_CANDIDATE) FAILED the audit probe — Category A blocks the office boot (№327 debt, см. отчёт №419)"
@@ -154,14 +172,14 @@ else
   fi
 fi
 mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs"
-if "$MLOG_BIN" check "$MLOG_ENTRY" 2>&1 | grep -q "parse error"; then
+if "$MLOG_BIN" check "$MLOG_SERVE_FILE" 2>&1 | grep -q "parse error"; then
   echo "WARNING: mlog check found parse errors (mlog serve may still work — interpreter is more lenient)"
-  "$MLOG_BIN" check "$MLOG_ENTRY" 2>&1 | head -5
+  "$MLOG_BIN" check "$MLOG_SERVE_FILE" 2>&1 | head -5
 fi
-"$MLOG_BIN" audit "$MLOG_ENTRY" 2>&1 | tail -3
-PORT=10001 "$MLOG_BIN" serve "$MLOG_ENTRY" &
+"$MLOG_BIN" audit "$MLOG_SERVE_FILE" 2>&1 | tail -3
+PORT=10001 "$MLOG_BIN" serve "$MLOG_SERVE_FILE" &
 MLOG_PID=$!
-echo "Metalogos started (PID: $MLOG_PID, bin: $MLOG_BIN, entry: $MLOG_ENTRY)"
+echo "Metalogos started (PID: $MLOG_PID, bin: $MLOG_BIN, entry: $MLOG_SERVE_FILE)"
 sleep 3
 
 for i in {1..10}; do
