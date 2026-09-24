@@ -1,0 +1,63 @@
+// test_yana359.mlog — office#359: единый список делегирования Яны.
+// Проверки:
+//  a1 — каждый отдел из списка: гейт-2 PASS и диспетчер возвращает slug
+//       (маркер доходит до исполнения, не тишина);
+//  a2 — [DELEGATE: admin] — гейт-2 честный ОТКАЗ (не пропуск → не тишина);
+//  a3 — неизвестный отдел — гейт-2 ОТКАЗ;
+//  a4 — текст ОТКАЗа перечисляет допустимые отделы из того же источника;
+//  a5 — список гейта и диспетчера совпадают по построению (YanaDelegateTarget).
+// Запуск: mkdir -p /tmp/yana-test359 && ./bin/mlog run test_yana359.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/yana-test359/y.db" }
+import app
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS trace_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+
+  // a1: все 12 отделов — гейт PASS + диспетчер возвращает slug
+  let a1 = true
+  let slugs = parse_json(YanaDelegateListJson())
+  let n = length(slugs)
+  let mut i = 0.0
+  while i < n {
+    let s = get(slugs, i)
+    let marker = "[DELEGATE: " + s + "]"
+    if YanaGateDelegationIntegrity("ответ " + marker) != "PASS" then { let a1 = false }
+    if YanaCheckDelegate("ответ " + marker) != s then { let a1 = false }
+    let i = i + 1.0
+  }
+  let out = out + _Mark("a1_all_slugs_reach_dispatch", a1)
+
+  // a2: admin — честный отказ гейта, диспетчер пуст
+  let g_admin = YanaGateDelegationIntegrity("передаю [DELEGATE: admin]")
+  let a2 = (starts_with(g_admin, "ОТКАЗ")) and (YanaCheckDelegate("[DELEGATE: admin]") == "")
+  let out = out + _Mark("a2_admin_honest_refusal", a2)
+
+  // a3: неизвестный отдел — честный отказ
+  let a3 = starts_with(YanaGateDelegationIntegrity("[DELEGATE: boss]"), "ОТКАЗ")
+  let out = out + _Mark("a3_unknown_refused", a3)
+
+  // a4: текст ОТКАЗа строится из единого источника
+  let refusal = YanaGateDelegationIntegrity("[DELEGATE: boss]")
+  let a4 = contains(refusal, "osp, lz") and contains(refusal, "kavalnya") and (contains(refusal, "admin") == false)
+  let out = out + _Mark("a4_refusal_from_source", a4)
+
+  // a5: диспетчер = гейт-список (первый маркер извлекается из середины ответа)
+  let a5 = YanaCheckDelegate("Готово. Передаю задача в работу.\n[DELEGATE: qa]\n") == "qa"
+  let out = out + _Mark("a5_dispatch_from_body", a5)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

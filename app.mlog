@@ -1807,24 +1807,51 @@ pattern YanaGateNoFalseConfirmation(reply: String) -> String {
   return "PASS"
 }
 
+// ── office#359: ЕДИНЫЙ источник списка делегирования Яны (JSON-массив). ──
+// Прежде гейт-2 знал 13 целей (включая admin), а диспетчер YanaCheckDelegate —
+// 12: [DELEGATE: admin] проходил гейт, диспетчер возвращал "" — делегирование
+// молча не происходило, а сырой маркер утекал в видимый чат. Теперь оба места
+// читают один массив; расхождение невозможно по построению.
+// admin сознательно исключён (делегирование Админу из Яны закрыто — см.
+// AGENTS.md §3; решение открыть — добавить "admin" в массив ниже, гейт и
+// диспетчер подхватят автоматически).
+pattern YanaDelegateListJson() -> String {
+  return json_encode(["osp", "lz", "expert", "marketing", "finance", "legal", "dev", "design", "qa", "visual", "engineering", "kavalnya"])
+}
+
+// Первый валидный [DELEGATE: slug] в reply; "" — валидных нет.
+pattern YanaDelegateTarget(reply: String) -> String {
+  let slugs = parse_json(YanaDelegateListJson())
+  let n = length(slugs)
+  let mut i = 0.0
+  while i < n {
+    let s = get(slugs, i)
+    if contains(reply, "[DELEGATE: " + s + "]") then { return s }
+    let i = i + 1.0
+  }
+  return ""
+}
+
+// Человекочитаемый список для текста ОТКАЗа — из того же источника.
+pattern YanaDelegateNames() -> String {
+  let slugs = parse_json(YanaDelegateListJson())
+  let n = length(slugs)
+  let mut out = ""
+  let mut i = 0.0
+  while i < n {
+    let out = out + get(slugs, i)
+    let i = i + 1.0
+    if i < n then { let out = out + ", " }
+  }
+  return out
+}
+
 // Gate 2: Delegation integrity — [DELEGATE: slug] must target valid department
 pattern YanaGateDelegationIntegrity(reply: String) -> String {
   if contains(reply, "[DELEGATE:") == false then { return "PASS" }
-  if contains(reply, "[DELEGATE: osp]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: lz]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: expert]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: marketing]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: finance]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: legal]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: dev]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: design]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: qa]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: visual]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: engineering]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: kavalnya]") then { return "PASS" }
-  if contains(reply, "[DELEGATE: admin]") then { return "PASS" }
+  if YanaDelegateTarget(reply) != "" then { return "PASS" }
   let _ = AuditLog("hard_gate_violation", "yana", "Gate 2: invalid delegation target in [DELEGATE]")
-  return "ОТКАЗ: Недопустимый отдел делегирования. Яна может делегировать только: osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya, admin."
+  return "ОТКАЗ: Недопустимый отдел делегирования. Яна может делегировать только: " + YanaDelegateNames() + "."
 }
 
 // Gate 3: REMIND format validation — [REMIND: type|param|text] must match spec
@@ -2150,19 +2177,9 @@ pattern YanaCalendar() -> String {
 }
 
 pattern YanaCheckDelegate(reply: String) -> String {
-  if contains(reply, "[DELEGATE: osp]") then { return "osp" }
-  if contains(reply, "[DELEGATE: lz]") then { return "lz" }
-  if contains(reply, "[DELEGATE: expert]") then { return "expert" }
-  if contains(reply, "[DELEGATE: marketing]") then { return "marketing" }
-  if contains(reply, "[DELEGATE: finance]") then { return "finance" }
-  if contains(reply, "[DELEGATE: legal]") then { return "legal" }
-  if contains(reply, "[DELEGATE: dev]") then { return "dev" }
-  if contains(reply, "[DELEGATE: design]") then { return "design" }
-  if contains(reply, "[DELEGATE: qa]") then { return "qa" }
-  if contains(reply, "[DELEGATE: visual]") then { return "visual" }
-  if contains(reply, "[DELEGATE: engineering]") then { return "engineering" }
-  if contains(reply, "[DELEGATE: kavalnya]") then { return "kavalnya" }
-  return ""
+  // office#359: диспетчер читает тот же единый список, что и гейт-2 —
+  // расхождение списков (молчаливая потеря [DELEGATE]) больше невозможно.
+  return YanaDelegateTarget(reply)
 }
 
 // ── SHOP-7 (#180): разговорный подбор товара — маркер [SHOP: запрос] ───
