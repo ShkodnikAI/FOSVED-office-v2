@@ -126,7 +126,10 @@ GitHub Actions в публичном Metalogos- (наряд №420; с 2026-09-2
 доставка в `ReminderCheck`); recipe расчёта epoch — в README-runbook.
 Живая поверхность (без рестарта): `/schedules/list`, `/schedules/bootstrap`,
 `/schedules/create`, `/schedules/remove` — та же CRON_SECRET-авторизация, что
-у `/cron/*`.
+у `/cron/*`. №426: `GET /schedules/list|bootstrap` также экспонированы через
+публичный прокси (секрет в query, `--data-urlencode` по уроку №425) — владелец
+может живьём проверить реестр и перерегистрировать его без рестарта;
+create/remove остаются mlog-internal (админ-домен).
 
 **Целевой расклад нативных заданий (tz Europe/Moscow, времена MSK wall-clock):**
 

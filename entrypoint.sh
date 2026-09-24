@@ -180,15 +180,26 @@ if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
   # (гонка инициализации kv/БД — в бут-логе 2026-09-22 бутстрап отпал через 160 мс
   # после «listening»). Три попытки с паузой 2 с; секрет в URL не печатаем.
   BOOT_REPORT=""
+  BOOT_CODE=""
   for BOOT_ATTEMPT in 1 2 3; do
     # №425: 0.21 percent-декодирует query ('+' → пробел, %XX → байты,
     # url_decode_fallback server.rs) — сырая вставка секрета с '+' честно
     # даёт 403 (проба scripts/probe021qp.sh: raw=403, enc=200 KEEP×7).
     # Секрет только в URL внутреннего curl, в лог не печатаем.
-    BOOT_REPORT=$(curl -sf --max-time 90 -G "http://127.0.0.1:10001/schedules/bootstrap" --data-urlencode "secret=${CRON_SECRET}" 2>/dev/null || true)
+    # №426: -w добавляет HTTP-код отдельной строкой — прежнее «no answer»
+    # сливало 403/404/conn-refused/таймаут (бут 2026-09-23T07:29Z: причина
+    # из лога не видна). Тело не-2xx в отчёт не попадает (2*-фильтр).
+    BOOT_RAW=$(curl -s --max-time 90 -G "http://127.0.0.1:10001/schedules/bootstrap" --data-urlencode "secret=${CRON_SECRET}" -w $'\n%{http_code}' 2>/dev/null || true)
+    BOOT_CODE="${BOOT_RAW##*$'\n'}"
+    BOOT_REPORT="${BOOT_RAW%$'\n'*}"
+    case "$BOOT_CODE" in
+      2*) : ;;
+      000|"") BOOT_CODE="conn-fail"; BOOT_REPORT="" ;;
+      *) BOOT_REPORT="" ;;
+    esac
     if [ -n "$BOOT_REPORT" ]; then break; fi
     if [ "$BOOT_ATTEMPT" != "3" ]; then
-      echo "  bootstrap attempt ${BOOT_ATTEMPT}: no answer — retry in 2s"
+      echo "  bootstrap attempt ${BOOT_ATTEMPT}: no answer (HTTP ${BOOT_CODE:-conn-fail}) — retry in 2s"
       sleep 2
     fi
   done
@@ -199,7 +210,7 @@ if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
       *) echo "  native schedules OK" ;;
     esac
   else
-    echo "  !!! schedules/bootstrap did not answer after 3 attempts — native schedules NOT registered (external crons remain the executor)"
+    echo "  !!! schedules/bootstrap did not answer after 3 attempts (last HTTP: ${BOOT_CODE:-conn-fail}) — native schedules NOT registered (external crons remain the executor)"
   fi
 fi
 
