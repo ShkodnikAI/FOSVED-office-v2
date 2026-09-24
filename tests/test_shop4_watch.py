@@ -261,8 +261,11 @@ def test_platforms_real_loop_wb_ozon_onliner_21vek_tmby():
     """Такт реальных площадок. 2026-09-16: kufar выведен, ozon — каркас
     (антибот, отказ честный). 2026-09-21 (f281c20): onliner/21vek заведены
     в реальный цикл опроса. 2026-09-24 (#331 B.2): tmby — пятый, каркас
-    (площадка недоступна для разведки, отказ честный, такт живёт)."""
-    assert PLATFORMS_REAL == ("wb", "ozon", "onliner", "21vek", "tmby")
+    (площадка недоступна для разведки, отказ честный, такт живёт).
+    2026-09-24 (батч-2, #335/#337/#338/#339/#340): +7745/shopby (GeoIP-блок),
+    +tomas/unishop (robots), +ym (Content API, гейт на ключ владельца)."""
+    assert PLATFORMS_REAL == ("wb", "ozon", "onliner", "21vek", "tmby",
+                              "7745", "shopby", "tomas", "unishop", "ym")
 
 
 def test_dashboard_doc_has_shop_cron_and_switch():
