@@ -1,0 +1,76 @@
+// test_ddl363.mlog — office#363: свежая БД + InitDB → все таблицы существуют;
+// реальные сценарии записи на каждую задетую таблицу.
+// Запуск: mkdir -p /tmp/ddl363 && DATABASE_URL=sqlite:/tmp/ddl363/t.db ./bin/mlog run test_ddl363.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: env("DATABASE_URL") }
+import dept/utils
+import app
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  let _ = InitDB()
+
+  // Из списка наряда (#363): 26 таблиц + найденные при скане (facts и др.)
+  let need = "watchlist_scenarios,analysis_verifications,monthly_reviews,profiles,macro_regime_snapshots,cross_asset_divergences,expert_briefings,expert_automotive_kb,lz_channels,contract_templates,tech_radar_entries,architecture_decisions,code_repositories,dev_estimate_verifications,dev_rule_violations,design_artifacts,design_decisions,user_research_sessions,design_verification,test_runs,defect_records,incidents,ai_eval_runs,security_audits,qa_assessments,cross_dept_tasks,facts,financial_forecasts,invoices,tax_calendar_events,exchange_rates"
+  let names = split(need, ",")
+  let n = length(names)
+  let mut i = 0.0
+  let mut absent = 0.0
+  while i < n {
+    let t = get(names, i)
+    let r = TryVal(try query("SELECT COUNT(*) as c FROM " + t))
+    if to_string(r) == "()" then { let absent = absent + 1.0 }
+    let i = i + 1.0
+  }
+  let a1 = absent == 0.0
+  let out = out + _Mark("a1_all_tables_exist", a1)
+
+  // Реальный сценарий записи: QA test-run + defect (чек-лист наряда)
+  let _ = db_execute("INSERT INTO test_runs (project, test_type, status, environment, triggered_by) VALUES ('smoke363', 'unit', 'running', 'sandbox', 'naryad')", [])
+  let ids = query("SELECT id FROM test_runs WHERE project = 'smoke363' ORDER BY id DESC LIMIT 1", [])
+  let a2 = length(ids) > 0.0
+  let out = out + _Mark("a2_qa_test_run_saved", a2)
+
+  // Realный сценарий: OSP watchlist_scenarios
+  let _ = TryVal(try db_execute("INSERT INTO watchlist_scenarios (scenario_label, description, status) VALUES ('smoke363', 'naryad-363 smoke', 'pending')", []))
+  let ws = query("SELECT scenario_label FROM watchlist_scenarios WHERE scenario_label = 'smoke363'", [])
+  let a3 = length(ws) > 0.0
+  let out = out + _Mark("a3_osp_watchlist_scenarios", a3)
+
+  // Реальный сценарий: Expert брифинг
+  let _ = db_execute("INSERT INTO expert_briefings (topic, depth_level, status, chat_id) VALUES ('smoke363 topic', 'quick', 'open', 'smoke363')", [])
+  let eb = query("SELECT topic FROM expert_briefings WHERE topic = 'smoke363 topic'", [])
+  let a4 = length(eb) > 0.0
+  let out = out + _Mark("a4_expert_briefing_saved", a4)
+
+  // Реальный сценарий: Dev ADR
+  let _ = db_execute("INSERT INTO architecture_decisions (task_id, title, context, alternatives, decision, consequences, status) VALUES ('smoke363', 'Test ADR', 'ctx', 'alts', 'dec', 'cons', 'accepted')", [])
+  let adr = query("SELECT title FROM architecture_decisions WHERE task_id = 'smoke363'", [])
+  let a5 = length(adr) > 0.0
+  let out = out + _Mark("a5_dev_adr_saved", a5)
+
+  // Реальный сценарий: Design artifact
+  let _ = db_execute("INSERT INTO design_artifacts (name, artifact_type, status, content) VALUES ('smoke363', 'screen', 'draft', 'cnt')", [])
+  let da = query("SELECT name FROM design_artifacts WHERE name = 'smoke363'", [])
+  let a6 = length(da) > 0.0
+  let out = out + _Mark("a6_design_artifact_saved", a6)
+
+  // facts (находка смока #355) читается GetFacts
+  let _ = db_execute("INSERT INTO facts (dept, content, status) VALUES ('yana', 'smoke363 fact content', 'active')", [])
+  let f = GetFacts("yana", "5")
+  let a7 = contains(f, "smoke363 fact content")
+  let out = out + _Mark("a7_facts_readable", a7)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
