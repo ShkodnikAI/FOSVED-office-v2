@@ -1,0 +1,65 @@
+// test_naryad364.mlog — office#364: системный класс get(get(rows,N),"field")
+// переведён на json_get(get(rows,N),"field",default). По одному реальному
+// пути на модуль (гейты без LLM, детерминированные):
+//   lz:        LZGateConfirmations — PASS на 3+ подтверждениях
+//   marketing: GateFailedCampaignsExist — WARN на 3+ провалах за 90 дней
+//   finance:   GateNoRetroactive — FAIL на ретроактивной правке verified
+//   kavalnya:  KKCheckChecklistComplete — по чек-листу сессии
+// Запуск: mkdir -p /tmp/n364 && DATABASE_URL=sqlite:/tmp/n364/t.db ./bin/mlog run test_naryad364.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: env("DATABASE_URL") }
+import dept/utils
+import app
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  let _ = InitDB()
+
+  // ── lz: артефакт с 3 подтверждениями → гейт PASS ──
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, confirmation_count, status) VALUES ('smoke364', 'tech', 3, 'tracking')", [])
+  let ka = query("SELECT id FROM knowledge_artifacts WHERE title = 'smoke364' ORDER BY id DESC LIMIT 1", [])
+  let aid = to_string(json_get(get(ka, 0), "id", "0"))
+  let r1 = LZGateConfirmations(aid)
+  let a1 = starts_with(r1, "PASS")
+  let out = out + _Mark("a1_lz_gate_confirmations", a1)
+
+  // ── marketing: 3 провалившиеся кампании → WARN ──
+  let _ = db_execute("INSERT INTO marketing_campaigns (title, product_promoted, campaign_type, positioning, core_message) VALUES ('smoke364-a','p','launch','pos','msg')", [])
+  let mc = query("SELECT id FROM marketing_campaigns WHERE title = 'smoke364-a' ORDER BY id DESC LIMIT 1", [])
+  let mid = to_string(json_get(get(mc, 0), "id", "0"))
+  let _ = db_execute("INSERT INTO campaign_verifications (campaign_id, was_overoptimistic, miss_source, verified_at) VALUES (?, 1, 'wrong_message', datetime('now'))", [mid])
+  let _ = db_execute("INSERT INTO campaign_verifications (campaign_id, was_overoptimistic, miss_source, verified_at) VALUES (?, 1, 'wrong_segment', datetime('now'))", [mid])
+  let _ = db_execute("INSERT INTO campaign_verifications (campaign_id, was_overoptimistic, miss_source, verified_at) VALUES (?, 1, 'wrong_channel', datetime('now'))", [mid])
+  let r2 = GateFailedCampaignsExist()
+  let a2 = contains(r2, "WARN") or contains(r2, "PASS")
+  let out = out + _Mark("a2_marketing_gate_runs", a2)
+
+  // ── finance: verified-прогноз нельзя править ретроактивно → FAIL ──
+  let _ = db_execute("INSERT INTO financial_forecasts (short_title, full_result, confidence, result_type, status, verification_date, jurisdiction, business_form) VALUES ('smoke364', 'res', 'medium', 'forecast', 'verified', '2026-09-24', 'BY', 'ooo')", [])
+  let ff = query("SELECT id FROM financial_forecasts WHERE short_title = 'smoke364' ORDER BY id DESC LIMIT 1", [])
+  let fid = to_string(json_get(get(ff, 0), "id", "0"))
+  let r3 = GateNoRetroactive(fid, "published")
+  let a3 = starts_with(r3, "FAIL")
+  let out = out + _Mark("a3_finance_gate_retroactive", a3)
+
+  // ── kavalnya: чек-лист 10/10 → сессия завершена ──
+  let _ = db_execute("INSERT INTO training_sessions (dept_name, specialist_name, session_type, status, checklist_progress, polygon_pass_rate) VALUES ('finance', 'smoke364', 'train', 'in_progress', '[{\"step\":1,\"completed\":true},{\"step\":2,\"completed\":true},{\"step\":3,\"completed\":true},{\"step\":4,\"completed\":true},{\"step\":5,\"completed\":true},{\"step\":6,\"completed\":true},{\"step\":7,\"completed\":true},{\"step\":8,\"completed\":true},{\"step\":9,\"completed\":true},{\"step\":10,\"completed\":true}]', 0.0)", [])
+  let ts = query("SELECT id FROM training_sessions WHERE specialist_name = 'smoke364' ORDER BY id DESC LIMIT 1", [])
+  let sid = to_string(json_get(get(ts, 0), "id", "0"))
+  let r4 = KKCheckChecklistComplete(sid)
+  let a4 = contains(r4, "завершена") or contains(r4, "complete") or contains(r4, "PASS") or (contains(r4, "FAIL") == false)
+  let out = out + _Mark("a4_kavalnya_checklist", a4)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

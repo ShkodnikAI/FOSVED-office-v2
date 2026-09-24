@@ -114,7 +114,7 @@ pattern GateNoRetroactive(forecast_id: String, new_status: String) -> String {
   // Check if forecast already verified — verified forecasts cannot be changed
   let rows = query("SELECT status FROM financial_forecasts WHERE id = ?", [forecast_id])
   if length(rows) > 0.0 then {
-    let current_status = get(get(rows, 0.0), "status")
+    let current_status = to_string(json_get(get(rows, 0.0), "status", ""))
     if current_status == "verified" or current_status == "missed" or current_status == "partial" then {
       return "FAIL: verified/missed/partial forecasts cannot be retroactively modified."
     }
@@ -244,8 +244,8 @@ pattern FinanceInvoicesAPI(status: String, limit: Int) -> String {
 pattern FinanceMetricsAPI() -> String {
   let rows = query("SELECT AVG(v.mape) as avg_mape, COUNT(*) as n FROM financial_forecast_verifications v JOIN financial_forecasts f ON v.forecast_id = f.id WHERE f.result_type = 'forecast' AND v.verified_at >= datetime('now', '-30 days') AND v.mape IS NOT NULL", [])
   if length(rows) > 0.0 then {
-    let avg_mape = get(get(rows, 0.0), "avg_mape")
-    let n = get(get(rows, 0.0), "n")
+    let avg_mape = to_float(to_string(json_get(get(rows, 0.0), "avg_mape", "0")))
+    let n = to_float(to_string(json_get(get(rows, 0.0), "n", "0")))
     return json_encode({metric: "mape-cashflow", value: avg_mape, sample_size: n, period: "last_30_days"})
   }
   return json_encode({metric: "mape-cashflow", value: null, sample_size: 0, period: "last_30_days", note: "insufficient data"})
@@ -604,7 +604,7 @@ pattern FinanceInvoiceTransition(invoice_id: String, new_status: String, reason:
   // Valid transitions map
   let rows = query("SELECT status FROM invoices WHERE id = ?", [invoice_id])
   if length(rows) == 0.0 then { return "FAIL: invoice not found" }
-  let current = get(get(rows, 0.0), "status")
+  let current = to_string(json_get(get(rows, 0.0), "status", ""))
 
   // Validate transition
   let valid = "false"
@@ -731,19 +731,19 @@ pattern FinanceScore(chat_id: String) -> String {
   let avg_mape = "N/A"
   let mut mape_n = 0
   if length(mape_rows) > 0.0 then {
-    let raw_mape = get(get(mape_rows, 0.0), "avg_mape")
-    let raw_n = get(get(mape_rows, 0.0), "n")
+    let raw_mape = to_float(to_string(json_get(get(mape_rows, 0.0), "avg_mape", "0")))
+    let raw_n = to_float(to_string(json_get(get(mape_rows, 0.0), "n", "0")))
     if to_string(raw_mape) != "null" then { let avg_mape = to_string(raw_mape) + "%" }
     let mape_n = raw_n
   }
 
   let total_inv = 0
   let overdue_inv = 0
-  if length(inv_rows) > 0.0 then { let total_inv = get(get(inv_rows, 0.0), "total") }
-  if length(overdue_rows) > 0.0 then { let overdue_inv = get(get(overdue_rows, 0.0), "overdue") }
+  if length(inv_rows) > 0.0 then { let total_inv = to_float(to_string(json_get(get(inv_rows, 0.0), "total", "0"))) }
+  if length(overdue_rows) > 0.0 then { let overdue_inv = to_float(to_string(json_get(get(overdue_rows, 0.0), "overdue", "0"))) }
 
   let missed_tax = 0
-  if length(tax_rows) > 0.0 then { let missed_tax = get(get(tax_rows, 0.0), "total") }
+  if length(tax_rows) > 0.0 then { let missed_tax = to_float(to_string(json_get(get(tax_rows, 0.0), "total", "0"))) }
 
   let mut overdue_ratio = "0%"
   if total_inv > 0.0 then {
@@ -1029,7 +1029,7 @@ pattern FinanceMonthlyReview() -> String {
   let mape_rows = query("SELECT AVG(v.mape) as avg_mape FROM financial_forecast_verifications v JOIN financial_forecasts f ON v.forecast_id = f.id WHERE f.result_type = 'forecast' AND v.verified_at >= datetime('now', '-30 days') AND v.mape IS NOT NULL", [])
   let avg_mape = "N/A"
   if length(mape_rows) > 0.0 then {
-    let raw = get(get(mape_rows, 0.0), "avg_mape")
+    let raw = to_float(to_string(json_get(get(mape_rows, 0.0), "avg_mape", "0")))
     if to_string(raw) != "null" then { let avg_mape = to_string(raw) }
   }
 
@@ -1250,14 +1250,14 @@ pattern FinanceConvertCurrency(amount: String, from_currency: String, to_currenc
   // Get exchange rate from DB (stored by scheduler)
   let rate_rows = query("SELECT rate FROM exchange_rates WHERE from_currency = ? AND to_currency = ? AND rate_date <= ? ORDER BY rate_date DESC LIMIT 1", [from_currency, to_currency, date])
   if length(rate_rows) > 0.0 then {
-    let rate = get(get(rate_rows, 0.0), "rate")
+    let rate = to_float(to_string(json_get(get(rate_rows, 0.0), "rate", "0")))
     let result = to_float(amount) * to_float(to_string(rate))
     return to_string(result)
   }
   // Fallback: try reverse rate
   let reverse_rows = query("SELECT rate FROM exchange_rates WHERE from_currency = ? AND to_currency = ? AND rate_date <= ? ORDER BY rate_date DESC LIMIT 1", [to_currency, from_currency, date])
   if length(reverse_rows) > 0.0 then {
-    let rev_rate = get(get(reverse_rows, 0.0), "rate")
+    let rev_rate = to_float(to_string(json_get(get(reverse_rows, 0.0), "rate", "0")))
     let result = to_float(amount) / to_float(to_string(rev_rate))
     return to_string(result)
   }
@@ -1274,7 +1274,7 @@ pattern FinanceRevenueRecognition(amount: String, currency: String, basis: Strin
     // Cash basis: recognize when payment received
     let payments = query("SELECT SUM(paid_amount) as total FROM invoices WHERE paid_at >= ? AND paid_at <= ? AND currency = ? AND status = 'paid'", [period_start, period_end, currency])
     if length(payments) > 0.0 then {
-      let total = get(get(payments, 0.0), "total")
+      let total = to_float(to_string(json_get(get(payments, 0.0), "total", "0")))
       return "CASH_BASIS: recognized " + to_string(total) + " " + currency + " (payments received " + period_start + " to " + period_end + ")"
     }
     return "CASH_BASIS: no payments in period"
@@ -1282,11 +1282,11 @@ pattern FinanceRevenueRecognition(amount: String, currency: String, basis: Strin
   // Accrual basis: recognize when earned (issued date)
   let earned = query("SELECT SUM(amount) as total FROM invoices WHERE issue_date >= ? AND issue_date <= ? AND currency = ? AND status NOT IN ('drafted', 'written_off')", [period_start, period_end, currency])
   if length(earned) > 0.0 then {
-    let total = get(get(earned, 0.0), "total")
+    let total = to_float(to_string(json_get(get(earned, 0.0), "total", "0")))
     // Deferred revenue: invoices issued but not yet due
     let deferred = query("SELECT SUM(amount) as total FROM invoices WHERE issue_date < ? AND due_date > ? AND currency = ? AND status NOT IN ('drafted', 'written_off', 'paid', 'closed')", [period_end, period_end, currency])
     let deferred_amount = "0"
-    if length(deferred) > 0.0 then { let deferred_amount = to_string(get(get(deferred, 0.0), "total")) }
+    if length(deferred) > 0.0 then { let deferred_amount = to_float(to_string(json_get(get(deferred, 0.0), "total", "0"))) }
     return "ACCRUAL_BASIS: recognized " + to_string(total) + " " + currency + " (earned " + period_start + " to " + period_end + "). Deferred: " + deferred_amount + " " + currency
   }
   return "ACCRUAL_BASIS: no revenue in period"
@@ -1314,7 +1314,7 @@ pattern FinanceTaxCalendarList(jurisdiction: String, limit: Int) -> String {
 pattern FinanceTaxCalendarComplete(event_id: String) -> String {
   let rows = query("SELECT id, completed FROM tax_calendar_events WHERE id = ?", [event_id])
   if length(rows) == 0.0 then { return "Tax event #" + event_id + " not found" }
-  let current = get(get(rows, 0.0), "completed")
+  let current = to_string(json_get(get(rows, 0.0), "completed", ""))
   if current == 1.0 then { return "Tax event #" + event_id + " already completed" }
   let _ = db_execute("UPDATE tax_calendar_events SET completed = 1, completed_at = datetime('now') WHERE id = ?", [event_id])
   let _ = AuditLog("finance_tax_complete", "finance", "event_id=" + event_id)

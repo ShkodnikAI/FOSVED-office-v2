@@ -75,7 +75,7 @@ pattern KKDisclaimer() -> String {
 pattern KKCheckChecklistComplete(session_id: Int) -> String {
   let rows = query("SELECT checklist_progress FROM training_sessions WHERE id = ?", [to_string(session_id)])
   if length(rows) == 0 then { return "FAIL: session not found" }
-  let progress = to_string(get(get(rows, 0), "checklist_progress"))
+  let progress = to_string(json_get(get(rows, 0), "checklist_progress", ""))
   // Count completed steps — need 10
   let count = 0.0
   if contains(progress, "completed") then { let count = count + 1.0 }
@@ -88,7 +88,7 @@ pattern KKCheckChecklistComplete(session_id: Int) -> String {
 pattern KKCheckPolygonPassRate(session_id: Int) -> String {
   let rows = query("SELECT polygon_pass_rate FROM training_sessions WHERE id = ?", [to_string(session_id)])
   if length(rows) == 0 then { return "FAIL: session not found" }
-  let rate = to_float(to_string(get(get(rows, 0), "polygon_pass_rate")))
+  let rate = to_float(to_string(json_get(get(rows, 0), "polygon_pass_rate", "0")))
   if rate >= 0.7 then { return "PASS: pass-rate " + to_string(rate) + " ≥ 0.70" }
   return "FAIL: pass-rate " + to_string(rate) + " < 0.70"
 }
@@ -97,7 +97,7 @@ pattern KKCheckPolygonPassRate(session_id: Int) -> String {
 pattern KKCheckAntiPatterns(skill_name: String) -> String {
   let rows = query("SELECT anti_patterns FROM skill_reviews WHERE skill_name = ?", [skill_name])
   if length(rows) == 0 then { return "FAIL: skill not reviewed" }
-  let patterns = to_string(get(get(rows, 0), "anti_patterns"))
+  let patterns = to_string(json_get(get(rows, 0), "anti_patterns", ""))
   // Count anti-patterns (rough: count commas + 1)
   if contains(patterns, ",") then { return "PASS: ≥3 anti-patterns" }
   if contains(patterns, "]") and contains(patterns, "\"") then { return "PASS" }
@@ -130,7 +130,7 @@ pattern KKValidateDebriefTone(text: String) -> String {
 pattern KKCheckConsecutiveBadMonths(dept_name: String) -> String {
   let rows = query("SELECT COUNT(*) as c FROM monthly_reviews WHERE dominant_error IS NOT NULL AND improvements_applied = false ORDER BY created_at DESC LIMIT 2", [])
   if length(rows) > 0 then {
-    let c = to_float(to_string(get(get(rows, 0), "c")))
+    let c = to_float(to_string(json_get(get(rows, 0), "c", "0")))
     if c >= 2.0 then { return "PASS: 2+ consecutive bad months" }
   }
   return "FAIL: <2 consecutive bad months — retraining not warranted"
@@ -153,14 +153,14 @@ pattern KKCheckOwnerApproval(action: String) -> String {
 pattern KKCreateSession(dept_name: String, session_type: String, specialist: String) -> Int {
   let _ = db_execute("INSERT INTO training_sessions (dept_name, specialist_name, session_type, status) VALUES (?, ?, ?, 'in_progress')", [dept_name, specialist, session_type])
   let ids = query("SELECT id FROM training_sessions WHERE dept_name = ? AND session_type = ? ORDER BY created_at DESC LIMIT 1", [dept_name, session_type])
-  if length(ids) > 0 then { return to_int(to_string(get(get(ids, 0), "id"))) }
+  if length(ids) > 0 then { return to_int(to_string(json_get(get(ids, 0), "id", ""))) }
   return -1
 }
 
 pattern KKCompleteSession(session_id: Int) -> String {
   let rows = query("SELECT status FROM training_sessions WHERE id = ?", [to_string(session_id)])
   if length(rows) == 0 then { return "ERROR: session not found" }
-  let status = to_string(get(get(rows, 0), "status"))
+  let status = to_string(json_get(get(rows, 0), "status", ""))
   if status != "in_progress" then { return "ERROR: status is '" + status + "', must be 'in_progress'" }
   let _ = db_execute("UPDATE training_sessions SET status = 'completed', completed_at = datetime('now') WHERE id = ?", [to_string(session_id)])
   let _ = AuditLog("kk_complete", "kavalnya", "session " + to_string(session_id) + " in_progress→completed")
@@ -192,8 +192,8 @@ pattern KKRunPolygonTask(session_id: Int, task_name: String, expected: String, a
   // Recalculate pass rate
   let results = query("SELECT COUNT(*) as total, SUM(CASE WHEN passed THEN 1 ELSE 0 END) as passed_count FROM polygon_results WHERE session_id = ?", [to_string(session_id)])
   if length(results) > 0 then {
-    let total = to_float(to_string(get(get(results, 0), "total")))
-    let p_count = to_float(to_string(get(get(results, 0), "passed_count")))
+    let total = to_float(to_string(json_get(get(results, 0), "total", "0")))
+    let p_count = to_float(to_string(json_get(get(results, 0), "passed_count", "0")))
     if total > 0.0 then {
       let rate = p_count / total
       let _ = db_execute("UPDATE training_sessions SET polygon_pass_rate = ? WHERE id = ?", [to_string(rate), to_string(session_id)])
@@ -222,9 +222,9 @@ pattern KKGetSkillStats() -> String {
   let active = query("SELECT COUNT(*) as c FROM skill_reviews WHERE status = 'active'", [])
   let underused = query("SELECT COUNT(*) as c FROM skill_reviews WHERE status = 'underused'", [])
   let deprecated = query("SELECT COUNT(*) as c FROM skill_reviews WHERE status = 'deprecated'", [])
-  let a = to_string(get(get(active, 0), "c"))
-  let u = to_string(get(get(underused, 0), "c"))
-  let d = to_string(get(get(deprecated, 0), "c"))
+  let a = to_float(to_string(json_get(get(active, 0), "c", "0")))
+  let u = to_float(to_string(json_get(get(underused, 0), "c", "0")))
+  let d = to_float(to_string(json_get(get(deprecated, 0), "c", "0")))
   return "Skill stats: active=" + a + " underused=" + u + " deprecated=" + d
 }
 
@@ -456,9 +456,9 @@ pattern KKForgeStatus(chat_id: String) -> String {
   let completed = query("SELECT COUNT(*) as c FROM training_sessions WHERE status = 'completed'", [])
   let ratified = query("SELECT COUNT(*) as c FROM training_sessions WHERE status = 'ratified'", [])
   let recent = query("SELECT id, dept_name, session_type, status, polygon_pass_rate FROM training_sessions ORDER BY created_at DESC LIMIT 5", [])
-  let a_count = to_string(get(get(active, 0), "c"))
-  let c_count = to_string(get(get(completed, 0), "c"))
-  let r_count = to_string(get(get(ratified, 0), "c"))
+  let a_count = to_float(to_string(json_get(get(active, 0), "c", "0")))
+  let c_count = to_float(to_string(json_get(get(completed, 0), "c", "0")))
+  let r_count = to_float(to_string(json_get(get(ratified, 0), "c", "0")))
   let skills = KKGetSkillStats()
   return "🔥 Кузница кадров — статус\nАктивных сессий: " + a_count + "\nЗавершённых: " + c_count + "\nРатифицированных: " + r_count + "\n\n" + skills + "\n\nПоследние сессии:\n" + json_encode(recent)
 }
