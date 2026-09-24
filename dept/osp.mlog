@@ -151,13 +151,13 @@ pattern OSPDraftAnalysis(topic: String, mode: String, domain: String, depth: Int
   let slug = lower(replace(topic, " ", "-"))
   let _ = db_execute("INSERT INTO analysis (topic, topic_slug, mode, status) VALUES (?, ?, ?, 'drafted')", [topic, slug, mode])
   let ids = query("SELECT id FROM analysis WHERE topic = ? ORDER BY created_at DESC LIMIT 1", [topic])
-  if length(ids) > 0 then { return to_int(to_string(get(get(ids, 0), "id"))) }
+  if length(ids) > 0 then { return to_int(to_string(json_get(get(ids, 0), "id", "-1"))) }
   return -1
 }
 pattern OSPPublishAnalysis(analysis_id: Int) -> String {
   let rows = query("SELECT status FROM analysis WHERE id = ?", [to_string(analysis_id)])
   if length(rows) == 0 then { return "ERROR: not found" }
-  let status = to_string(get(get(rows, 0), "status"))
+  let status = to_string(json_get(get(rows, 0), "status", ""))
   if status != "drafted" then { return "ERROR: status is '" + status + "', must be 'drafted'" }
   let _ = db_execute("UPDATE analysis SET status = 'published', published_at = datetime('now') WHERE id = ?", [to_string(analysis_id)])
   let _ = AuditLog("osp_publish", "osp", "id=" + to_string(analysis_id) + " drafted→published")
@@ -254,7 +254,7 @@ pattern OSPAutoEscalate(topic: String, base_depth: Int) -> Int {
   if contains(to_string(owner_pri), substring(t, 0, 20)) then { let depth = depth + 1 }
   let miss_count = query("SELECT COUNT(*) as c FROM analysis WHERE topic LIKE ? AND status IN ('missed','partial')", ["%" + substring(t, 0, 30) + "%"])
   if length(miss_count) > 0 then {
-    let mc = get(get(miss_count, 0), "c")
+    let mc = json_get(get(miss_count, 0), "c", "0")
     if to_float(to_string(mc)) >= 2.0 then { let depth = depth + 1 }
   }
   if contains(t, "критич") or contains(t, "existential") then { let depth = depth + 2 }
@@ -681,11 +681,11 @@ pattern OSPVerify(query: String, chat_id: String) -> String {
 pattern OSPCalibrationScore(chat_id: String) -> String {
   let total = query("SELECT COUNT(*) as c FROM analysis", [])
   let verified = query("SELECT COUNT(*) as c FROM analysis WHERE status = 'verified'", [])
-  let t_count = to_string(get(get(total, 0), "c"))
-  let v_count = to_string(get(get(verified, 0), "c"))
+  let t_count = to_string(json_get(get(total, 0), "c", "0"))
+  let v_count = to_string(json_get(get(verified, 0), "c", "0"))
   let brier_rows = query("SELECT AVG(brier_total) as avg_brier FROM analysis_verifications", [])
   let avg_brier = "N/A"
-  if length(brier_rows) > 0 then { let avg_brier = to_string(get(get(brier_rows, 0), "avg_brier")) }
+  if length(brier_rows) > 0 then { let avg_brier = to_string(json_get(get(brier_rows, 0), "avg_brier", "N/A")) }
   let context = BuildOSPContext("калибровка", "general", chat_id)
   let prompt = context + "\n\nКАЛИБРОВКА. Всего: " + t_count + " Верифицировано: " + v_count + " Avg Brier: " + avg_brier + " Цели: Y1≤0.25 Y2≤0.20 Y3≤0.18"
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Калибровочный скор ОСП"))), "all")
@@ -826,7 +826,7 @@ pattern OSPRecordRegime(regime: String, region: String, notes: String) -> String
 pattern OSPGetCurrentRegime(region: String) -> String {
   let rows = query("SELECT regime, regime_notes, date FROM macro_regime_snapshots WHERE region = ? ORDER BY date DESC LIMIT 1", [region])
   if length(rows) == 0 then { return "No regime for " + region }
-  return to_string(get(get(rows, 0), "regime")) + " [" + to_string(get(get(rows, 0), "date")) + "]"
+  return to_string(json_get(get(rows, 0), "regime", "")) + " [" + to_string(json_get(get(rows, 0), "date", "")) + "]"
 }
 pattern OSPUpdateBetStatus(bet_id: Int, new_status: String, note: String) -> String {
   let _ = db_execute("UPDATE asymmetric_bet SET status = ?, outcome_note = ? WHERE id = ?", [new_status, note, to_string(bet_id)])
