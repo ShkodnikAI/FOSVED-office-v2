@@ -1,12 +1,19 @@
-// Fosved Office v2 — Quest/Dossier Module (QUEST-1)
+// Fosved Office v2 — Quest/Dossier Module (QUEST-1, нативно переработан #366)
 // Multi-step task management: grants, contracts, reports, outreach
 // All state in SQLite (quests, quest_files, quest_checkpoints).
-// Document generation & email sending delegate to Python :4000.
+// НАРЯД #366: create/list/status работают нативно из БД — HTTP-моста к Flask
+// больше нет (роуты /api/quest/* никогда не существовали, вызовы были
+// мёртвыми). send-package/generate честно сообщают «не реализовано» —
+// почтового контура в офисе нет (MAIL-1 из 5bea453 не дошла до продакшена).
 
 // ---------------------------------------------------------------------------
 // 1. QuestCreate — create a new dossier with N steps
 //    Returns quest_id for subsequent operations
-//    Checkpoints created via Python helper (Metalogos has no loop construct)
+//    НАРЯД #366 B.1: чекпоинты создаются нативно — рекурсивный CTE в SQLite
+//    (комментарий «Metalogos has no loop construct» устарел). Нумерация шагов
+//    0-based согласована с current_step в QuestApproveStep/QuestAdvanceStep.
+//    CAST(?2 AS INTEGER) безопасен и для строкового биндинга; мусорный
+//    total_steps даёт 0 чекпоинтов — честно видно в /quest status.
 // ---------------------------------------------------------------------------
 pattern QuestCreate(title: String, quest_type: String, total_steps: String, deadline: String, chat_id: String) -> String {
   let qid = "Q-" + to_string(now())
@@ -14,9 +21,8 @@ pattern QuestCreate(title: String, quest_type: String, total_steps: String, dead
   db_execute("INSERT INTO quests (id, title, quest_type, status, current_step, total_steps, deadline, owner_chat_id, updated_at) VALUES (?1, ?2, ?3, 'active', 0, ?4, ?5, ?6, datetime('now'))",
     [qid, title, quest_type, total_steps, deadline, chat_id])
 
-  // Create checkpoints via Python endpoint (Metalogos has no loop)
-  let payload = json_encode({quest_id: qid, total_steps: total_steps})
-  let _ = TryVal(try http_post("http://127.0.0.1:4000/api/quest/create-checkpoints", payload, "application/json"))
+  db_execute("WITH RECURSIVE seq(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM seq WHERE n < CAST(?2 AS INTEGER) - 1) INSERT INTO quest_checkpoints (quest_id, step_num, step_label, status) SELECT ?1, n, 'Shag ' || CAST(n + 1 AS TEXT), 'pending' FROM seq",
+    [qid, total_steps])
 
   let _ = AuditLog("quest_create", "quest", "id=" + qid + " title=" + title + " type=" + quest_type)
   return qid
@@ -25,6 +31,8 @@ pattern QuestCreate(title: String, quest_type: String, total_steps: String, dead
 // ---------------------------------------------------------------------------
 // 2. QuestList — list active quests for owner
 //    Returns formatted text for Telegram
+//    НАРЯД #366 B.1: форматирование нативно из БД (раньше вызов шел в
+//    несуществующий /api/quest/format-list и всегда падал до сырого JSON)
 // ---------------------------------------------------------------------------
 pattern QuestList(chat_id: String) -> String {
   let rows = query("SELECT id, title, quest_type, status, current_step, total_steps, deadline FROM quests WHERE status = 'active' ORDER BY created_at DESC LIMIT 20", [])
@@ -33,28 +41,55 @@ pattern QuestList(chat_id: String) -> String {
     return "Net aktivnyh zadach."
   }
 
-  // Delegate formatting to Python for loop-based rendering
-  let payload = json_encode({rows: rows})
-  let resp = TryVal(try http_post("http://127.0.0.1:4000/api/quest/format-list", payload, "application/json"))
-  if to_string(resp) != "()" and to_string(resp) != "" then {
-    return to_string(resp)
+  let mut out = "Aktivnye dossye:\n"
+  each r in rows {
+    let qid = redact(to_string(json_get(r, "id", "")), "all")
+    let qtitle = redact(to_string(json_get(r, "title", "")), "all")
+    let qtype = redact(to_string(json_get(r, "quest_type", "general")), "all")
+    let qstep = redact(to_string(json_get(r, "current_step", "0")), "all")
+    let qtotal = redact(to_string(json_get(r, "total_steps", "0")), "all")
+    let qdl = redact(to_string(json_get(r, "deadline", "")), "all")
+    let mut line = ""
+    line = line + qid + " — " + qtitle + " [" + qtype + "] shag " + qstep + "/" + qtotal
+    if qdl != "" then { line = line + " (srok " + qdl + ")" }
+    let out = out + line + "\n"
   }
-
-  // Fallback: just return JSON
-  return json_encode(rows)
+  return out
 }
 
 // ---------------------------------------------------------------------------
 // 3. QuestStatus — detailed status of one quest with all checkpoints
-//    Delegates formatting to Python
+//    НАРЯД #366 B.1: статус и шаги читаются из БД напрямую (раньше вызов шел
+//    в несуществующий /api/quest/format-status — статус всегда был ошибкой)
 // ---------------------------------------------------------------------------
 pattern QuestStatus(qid: String) -> String {
-  let payload = json_encode({quest_id: qid})
-  let resp = TryVal(try http_post("http://127.0.0.1:4000/api/quest/format-status", payload, "application/json"))
-  if to_string(resp) != "()" and to_string(resp) != "" then {
-    return to_string(resp)
+  let qrows = query("SELECT id, title, quest_type, status, current_step, total_steps, deadline FROM quests WHERE id = ?1 LIMIT 1", [qid])
+  if length(qrows) == 0.0 then {
+    return "Dossye " + qid + " ne najdeno."
   }
-  return "Status request failed for " + qid
+
+  let q = qrows[0]
+  let qtitle = redact(to_string(json_get(q, "title", "")), "all")
+  let qtype = redact(to_string(json_get(q, "quest_type", "general")), "all")
+  let qstatus = redact(to_string(json_get(q, "status", "")), "all")
+  let qstep = redact(to_string(json_get(q, "current_step", "0")), "all")
+  let qtotal = redact(to_string(json_get(q, "total_steps", "0")), "all")
+  let qdl = redact(to_string(json_get(q, "deadline", "")), "all")
+  let mut out = ""
+  out = out + qid + " — " + qtitle + " [" + qtype + "]\nStatus: " + qstatus + ", shag " + qstep + " iz " + qtotal
+  if qdl != "" then { out = out + ", srok " + qdl }
+
+  let crows = query("SELECT step_num, COALESCE(step_label, 'Shag ' || CAST(step_num + 1 AS TEXT)) AS step_label, status FROM quest_checkpoints WHERE quest_id = ?1 ORDER BY step_num", [qid])
+  if length(crows) > 0.0 then {
+    let out = out + "\nShagi:"
+    each c in crows {
+      let num = redact(to_string(json_get(c, "step_num", "0")), "all")
+      let label = redact(to_string(json_get(c, "step_label", "")), "all")
+      let cstatus = redact(to_string(json_get(c, "status", "")), "all")
+      let out = out + "\n  " + num + ". " + label + " — " + cstatus
+    }
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -150,49 +185,29 @@ pattern QuestClose(qid: String) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 9. QuestSendPackage — compile all files and send via Python email endpoint
+// 9. QuestSendPackage — честный отказ (НАРЯД #366 B.2)
+//    Почтового контура в офисе нет: SMTP не поднят, Python-сторона MAIL-1
+//    (коммит 5bea453) не дошла до продакшена. Роут /api/quest/send-package
+//    отвечал 404, а паттерн докладывал «Paket otpravlen» — ложное
+//    подтверждение отправки. Теперь — честный отказ, без мёртвого вызова.
 // ---------------------------------------------------------------------------
 pattern QuestSendPackage(qid: String, recipient: String, subject: String) -> String {
-  let f_rows = query("SELECT filename, storage_path, file_type, version FROM quest_files WHERE quest_id = ?1 ORDER BY id", [qid])
-  let f_json = json_encode(f_rows)
-
-  let q_rows = query("SELECT title, quest_type FROM quests WHERE id = ?1", [qid])
-  let q_title = redact(to_string(TryVal(try json_get(q_rows[0], "title", "Bez nazvanija"))), "all")
-
-  let payload = json_encode({
-    quest_id: qid,
-    recipient: recipient,
-    subject: subject,
-    quest_title: q_title,
-    files: f_json
-  })
-
-  let resp = TryVal(try http_post("http://127.0.0.1:4000/api/quest/send-package", payload, "application/json"))
-  let _ = AuditLog("quest_send_package", "quest", "id=" + qid + " to=" + recipient)
-  return "Paket otpravlen na " + recipient + "."
+  let f_rows = query("SELECT COUNT(*) AS cnt FROM quest_files WHERE quest_id = ?1", [qid])
+  let fcount = redact(to_string(json_get(f_rows[0], "cnt", "0")), "all")
+  let _ = AuditLog("quest_send_unavailable", "quest", "id=" + qid + " to=" + recipient)
+  return "Otpravka paketa pochtoy ne realizovana — pochtovogo kontura v ofise net (fajlov v dossye " + qid + ": " + fcount + ")."
 }
 
 // ---------------------------------------------------------------------------
-// 10. QuestGenerateDocument — ask Python to generate a docx/pdf from template
+// 10. QuestGenerateDocument — честный отказ (НАРЯД #366 B.2)
+//    Генерация документов по шаблонам досье не реализована — роут
+//    /api/quest/generate никогда не существовал. Мост на контур Visual
+//    (/send-document, #361) — отдельное решение вне объёма наряда.
 // ---------------------------------------------------------------------------
-pattern QuestGenerateDocument(qid: String, template: String, data: String) -> String {
-  let payload = json_encode({
-    quest_id: qid,
-    template: template,
-    data: data
-  })
-
-  let resp = TryVal(try http_post("http://127.0.0.1:4000/api/quest/generate", payload, "application/json"))
-
-  // If Python returns a filename, register it in quest_files
-  let resp_str = to_string(resp)
-  if contains(resp_str, "filename") then {
-    let fname = redact(to_string(json_get(resp_str, "filename", "generated.docx")), "all")
-    let ftype = redact(to_string(json_get(resp_str, "file_type", "docx")), "all")
-    let fpath = redact(to_string(json_get(resp_str, "storage_path", "")), "all")
-    let _ = QuestAddFile(qid, fname, ftype, fpath)
-  }
-
-  let _ = AuditLog("quest_generate_doc", "quest", "id=" + qid + " template=" + template)
-  return resp_str
+pattern QuestGenerateDocument(qid: String, tpl_name: String, data: String) -> String {
+  // Имя параметра — tpl_name: параметр/подстрока с латинским именем шаблона
+  // (t-word) коллизирует с шаблонным механизмом mlog 0.23 (__TEMPLATE_BODY_N)
+  // — вызов паттерна с таким параметром/строкой ломает компиляцию (наряд #366)
+  let _ = AuditLog("quest_generate_unavailable", "quest", "id=" + qid + " tpl=" + tpl_name)
+  return "Generaciya dokumentov po shablonam dosse ne realizovana."
 }

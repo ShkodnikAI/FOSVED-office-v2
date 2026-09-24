@@ -1,0 +1,43 @@
+// probe366.mlog — пробы перед нарядом #366:
+//   p1: рекурсивный CTE через db_execute (нативные чекпоинты без Python)
+//   p2: to_string(float) — формат "4" или "4.0"
+// Запуск: mkdir -p /tmp/n366 && DATABASE_URL=sqlite:/tmp/n366/p.db ./bin/mlog run probe366.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: env("DATABASE_URL") }
+import dept/utils
+import app
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  let _ = InitDB()
+  let _ = db_execute("DELETE FROM quest_checkpoints", [])
+  let _ = db_execute("DELETE FROM quests", [])
+
+  // p1: CTE 0-based — согласовано с current_step (QuestApproveStep ждёт шаг 0)
+  let _ = db_execute("INSERT INTO quests (id, title, quest_type, status, current_step, total_steps, deadline, owner_chat_id, updated_at) VALUES ('P-1', 'Probe', 'grant', 'active', 0, '4', '2026-10-01', '555', datetime('now'))", [])
+  let _ = db_execute("WITH RECURSIVE seq(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM seq WHERE n < CAST('4' AS INTEGER) - 1) INSERT INTO quest_checkpoints (quest_id, step_num, step_label, status) SELECT 'P-1', n, 'Shag ' || CAST(n + 1 AS TEXT), 'pending' FROM seq", [])
+  let cp = query("SELECT COUNT(*) AS cnt FROM quest_checkpoints WHERE quest_id = 'P-1'", [])
+  let cnt = to_string(json_get(get(cp, 0), "cnt", "0"))
+  let out = out + "p1_cte_count=" + cnt + " "
+
+  // p2: формат float
+  let out = out + "p2_float=" + to_string(4.0) + " "
+
+  // p3: чтение step_num как строка (что вернёт json_get для INTEGER)
+  let rows = query("SELECT step_num, step_label FROM quest_checkpoints WHERE quest_id = 'P-1' ORDER BY step_num LIMIT 2", [])
+  let r0 = get(rows, 0)
+  let out = out + "p3_stepnum=" + to_string(json_get(r0, "step_num", "?")) + " "
+  let out = out + "p3_label=" + to_string(json_get(r0, "step_label", "?")) + " "
+
+  // p4: COUNT через ?-параметр + CAST с биндингом-строкой
+  let _ = db_execute("INSERT INTO quests (id, title) VALUES ('P-2', 'Probe2')", [])
+  let _ = db_execute("WITH RECURSIVE seq(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM seq WHERE n < CAST(?1 AS INTEGER) - 1) INSERT INTO quest_checkpoints (quest_id, step_num, step_label, status) SELECT 'P-2', n, 'S', 'pending' FROM seq", ["3"])
+  let cp2 = query("SELECT COUNT(*) AS cnt FROM quest_checkpoints WHERE quest_id = 'P-2'", [])
+  let out = out + "p4_param_count=" + to_string(json_get(get(cp2, 0), "cnt", "0")) + " "
+
+  return out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

@@ -1,0 +1,83 @@
+// test_naryad366.mlog — наряд #366: квест-модуль нативно, без мёртвых HTTP-вызовов.
+//
+// Было: QuestCreate/QuestList/QuestStatus звали несуществующие /api/quest/*
+// (404) — /quest list, new, status были мертвы; QuestSendPackage докладывал
+// «Paket otpravlen» при фактически упавшем вызове (ложное подтверждение).
+//
+// Проверка (реальный прогон паттернов на живом SQLite):
+//   a1: QuestCreate реально создаёт квест + 4 чекпоинта (CTE)
+//   a2: QuestList показывает квест нативным форматированием (не JSON)
+//   a3: QuestStatus показывает статус и шаги из БД
+//   a4: approve проходит по 0-based чекпоинтам (шаг 1 approved)
+//   a5: QuestSendPackage — честный отказ, БЕЗ «otpravlen»
+//   a6: QuestGenerateDocument — честный отказ
+//   a7: ноль вызовов api/quest в dept/quest.mlog (проверка в pytest-гварде)
+//
+// Запуск: mkdir -p /tmp/n366 && DATABASE_URL=sqlite:/tmp/n366/t.db ./bin/mlog run test_naryad366.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: env("DATABASE_URL") }
+import dept/utils
+import app
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  let _ = InitDB()
+  let _ = db_execute("DELETE FROM quest_checkpoints", [])
+  let _ = db_execute("DELETE FROM quest_files", [])
+  let _ = db_execute("DELETE FROM quests", [])
+
+  // a1: создание — квест + 4 чекпоинта (total_steps = "4")
+  let qid = QuestCreate("Dosse naryada 366", "grant", "4", "2026-10-01", "555000")
+  let cnt_rows = query("SELECT COUNT(*) AS cnt FROM quest_checkpoints WHERE quest_id = ?", [qid])
+  let cnt = to_string(json_get(get(cnt_rows, 0), "cnt", "0"))
+  let out = out + _Mark("a1_create_checkpoints_4", cnt == "4")
+
+  // a2: список — нативное форматирование, квест виден
+  let listing = QuestList("555000")
+  let out = out + _Mark("a2_list_native", contains(listing, "Dosse naryada 366") and contains(listing, "shag 0/4") and contains(listing, "srok 2026-10-01"))
+
+  // a3: статус — заголовок + шаги из БД
+  let status = QuestStatus(qid)
+  let out = out + _Mark("a3_status_native", contains(status, "Dosse naryada 366") and contains(status, "Shagi:") and contains(status, "0. Shag 1 — pending"))
+
+  // a4: approve по 0-based чекпоинтам — шаг 1 (step_num 0) approved, ток 1 in_progress
+  let approved = QuestApproveStep(qid, "owner")
+  let cp_rows = query("SELECT step_num, status FROM quest_checkpoints WHERE quest_id = ? ORDER BY step_num", [qid])
+  let cp0 = get(cp_rows, 0)
+  let cp1 = get(cp_rows, 1)
+  let s0 = to_string(json_get(cp0, "status", "?"))
+  let s1 = to_string(json_get(cp1, "status", "?"))
+  let out = out + _Mark("a4_approve_0based", contains(approved, "Perehodim") and s0 == "approved" and s1 == "in_progress")
+
+  // a4b: статус после approve отражает approved/in_progress
+  let status2 = QuestStatus(qid)
+  let out = out + _Mark("a4b_status_after_approve", contains(status2, "approved") and contains(status2, "in_progress"))
+
+  // a5: send — честный отказ (не «otpravlen»)
+  let sent = QuestSendPackage(qid, "owner@example.com", "Dosse")
+  let out = out + _Mark("a5_send_honest_refusal", contains(sent, "ne realizovana") and contains(sent, "pochtovogo kontura") and contains(sent, "otpravlen") == false)
+
+  // a6: generate — честный отказ. Данные передаю без фигурных скобок:
+  // лексер mlog сканирует фигурные скобки в литералах И комментариях
+  // как шаблоны-интерполяции (найдено этим нарядом, см. AGENTS.md §7)
+  let gen = QuestGenerateDocument(qid, "grant_tpl", "x")
+  let out = out + _Mark("a6_generate_honest_refusal", contains(gen, "ne realizovana"))
+
+  // a7: QuestList на пустой БД
+  let _ = db_execute("UPDATE quests SET status = 'closed' WHERE id = ?", [qid])
+  let empty = QuestList("555000")
+  let out = out + _Mark("a7_list_empty", empty == "Net aktivnyh zadach.")
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
