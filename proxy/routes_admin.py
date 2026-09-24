@@ -2262,13 +2262,24 @@ def api_voice_settings_set():
 @app.get("/miniapp-spa/")
 @require_telegram
 def miniapp_spa_index():
-    """Serve the Mini App SPA index page with API_SECRET injected."""
+    """Serve the Mini App SPA index page with API_SECRET injected.
+
+    Без явного запрета кэша Telegram WebView может застрять на старой
+    версии страницы надолго (известная особенность встроенного
+    браузера Telegram) — владелец получал устаревшую, уже исправленную
+    версию как будто баг не чинился, хотя на сервере всё было верно.
+    Найдено 2026-09-24 по повторной жалобе на пустую Главную,
+    невоспроизводимую при свежей загрузке.
+    """
     index_path = MINIAPP_DIR / "index.html"
     if not index_path.exists():
         return "<h1>Mini App not found</h1>", 404
     html = index_path.read_text(encoding="utf-8")
     html = html.replace('{{API_SECRET}}', API_SECRET)
-    return Response(html, mimetype="text/html")
+    resp = Response(html, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 @app.get("/miniapp-spa/<path:filepath>")
 def miniapp_spa_static(filepath):
