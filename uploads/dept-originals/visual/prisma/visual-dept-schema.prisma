@@ -1,0 +1,103 @@
+// ============================================================================
+// visual-dept-schema.prisma — Visual Department schema additions
+// ============================================================================
+//
+// APPEND these models to existing prisma/schema.prisma (do not replace).
+// Adds 3 new models:
+//   - VisualArtifact: any generated visual (5 types × N artifacts per type)
+//   - VisualTemplate: template definitions for each type
+//   - StyleEvolution: quarterly style updates log
+//
+// Does NOT modify any existing models.
+// ============================================================================
+
+model VisualArtifact {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @default(2044005421) @map("user_id")
+
+  // Type and tier
+  type            String   // e.g., "osp_analysis_card" | "expert_briefing_card" | "compression_visual" | "memorable_infographic" | "client_reference_sheet" | "premium_spec"
+  tier            Int      // 1 (Compression) | 2 (Memorable) | 3 (Analysis Card) | 4 (Reference Sheet) | 5 (Premium Spec)
+  templateVersion String   @map("template_version")  // "v1.0" | "v1.1" — track style evolution
+
+  // Source linking — exactly one of these is set based on source
+  sourceType      String   @map("source_type")  // "analysis" | "briefing" | "artifact" | "client" | "project" | "verification" | "review"
+  sourceId        Int      @map("source_id")
+
+  // Content
+  title           String
+  format          String   // "svg" | "png" | "html" | "spec_json"
+  content         String?  @db.Text   // SVG markup / HTML / JSON spec / base64 png
+  contentHash     String   @map("content_hash")  // sha256 for idempotence — skip regen if data unchanged
+  thumbnailUrl    String?  @map("thumbnail_url")
+  publicUrl       String?  @map("public_url")  // if published in Telegram channel
+
+  // Production metadata (essential for Tier 5 manual production)
+  generationMethod String  @map("generation_method")  // "auto_svg_template" | "claude_svg_generation" | "midjourney_figma" | "manual_upload"
+  generationLog   String?  @db.Text @map("generation_log")  // tokens used, iterations, time
+  manualWorkMinutes Int?   @map("manual_work_minutes")  // for Tier 5 — how much owner time spent
+
+  // Visual recall test
+  recallTested    Boolean  @default(false) @map("recall_tested")
+  recallTestedAt  DateTime? @map("recall_tested_at")
+  recallSuccess   Boolean? @map("recall_success")  // could owner recall what artifact shows without reading text?
+  recallNote      String?  @db.Text @map("recall_note")
+
+  // Telegram archive integration
+  publishedToChannel Boolean @default(false) @map("published_to_channel")
+  channelMessageId   Int?    @map("channel_message_id")
+  hashtags           String  @default("[]") @map("hashtags")
+
+  // Style audit (automated checks)
+  brandComplianceScore Float? @map("brand_compliance_score")  // 0-1, automated
+  lastAuditAt         DateTime? @map("last_audit_at")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([sourceType, sourceId])
+  @@index([type])
+  @@index([tier])
+  @@index([contentHash])
+  @@index([templateVersion])
+  @@index([createdAt(sort: Desc)])
+  @@map("visual_artifacts")
+}
+
+model VisualTemplate {
+  id              Int      @id @default(autoincrement())
+  type            String   @unique  // e.g., "osp_analysis_card"
+  tier            Int
+  currentVersion  String   @map("current_version")  // "v1.0" — bumps when template updates
+  spec            String   @db.Text  // JSON spec describing layout, fields, defaults
+  exampleSvg      String?  @db.Text @map("example_svg")
+  description     String?  @db.Text
+  applyTo         String   @map("apply_to")  // when to apply: "auto_on_analysis_complete" | "on_request" | "manual_only"
+  versionHistory  String   @default("[]") @db.Text @map("version_history")  // JSON array of {version, date, changes}
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([type])
+  @@index([tier])
+  @@map("visual_templates")
+}
+
+model StyleEvolution {
+  id              Int      @id @default(autoincrement())
+  yearQuarter     String   @unique @map("year_quarter")  // "2026-Q3"
+  templatesUpdated String  @default("[]") @db.Text @map("templates_updated")  // JSON list of {type, from_version, to_version, reason}
+  patternsAdded   String   @default("[]") @db.Text @map("patterns_added")  // JSON list of new patterns adopted
+  patternsRetired String   @default("[]") @db.Text @map("patterns_retired")  // JSON list of removed patterns
+  recallStats     String?  @db.Text @map("recall_stats")  // JSON summary of recall tests this quarter
+  externalScan    String?  @db.Text @map("external_scan")  // JSON observations from world scan
+  reviewNote      String?  @db.Text @map("review_note")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@map("style_evolutions")
+}
+
+// ============================================================================
+// END OF VISUAL DEPT SCHEMA ADDITIONS
+// ============================================================================
