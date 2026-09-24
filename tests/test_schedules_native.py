@@ -124,7 +124,8 @@ def test_harness_imports_schedules_and_stays_clean():
 def test_entrypoint_guarded_cutover():
     # Проба: кандидат проходит Category A аудит → serving; иначе громкий
     # откат на легаси (внешние cron-job.org продолжают работать).
-    # №349 (2026-09-24): кандидат = bin/mlog (0.22.0), фолбэк = mlog-020
+    # №349 (2026-09-24): переход на 0.22.0 (ADR-0005); N023 (2026-09-24):
+    # кандидат = bin/mlog (0.23.0, ADR-0006), фолбэк = mlog-020
     # (0.20.0 — последний бинарь, грузящий сырой app.mlog: lax-аудит +
     # корректный try-контракт; 0.21-сырец красный на бут-аудите, 0.19
     # выведен из ротации, ADR-0005).
@@ -147,6 +148,9 @@ def test_entrypoint_guarded_cutover():
     assert "METALOGOS_SERVE_BACKEND" in ENTRYPOINT
 
 
-def test_binary_021_vendored():
-    b = REPO_ROOT / "bin" / "mlog-021"
-    assert b.exists() and b.stat().st_size > 10_000_000, "bin/mlog-021 не вендорен"
+def test_binary_prev_good_vendored():
+    # N023 (ADR-0006): прошлый-хороший 0.22.0 вендорен как тест-гвард
+    # (роль mlog-021 из ADR-0005); 0.21 выведен из репо, история git хранит.
+    b = REPO_ROOT / "bin" / "mlog-022"
+    assert b.exists() and b.stat().st_size > 10_000_000, "bin/mlog-022 не вендорен"
+    assert not (REPO_ROOT / "bin" / "mlog-021").exists(), "mlog-021 должен быть выведен (ADR-0006)"

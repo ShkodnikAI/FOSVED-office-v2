@@ -17,8 +17,8 @@ RUN pip3 install -r requirements.txt --break-system-packages
 
 # Metalogos v0.22.0 — прод-бинарь (наряд №349, переход 0.19.0→0.22.0, ADR-0005)
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
-# грузит сырой app.mlog). bin/mlog-021 (0.21.0) остаётся вендоренным, но из
-# бут-пути выведен (raw app.mlog на его бут-аудите красный).
+# грузит сырой app.mlog). bin/mlog-022 (0.22.0) вендорен как прошлый-хороший
+# тест-гвард (ADR-0006); mlog-021 выведен из репо (история git сохраняет).
 COPY bin/mlog /usr/local/bin/mlog
 COPY bin/mlog-020 /usr/local/bin/mlog-020
 RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 && /usr/local/bin/mlog --version
@@ -32,7 +32,7 @@ COPY . .
 # аудиторская проба entrypoint ("-x $MLOG_CANDIDATE") физически запускалась
 # в образе. Без него guard-переход молча вечно едет на фолбэк и
 # нативный cron никогда не бутстрапится (предусловие А cutover-чеклиста).
-RUN chmod +x /office/bin/mlog-021 && /office/bin/mlog-021 --version
+RUN chmod +x /office/bin/mlog-022 && /office/bin/mlog-022 --version
 
 # Node.js deps (Prisma client for PostgreSQL)
 RUN npm install --production 2>/dev/null || true
