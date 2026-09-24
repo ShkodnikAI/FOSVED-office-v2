@@ -1,0 +1,57 @@
+// test_finance357.mlog — office#357: knowledge-файлы форм бизнеса реально читаются.
+// Реальный вызов BuildFinanceContext (dept/finance) для 3 форм и 4 юрисдикций;
+// контекст проверяется подстрокой из соответствующего .md — то, что наряд
+// требует («прогон, не grep»).
+// Запуск: mkdir -p /tmp/finance-test357 && DATABASE_URL=sqlite:/tmp/finance-test357/f.db ./bin/mlog run test_finance357.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: env("DATABASE_URL") }
+import dept/utils
+import dept/finance
+import app
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  // Минимальные таблицы под вспомогательные читалки контекста
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS facts (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, content TEXT, status TEXT DEFAULT 'active', review_status TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, dept TEXT, role TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // Заглушка: без TELEGRAM/LLM — YanaRecallMemories честно деградирует (TryVal)
+
+  // ── 3 формы бизнеса: подстрока из каждого файла в контексте ──
+  let c1 = BuildFinanceContext("налоговый расчёт для ооо", "BY", "ooo", "smoke357")
+  let a1 = contains(c1, "BUSINESS FORM KB: ooo") and contains(c1, "ООО/ОДО")
+  let out = out + _Mark("a1_ooo_file_read", a1)
+  let c2 = BuildFinanceContext("налоговый расчёт ип", "BY", "ip", "smoke357")
+  let a2 = contains(c2, "BUSINESS FORM KB: ip") and contains(c2, "Индивидуальный предприниматель")
+  let out = out + _Mark("a2_ip_file_read", a2)
+  let c3 = BuildFinanceContext("налоги самозанятого", "BY", "selfemployed", "smoke357")
+  let a3 = contains(c3, "BUSINESS FORM KB: selfemployed") and contains(c3, "НПД")
+  let out = out + _Mark("a3_selfemployed_file_read", a3)
+
+  // ── 4 юрисдикции: подстрока из каждого файла ──
+  let j1 = BuildFinanceContext("налоги", "BY", "ip", "smoke357")
+  let b1 = contains(j1, "JURISDICTION KB: BY") and contains(j1, "Республика Беларусь")
+  let out = out + _Mark("b1_jx_by", b1)
+  let j2 = BuildFinanceContext("налоги", "RU", "ip", "smoke357")
+  let b2 = contains(j2, "JURISDICTION KB: RU")
+  let out = out + _Mark("b2_jx_ru", b2)
+  let j3 = BuildFinanceContext("налоги", "EU", "ip", "smoke357")
+  let b3 = contains(j3, "JURISDICTION KB: EU")
+  let out = out + _Mark("b3_jx_eu", b3)
+  let j4 = BuildFinanceContext("налоги", "US", "ip", "smoke357")
+  let b4 = contains(j4, "JURISDICTION KB: US")
+  let out = out + _Mark("b4_jx_us", b4)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
