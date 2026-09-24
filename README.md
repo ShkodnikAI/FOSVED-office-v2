@@ -246,9 +246,9 @@ Reverse Proxy (Flask)
 ```
 .
 ├── app.mlog                  # Главный роутер (~4800 строк)
-├── bin/mlog                  # Metalogos v0.23.0 бинарник (x86-64, Rust, боевой)
+├── bin/mlog                  # Metalogos v0.24.0 бинарник (x86-64, Rust, боевой)
 ├── bin/mlog-020              # Metalogos 0.20.0 wave-3 (main 29de25a) — стейджинг-догфуд (FO-050)
-├── bin/mlog-022              # Metalogos 0.22.0 (2d3ca8a→04b2803) — прошлый-хороший, тест-гвард (ADR-0006)
+├── bin/mlog-023              # Metalogos 0.23.0 (23323f0a) — прошлый-хороший, тест-гвард (ADR-0007)
 ├── llm_proxy.py              # Тонкий фасад-сборщик (FO-008), точка входа
 ├── proxy/                    # 27 модулей, ~12400 строк — вся логика LLM-прокси
 │   ├── core.py                    # Flask-приложение, auth, конфиг
@@ -403,7 +403,7 @@ docs/render-dashboard.md, §№424.
 
 | Компонент | Технология |
 |---|---|
-| Ядро | Metalogos 0.23.0 (Rust DSL, ~500 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory + recall, label-lattice + гранты, timeseries-домен; прошлый-хороший 0.22.0 вендорен, аварийный фолбэк 0.20.0, см. entrypoint guard-переход, ADR-0005/0006) |
+| Ядро | Metalogos 0.24.0 (Rust DSL, ~500 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory + recall + forget/retain-ttl, label-lattice + гранты, timeseries-домен; прошлый-хороший 0.23.0 вендорен, аварийный фолбэк 0.20.0, см. entrypoint guard-переход, ADR-0005/0006/0007) |
 | Прокси-слой | Python 3.12 + Flask, разбит на пакет `proxy/` (27 модулей) |
 | База данных | SQLite, 68 таблиц |
 | Голос STT | Whisper |
