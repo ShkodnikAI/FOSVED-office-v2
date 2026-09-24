@@ -1,0 +1,47 @@
+// test_osplz362.mlog — office#362: прямые команды ОСП/ЛЗ доходят до нативных
+// диспетчеров (HandleOSP/HandleLZ), а не до generic HandleDeptQuery.
+// Детерминированные подкоманды (без LLM): /osp unwatch, /lz watch remove,
+// /lz watchlist — их ответы может дать ТОЛЬКО нативный диспетчер отдела.
+// Запуск: mkdir -p /tmp/osplz-test362 && ./bin/mlog run test_osplz362.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/osplz-test362/o.db" }
+import dept/utils
+import app
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  let _ = InitDB()
+
+  // 1) Полный путь спец-блока: HandleOSP с полным текстом (префикс /osp)
+  let r1 = HandleOSP("/osp unwatch testtopic362", "smoke362")
+  let a1 = contains(r1, "testtopic362")
+  let out = out + _Mark("a1_osp_native_dispatch", a1)
+
+  // 2) HandleLZ с полным текстом
+  let r2 = HandleLZ("/lz watch remove testtopic362", "smoke362")
+  let a2 = contains(r2, "testtopic362")
+  let out = out + _Mark("a2_lz_native_dispatch", a2)
+
+  // 3) /lz watchlist — детерминированный лист вотча
+  let r3 = HandleLZ("/lz watchlist", "smoke362")
+  let a3 = contains(r3, "Watchlist")
+  let out = out + _Mark("a3_lz_watchlist", a3)
+
+  // 4) Гейты диспетчера отрабатывают (AuditLog пишется от имени отдела)
+  let rows = query("SELECT dept FROM audit_log WHERE dept = 'osp' ORDER BY id DESC LIMIT 1", [])
+  let a4 = length(rows) > 0.0
+  let out = out + _Mark("a4_osp_audit_dept", a4)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
