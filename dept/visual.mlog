@@ -117,10 +117,25 @@ pattern VisualEnforceGates(svgOutput: String, chat_id: String) -> String {
 // TYPE 3 — Analysis Card (AUTO для каждого анализа)
 // ═══════════════════════════════════════════════════════════════════════
 
+// ── naryad-361: доставка артефакта в чат ────────────────────────────
+// Прежде генераторы возвращали только строку пути — PDF лежал на диске,
+// в Telegram не попадал. Мост по образцу Дизайна (HandleDesignImage →
+// /generate-image): питон-сторона сама шлёт документ (_tg_send_document,
+// FO-042). Ошибка доставки НЕ ломает генерацию — честно глотается.
+pattern SendVisualDocument(chat_id: String, fpath: String, caption: String) -> String {
+  if chat_id == "" then { return "" }
+  let body = json_encode({path: fpath, chat_id: to_float(chat_id), caption: caption})
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/send-document", body, "application/json", 90.0))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "" }
+  return redact(to_string(json_get(parsed, "status", "")), "all")
+}
+
 // Генерирует SVG-карточку для OSP/Expert/LZ анализа
 // src_type: "analysis" | "expert" | "lz"
 // src_id: ID записи в БД
-pattern GenerateAnalysisCard(src_type: String, src_id: String) -> String {
+pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) -> String {
   let _ = InitDB()
 
   // Загрузить данные источника из БД
@@ -142,10 +157,13 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String) -> String {
 
   // Parse source data
   let parsed = parse_json(data)
-  let topic = redact(to_string(json_get(json_get(parsed, 0.0), "topic", "N/A")), "all")
-  let confidence = redact(to_string(json_get(json_get(parsed, 0.0), "confidence", "N/A")), "all")
-  let status = redact(to_string(json_get(json_get(parsed, 0.0), "status", "drafted")), "all")
-  let created_at = redact(to_string(json_get(json_get(parsed, 0.0), "created_at", "")), "all")
+  // naryad-361/#364: json_get(x, 0.0) с Float-индексом падает в рантайме
+  // ("expected String, got Float"); списки индексируются get(list, i)
+  let first = get(parsed, 0.0)
+  let topic = redact(to_string(json_get(first, "topic", "N/A")), "all")
+  let confidence = redact(to_string(json_get(first, "confidence", "N/A")), "all")
+  let status = redact(to_string(json_get(first, "status", "drafted")), "all")
+  let created_at = redact(to_string(json_get(first, "created_at", "")), "all")
 
   // ── Dept badge ──
   let badge = "ОСП"
@@ -157,26 +175,20 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String) -> String {
   let ink = redact(to_string(json_get(style, "ink", "#1a1a2e")), "all")
   let accent = redact(to_string(json_get(style, "accent", "#c9a961")), "all")
   let paper = redact(to_string(json_get(style, "paper", "#ffffff")), "all")
-  let muted = redact(to_string(json_get(style, "muted", "#5a5a5a")), "all")
+  let dim_c = redact(to_string(json_get(style, "muted", "#5a5a5a")), "all")
   let rule = redact(to_string(json_get(style, "rule", "#e0ddd5")), "all")
 
   // Card canvas 360×504
-  let header = svg_group(0.0, 0.0,
-    svg_rect(0.0, 0.0, 360.0, 72.0, accent, accent, 0.0) +
-    svg_text(18.0, 24.0, badge, paper, 10.0) +
-    svg_text(18.0, 48.0, substring(topic, 0.0, 40.0), paper, 14.0)
-  )
-  let status_bar = svg_group(0.0, 72.0,
-    svg_rect(0.0, 0.0, 360.0, 24.0, rule, rule, 0.0) +
-    svg_text(18.0, 16.0, "Статус: " + status + "  |  Уверенность: " + confidence, muted, 9.0)
-  )
-  let footer = svg_group(0.0, 474.0,
-    svg_rect(0.0, 0.0, 360.0, 30.0, accent, accent, 0.0) +
-    svg_text(18.0, 18.0, "FOSVED OFFICE | " + created_at, paper, 7.0)
-  )
+  let header = svg_group([svg_rect(0.0, 0.0, 360.0, 72.0, accent, accent) +
+    svg_text(18.0, 24.0, badge, 10.0, paper) +
+    svg_text(18.0, 48.0, substring(topic, 0.0, 40.0), 14.0, paper)], "translate(0.0,0.0)")
+  let status_bar = svg_group([svg_rect(0.0, 0.0, 360.0, 24.0, rule, rule) +
+    svg_text(18.0, 16.0, "Статус: " + status + "  |  Уверенность: " + confidence, 9.0, dim_c)], "translate(0.0,72.0)")
+  let footer = svg_group([svg_rect(0.0, 0.0, 360.0, 30.0, accent, accent) +
+    svg_text(18.0, 18.0, "FOSVED OFFICE | " + created_at, 7.0, paper)], "translate(0.0,474.0)")
 
   // Compose full card
-  let svg = svg_canvas(360.0, 504.0, header + status_bar + footer)
+  let svg = svg_canvas(360.0, 504.0, "0 0 360 504", [header, status_bar, footer])
 
   // QA check
   let qa = infographic_qa(svg)
@@ -189,6 +201,9 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String) -> String {
   // Record in visual_artifacts table
   let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["card", src_type, src_id, output_path]))
 
+  // naryad-361: файл уходит в чат документом (прежде — только путь строкой)
+  let _ = SendVisualDocument(chat_id, output_path, "Визуал: карточка анализа")
+
   return output_path
 }
 
@@ -197,18 +212,24 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Сжимает анализ в dashboard: KPI блок + 2-3 чарта
-pattern GenerateCompressionVisual(src_type: String, src_id: String) -> String {
+pattern GenerateCompressionVisual(src_type: String, src_id: String, chat_id: String) -> String {
   let _ = InitDB()
 
   // Load full result text
   let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [src_id])
-  let mut topic = to_string(json_get(json_get(rows, 0.0), "topic", ""))
-  let mut full_result = to_string(json_get(json_get(rows, 0.0), "full_result", ""))
+  let mut topic = ""
+  let mut full_result = ""
+  if length(rows) > 0.0 then {
+    let topic = to_string(json_get(get(rows, 0.0), "topic", ""))
+    let full_result = to_string(json_get(get(rows, 0.0), "full_result", ""))
+  }
 
   if topic == "" then {
     let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [src_id])
-    let topic = redact(to_string(json_get(json_get(rows2, 0.0), "topic", "")), "all")
-    let full_result = redact(to_string(json_get(json_get(rows2, 0.0), "full_result", "")), "all")
+    if length(rows2) > 0.0 then {
+      let topic = redact(to_string(json_get(get(rows2, 0.0), "topic", "")), "all")
+      let full_result = redact(to_string(json_get(get(rows2, 0.0), "full_result", "")), "all")
+    }
   }
   if topic == "" then { return "Error: no content found" }
 
@@ -236,17 +257,15 @@ pattern GenerateCompressionVisual(src_type: String, src_id: String) -> String {
   let kpi_count = length(kpi_data)
 
   // Build KPI text blocks
-  let kpi_header = svg_group(0.0, 0.0,
-    svg_rect(0.0, 0.0, 841.89, 60.0, accent, accent, 0.0) +
-    svg_text(36.0, 30.0, "COMPRESSION: " + substring(topic, 0.0, 60.0), paper, 18.0)
-  )
+  let kpi_header = svg_group([svg_rect(0.0, 0.0, 841.89, 60.0, accent, accent) +
+    svg_text(36.0, 30.0, "COMPRESSION: " + substring(topic, 0.0, 60.0), 18.0, paper)], "translate(0.0,0.0)")
 
   // Compose dashboard
-  let dashboard_svg = svg_canvas(841.89, 595.28,
-    kpi_header +
-    svg_group(20.0, 80.0, bar_svg) +
-    svg_group(300.0, 80.0, line_svg) +
-    svg_group(600.0, 80.0, donut_svg)
+  let dashboard_svg = svg_canvas(841.89, 595.28, "0 0 841.89 595.28",
+    [kpi_header,
+    svg_group([bar_svg], "translate(20.0,80.0)"),
+    svg_group([line_svg], "translate(300.0,80.0)"),
+    svg_group([donut_svg], "translate(600.0,80.0)")]
   )
 
   // QA
@@ -258,6 +277,9 @@ pattern GenerateCompressionVisual(src_type: String, src_id: String) -> String {
   let _ = html_to_pdf(html, output_path)
   let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["compression", src_type, src_id, output_path]))
 
+  // naryad-361: файл уходит в чат документом
+  let _ = SendVisualDocument(chat_id, output_path, "Визуал: сжатие")
+
   return output_path
 }
 
@@ -265,18 +287,24 @@ pattern GenerateCompressionVisual(src_type: String, src_id: String) -> String {
 // TYPE 2 — Memorable Infographic (LLM + native SVG charts)
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern GenerateMemorableInfographic(src_type: String, src_id: String) -> String {
+pattern GenerateMemorableInfographic(src_type: String, src_id: String, chat_id: String) -> String {
   let _ = InitDB()
 
   // Load source data
   let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [src_id])
-  let mut topic = to_string(json_get(json_get(rows, 0.0), "topic", ""))
-  let mut full_result = to_string(json_get(json_get(rows, 0.0), "full_result", ""))
+  let mut topic = ""
+  let mut full_result = ""
+  if length(rows) > 0.0 then {
+    let topic = to_string(json_get(get(rows, 0.0), "topic", ""))
+    let full_result = to_string(json_get(get(rows, 0.0), "full_result", ""))
+  }
 
   if topic == "" then {
     let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [src_id])
-    let topic = redact(to_string(json_get(json_get(rows2, 0.0), "topic", "")), "all")
-    let full_result = redact(to_string(json_get(json_get(rows2, 0.0), "full_result", "")), "all")
+    if length(rows2) > 0.0 then {
+      let topic = redact(to_string(json_get(get(rows2, 0.0), "topic", "")), "all")
+      let full_result = redact(to_string(json_get(get(rows2, 0.0), "full_result", "")), "all")
+    }
   }
 
   // LLM generates structured data for native charts
@@ -315,20 +343,16 @@ pattern GenerateMemorableInfographic(src_type: String, src_id: String) -> String
   if sec_type == "line" then { let secondary_svg = chart_line(sec_data, style) }
 
   // Compose infographic with SVG primitives
-  let header = svg_group(0.0, 0.0,
-    svg_rect(0.0, 0.0, 800.0, 80.0, ink, ink, 0.0) +
-    svg_text(40.0, 50.0, substring(headline, 0.0, 50.0), paper, 28.0)
-  )
-  let insight_block = svg_group(0.0, 420.0,
-    svg_rect(0.0, 0.0, 800.0, 80.0, accent, accent, 4.0) +
-    svg_text(20.0, 45.0, substring(insight, 0.0, 100.0), paper, 14.0)
-  )
+  let header = svg_group([svg_rect(0.0, 0.0, 800.0, 80.0, ink, ink) +
+    svg_text(40.0, 50.0, substring(headline, 0.0, 50.0), 28.0, paper)], "translate(0.0,0.0)")
+  let insight_block = svg_group([svg_rect(0.0, 0.0, 800.0, 80.0, accent, accent) +
+    svg_text(20.0, 45.0, substring(insight, 0.0, 100.0), 14.0, paper)], "translate(0.0,420.0)")
 
-  let infographic_svg = svg_canvas(800.0, 500.0,
-    header +
-    svg_group(20.0, 100.0, primary_svg) +
-    svg_group(430.0, 100.0, secondary_svg) +
-    insight_block
+  let infographic_svg = svg_canvas(800.0, 500.0, "0 0 800 500",
+    [header,
+    svg_group([primary_svg], "translate(20.0,100.0)"),
+    svg_group([secondary_svg], "translate(430.0,100.0)"),
+    insight_block]
   )
 
   // QA check
@@ -340,6 +364,9 @@ pattern GenerateMemorableInfographic(src_type: String, src_id: String) -> String
   let _ = html_to_pdf(html, output_path)
   let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["memorable", src_type, src_id, output_path]))
 
+  // naryad-361: файл уходит в чат документом
+  let _ = SendVisualDocument(chat_id, output_path, "Визуал: инфографика")
+
   return output_path
 }
 
@@ -347,63 +374,62 @@ pattern GenerateMemorableInfographic(src_type: String, src_id: String) -> String
 // TYPE 4 — Reference Sheet (entity profile → structured SVG)
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern GenerateReferenceSheet(entity_type: String, entity_id: String) -> String {
+pattern GenerateReferenceSheet(entity_type: String, entity_id: String, chat_id: String) -> String {
   let _ = InitDB()
 
   let style = color_palette("authority", "light")
   let ink = redact(to_string(json_get(style, "ink", "#1a1a2e")), "all")
   let accent = redact(to_string(json_get(style, "accent", "#c9a961")), "all")
   let paper = redact(to_string(json_get(style, "paper", "#ffffff")), "all")
-  let muted = redact(to_string(json_get(style, "muted", "#5a5a5a")), "all")
+  let dim_c = redact(to_string(json_get(style, "muted", "#5a5a5a")), "all")
   let rule = redact(to_string(json_get(style, "rule", "#e0ddd5")), "all")
 
   // Header
-  let header = svg_group(0.0, 0.0,
-    svg_rect(0.0, 0.0, 595.28, 80.0, ink, ink, 0.0) +
-    svg_text(36.0, 36.0, "REFERENCE SHEET", paper, 10.0)
-  )
+  let header = svg_group([svg_rect(0.0, 0.0, 595.28, 80.0, ink, ink) +
+    svg_text(36.0, 36.0, "REFERENCE SHEET", 10.0, paper)], "translate(0.0,0.0)")
 
   let mut body = ""
   let entity_label = entity_type
 
   if entity_type == "analysis" then {
     let rows = query("SELECT id, topic, full_result, status, confidence, verification_date, created_at FROM analysis WHERE id = ?", [entity_id])
-    let r = to_float(redact(to_string(json_get(rows, 0.0)), "all"))
-    let title = redact(to_string(json_get(r, "topic", "N/A")), "all")
+    if length(rows) > 0.0 then {
+      let r = get(rows, 0.0)
+      let title = redact(to_string(json_get(r, "topic", "N/A")), "all")
 
-    let body = svg_group(0.0, 80.0,
-      svg_text(36.0, 20.0, title, ink, 20.0) +
-      svg_text(36.0, 50.0, "ID: " + to_string(json_get(r, "id", "")) + "  |  Статус: " + to_string(json_get(r, "status", "")), muted, 10.0) +
-      svg_text(36.0, 70.0, "Уверенность: " + to_string(json_get(r, "confidence", "")) + "  |  Верификация: " + to_string(json_get(r, "verification_date", "N/A")), muted, 10.0) +
-      svg_text(36.0, 90.0, "Создано: " + to_string(json_get(r, "created_at", "")), muted, 10.0)
-    )
+      let body = svg_group([svg_text(36.0, 20.0, title, 20.0, ink) +
+        svg_text(36.0, 50.0, "ID: " + to_string(json_get(r, "id", "")) + "  |  Статус: " + to_string(json_get(r, "status", "")), 10.0, dim_c) +
+        svg_text(36.0, 70.0, "Уверенность: " + to_string(json_get(r, "confidence", "")) + "  |  Верификация: " + to_string(json_get(r, "verification_date", "N/A")), 10.0, dim_c) +
+        svg_text(36.0, 90.0, "Создано: " + to_string(json_get(r, "created_at", "")), 10.0, dim_c)], "translate(0.0,80.0)")
+    }
   }
 
   if entity_type == "lz" then {
     let rows = query("SELECT id, topic, full_result, status, confidence, created_at FROM dept_archive WHERE id = ? AND dept = 'lz'", [entity_id])
-    let r = to_float(redact(to_string(json_get(rows, 0.0)), "all"))
-    let title = redact(substring(to_string(json_get(r, "topic", "ЛЗ Артефакт")), 0.0, 50.0), "all")
+    if length(rows) > 0.0 then {
+      let r = get(rows, 0.0)
+      let title = redact(substring(to_string(json_get(r, "topic", "ЛЗ Артефакт")), 0.0, 50.0), "all")
 
-    let body = svg_group(0.0, 80.0,
-      svg_text(36.0, 20.0, title, ink, 20.0) +
-      svg_text(36.0, 50.0, "ID: " + to_string(json_get(r, "id", "")) + "  |  Статус: " + to_string(json_get(r, "status", "")), muted, 10.0) +
-      svg_text(36.0, 70.0, "Уверенность: " + to_string(json_get(r, "confidence", "")), muted, 10.0)
-    )
+      let body = svg_group([svg_text(36.0, 20.0, title, 20.0, ink) +
+        svg_text(36.0, 50.0, "ID: " + to_string(json_get(r, "id", "")) + "  |  Статус: " + to_string(json_get(r, "status", "")), 10.0, dim_c) +
+        svg_text(36.0, 70.0, "Уверенность: " + to_string(json_get(r, "confidence", "")), 10.0, dim_c)], "translate(0.0,80.0)")
+    }
   }
 
   // Footer
-  let footer = svg_group(0.0, 800.0,
-    svg_rect(0.0, 0.0, 595.28, 41.89, accent, accent, 0.0) +
-    svg_text(36.0, 20.0, "FOSVED OFFICE | Reference Sheet | " + entity_type + " #" + entity_id, paper, 8.0)
-  )
+  let footer = svg_group([svg_rect(0.0, 0.0, 595.28, 41.89, accent, accent) +
+    svg_text(36.0, 20.0, "FOSVED OFFICE | Reference Sheet | " + entity_type + " #" + entity_id, 8.0, paper)], "translate(0.0,800.0)")
 
-  let svg = svg_canvas(595.28, 841.89, header + body + footer)
+  let svg = svg_canvas(595.28, 841.89, "0 0 595.28 841.89", [header, body, footer])
   let qa = infographic_qa(svg)
 
   let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + svg + "</body></html>"
   let output_path = "visuals/ref_" + entity_type + "_" + entity_id + ".pdf"
   let _ = html_to_pdf(html, output_path)
   let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["reference", entity_type, entity_id, output_path]))
+
+  // naryad-361: файл уходит в чат документом
+  let _ = SendVisualDocument(chat_id, output_path, "Визуал: справочный лист")
 
   return output_path
 }
@@ -416,13 +442,19 @@ pattern GeneratePremiumSpec(src_type: String, src_id: String) -> String {
   let _ = InitDB()
 
   let rows = query("SELECT topic, full_result FROM analysis WHERE id = ?", [src_id])
-  let mut topic = to_string(json_get(json_get(rows, 0.0), "topic", ""))
-  let mut full_result = to_string(json_get(json_get(rows, 0.0), "full_result", ""))
+  let mut topic = ""
+  let mut full_result = ""
+  if length(rows) > 0.0 then {
+    let topic = to_string(json_get(get(rows, 0.0), "topic", ""))
+    let full_result = to_string(json_get(get(rows, 0.0), "full_result", ""))
+  }
 
   if topic == "" then {
     let rows2 = query("SELECT topic, full_result FROM dept_archive WHERE id = ?", [src_id])
-    let topic = redact(to_string(json_get(json_get(rows2, 0.0), "topic", "")), "all")
-    let full_result = redact(to_string(json_get(json_get(rows2, 0.0), "full_result", "")), "all")
+    if length(rows2) > 0.0 then {
+      let topic = redact(to_string(json_get(get(rows2, 0.0), "topic", "")), "all")
+      let full_result = redact(to_string(json_get(get(rows2, 0.0), "full_result", "")), "all")
+    }
   }
 
   let style = color_palette("energy", "light")
@@ -455,10 +487,8 @@ pattern InfographicDashboard(title: String, kpi_json: String, charts_json: Strin
   let paper = redact(to_string(json_get(style, "paper", "#ffffff")), "all")
 
   // Header
-  let header = svg_group(0.0, 0.0,
-    svg_rect(0.0, 0.0, 1200.0, 80.0, ink, ink, 0.0) +
-    svg_text(40.0, 50.0, substring(title, 0.0, 60.0), paper, 28.0)
-  )
+  let header = svg_group([svg_rect(0.0, 0.0, 1200.0, 80.0, ink, ink) +
+    svg_text(40.0, 50.0, substring(title, 0.0, 60.0), 28.0, paper)], "translate(0.0,0.0)")
 
   // KPI row
   let kpi_data = parse_json(kpi_json)
@@ -471,17 +501,15 @@ pattern InfographicDashboard(title: String, kpi_json: String, charts_json: Strin
     let label = redact(to_string(json_get(item, "label", "")), "all")
     let value = redact(to_string(json_get(item, "value", "")), "all")
     let x = i * kpi_width
-    let kpi_row = kpi_row + svg_group(x, 0.0,
-      svg_rect(0.0, 0.0, kpi_width - 10.0, 60.0, accent, accent, 4.0) +
-      svg_text(10.0, 20.0, value, paper, 24.0) +
-      svg_text(10.0, 45.0, label, paper, 10.0)
-    )
+    let kpi_row = kpi_row + svg_group([svg_rect(0.0, 0.0, kpi_width - 10.0, 60.0, accent, accent) +
+      svg_text(10.0, 20.0, value, 24.0, paper) +
+      svg_text(10.0, 45.0, label, 10.0, paper)], "translate(x,0.0)")
     let i = i + 1.0
   }
 
-  let dashboard = svg_canvas(1200.0, 800.0,
-    header +
-    svg_group(0.0, 100.0, kpi_row)
+  let dashboard = svg_canvas(1200.0, 800.0, "0 0 1200 800",
+    [header,
+    svg_group([kpi_row], "translate(0.0,100.0)")]
   )
 
   return dashboard
@@ -492,14 +520,12 @@ pattern InfographicComparison(left_svg: String, right_svg: String) -> String {
   let style = color_palette("energy", "light")
   let ink = redact(to_string(json_get(style, "ink", "#1a1a2e")), "all")
 
-  let divider = svg_group(395.0, 0.0,
-    svg_line(0.0, 20.0, 0.0, 480.0, ink, 2.0)
-  )
+  let divider = svg_group([svg_line(0.0, 20.0, 0.0, 480.0, ink, 2.0)], "translate(395.0,0.0)")
 
-  return svg_canvas(800.0, 500.0,
-    svg_group(0.0, 0.0, left_svg) +
-    divider +
-    svg_group(410.0, 0.0, right_svg)
+  return svg_canvas(800.0, 500.0, "0 0 800 500",
+    [svg_group([left_svg], "translate(0.0,0.0)"),
+    divider,
+    svg_group([right_svg], "translate(410.0,0.0)")]
   )
 }
 
@@ -526,7 +552,8 @@ pattern ListVisuals(filter_type: String) -> String {
 pattern GetVisualPath(visual_id: String) -> String {
   let _ = InitDB()
   let rows = query("SELECT path FROM visual_artifacts WHERE id = ?", [visual_id])
-  return to_string(json_get(json_get(rows, 0.0), "path", ""))
+  if length(rows) == 0.0 then { return "" }
+  return to_string(json_get(get(rows, 0.0), "path", ""))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -542,7 +569,7 @@ pattern HandleVisual(query: String, chat_id: String) -> String {
     if length(parts) >= 3.0 then {
       let src_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
       let src_id = redact(to_string(json_get(parts, 2, "1")), "all")
-      return GenerateAnalysisCard(src_type, src_id)
+      return GenerateAnalysisCard(src_type, src_id, chat_id)
     }
   }
 
@@ -551,7 +578,7 @@ pattern HandleVisual(query: String, chat_id: String) -> String {
     if length(parts) >= 3.0 then {
       let src_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
       let src_id = redact(to_string(json_get(parts, 2, "1")), "all")
-      return GenerateCompressionVisual(src_type, src_id)
+      return GenerateCompressionVisual(src_type, src_id, chat_id)
     }
   }
 
@@ -560,7 +587,7 @@ pattern HandleVisual(query: String, chat_id: String) -> String {
     if length(parts) >= 3.0 then {
       let entity_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
       let entity_id = redact(to_string(json_get(parts, 2, "1")), "all")
-      return GenerateReferenceSheet(entity_type, entity_id)
+      return GenerateReferenceSheet(entity_type, entity_id, chat_id)
     }
   }
 
@@ -569,7 +596,7 @@ pattern HandleVisual(query: String, chat_id: String) -> String {
     if length(parts) >= 3.0 then {
       let src_type = redact(to_string(json_get(parts, 1, "analysis")), "all")
       let src_id = redact(to_string(json_get(parts, 2, "1")), "all")
-      return GenerateMemorableInfographic(src_type, src_id)
+      return GenerateMemorableInfographic(src_type, src_id, chat_id)
     }
   }
 

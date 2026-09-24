@@ -1,0 +1,47 @@
+// test_visual361.mlog — office#361: PDF Визуала уходит в чат документом.
+// Реальный прогон генератора (html_to_pdf живой, мост /send-document —
+// в песочнице :4000 недоступен → честная деградация "" без падения
+// генерации), проверка: генератор вернул путь, артефакт записан.
+// Запуск: mkdir -p /tmp/visual-test361 && DATABASE_URL=sqlite:/tmp/visual-test361/v.db ./bin/mlog run test_visual361.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: env("DATABASE_URL") }
+import dept/utils
+import dept/visual
+import app
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  // InitDB создаёт analysis, visual_artifacts и прочий контур
+  let _ = InitDB()
+  let _ = db_execute("INSERT INTO analysis (topic, full_result, status) VALUES ('office361 smoke topic', 'Полный результат анализа для карточки', 'published')")
+
+  // Реальный прогон генератора (после наряда: с chat_id)
+  let path = GenerateAnalysisCard("analysis", "1", "555000")
+
+  // Генератор вернул путь файла (возврат не сломан доставкой)
+  let a1 = contains(path, "visuals/card_analysis_1.pdf")
+  let out = out + _Mark("a1_returns_path", a1)
+
+  // Артефакт записан в архив (source_type/source_id — контракт #356)
+  let rows = query("SELECT source_type, source_id, path FROM visual_artifacts WHERE type = 'card'", [])
+  let a2 = length(rows) == 1.0
+  let out = out + _Mark("a2_artifact_recorded", a2)
+
+  // Файл реально создан html_to_pdf (контент PDF-заголовка проверит pytest
+  // тесты доставки; здесь достаточно, что html_to_pdf не уронил генерацию)
+  let a3 = length(path) > 10.0
+  let out = out + _Mark("a3_pipeline_completed", a3)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}

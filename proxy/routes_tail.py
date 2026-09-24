@@ -283,6 +283,44 @@ def generate_image_endpoint():
     return jsonify({'status': 'ok', 'path': fpath, 'tg_msg_id': msg_id})
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  DOCUMENT SEND ENDPOINT (naryad-361: визуальный отдел — PDF в чат)
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/send-document', methods=['POST'])
+def send_document_endpoint():
+    """Send an existing on-disk file to a Telegram chat as a document.
+
+    naryad-361: генераторы Визуала писали PDF в visuals/ и возвращали путь
+    строкой — файл в Telegram не попадал. Мост mlog→Flask по образцу
+    /generate-image: питон-сторона шлёт документ сама (_tg_send_document).
+    Request body: {path, chat_id, caption?}
+    Returns: {status, tg_msg_id?} | {status: error, error}
+    """
+    d = request.get_json(force=True) or {}
+    fpath = str(d.get('path', ''))
+    chat_id = str(d.get('chat_id', ''))
+    caption = d.get('caption', '')
+    if not fpath or not chat_id:
+        return jsonify({'status': 'error', 'error': 'path and chat_id are required'}), 400
+    # путь только внутри рабочих каталогов офиса (не произвольный файл)
+    base = Path.cwd().resolve()
+    target = Path(fpath)
+    if not target.is_absolute():
+        target = base / target
+    target = target.resolve()
+    allowed_roots = [base, Path('/tmp')]
+    if not any(str(target).startswith(str(r)) for r in allowed_roots):
+        return jsonify({'status': 'error', 'error': 'path outside allowed roots'}), 403
+    if not target.is_file():
+        return jsonify({'status': 'error', 'error': 'file not found'}), 404
+    msg_id = _tg_send_document(chat_id, str(target), caption or None)
+    if msg_id is None:
+        return jsonify({'status': 'error', 'error': 'telegram send failed'}), 502
+    _log_audit('document_sent', {'path': str(target)[:200], 'chat_id': chat_id, 'tg_msg_id': msg_id}, dept='visual')
+    return jsonify({'status': 'ok', 'tg_msg_id': msg_id})
+
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  MAIN

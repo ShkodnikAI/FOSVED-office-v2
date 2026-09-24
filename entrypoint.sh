@@ -173,7 +173,10 @@ else
     MLOG_BIN="$MLOG_LEGACY"
   fi
 fi
-mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs"
+mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs" "${DATABASE_PATH:-./data}"
+# naryad-361: каталог артефактов Визуала — html_to_pdf пишет туда относительными
+# путями (visuals/*.pdf); без mkdir запись падала ENOENT в рантайме
+mkdir -p visuals
 if "$MLOG_BIN" check "$MLOG_SERVE_FILE" 2>&1 | grep -q "parse error"; then
   echo "WARNING: mlog check found parse errors (mlog serve may still work — interpreter is more lenient)"
   "$MLOG_BIN" check "$MLOG_SERVE_FILE" 2>&1 | head -5
