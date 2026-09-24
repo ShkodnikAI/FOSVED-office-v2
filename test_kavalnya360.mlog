@@ -1,0 +1,48 @@
+// test_kavalnya360.mlog — office#360: /quarterly-review — порядок аргументов.
+// Было: HandleDeptQuery(chat_id, dept, context) при сигнатуре
+// (dept, query, chat_id) — запрос уходил в несуществующий отдел-«chat_id».
+// Проверка: реальный вызов HandleDeptQuery в исправленном порядке доезжает
+// до HandleKavalnya (ответ Кавальни/честная деградация LLM, не мусор маршрута).
+// Запуск: mkdir -p /tmp/kk-test360 && ./bin/mlog run test_kavalnya360.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/kk-test360/k.db" }
+import app
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(x: String) -> String {
+  let mut out = ""
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS trace_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, correction TEXT, original_query TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, dept TEXT, role TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS facts (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, content TEXT, status TEXT DEFAULT 'active', review_status TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS session_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, session_seq INTEGER DEFAULT 0, event_type TEXT, dept TEXT, data TEXT, model TEXT, tokens_in INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0, latency_ms INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))")
+
+  // Реальный вызов в исправленном порядке (dept, query, chat_id)
+  let context = "QUARTERLY METHODOLOGY REVIEW for department: finance\n\nTask: Review this department against the methodology."
+  let reply = HandleDeptQuery("kavalnya", context, "smoke360")
+
+  // Доезжает до Кавальни: либо LLM-ответ, либо честная деградация LLM
+  // (в песочнице провайдеров нет) — в любом случае ЭТО ответ Кавальни,
+  // а не маршрутный мусор/unknown-dept из-за перепутанных аргументов
+  let a1 = (reply != "") and (contains(reply, "неизвестн") == false)
+  let out = out + _Mark("a1_reaches_kavalnya", a1)
+
+  // Запрос зафиксирован Кавальней в audit_log как dept=kavalnya
+  let rows = query("SELECT dept FROM audit_log WHERE action = 'dept_query' AND dept = 'kavalnya' ORDER BY id DESC LIMIT 1", [])
+  let a2 = length(rows) > 0.0
+  let out = out + _Mark("a2_audit_dept_kavalnya", a2)
+
+  let fails = length(split(out, "FAILED")) - 1.0
+  if fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
