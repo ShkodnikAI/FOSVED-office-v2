@@ -149,8 +149,8 @@ def test_entrypoint_guarded_cutover():
 
 
 def test_binary_prev_good_vendored():
-    # N024 (ADR-0007): прошлый-хороший 0.23.0 вендорен как тест-гвард
-    # (роль mlog-022 из ADR-0006); 0.22 выведен из репо, история git хранит.
-    b = REPO_ROOT / "bin" / "mlog-023"
-    assert b.exists() and b.stat().st_size > 10_000_000, "bin/mlog-023 не вендорен"
-    assert not (REPO_ROOT / "bin" / "mlog-022").exists(), "mlog-022 должен быть выведен (ADR-0007)"
+    # №372 (ADR-0008): прошлый-хороший 0.24.0 вендорен как тест-гвард
+    # (роль mlog-023 из ADR-0007); 0.23 выведен из репо, история git хранит.
+    b = REPO_ROOT / "bin" / "mlog-024"
+    assert b.exists() and b.stat().st_size > 10_000_000, "bin/mlog-024 не вендорен"
+    assert not (REPO_ROOT / "bin" / "mlog-023").exists(), "mlog-023 должен быть выведен (ADR-0008)"
