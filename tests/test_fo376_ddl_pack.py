@@ -13,6 +13,7 @@
 2. SQLite-валидность: каждый statement исполняется на in-memory sqlite.
 3. Дрейф: если живая БД доступна — множество колонок из DDL == множество
    колонок живой таблицы (skip, если БД нет — CI-песочницы).
+#377 добавляет expert_briefings/expert_automotive_kb/lz_channels.
 """
 import re
 import sqlite3
@@ -36,6 +37,10 @@ DDL_PACK = {
     ],
 }
 ALL_TABLES = DDL_PACK["qa"] + DDL_PACK["dev"] + DDL_PACK["design"]
+# #377: DDL Expert+ЛЗ — тот же паттерн
+DDL_PACK["expert"] = ["expert_briefings", "expert_automotive_kb"]
+DDL_PACK["lz"] = ["lz_channels"]
+ALL_TABLES = ALL_TABLES + DDL_PACK["expert"] + DDL_PACK["lz"]
 
 
 def _statements() -> dict:
@@ -46,14 +51,14 @@ def _statements() -> dict:
     return found
 
 
-def test_all_16_tables_in_initdb():
+def test_all_19_tables_in_initdb():
     stmts = _statements()
     missing = [t for t in ALL_TABLES if t not in stmts]
     assert not missing, f"нет CREATE TABLE IF NOT EXISTS для: {missing}"
 
 
 def test_per_dept_counts():
-    block = APP[APP.index("Наряд №376 (P2): DDL-пачка"):APP.index("конец DDL-пачки №376")]
+    block = APP[APP.index("Наряд №376 (P2): DDL-пачка"):APP.index("конец DDL-пачки #377")]
     for dept, tables in DDL_PACK.items():
         for t in tables:
             assert t in block, f"{t} не найден в секции {dept} DDL-пачки"
