@@ -12,7 +12,7 @@
 
 FOSVED Office — самооптимизирующаяся бизнес-операционная система, построенная на [Metalogos](https://github.com/ShkodnikAI/Metalogos-) — AI-ориентированном DSL на Rust — с прокси-слоем на Python. Система управляет 13 специализированными агентами-департаментами, 1 системным Admin-агентом и собственным контуром разработки (FORGE): хранилищем репозиториев, конвейером проверок и живым превью, целиком реализованным на нативном Metalogos. Задачи поступают через Telegram, маршрутизируются в нужный департамент, обрабатываются с помощью LLM (с бюджетным контролем, канареечным сравнением моделей и параллельным fan-out для сложных запросов) и возвращаются в виде стилизованных Mini App-отчётов.
 
-**~4800 строк** в главном роутере (`app.mlog`), **~12400 строк** в прокси-пакете (`proxy/`), **68 таблиц БД**, **64 команды бота**, **15 модулей отделов** (.mlog).
+**~4500 строк** в главном роутере (`app.mlog`), **~21500 строк** в 27 модулях отделов (`dept/*.mlog`), **~17700 строк** в 37 модулях прокси-пакета (`proxy/`), **≈140 таблиц БД**, **106 команд бота**.
 
 ## Архитектура
 
@@ -24,21 +24,21 @@ Reverse Proxy (Flask)
        │
        ├──▶ Metalogos (mlog serve, :10001)
        │       │
-       │       ├── app.mlog (~4800 строк, маршрутизация + команды + FORGE-роуты)
-       │       ├── dept/*.mlog (15 модулей: 13 департаментов + forge + утилиты)
-       │       └── SQLite (68 таблиц)
+       │       ├── app.mlog (~4500 строк, маршрутизация + команды + FORGE-роуты)
+       │       ├── dept/*.mlog (27 модулей: 13 департаментов + forge, chain, scheduler, narad, quest, miniapp, utils и др.)
+       │       └── SQLite (≈140 таблиц)
        │
        └──▶ LLM Proxy (Flask, :4000)
                │
                ├── llm_proxy.py — тонкий фасад-сборщик (FO-008 стренглер)
-               ├── proxy/ — 27 модулей, ~12400 строк:
+               ├── proxy/ — 37 модулей, ~17700 строк:
                │     core, providers, routes_core/admin/sched/tail,
                │     budget, shadow, chain_parallel, chain_durable,
                │     guardian, mcp_server, forge_backup, forge_secrets,
                │     lz_github, lz_sources, news, dialog, compaction,
                │     owner_profile, reports, resilience, review, redact,
                │     kg, telegram, voice, departments
-               ├── 7+ LLM-провайдеров с фейловером, бюджетным контролем
+               ├── 8 LLM-провайдеров с фейловером, бюджетным контролем
                │   и канареечным (shadow) сравнением моделей
                └── Mini App SPA статика (/miniapp-spa), FORGE-веб (/repos)
 ```
@@ -71,7 +71,7 @@ Reverse Proxy (Flask)
 ## Ключевые возможности
 
 ### Мультипровайдерный LLM с бюджетом и канареечной оценкой
-7+ провайдеров с фейловером. **Бюджетный контроль** (soft/hard/stop лимиты в сутки на департамент). **Shadow-оценка** — канареечный роутинг с сравнением через verifier, без риска для основного трафика. Компакция контекста департаментов (budget + prune + summarize + offload).
+8 провайдеров с фейловером. **Бюджетный контроль** (soft/hard/stop лимиты в сутки на департамент). **Shadow-оценка** — канареечный роутинг с сравнением через verifier, без риска для основного трафика. Компакция контекста департаментов (budget + prune + summarize + offload).
 
 ### Guardian — permission-matrix
 Декларативная политика прав в `guardian_base.json` (версионируется коммитом): правило `deny` **скрывает** инструмент от LLM целиком, не просто блокирует вызов. По умолчанию заперты `http_*`, `web_*`, `search_web*`, `tavily_*`, `exec_*` для всех департаментов — открываются точечно. Overlay на уровне департамента — в таблице `guardian_rules`, оценка last-match-wins.
@@ -245,14 +245,15 @@ Reverse Proxy (Flask)
 
 ```
 .
-├── app.mlog                  # Главный роутер (~4800 строк)
+├── app.mlog                  # Главный роутер (~4500 строк)
 ├── bin/mlog                  # Metalogos v0.25.0 бинарник (x86-64, Rust, боевой)
 ├── bin/mlog-020              # Metalogos 0.20.0 wave-3 (main 29de25a) — стейджинг-догфуд (FO-050)
 ├── bin/mlog-024              # Metalogos 0.24.0 (5df35ff) — прошлый-хороший, тест-гвард (ADR-0008)
+├── VERSION                   # runtime-генерируется при буте из RENDER_GIT_COMMIT; коммит в git — снимок последнего деплоя
 ├── llm_proxy.py              # Тонкий фасад-сборщик (FO-008), точка входа
-├── proxy/                    # 27 модулей, ~12400 строк — вся логика LLM-прокси
+├── proxy/                    # 37 модулей, ~17700 строк — вся логика LLM-прокси
 │   ├── core.py                    # Flask-приложение, auth, конфиг
-│   ├── providers.py                # 7+ LLM-провайдеров, фейловер
+│   ├── providers.py                # 8 LLM-провайдеров (kimi, deepseek, zai, groq, cerebras, glm, openai, anthropic), фейловер
 │   ├── budget.py, shadow.py        # Бюджетный контроль, канареечная оценка
 │   ├── guardian.py                 # Permission-matrix (FO-015)
 │   ├── mcp_server.py               # Memory-MCP офиса наружу (FO-021)
@@ -277,8 +278,11 @@ Reverse Proxy (Flask)
 │   │   visual.mlog, engineering.mlog, kavalnya.mlog, admin.mlog
 │   ├── forge.mlog            # Контур разработки FORGE (~1800 строк)
 │   ├── forge_model.mlog      # Модель данных FORGE
+│   ├── forge_create_bridge.mlog  # Мост создания FORGE-задач
 │   ├── chain.mlog            # Кросс-департаментные цепочки
 │   ├── scheduler.mlog        # Cron-планировщики
+│   ├── schedules.mlog        # Реестр заданий владельца (SSOT, наряд №419)
+│   ├── narad.mlog, quest.mlog, templates.mlog  # Наряды, квесты, шаблоны
 │   ├── miniapp.mlog          # Форматирование отчётов
 │   └── utils.mlog, context.mlog, handlers_fallback.mlog
 ├── library/                  # Профили департаментов (.md) — основной источник
@@ -293,7 +297,7 @@ Reverse Proxy (Flask)
 └── docs/                      # FOIP-предложения, аудит веток, параметры ОСП
 ```
 
-## База данных (68 таблиц)
+## База данных (≈140 таблиц)
 
 Основные группы:
 
@@ -404,11 +408,11 @@ docs/render-dashboard.md, §№424.
 | Компонент | Технология |
 |---|---|
 | Ядро | Metalogos 0.25.0 (Rust DSL, ~500 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory + recall + forget/retain-ttl, label-lattice + гранты, timeseries-домен, full statement-kind taint-инференс; прошлый-хороший 0.24.0 вендорен, аварийный фолбэк 0.20.0, см. entrypoint guard-переход, ADR-0005/0006/0007/0008) |
-| Прокси-слой | Python 3.12 + Flask, разбит на пакет `proxy/` (27 модулей) |
-| База данных | SQLite, 68 таблиц |
+| Прокси-слой | Python 3.12 + Flask, разбит на пакет `proxy/` (37 модулей) |
+| База данных | SQLite, ≈140 таблиц (живая база data/fosved.db) |
 | Голос STT | Whisper |
 | Голос TTS | edge-tts |
-| LLM | 7+ провайдеров, бюджетный контроль, канареечная (shadow) оценка |
+| LLM | 8 провайдеров, бюджетный контроль, канареечная (shadow) оценка |
 | MCP | Клиент (stdio) + собственный Memory-MCP сервер наружу |
 | Контейнер | Docker (ubuntu:24.04), зависимости из `requirements.txt` |
 | Интерфейс | Telegram Bot API + WebApp SPA + FORGE веб-панель |
