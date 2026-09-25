@@ -20,7 +20,18 @@ def _live_commands() -> set:
             live.add(m.group(1).strip())
         for m in re.finditer(r'text\s*==\s*"/([a-z0-9_]+)"', ln):
             live.add(m.group(1).strip())
+    # dept-команды, живущие в dept/*.mlog (мимо app.mlog-диспетчера) — naryad #379.
+    # Системный хвост: ~106 dept-команд пока вне каталога — расширять множество
+    # по мере документирования (каждая запись = реально существующий starts_with).
+    live |= DEPT_LIVE_COMMANDS
     return live
+
+
+DEPT_LIVE_COMMANDS = {
+    # naryad #379: dept/visual.mlog HandleVisual — 8 команд из промпта отдела
+    "visual", "visual-card", "visual-archive", "visual-show",
+    "visual-template", "visual-style", "visual-spec", "visual-recall",
+}
 
 
 def _readme_section() -> str:
