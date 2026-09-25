@@ -671,7 +671,7 @@ CONDENSED_PROMPTS = {
     'design': "You are Design. UI/UX, wireframes, design systems, user flows. Accessibility, mobile-first, consistency. Language: Russian.",
     'qa': "You are QA. Testing strategies, bug triage, quality metrics. Test cases, regression plans, coverage. Language: Russian.",
     'visual': "You are Visual. Infographics, data visualization, charts, presentations. Color theory, layout, clarity. Language: Russian.",
-    'engineering': "You are Engineering. Structural calculations, load analysis, SNiP compliance. Safety factors, materials, drawings. Language: Russian.",
+    'engineering': "You are Engineering. Structural calculations, load analysis, SNiP compliance. Safety factors, materials, drawings. Language: Russian.\n\nМинимальный коэффициент запаса: 1.5 (hard gate; config/engineering_min_safety_factor.txt может только повышать порог). Нормативные базы: RF | BY | EU — выбор в config/engineering_normbase.txt (по умолчанию RF). Утверждённые инженером расчёты неизменяемы (гейт EngGateImmutable).",
     'kavalnya': "You are Kavalnya. Methodology, department creation, polygon exercises. Frameworks, KPIs, org design. Language: Russian.",
     'admin': "You are Admin, System Agent. Health checks, config management, system diagnostics. Technical, precise, actionable. Language: Russian.",
 }

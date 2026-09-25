@@ -15,9 +15,18 @@ pattern EngGateImmutable(file_path: String) -> String {
 }
 
 pattern EngGateSafetyFactor(factor: String) -> String {
-  // Minimum safety factor enforcement
-  let f = to_float(factor)
-  if f < 1.5 then { return "BLOCK:safety_factor_below_minimum" }
+  // Minimum safety factor enforcement (naryad #378: gate wiring live).
+  // Floor = 1.5 (codified department minimum); config/engineering_min_safety_factor.txt
+  // can only RAISE the floor (max of 1.5 and config). Non-numeric factor ("N/A") —
+  // gate cannot evaluate → PASS (honesty is enforced by the verdict path, not by this gate).
+  let mut min_f = 1.5
+  let min_cfg = TryVal(try to_float(trim(redact(read_file("config/engineering_min_safety_factor.txt"), "all"))))
+  if to_string(min_cfg) != "()" then {
+    if min_cfg > min_f then { let min_f = min_cfg }
+  }
+  let f = TryVal(try to_float(factor))
+  if to_string(f) == "()" then { return "PASS" }
+  if f < min_f then { return "BLOCK:safety_factor_below_minimum" }
   return "PASS"
 }
 // disclaimer enforcement, independent verification, learning loop.
@@ -83,6 +92,34 @@ pattern STATUS_ARCHIVED() -> String { return "archived" }
 
 // Error classes for learning loop
 pattern ERROR_CLASSES() -> String { return "missed_load_case,wrong_coefficient,wrong_norm,dimensional_error,wrong_assumption,method_error,none" }
+
+// ── Immunity gate wiring (naryad #378: gates were declared but never called) ──
+pattern CalcImmutableZone(calc_id: String) -> String {
+  // Maps a calculation record to its storage zone for EngGateImmutable:
+  // engineer_approved / archived → calc_verified (engineer-of-record document, immutable);
+  // system_lockdown (kv_store, наряд №268) → lockdown (office-wide write freeze).
+  if kv_get("system_lockdown") == "true" then { return "lockdown" }
+  let rows = query("SELECT status FROM engineering_calculations WHERE id = ?", [calc_id])
+  if length(rows) > 0 then {
+    let status = redact(to_string(json_get(get(rows, 0), "status", "")), "all")
+    if status == STATUS_ENGINEER_APPROVED() then { return "calc_verified" }
+    if status == STATUS_ARCHIVED() then { return "calc_verified" }
+  }
+  return "drafting"
+}
+
+pattern GuardMutable(calc_id: String) -> String {
+  // Returns "" when the record may be modified, otherwise an honest refusal.
+  // Guards SetNormBase / SetLoadCases / IndependentVerify / EngineerReview from
+  // silently mutating engineer-approved or archived calculations.
+  let zone = CalcImmutableZone(calc_id)
+  let gate = EngGateImmutable("engineering_calcs/" + zone + "/" + calc_id)
+  if gate != "PASS" then {
+    let _ = AuditLog("eng_gate_immutable", "engineering", "calc_id=" + calc_id + " gate=" + gate)
+    return "ЗАБЛОКИРОВАНО гейтом EngGateImmutable (" + gate + "): расчёт " + calc_id + " в неизменяемой зоне («" + zone + "»). Создайте новый расчёт вместо правки утверждённого."
+  }
+  return ""
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 1: NLP QUERY PARSER & DISCIPLINE DETECTION
@@ -179,25 +216,67 @@ pattern FormatVerdict(verdict: String) -> String {
 // Hard rule: #2 (no calculation without a stated norm)
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern GetDefaultNorms(discipline: String) -> String {
-  // Returns JSON array of default norms for RF jurisdiction
-  if discipline == "structural" then {
-    return "[{\"code\":\"СП 20.13330\",\"edition\":\"2016\",\"title\":\"Нагрузки и воздействия\",\"governs\":\"load_combinations\"},{\"code\":\"СП 16.13330\",\"edition\":\"2017\",\"title\":\"Стальные конструкции\",\"governs\":\"steel_design\"},{\"code\":\"СП 64.13330\",\"edition\":\"2017\",\"title\":\"Деревянные конструкции\",\"governs\":\"timber_design\"},{\"code\":\"СП 70.13330\",\"edition\":\"2016\",\"title\":\"Несущие и ограждающие конструкции\",\"governs\":\"execution\"}]"
+pattern GetNormSystem() -> String {
+  // Normative-base switch (naryad #378): config/engineering_normbase.txt ∈ {RF, BY, EU}.
+  // Default RF; missing/unknown content honestly falls back to RF (codified default).
+  let nb = trim(redact(read_file("config/engineering_normbase.txt"), "all"))
+  if nb == "BY" then { return "BY" }
+  if nb == "EU" then { return "EU" }
+  return "RF"
+}
+
+pattern GetDefaultNormsFor(discipline: String, norm_system: String) -> String {
+  // Default norm packs per (discipline, norm_system). Unknown combination → "[]"
+  // → SetNormBase honestly refuses (hard rule 2: no calculation without a fixed norm base).
+  if norm_system == "RF" then {
+    if discipline == "structural" then {
+      return "[{\"code\":\"СП 20.13330\",\"edition\":\"2016\",\"title\":\"Нагрузки и воздействия\",\"governs\":\"load_combinations\"},{\"code\":\"СП 16.13330\",\"edition\":\"2017\",\"title\":\"Стальные конструкции\",\"governs\":\"steel_design\"},{\"code\":\"СП 64.13330\",\"edition\":\"2017\",\"title\":\"Деревянные конструкции\",\"governs\":\"timber_design\"},{\"code\":\"СП 70.13330\",\"edition\":\"2016\",\"title\":\"Несущие и ограждающие конструкции\",\"governs\":\"execution\"}]"
+    }
+    if discipline == "hydraulic" then {
+      return "[{\"code\":\"ГОСТ Р 52869\",\"edition\":\"2007\",\"title\":\"Гидроприводы объёмные\",\"governs\":\"hydraulic_systems\"},{\"code\":\"ГОСТ 17474\",\"edition\":\"2015\",\"title\":\"Гидроцилиндры\",\"governs\":\"cylinder_specs\"},{\"code\":\"ПБ 10-157-97\",\"edition\":\"2003\",\"title\":\"Правила подъёмных сооружений\",\"governs\":\"lifting_safety\"}]"
+    }
+    if discipline == "power_electronics" then {
+      return "[{\"code\":\"ПУЭ\",\"edition\":\"7-е изд.\",\"title\":\"Правила устройства электроустановок\",\"governs\":\"electrical_safety\"},{\"code\":\"ГОСТ Р 50571\",\"edition\":\"2019\",\"title\":\"Электробезопасность\",\"governs\":\"low_voltage_installations\"},{\"code\":\"ГОСТ Р 54002\",\"edition\":\"2010\",\"title\":\"Фотоэлектрические системы\",\"governs\":\"pv_systems\"}]"
+    }
   }
-  if discipline == "hydraulic" then {
-    return "[{\"code\":\"ГОСТ Р 52869\",\"edition\":\"2007\",\"title\":\"Гидроприводы объёмные\",\"governs\":\"hydraulic_systems\"},{\"code\":\"ГОСТ 17474\",\"edition\":\"2015\",\"title\":\"Гидроцилиндры\",\"governs\":\"cylinder_specs\"},{\"code\":\"ПБ 10-157-97\",\"edition\":\"2003\",\"title\":\"Правила подъёмных сооружений\",\"governs\":\"lifting_safety\"}]"
+  if norm_system == "BY" then {
+    if discipline == "structural" then {
+      return "[{\"code\":\"СН 2.04.01-2020\",\"edition\":\"\",\"title\":\"Нагрузки и воздействия (РБ)\",\"governs\":\"load_combinations\"},{\"code\":\"СН 5.04.01-2021\",\"edition\":\"\",\"title\":\"Стальные конструкции (РБ)\",\"governs\":\"steel_design\"},{\"code\":\"СН 5.06.01-2020\",\"edition\":\"\",\"title\":\"Деревянные конструкции (РБ)\",\"governs\":\"timber_design\"}]"
+    }
+    if discipline == "hydraulic" then {
+      return "[{\"code\":\"ГОСТ 18464-96\",\"edition\":\"\",\"title\":\"Гидрообъемные приводы. Методы испытаний\",\"governs\":\"hydraulic_testing\"},{\"code\":\"ГОСТ 17474\",\"edition\":\"\",\"title\":\"Гидроцилиндры\",\"governs\":\"cylinder_specs\"}]"
+    }
+    if discipline == "power_electronics" then {
+      return "[{\"code\":\"ГОСТ 30331.1\",\"edition\":\"\",\"title\":\"Электроустановки зданий. Основные положения\",\"governs\":\"electrical_safety\"}]"
+    }
   }
-  if discipline == "power_electronics" then {
-    return "[{\"code\":\"ПУЭ\",\"edition\":\"7-е изд.\",\"title\":\"Правила устройства электроустановок\",\"governs\":\"electrical_safety\"},{\"code\":\"ГОСТ Р 50571\",\"edition\":\"2019\",\"title\":\"Электробезопасность\",\"governs\":\"low_voltage_installations\"},{\"code\":\"ГОСТ Р 54002\",\"edition\":\"2010\",\"title\":\"Фотоэлектрические системы\",\"governs\":\"pv_systems\"}]"
+  if norm_system == "EU" then {
+    if discipline == "structural" then {
+      return "[{\"code\":\"EN 1990\",\"edition\":\"2002\",\"title\":\"Eurocode — Basis of structural design\",\"governs\":\"load_combinations\"},{\"code\":\"EN 1991\",\"edition\":\"\",\"title\":\"Eurocode 1 — Actions on structures\",\"governs\":\"actions\"},{\"code\":\"EN 1993\",\"edition\":\"\",\"title\":\"Eurocode 3 — Design of steel structures\",\"governs\":\"steel_design\"},{\"code\":\"EN 1995\",\"edition\":\"\",\"title\":\"Eurocode 5 — Design of timber structures\",\"governs\":\"timber_design\"}]"
+    }
+    if discipline == "hydraulic" then {
+      return "[{\"code\":\"ISO 4413\",\"edition\":\"2010\",\"title\":\"Hydraulic fluid power — General rules and safety requirements\",\"governs\":\"hydraulic_systems\"},{\"code\":\"EN 982\",\"edition\":\"1996\",\"title\":\"Fluid power systems — hydraulic safety requirements\",\"governs\":\"lifting_safety\"}]"
+    }
+    if discipline == "power_electronics" then {
+      return "[{\"code\":\"IEC 60364\",\"edition\":\"\",\"title\":\"Low-voltage electrical installations\",\"governs\":\"electrical_safety\"},{\"code\":\"IEC 62446\",\"edition\":\"\",\"title\":\"Photovoltaic systems — documentation and commissioning\",\"governs\":\"pv_systems\"}]"
+    }
   }
   return "[]"
 }
 
+pattern GetDefaultNorms(discipline: String) -> String {
+  // Returns JSON array of default norms for RF jurisdiction (naryad #378: RF = one of {RF, BY, EU})
+  return GetDefaultNormsFor(discipline, "RF")
+}
+
 pattern SetNormBase(calc_id: String, discipline: String, norm_system: String, norms_json: String) -> String {
   // Hard rule 2: no calculation without a fixed norm base
-  // Gate: if norms_json is empty, use discipline defaults
+  // Immunity gate (naryad #378): approved/archived calculations are immutable
+  let gm = GuardMutable(calc_id)
+  if gm != "" then { return gm }
+  // Gate: if norms_json is empty, use discipline defaults for the given norm_system
   let norms = norms_json
-  if norms_json == "" or norms_json == "[]" then { let norms = GetDefaultNorms(discipline) }
+  if norms_json == "" or norms_json == "[]" then { let norms = GetDefaultNormsFor(discipline, norm_system) }
 
   // Validate: at least 1 norm must be present
   let norms_parsed = parse_json(norms)
@@ -235,6 +314,9 @@ pattern GetDefaultLoadCases(discipline: String, object_type: String) -> String {
 
 pattern SetLoadCases(calc_id: String, discipline: String, load_cases_json: String, input_data_json: String, missing_data: String) -> String {
   // Hard rule 3: every load case enumerated before calculation
+  // Immunity gate (naryad #378): approved/archived calculations are immutable
+  let gm = GuardMutable(calc_id)
+  if gm != "" then { return gm }
   let lc = load_cases_json
   if load_cases_json == "" or load_cases_json == "[]" then { let lc = GetDefaultLoadCases(discipline, "") }
 
@@ -292,9 +374,24 @@ pattern IndependentVerify(calc_id: String, result_summary: String, discipline: S
   let magnitude_check = redact(to_string(TryVal(try call_llm(magnitude_prompt))), "all")
   if to_string(magnitude_check) == "()" then { let magnitude_check = "[оценка недоступна — провайдеры модели не ответили]" }
 
+  // Immunity gate (naryad #378): approved/archived calculations are immutable
+  let gm = GuardMutable(calc_id)
+  if gm != "" then {
+    return { verification_method: "verification blocked", verification_agrees: false, dimensional_check_ok: false, verdict: "blocked_immutable", details: gm }
+  }
+
+  // verification_agrees from the REAL Route-2 signal (naryad #378: was hardcoded true,
+  // which marked every calculation self_verified regardless of the check outcome).
+  // States: agreed | disagreed | unavailable — unavailable is honest, never true.
+  let mut verification_state = "agreed"
+  if contains(magnitude_check, "недоступна") then { let verification_state = "unavailable" }
+  if contains(magnitude_check, "нереалист") or contains(magnitude_check, "на порядк") or contains(magnitude_check, "противореч") or contains(magnitude_check, "ошибоч") then {
+    let verification_state = "disagreed"
+  }
+  let verification_agrees = verification_state == "agreed"
+
   // Route 3: Independent method — discipline-specific
   let mut independent_method = ""
-  let verification_agrees = true
   if discipline == "structural" then {
     let independent_method = "Сравнение прогиба с допустимым по норме L/n; проверка utilisation ratio ≤ 1.0"
   }
@@ -312,15 +409,17 @@ pattern IndependentVerify(calc_id: String, result_summary: String, discipline: S
   let dim_str = "НЕ ПРОЙДЕНА"
   if dimensional_check_ok then { let dim_str = "ПРОЙДЕНА" }
   let details = "Размерностная проверка: " + dim_str + "\n"
-  let details = details + "Порядок величины: проверен\n"
+  let details = details + "Порядок величины (" + verification_state + "): " + substring(magnitude_check, 0.0, 160.0) + "\n"
   let details = details + "Независимый метод: " + independent_method + "\n"
   let verdict_str = "НЕ верифицирован — требуется доработка"
   if all_agree then { let verdict_str = "self_verified — расчёт может быть передан инженеру" }
+  if verification_state == "unavailable" then { let verdict_str = "verification_unavailable — независимая сверка недоступна, self_verified НЕ присвоен" }
   let details = details + "Вердикт: " + verdict_str
 
   // Update DB
   let va_str = "false"
   if verification_agrees then { let va_str = "true" }
+  if verification_state == "unavailable" then { let va_str = "unavailable" }
   let dc_str = "false"
   if dimensional_check_ok then { let dc_str = "true" }
   let _ = db_execute("UPDATE engineering_calculations SET verification_method = ?, verification_agrees = ?, dimensional_check_ok = ?, status = ? WHERE id = ?", [independent_method, va_str, dc_str, verdict, calc_id])
@@ -328,6 +427,7 @@ pattern IndependentVerify(calc_id: String, result_summary: String, discipline: S
   return {
     verification_method: independent_method,
     verification_agrees: verification_agrees,
+    verification_state: verification_state,
     dimensional_check_ok: dimensional_check_ok,
     verdict: verdict,
     details: details
@@ -896,6 +996,9 @@ pattern EngineerReview(calc_id: String, engineer_verdict: String, engineer_notes
   // Gate: calculation must be self_verified
   let row = query("SELECT status FROM engineering_calculations WHERE id = ?", [calc_id])
   if length(row) == 0 then { return "Расчёт не найден: " + calc_id }
+  // Immunity gate (naryad #378): approved/archived calculations are immutable
+  let gm = GuardMutable(calc_id)
+  if gm != "" then { return gm }
   let current_status = redact(to_string(json_get(get(row, 0), "status", "")), "all")
   if current_status != STATUS_SELF_VERIFIED() and current_status != STATUS_SENT_FOR_REVIEW() then {
     return "Расчёт " + calc_id + " в статусе " + current_status + " — не готов для передачи инженеру. Нужен статус self_verified."
@@ -1004,9 +1107,9 @@ pattern FullPipeline(query: String, discipline: String, chat_id: String) -> Stri
   // Step 2: Create in DB
   let _ = db_execute("INSERT INTO engineering_calculations (id, title, discipline, status, disclaimer_included, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))", [calc_id, substring(query, 0.0, 200.0), discipline, STATUS_DRAFTED(), "false"])
 
-  // Step 3: Norm-base fixation (Tier 1, hard rule 2)
-  let norms = GetDefaultNorms(discipline)
-  let norm_system = "RF"
+  // Step 3: Norm-base fixation (Tier 1, hard rule 2) — norm_system from config switch (naryad #378)
+  let norm_system = GetNormSystem()
+  let norms = GetDefaultNormsFor(discipline, norm_system)
   let _ = SetNormBase(calc_id, discipline, norm_system, norms)
 
   // Step 4: Load-case enumeration (Tier 1, hard rule 3)
@@ -1015,6 +1118,19 @@ pattern FullPipeline(query: String, discipline: String, chat_id: String) -> Stri
 
   // Step 5: Discipline calculation (Tier 2)
   let calc_result = ExecuteDisciplineCalc(calc_id, discipline, query, norms, load_cases)
+
+  // Step 5.5: safety-factor hard gate (naryad #378 — gate was declared but never called).
+  // Non-numeric safety_factor ("N/A") — gate not applicable, recorded honestly in audit.
+  let sf_num = TryVal(try to_float(calc_result.safety_factor))
+  if to_string(sf_num) == "()" then {
+    let _ = AuditLog("eng_gate_safety", "engineering", "calc_id=" + calc_id + " safety_factor non-numeric (" + calc_result.safety_factor + ") — gate not applicable")
+  } else {
+    let sf_gate = EngGateSafetyFactor(calc_result.safety_factor)
+    if sf_gate != "PASS" then {
+      let _ = AuditLog("eng_gate_safety", "engineering", "calc_id=" + calc_id + " gate=" + sf_gate + " safety_factor=" + calc_result.safety_factor)
+      return WrapWithDisclaimer("РАСЧЁТ ОСТАНОВЛЕН гейтом запаса прочности: коэффициент " + calc_result.safety_factor + " ниже кодифицированного минимума.\n\nРасчёт не может быть передан инженеру. Требуется изменение конструкции, материалов или пересчёт с обоснованным коэффициентом запаса.")
+    }
+  }
 
   // Step 6: Independent verification (Tier 1, hard rules 7+8)
   let verification = IndependentVerify(calc_id, calc_result.result_summary, discipline)
@@ -1068,7 +1184,7 @@ pattern RouteByCommand(parsed: Dict, chat_id: String) -> String {
   // /calc-norms — fix normative base
   if cmd == "norms" then {
     if parsed.calc_id == "" then { return "Укажите ID расчёта: /calc-norms <id>" }
-    return SetNormBase(parsed.calc_id, parsed.discipline, "RF", "")
+    return SetNormBase(parsed.calc_id, parsed.discipline, GetNormSystem(), "")
   }
 
   // /calc-loadcases — enumerate load cases
