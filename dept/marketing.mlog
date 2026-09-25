@@ -410,55 +410,87 @@ pattern BuildMarketingContext(query: String, work_mode: String, chat_id: String)
 // ENRICHED SKILL LOADING — 3-tier
 // ═══════════════════════════════════════════════════════════════════════
 
+// Наряд #383: снапшот скиллов НЕ содержит skills/fosved/marketing/* — все 11 чтений были
+// молча пустыми. Честный фолбэк: компактные инлайн-заметки из СОБСТВЕННЫХ дисциплин офиса
+// (honest-claims, forecast-before-launch, схема marketing_campaigns/marketing_forecasts).
+// Путь в снапшоте остаётся первичным: если пак появится — read_file выиграет.
+pattern MarketingSkillNote(name: String) -> String {
+  if name == "audience-segmentation" then { return "Сегменты — по наблюдаемому поведению, не по догадкам; размер и источник сегмента указываются." }
+  if name == "forecast-before-launch" then { return "ПРОГНОЗ ДО ЛАУНЧА — дисциплина офиса: forecast (охват/конверсия/CAC) обязателен до запуска кампании (marketing_campaigns.forecast_*), верификация — после." }
+  if name == "campaign-verification" then { return "Каждая кампания верифицируется: прогноз vs факт; overoptimistic фиксируется в monthly review." }
+  if name == "honest-claims-discipline" then { return "HONEST CLAIMS — конституция отдела: не заявлять непроверяемое; цифры — с источником; без данных — честное «не знаю»." }
+  if name == "market-research-methods" then { return "Метод и выборка исследования объявляются до сбора; выводы — строго из собранного, с указанием n." }
+  if name == "competitive-analysis" then { return "Конкуренты — из проверяемых источников с пометкой «по открытым данным»; домыслы о чужих цифрах запрещены." }
+  if name == "unit-economics-and-cac" then { return "CAC/LTV — по каналам; forecast_cac до кампании, actual_cac после (marketing_campaigns)." }
+  if name == "positioning-and-messaging" then { return "Позиционирование — одно проверяемое отличие в одном предложении; месседжи не противоречат honest-claims." }
+  if name == "channel-strategy" then { return "Каналы — по данным прошлых кампаний; новый канал — пилот с бюджетным лимитом и прогнозом." }
+  if name == "ab-testing-protocol" then { return "A/B: один изменяемый фактор; размер выборки и критерий успеха — до старта; ранняя остановка — только при явной значимости." }
+  if name == "launch-orchestration" then { return "Лаунч — чеклист: канал, аудитория, прогноз, метрики успеха; без прогноза лаунч не стартует." }
+  return ""
+}
+
 pattern LoadMarketingSkills(query: String, depth: Int) -> String {
   let t = lower(query)
-  let result = ""
+  // Наряд #383: было `let result = ""` БЕЗ mut — накопление не работало, паттерн
+  // всегда возвращал «No Marketing skills loaded» даже при живых скиллах
+  let mut result = ""
   let budget = MarketingSkillBudget(depth)
 
   // ── Tier 1: Methodological core (always loaded) ──
   let s = redact(read_file("skills/fosved/marketing/audience-segmentation/SKILL.md"), "all")
+  if s == "" then { let s = MarketingSkillNote("audience-segmentation") }
   if s != "" and length(result) < budget then { let result = result + "\n--- audience-segmentation ---\n" + s }
   let s = redact(read_file("skills/fosved/marketing/forecast-before-launch/SKILL.md"), "all")
+  if s == "" then { let s = MarketingSkillNote("forecast-before-launch") }
   if s != "" and length(result) < budget then { let result = result + "\n--- forecast-before-launch ---\n" + s }
   let s = redact(read_file("skills/fosved/marketing/campaign-verification/SKILL.md"), "all")
+  if s == "" then { let s = MarketingSkillNote("campaign-verification") }
   if s != "" and length(result) < budget then { let result = result + "\n--- campaign-verification ---\n" + s }
   let s = redact(read_file("skills/fosved/marketing/honest-claims-discipline/SKILL.md"), "all")
+  if s == "" then { let s = MarketingSkillNote("honest-claims-discipline") }
   if s != "" and length(result) < budget then { let result = result + "\n--- honest-claims-discipline ---\n" + s }
 
   // ── Tier 2: Domain depth (by operation type) ──
   // Market research
   if (contains(t, "исследован") or contains(t, "research") or contains(t, "рынок") or contains(t, "размер рынка")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/marketing/market-research-methods/SKILL.md"), "all")
+    if s == "" then { let s = MarketingSkillNote("market-research-methods") }
     if s != "" then { let result = result + "\n--- market-research-methods ---\n" + s }
   }
   // Competitive analysis
   if (contains(t, "конкурент") or contains(t, "competitor") or contains(t, "аналог")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/marketing/competitive-analysis/SKILL.md"), "all")
+    if s == "" then { let s = MarketingSkillNote("competitive-analysis") }
     if s != "" then { let result = result + "\n--- competitive-analysis ---\n" + s }
   }
   // Unit economics
   if (contains(t, "cac") or contains(t, "ltv") or contains(t, "unit econom") or contains(t, "окупаемост") or contains(t, "payback")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/marketing/unit-economics-and-cac/SKILL.md"), "all")
+    if s == "" then { let s = MarketingSkillNote("unit-economics-and-cac") }
     if s != "" then { let result = result + "\n--- unit-economics-and-cac ---\n" + s }
   }
   // Positioning & messaging
   if (contains(t, "позиционирован") or contains(t, "positioning") or contains(t, "месседж") or contains(t, "messaging") or contains(t, "посыл")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/marketing/positioning-and-messaging/SKILL.md"), "all")
+    if s == "" then { let s = MarketingSkillNote("positioning-and-messaging") }
     if s != "" then { let result = result + "\n--- positioning-and-messaging ---\n" + s }
   }
   // Channel strategy
   if (contains(t, "канал") or contains(t, "channel") or contains(t, "где продвигать") or contains(t, "where to promote")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/marketing/channel-strategy/SKILL.md"), "all")
+    if s == "" then { let s = MarketingSkillNote("channel-strategy") }
     if s != "" then { let result = result + "\n--- channel-strategy ---\n" + s }
   }
 
   // ── Tier 3: Special techniques (by explicit request) ──
   if (contains(t, "a/b") or contains(t, "ab test") or contains(t, "сплит")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/marketing/ab-testing-protocol/SKILL.md"), "all")
+    if s == "" then { let s = MarketingSkillNote("ab-testing-protocol") }
     if s != "" then { let result = result + "\n--- ab-testing-protocol ---\n" + s }
   }
   if (contains(t, "запуск") or contains(t, "launch") or contains(t, "оркестрац")) and length(result) < budget then {
     let s = redact(read_file("skills/fosved/marketing/launch-orchestration/SKILL.md"), "all")
+    if s == "" then { let s = MarketingSkillNote("launch-orchestration") }
     if s != "" then { let result = result + "\n--- launch-orchestration ---\n" + s }
   }
 
