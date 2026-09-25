@@ -152,6 +152,12 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
     let rows = query("SELECT topic, full_result, status, confidence, created_at FROM dept_archive WHERE id = ? AND dept = 'lz'", [src_id])
     let data = json_encode(rows)
   }
+  // naryad #379: источник — завершённый отчёт аналитика (SendReport → miniapp_responses);
+  // авто-hook Type 3 вызывает GenerateAnalysisCard("report", doc_id, chat_id)
+  if src_type == "report" then {
+    let rows = query("SELECT title AS topic, confidence, 'sent' AS status, created_at FROM miniapp_responses WHERE id = ?", [src_id])
+    let data = json_encode(rows)
+  }
 
   if data == "[]" then { return "Error: source not found" }
 
@@ -169,6 +175,7 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   let badge = "ОСП"
   if src_type == "expert" then { let badge = "ЭКСПЕРТ" }
   if src_type == "lz" then { let badge = "ЛЗ" }
+  if src_type == "report" then { let badge = "ОТЧЁТ" }
 
   // ── Build card using SVG primitives ──
   let style = color_palette("authority", "light")
@@ -556,12 +563,169 @@ pattern GetVisualPath(visual_id: String) -> String {
   return to_string(json_get(get(rows, 0.0), "path", ""))
 }
 
+// ═════════════════════════════════════════════════════════════════════
+// SLASH COMMANDS — 8 команд из промпта отдела (naryad #379: были keyword-only)
+// ═════════════════════════════════════════════════════════════════════
+
+// ── naryad #379: авто-hook Type 3 — карточка завершённого отчёта ──
+// Вызывается из SendReport (dept/miniapp.mlog) для аналитических отделов.
+// Fire-and-forget по контракту: вызывающий оборачивает в TryVal(try ...).
+pattern VisualAutoCardFromReport(dept: String, doc_id: String, chat_id: String) -> String {
+  if doc_id == "" then { return "" }
+  let result = GenerateAnalysisCard("report", doc_id, chat_id)
+  let _ = AuditLog("visual_auto_hook", "visual", "dept=" + dept + " doc=" + doc_id + " result=" + substring(result, 0.0, 80.0))
+  return result
+}
+
+// Автоопределение источника для /visual-card: analysis → expert → lz.
+// Если ничего не найдено — честный дефолт "analysis" (генератор вернёт "source not found").
+pattern VisualAutoDetectSource(src_id: String) -> String {
+  let _ = InitDB()
+  let a = query("SELECT id FROM analysis WHERE id = ? LIMIT 1", [src_id])
+  if length(a) > 0.0 then { return "analysis" }
+  let e = query("SELECT id FROM dept_archive WHERE id = ? AND dept = 'expert' LIMIT 1", [src_id])
+  if length(e) > 0.0 then { return "expert" }
+  let l = query("SELECT id FROM dept_archive WHERE id = ? AND dept = 'lz' LIMIT 1", [src_id])
+  if length(l) > 0.0 then { return "lz" }
+  return "analysis"
+}
+
+// Текущие дефолты генераторов (canvas и палитра сняты с кода, не выдуманы)
+pattern VisualTemplateInfo(vtype: String) -> String {
+  if vtype == "card" then {
+    return "Template: card (Type 3)\nCanvas: 360×504\nПалитра: authority/light\nГенератор: GenerateAnalysisCard"
+  }
+  if vtype == "compression" then {
+    return "Template: compression (Type 1)\nCanvas: 841.89×595.28 (A4 landscape)\nПалитра: energy/light\nГенератор: GenerateCompressionVisual"
+  }
+  if vtype == "memorable" then {
+    return "Template: memorable (Type 2)\nCanvas: 800×500\nПалитра: energy/light\nГенератор: GenerateMemorableInfographic"
+  }
+  if vtype == "reference" then {
+    return "Template: reference (Type 4)\nCanvas: 595.28×841.89 (A4 portrait)\nПалитра: authority/light\nГенератор: GenerateReferenceSheet"
+  }
+  if vtype == "spec" then {
+    return "Template: premium spec (Type 5)\nФормат: JSON 2400×3000 (Midjourney + Figma)\nПалитра: energy/light\nГенератор: GeneratePremiumSpec"
+  }
+  return "Неизвестный тип: " + vtype + ". Типы: card | compression | memorable | reference | spec"
+}
+
+// Стилевой гайд: реальные значения палитр через color_palette builtin
+pattern VisualStyleGuide() -> String {
+  let auth = color_palette("authority", "light")
+  let energy = color_palette("energy", "light")
+  let a_ink = redact(to_string(json_get(auth, "ink", "?")), "all")
+  let a_accent = redact(to_string(json_get(auth, "accent", "?")), "all")
+  let e_ink = redact(to_string(json_get(energy, "ink", "?")), "all")
+  let e_accent = redact(to_string(json_get(energy, "accent", "?")), "all")
+  let msg = "Стилевой гайд Визуала\n\nПалитра authority/light (карточки, справочники):\n  ink=" + a_ink + "  accent=" + a_accent + "\n"
+  let msg = msg + "Палитра energy/light (дашборды, инфографики):\n  ink=" + e_ink + "  accent=" + e_accent + "\n\n"
+  let msg = msg + "Правила: только палитры color_palette; QA-гейт на SVG; raw-LLM без SVG-обёртки запрещён."
+  return msg
+}
+
+// Recall-тест по протоколу меморабельности (5 вопросов, экспозиция 5 сек) —
+// честный протокол: вопросы выдаются владельцу, ответы НЕ выдумываются
+pattern VisualRecallTest(visual_id: String) -> String {
+  let _ = InitDB()
+  let rows = query("SELECT id, type, source_type, source_id, created_at FROM visual_artifacts WHERE id = ?", [visual_id])
+  if length(rows) == 0.0 then { return "Артефакт не найден: " + visual_id }
+  let row = get(rows, 0.0)
+  let vtype = redact(to_string(json_get(row, "type", "")), "all")
+  let created = redact(to_string(json_get(row, "created_at", "")), "all")
+  let msg = "Recall-тест артефакта #" + visual_id + " (" + vtype + ", создан " + created + ")\n\n"
+  let msg = msg + "1. Откройте артефакт на 5 секунд (/visual-show " + visual_id + "), затем закройте.\n"
+  let msg = msg + "2. Ответьте письменно:\n"
+  let msg = msg + "   а) Каков главный вывод (одной фразой)?\n"
+  let msg = msg + "   б) Сколько данных/KPI вы помните?\n"
+  let msg = msg + "   в) Что было выделено цветом?\n"
+  let msg = msg + "   г) Можете ли пересказать структуру без подглядывания?\n"
+  let msg = msg + "3. Критерий прохождения: (а) и (г) верны без подглядывания.\n"
+  let msg = msg + "Результат теста запишите в заметку к артефакту."
+  return msg
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // DISPATCHER — маршрутизация запросов к визуальному отделу
 // ═══════════════════════════════════════════════════════════════════════
 
 pattern HandleVisual(query: String, chat_id: String) -> String {
   let q = lower(query)
+  let t = trim(query)
+
+  // ── naryad #379: 8 слэш-команд из промпта отдела (раньше были keyword-only) ──
+
+  // 1. /visual <type> <source_type> <source_id> — on-demand генерация
+  if starts_with(t, "/visual ") or t == "/visual" then {
+    let parts = split(t, " ")
+    if length(parts) < 4.0 then {
+      return "Формат: /visual <type> <source_type> <source_id>\nТипы: card | compression | memorable | reference | spec\nПример: /visual card analysis 42"
+    }
+    let vtype = redact(to_string(json_get(parts, 1, "")), "all")
+    let stype = redact(to_string(json_get(parts, 2, "analysis")), "all")
+    let sid = redact(to_string(json_get(parts, 3, "1")), "all")
+    if vtype == "card" then { return GenerateAnalysisCard(stype, sid, chat_id) }
+    if vtype == "compression" then { return GenerateCompressionVisual(stype, sid, chat_id) }
+    if vtype == "memorable" then { return GenerateMemorableInfographic(stype, sid, chat_id) }
+    if vtype == "reference" then { return GenerateReferenceSheet(stype, sid, chat_id) }
+    if vtype == "spec" then { return GeneratePremiumSpec(stype, sid) }
+    return "Неизвестный тип: " + vtype + ". Типы: card | compression | memorable | reference | spec"
+  }
+
+  // 2. /visual-card <source_id> — быстрая Type 3 с автоопределением источника
+  if starts_with(t, "/visual-card") then {
+    let parts = split(t, " ")
+    if length(parts) < 2.0 then { return "Формат: /visual-card <source_id>" }
+    let sid = redact(to_string(json_get(parts, 1, "")), "all")
+    let src = VisualAutoDetectSource(sid)
+    return GenerateAnalysisCard(src, sid, chat_id)
+  }
+
+  // 3. /visual-archive [фильтр] — список визуалов
+  if starts_with(t, "/visual-archive") then {
+    let parts = split(t, " ")
+    let filter = ""
+    if length(parts) >= 2.0 then { let filter = redact(to_string(json_get(parts, 1, "")), "all") }
+    return ListVisuals(filter)
+  }
+
+  // 4. /visual-show <id> — отобразить конкретный артефакт (документом в чат)
+  if starts_with(t, "/visual-show") then {
+    let parts = split(t, " ")
+    if length(parts) < 2.0 then { return "Формат: /visual-show <id>" }
+    let vid = redact(to_string(json_get(parts, 1, "")), "all")
+    let fpath = GetVisualPath(vid)
+    if fpath == "" then { return "Артефакт не найден: " + vid }
+    let _ = SendVisualDocument(chat_id, fpath, "Визуал #" + vid)
+    return "Артефакт " + vid + " отправлен документом (" + fpath + ")."
+  }
+
+  // 5. /visual-template <type> — посмотреть текущий template
+  if starts_with(t, "/visual-template") then {
+    let parts = split(t, " ")
+    if length(parts) < 2.0 then { return "Формат: /visual-template <type>\nТипы: card | compression | memorable | reference | spec" }
+    return VisualTemplateInfo(redact(to_string(json_get(parts, 1, "")), "all"))
+  }
+
+  // 6. /visual-style — текущий стилистический guide
+  if t == "/visual-style" then {
+    return VisualStyleGuide()
+  }
+
+  // 7. /visual-spec <source_id> — spec для Type 5 (ручное исполнение в Midjourney+Figma)
+  if starts_with(t, "/visual-spec") then {
+    let parts = split(t, " ")
+    if length(parts) < 2.0 then { return "Формат: /visual-spec <source_id>" }
+    let sid = redact(to_string(json_get(parts, 1, "")), "all")
+    return GeneratePremiumSpec("analysis", sid)
+  }
+
+  // 8. /visual-recall <id> — recall тест на артефакте
+  if starts_with(t, "/visual-recall") then {
+    let parts = split(t, " ")
+    if length(parts) < 2.0 then { return "Формат: /visual-recall <id>" }
+    return VisualRecallTest(redact(to_string(json_get(parts, 1, "")), "all"))
+  }
 
   // Direct command routing
   if contains(q, "карточк") or contains(q, "card") then {
