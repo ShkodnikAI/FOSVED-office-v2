@@ -23,7 +23,7 @@ FORBIDDEN = [
 # Временно допущенные места: :4000/dept/* мосты в невызванных паттернах,
 # исправляются своими нарядами (KKRoute* → #382, OSPRoute* → тот же класс).
 TEMP_ALLOW = {
-    "kavalnya.mlog": 2,  # KKRouteToYana / KKRouteToOSP — наряд #382
+    # kavalnya.mlog удалён из allowlist нарядом #382 (KKRoute* вычищены)
     "osp.mlog": 4,       # OSPRouteToFinance/Expert/LZ/Legal — класс тот же, хвост #381-отчёта
 }
 
