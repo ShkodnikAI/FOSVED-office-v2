@@ -320,8 +320,90 @@ pattern BuildLegalContext(query: String, chat_id: String) -> String {
 // SECTION 4: KNOWLEDGE LOADER
 // ═══════════════════════════════════════════════════════════════════════
 
+// ── naryad #380: populate knowledge-паков из library/ → KV ──
+// Комментарий :324 заявлял «populated at startup from .md files», но populate
+// не существовал — ВСЕ юрисдикции/формы молча деградировали в хардкод-фолбэки.
+// Честный критерий: в KV попадают только паки с реальным контентом;
+// TODO-заглушки (RU/EU/US — 99 байт) пропускаются, их фолбэки остаются активными.
+pattern LoadKnowledgeFile(fpath: String) -> String {
+  let content = read_file(fpath)
+  // redact ДО решений (taint-валидатор Wave 15: untrusted read_file не решает if —
+  // класс ошибки вскрыт нарядом #376 на /osp/analyze). В KV уходит redact-копия —
+  // консервативно, как admin-профиль (dept/admin.mlog:287).
+  let safe = redact(content, "all")
+  if length(safe) < 400 then { return "" }        // TODO-заглушки (99 байт)
+  if contains(safe, "TODO:") then { return "" }   // явная заглушка в контенте
+  return safe
+}
+
+// Version-stamped populate: контент в KV не устаревает относительно .md
+// (sha256-версия контента; расхождение → пере-население). Идемпотентно.
+pattern PopulateLegalKnowledge() -> String {
+  // Юрисдикции → legal_jx_<JX>
+  let by = LoadKnowledgeFile("library/knowledge/legal/jurisdictions/BY.md")
+  if length(by) > 0 then {
+    let ver = substring(to_string(sha256(by)), 0.0, 12.0)
+    if kv_get("legal_jx_BY_ver") != ver then {
+      let _ = kv_set("legal_jx_BY", by)
+      let _ = kv_set("legal_jx_BY_ver", ver)
+    }
+  }
+  let ru = LoadKnowledgeFile("library/knowledge/legal/jurisdictions/RU.md")
+  if length(ru) > 0 then {
+    let ver = substring(to_string(sha256(ru)), 0.0, 12.0)
+    if kv_get("legal_jx_RU_ver") != ver then {
+      let _ = kv_set("legal_jx_RU", ru)
+      let _ = kv_set("legal_jx_RU_ver", ver)
+    }
+  }
+  let eu = LoadKnowledgeFile("library/knowledge/legal/jurisdictions/EU.md")
+  if length(eu) > 0 then {
+    let ver = substring(to_string(sha256(eu)), 0.0, 12.0)
+    if kv_get("legal_jx_EU_ver") != ver then {
+      let _ = kv_set("legal_jx_EU", eu)
+      let _ = kv_set("legal_jx_EU_ver", ver)
+    }
+  }
+  let us = LoadKnowledgeFile("library/knowledge/legal/jurisdictions/US.md")
+  if length(us) > 0 then {
+    let ver = substring(to_string(sha256(us)), 0.0, 12.0)
+    if kv_get("legal_jx_US_ver") != ver then {
+      let _ = kv_set("legal_jx_US", us)
+      let _ = kv_set("legal_jx_US_ver", ver)
+    }
+  }
+  // Бизнес-формы → legal_bf_<BF>
+  let ooo = LoadKnowledgeFile("library/knowledge/legal/business-forms/OOO.md")
+  if length(ooo) > 0 then {
+    let ver = substring(to_string(sha256(ooo)), 0.0, 12.0)
+    if kv_get("legal_bf_ooo_ver") != ver then {
+      let _ = kv_set("legal_bf_ooo", ooo)
+      let _ = kv_set("legal_bf_ooo_ver", ver)
+    }
+  }
+  let ip = LoadKnowledgeFile("library/knowledge/legal/business-forms/IP.md")
+  if length(ip) > 0 then {
+    let ver = substring(to_string(sha256(ip)), 0.0, 12.0)
+    if kv_get("legal_bf_ip_ver") != ver then {
+      let _ = kv_set("legal_bf_ip", ip)
+      let _ = kv_set("legal_bf_ip_ver", ver)
+    }
+  }
+  let selfemp = LoadKnowledgeFile("library/knowledge/legal/business-forms/SELF_EMPLOYED.md")
+  if length(selfemp) > 0 then {
+    let ver = substring(to_string(sha256(selfemp)), 0.0, 12.0)
+    if kv_get("legal_bf_selfemployed_ver") != ver then {
+      let _ = kv_set("legal_bf_selfemployed", selfemp)
+      let _ = kv_set("legal_bf_selfemployed_ver", ver)
+    }
+  }
+  return "ok"
+}
+
 pattern LoadJurisdictionKnowledge(jurisdiction: String) -> String {
-  // Load jurisdiction knowledge from KV store (populated at startup from .md files)
+  // Load jurisdiction knowledge from KV store (naryad #380: populate реально работает,
+  // version-stamped, TODO-заглушки пропускаются — честный фолбэк ниже остаётся для них)
+  let _ = PopulateLegalKnowledge()
   let key = "legal_jx_" + jurisdiction
   let cached = kv_get(key)
   if length(cached) > 0 then { return cached }
@@ -343,6 +425,10 @@ pattern LoadJurisdictionKnowledge(jurisdiction: String) -> String {
 }
 
 pattern LoadBusinessFormKnowledge(form: String, jx: String) -> String {
+  // naryad #380: KV-пак приоритетен (populate version-stamped), фолбэк — для отсутствующих паков
+  let _ = PopulateLegalKnowledge()
+  let bf_pack = kv_get("legal_bf_" + form)
+  if length(bf_pack) > 0 then { return bf_pack }
   if form == BF_OOO() then {
     return "ООО — ограниченная ответственность. Уставный капитал (BY: 100 БВ). Директор на основании Устава/доверенности. Договоры от имени директора. Переход долей по нотариальной форме. Ликвидация через регистрирующий орган."
   }
