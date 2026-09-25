@@ -136,18 +136,17 @@ pattern AdminGateNaradTransition(current_status: String, action: String) -> Stri
 // ═══════════════════════════════════════════════════════════════════════
 // CROSS-DEPARTMENT ROUTING
 // ═══════════════════════════════════════════════════════════════════════
-pattern AdminRouteToScheduler(task: String, chat_id: String) -> String {
-  // Route morning brief section to scheduler
-  let body = json_encode({dept: "scheduler", action: "append_brief", section: "admin", content: task, chat_id: to_float(chat_id)})
-  let _ = http_post("http://127.0.0.1:10000/dept/scheduler", body, "application/json")
-  return "routed"
-}
+// Наряд #381: прежний AdminRouteToScheduler посылал POST :10000/dept/scheduler —
+// reverse_proxy не форвардит /dept/* (класс ошибок №1, анализ v1), и action
+// "append_brief" не существовал нигде. Живой механизм маршрутизации — KV
+// admin_night_summary (пишется в AdminNightCycle, читается AdminReport и
+// app.mlog-кроном). HTTP-мост удалён честно, вызов в :586 убран.
 
 pattern AdminNotifyOwner(text: String, chat_id: String) -> String {
-  // Send critical notification to owner via Yana
-  let body = json_encode({dept: "yana", action: "notify", priority: "high", message: text, chat_id: to_float(chat_id)})
-  let _ = http_post("http://127.0.0.1:10000/dept/yana", body, "application/json")
-  return "notified"
+  // Наряд #381: было POST :10000/dept/yana с action "notify" — роут не существовал.
+  // Живой эквивалент «критического уведомления владельцу» — прямая TG-доставка
+  // (SendAdminMessage, тот же путь, что у всего офиса).
+  return SendAdminMessage(chat_id, text)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -582,8 +581,9 @@ pattern AdminNightCycle() -> String {
   // Save for morning brief
   kv_set("admin_night_summary", report)
 
-  // Cross-dept: route to scheduler for morning brief
-  let _ = AdminRouteToScheduler(substring(report, 0, 500), env("OWNER_TELEGRAM_ID"))
+  // Наряд #381: кросс-департаментная маршрутизация — KV admin_night_summary и есть
+  // живой путь (AdminReport читает; HTTP-мост :10000/dept/scheduler удалён —
+  // reverse_proxy не форвардит /dept/*, action "append_brief" не существовал)
 
   let _ = AuditLog("night_cycle_done", "admin", "completed in " + duration + "s, health=" + to_string(health))
 
