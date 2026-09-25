@@ -33,13 +33,21 @@ def test_route_exists_exactly_once():
 
 def test_auth_is_query_secret_hash_compare():
     block = _route_block()
+    # №376: предварительный redact("all") сохранён — требование taint-валидатора
+    # (untrusted query_param не решает 'if' без one-way-redact, Wave 15).
     assert 'redact(query_param("secret"), "all")' in block, \
-        "auth по query_param — конвенция /schedules/create"
-    # №327 hash-of-hash: hash(полученного) vs hash(ожидаемого hash секрета)
+        "one-way-redact query_param перед решением if — конвенция №327 + taint Wave 15"
+    # №327: ожидание строится как redact-hash секрета (ОДИН hash)
     assert 'let expected = to_string(redact(cron_secret, "hash_only"))' in block, \
         "ожидание строится как redact-hash секрета"
-    assert 'redact(received, "hash_only") != redact(expected, "hash_only")' in block, \
-        "hash-compare по конвенции №327 (ADR-0161)"
+    # №376: сравнение против ОДНОГО H(secret), обе формы:
+    # hash-form дословно (мост LZ №318) ИЛИ hash(received)==H(secret) (raw, cron-стиль).
+    # Исторический паттерн 'redact(expected, "hash_only")' (двойной хэш) запрещён —
+    # при неидемпотентном redact (0.24/0.25) он делал raw-форму всегда 403.
+    assert 'if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }' in block, \
+        "№376: приём обеих форм секрета против одного H(secret)"
+    assert 'redact(expected, "hash_only")' not in block, \
+        "№376: двойной хэш ожидания запрещён (raw-форма непроходима при неидемпотентном redact)"
     assert 'if cron_secret == "" then { return respond("403 Forbidden") }' in block, \
         "пустой env-секрет = 403 (fail-closed)"
 
