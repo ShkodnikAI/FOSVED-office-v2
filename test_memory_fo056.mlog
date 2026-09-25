@@ -1,0 +1,113 @@
+// test_memory_fo056.mlog — FO-056 (office#373): memory E2E dogfood офисного пути.
+//
+// Цепочка по наряду (аудит 24.09, P1-1) на боевом бинаре bin/mlog:
+//   put (ttl/priority) → recall с consent ([MEM]-провенанс) → негатив: recall
+//   БЕЗ grant на private (origin-stamped отказ + memory.recall.denied) →
+//   derive → forget dry_run=true (preview, ничего не уничтожено, грант не
+//   тратится) → forget apply с грантом (грантconsumed on success) → чтение
+//   derived-ключа → MEMORY_POISONED (не silent empty) → ttl-expiry →
+//   retain-ttl/decay → ledger: экспорт + ledger_verify (структурный вердикт).
+//
+// Негативные ветки (мутационное расширение офисного пути):
+//   recall без consent на private   → MEMORY_RECALL_CONSENT_REQUIRED
+//   forget с чужим scope гранта     → GRANT_SCOPE_MISMATCH
+//   forget на private без consent   → MEMORY_FORGET_CONSENT_REQUIRED
+//   retain_ttl на отравленном       → MEMORY_POISONED
+// Каждая — origin-stamped код через try (ADR-0169) + ledger-запись (проверка
+// JSONL — в tests/test_fo056_memory_e2e.py).
+//
+// Запуск локально: ./bin/mlog run test_memory_fo056.mlog  (cwd = корень репо;
+// ledger-экспорт идёт в data/fo056_ledger.jsonl — data/ в .gitignore).
+
+profile legacy { egress: permissive_with_audit }
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(_tick: String) -> String {
+  let mut out = ""
+
+  // ── 1. Публичный typed-контейнер: put с opts (priority/ttl) ──────────
+  let mem = memory_open("office-mem-demo", "public")
+  memory_put(mem, "root-note", "the zebra-protocol root note for office demo", [], {priority: 0.8, decay_rate: 0.01})
+  memory_put(mem, "ephemeral", "short-lived entry", [], {priority: 0.5, ttl_secs: 1})
+  memory_put(mem, "note-live", "still alive entry")
+  memory_put(mem, "summary", "the derived summary of the zebra-protocol root", ["root-note"])
+
+  // m01: публичное чтение — String, значение совпадает
+  let r01 = memory_read(mem, "root-note")
+  let out = out + _Mark("m01_put_read_public", r01 == "the zebra-protocol root note for office demo")
+
+  // m02: keys видят все четыре ключа (до expiry)
+  let out = out + _Mark("m02_keys_after_put", contains(to_string(memory_keys(mem)), "root-note") and contains(to_string(memory_keys(mem)), "ephemeral") and contains(to_string(memory_keys(mem)), "summary"))
+
+  // m05: derive-граф — provenance summary ведёт к root-note
+  let out = out + _Mark("m05_derive_provenance", contains(to_string(memory_provenance(mem, "summary")), "root-note"))
+
+  // ── 2. Приватный контейнер: consent → put → revoke ───────────────────
+  consent_grant("priv-ctx", "memory:office-priv", "office-priv", 3600)
+  let priv = memory_open("office-priv", "private")
+  memory_put(priv, "secret-note", "private credential placeholder for fo056")
+
+  consent_revoke("priv-ctx", "memory:office-priv")
+
+  // m03: негатив — recall приватного ключа без активного consent → отказ
+  let r03 = try recall("secret-note")
+  let out = out + _Mark("m03_recall_denied_private", r03.ok == false and r03.error.code == "MEMORY_RECALL_CONSENT_REQUIRED")
+
+  // ── 3. Позитивный recall по публичному лейну: [MEM]-провенанс ────────
+  let r04 = recall("zebra-protocol")
+  let out = out + _Mark("m04_recall_hit_mem_provenance", contains(r04, "zebra") and contains(r04, "[MEM]"))
+
+  // ── 4. Негативы forget-лестницы ──────────────────────────────────────
+  let wrong_scope = grant_issue("db:delete:sessions", 60, "once")
+  let r06 = try forget(mem, "root-note", wrong_scope, true)
+  let out = out + _Mark("m06_forget_grant_scope_mismatch", r06.ok == false and contains(r06.error.message, "GRANT_SCOPE_MISMATCH"))
+
+  let g_priv = grant_issue("memory:forget:*", 60, "once")
+  let r07 = try forget(priv, "secret-note", g_priv, false)
+  let out = out + _Mark("m07_forget_consent_required", r07.ok == false and r07.error.code == "MEMORY_FORGET_CONSENT_REQUIRED")
+
+  // ── 5. forget dry_run=true: preview, состояние не тронуто ────────────
+  let g_dry = grant_issue("memory:forget:*", 60, "once")
+  let plan = forget(mem, "root-note", g_dry, true)
+  let out = out + _Mark("m08_forget_dry_run_preview", plan.dry_run == true and len(plan.deleted) == 0 and contains(to_string(plan.poisoned), "summary"))
+  let r08b = memory_read(mem, "root-note")
+  let out = out + _Mark("m08b_dry_run_no_state_change", r08b == "the zebra-protocol root note for office demo")
+
+  // ── 6. forget apply: грантconsumed, root удалён, summary отравлен ────
+  let g_apply = grant_issue("memory:forget:*", 60, "once")
+  let res = forget(mem, "root-note", g_apply, false)
+  let out = out + _Mark("m09_forget_apply", len(res.deleted) == 1 and contains(to_string(res.poisoned), "summary"))
+
+  // m10: poison-чтение — громкий отказ, не silent empty
+  let r10 = try memory_read(mem, "summary")
+  let out = out + _Mark("m10_poisoned_read_refused", r10.ok == false and r10.error.code == "MEMORY_POISONED")
+
+  // m09b: root исчез из keys; summary-кварантин остался в контейнере
+  let out = out + _Mark("m09b_keys_after_apply", not_contains(memory_keys(mem), "root-note") and contains(to_string(memory_keys(mem)), "summary"))
+
+  // ── 7. TTL auto-forget: sweep на следующем касании ───────────────────
+  sleep(2.0)
+  let out = out + _Mark("m11_ttl_expired_sweep", not_contains(memory_keys(mem), "ephemeral"))
+
+  // ── 8. retain-ttl: живой ключ получает lifetime (факт memory.retain_ttl
+  // верифицируется по JSONL в pytest; memory_retained — только пины,
+  // TTL-ключи в списке не видны — расхождение №2 в отчёте PR) ──────────
+  memory_retain_ttl(mem, "note-live", 3600)
+  let out = out + _Mark("m12_retain_ttl_live", contains(to_string(memory_keys(mem)), "note-live"))
+
+  let r13 = try memory_retain_ttl(mem, "summary", 3600)
+  let out = out + _Mark("m13_retain_ttl_poisoned_refused", r13.ok == false and r13.error.code == "MEMORY_POISONED")
+
+  // ── 9. Ledger: экспорт + структурная верификация ─────────────────────
+  ledger_export("data/fo056_ledger.jsonl")
+  let v = ledger_verify("data/fo056_ledger.jsonl")
+  let out = out + _Mark("m14_ledger_verify_ok", v.ok == true and v.records >= 12)
+
+  return out
+}
+
+flow Main { input: String = "" -> Main1 -> output }
