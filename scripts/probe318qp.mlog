@@ -32,10 +32,23 @@ route "/qp" method=GET {
     return respond("200 match")
 }
 
+// №376: синхронизированная с app.mlog /osp/analyze версия auth — обе формы
+// секрета (hash-form дословно, raw через одинарный hash-compare). redact("all")
+// на received сохранён (требование taint-валидатора Wave 15). /qp оставлен
+// как исторический негативный референс (двойной хэш ожидания, raw всегда 403).
+route "/qp2" method=GET {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 empty-env") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 mismatch") }
+    return respond("200 match")
+}
+
 // Полный конвейер вызывающей стороны (идиома lz.mlog №318): redact-hash
 // секрета в URL, затем реальный http_get своего же сервера.
 route "/selfcheck" method=GET {
-    let r = TryVal(try http_get("http://127.0.0.1:10001/qp?secret=" + redact(env("CRON_SECRET"), "hash_only")))
+    let r = TryVal(try http_get("http://127.0.0.1:10001/qp2?secret=" + redact(env("CRON_SECRET"), "hash_only")))
     let s = to_string(r)
     // ВАЖНО: respond("200 match") отдаёт ТЕЛО "match" — parse_status_line съедает
     // первый токен как статус. Сравниваем тело, не полную строку.

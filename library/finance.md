@@ -7,7 +7,6 @@ psychotype:
   primary: Педант
   secondary: Методист
 skillsDir: skills/fosved/finance/
-archiveModel: FinancialForecast
 metric: mape-cashflow
 status: ratified
 version: 1.0
@@ -146,6 +145,3 @@ version: 1.0
 
 - `runway-and-burn-analysis` — runway calculation, burn rate, точка безубыточности
 
-## Archive integration
-
-Все результаты публикуются в `ARCHIVE_CHANNEL_ID` через `lib/archive-publisher.js`. Каждая запись `FinancialForecast` имеет `archiveMessageId` + `archiveChannelId` для cross-reference из других отделов.

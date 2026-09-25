@@ -400,6 +400,36 @@ pattern InitDB() -> String {
   let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT"))
   // ── конец ALTER-хвоста naryad-363 ──
 
+  // ── Наряд №376 (P2): DDL-пачка QA/Dev/Design — 16 таблиц. Схема снята с
+  // живой БД (data/fosved.db, sqlite_master) 2026-09-25 — гарантия совпадения
+  // с исторически созданными таблицами (нулевой дрейф). До этого пачки
+  // писались/читались кодом (dept/qa.mlog, dept/dev.mlog, dept/design.mlog),
+  // но не создавались нигде — свежий деплой с пустой БД падал на первом
+  // INSERT. CREATE TABLE IF NOT EXISTS идемпотентен: живая БД не трогается.
+  // QA (7) — dept/qa.mlog: test_runs, defect_records, incidents,
+  //   ai_eval_runs, security_audits, qa_assessments, cross_dept_tasks.
+  db_execute("CREATE TABLE IF NOT EXISTS test_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), environment TEXT, project TEXT, started_at TEXT, status TEXT, test_type TEXT, triggered_by TEXT, updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT, coverage_pct TEXT, failed TEXT, passed REAL, skipped TEXT, total_tests TEXT, verdict TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS defect_records (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), environment TEXT, project TEXT, severity TEXT, status TEXT, summary TEXT, test_run_id TEXT, updated_at TEXT DEFAULT (datetime('now')), has_regression_test TEXT, verified_at TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, defect_id INTEGER, project TEXT, status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS ai_eval_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, coherence_score REAL, created_at TEXT DEFAULT (datetime('now')), faithfulness_score REAL, groundedness_score REAL, model_id TEXT, overall_pass_rate REAL, project TEXT, prompt_injection_score REAL, relevance_score REAL, status TEXT, total_cases TEXT, updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT, verdict TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS security_audits (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_type TEXT, created_at TEXT DEFAULT (datetime('now')), findings_critical TEXT, findings_high TEXT, findings_low TEXT, findings_medium TEXT, project TEXT, status TEXT, updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT, summary TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS qa_assessments (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), full_result TEXT, project TEXT, short_title TEXT, status TEXT, test_type TEXT, updated_at TEXT DEFAULT (datetime('now')), verification_date TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS cross_dept_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), reference_id TEXT, severity TEXT, source_dept TEXT, status TEXT, summary TEXT, target_dept TEXT, task_type TEXT)")
+  // Dev (5) — dept/dev.mlog: tech_radar_entries, architecture_decisions,
+  //   code_repositories, dev_estimate_verifications, dev_rule_violations.
+  db_execute("CREATE TABLE IF NOT EXISTS tech_radar_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, created_at TEXT DEFAULT (datetime('now')), description TEXT, name TEXT, radar_state TEXT, rationale TEXT, updated_at TEXT DEFAULT (datetime('now')))")
+  db_execute("CREATE TABLE IF NOT EXISTS architecture_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, alternatives TEXT, consequences TEXT, context TEXT, created_at TEXT DEFAULT (datetime('now')), decision TEXT, status TEXT, task_id TEXT, title TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS code_repositories (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), has_ci TEXT, has_gitignore TEXT, has_license TEXT, has_readme TEXT, name TEXT, storage_primary TEXT, task_type TEXT, url TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS dev_estimate_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, confidence REAL, created_at TEXT DEFAULT (datetime('now')), estimate_expected REAL, estimate_high REAL, estimate_low REAL, task_id TEXT, actual_hours TEXT, bias TEXT, mape REAL, verified_at TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS dev_rule_violations (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_number INTEGER, task_id TEXT, description TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // Design (4) — dept/design.mlog: design_artifacts, design_decisions,
+  //   user_research_sessions, design_verification.
+  db_execute("CREATE TABLE IF NOT EXISTS design_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, a11y_score REAL, artifact_type TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')), design_tokens TEXT, has_mobile TEXT, has_responsive TEXT, interaction_states TEXT, iteration_count REAL, name TEXT, parent_artifact_id TEXT, status TEXT, updated_at TEXT DEFAULT (datetime('now')), user_tasks TEXT, a11y_issues TEXT, a11y_level TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS design_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id TEXT, created_at TEXT DEFAULT (datetime('now')), decision_type TEXT, new_value TEXT, old_value TEXT, rationale TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS user_research_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), domain TEXT, findings TEXT, pain_points TEXT, research_type TEXT, segments TEXT, status TEXT, tasks TEXT)")
+  db_execute("CREATE TABLE IF NOT EXISTS design_verification (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id TEXT, design_hash TEXT, drift_score REAL, implemented_hash TEXT, verdict TEXT, verified_at TEXT)")
+  // ── конец DDL-пачки №376 ──
+
   return "ok"
 }
 
@@ -1498,6 +1528,11 @@ pattern DetectDepartment(text: String) -> String {
   if starts_with(text, "/yana") then { return "yana" }
   if starts_with(text, "/osp") then { return "osp" }
   if starts_with(text, "/lz") then { return "lz" }
+  // №376: /quickexpert (depth 1) и /deepexpert (depth 3) — промпт Эксперта
+  // заявляет, dept/expert.mlog:159-164 парсит оба, но диспетчер раньше их
+  // не мапил (не матчатся префиксом "/expert") — команды молча уходили в Яну.
+  if starts_with(text, "/quickexpert") then { return "expert" }
+  if starts_with(text, "/deepexpert") then { return "expert" }
   if starts_with(text, "/expert") then { return "expert" }
   if starts_with(text, "/marketing") then { return "marketing" }
   if starts_with(text, "/finance") then { return "finance" }
@@ -1672,13 +1707,23 @@ mlogserver {
   // ── №318: LZ→OSP мост — POST /osp/analyze ──────────────────────────────
   // Роут обещан LZ Native v2.0 (dept/lz.mlog:129,290), ранее не существовал:
   // обе стороны глотали 404 через TryVal, OSP-обогащение молча отсутствовало.
-  // Auth — в query ОДНОСТОРОННИЙ redact-hash секрета (№327/ADR-0161):
-  // вызывающая сторона шлёт redact(env,"hash_only") = "[HASH:x16] hex";
-  // сервер сравнивает hash(полученного) vs hash(ожидаемого hash) — обе
-  // стороны через hash-compare, детерминированный SHA256. Секрет НЕ ходит
-  // по сети вовсе (односторонний хеш), public-метка redact-выхода не даёт
-  // private-egress, hex-тело URL-safe (нет '+'/' ' — не ломается на декоде
-  // 0.21 и перекодировке прокси). Проба: scripts/probe318qp.{mlog,sh}.
+  // №376: принимаются ОБЕ формы секрета:
+  //   (а) hash-form "[HASH:x16] hex" — конвенция №327/№318, так шлёт мост LZ→ОСП
+  //       (dept/lz.mlog: redact(env("CRON_SECRET"),"hash_only"));
+  //   (б) raw-секрет — cron-стиль (cron-job.org, serve-батарея /schedules/*).
+  // История: до №376 expected строился как H(secret) и затем сравнивался как
+  // H(received) vs H(expected)=H(H(secret)) — двойной хэш при неидемпотентном
+  // redact (0.24/0.25) делал raw-форму непроходимой всегда (403; hash-form
+  // продолжала проходить — матрица scripts/fo376_probe_auth.sh). Фикс №376:
+  // сравнение против ОДНОГО H(secret): либо дословное совпадение (hash-form),
+  // либо hash(received)==H(secret) (raw). Предварительный redact("all") на
+  // received ОСТАВЛЕН — он требуется taint-валидатором (untrusted query_param
+  // не решает 'if' без one-way-redact, Wave 15) и на bare-значениях не меняет
+  // значение (hash-form проходит через него неизменной — доказано пробой).
+  // Секрет по сети в raw-форме не ходит у моста №318; hex-тело URL-safe
+  // (нет '+'/' ' — не ломается на декоде и перекодировке прокси).
+  // Проба: scripts/probe318qp.{mlog,sh} (/qp2 — фиксированный паттерн) +
+  // scripts/fo376_probe_auth.sh (матрица обеих форм на обоих бинарях).
   // Анализ выполняется ДО respond (может занять минуты) — вызывающая
   // сторона ставит короткий таймаут и не читает ответ; доставка результата —
   // SendTelegramReply владельцу (или chat_id из тела).
@@ -1688,7 +1733,7 @@ mlogserver {
     let cron_secret = env("CRON_SECRET")
     if cron_secret == "" then { return respond("403 Forbidden") }
     let expected = to_string(redact(cron_secret, "hash_only"))
-    if redact(received, "hash_only") != redact(expected, "hash_only") then { return respond("403 Forbidden") }
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
     let data = json_body()
     let query = redact(to_string(json_get(data, "query", "")), "all")
     if redact(query, "hash_only") == redact("", "hash_only") then { return respond("400 empty query") }
@@ -1701,6 +1746,84 @@ mlogserver {
     let reply = HandleOSP(query, chat_id)
     let _ = SendTelegramReply(chat_id, reply)
     return respond("200 analysis complete")
+  }
+
+  // ── №376: REST /api/expert/* — восстановление обёрток (TODO dept/expert.mlog:804) ──
+  // route допустим только в главном файле (в импортируемом модуле — parse
+  // error, проверено пробой 25.09), поэтому обёртки живут здесь тонкими
+  // диспетчерами; вся логика — в dept/expert.mlog (паттерны Expert*).
+  // Auth — CRON_SECRET, обе формы (конвенция №376, как /osp/analyze).
+  // reverse_proxy форвардит префикс /api/expert/ сюда (MLOG_ROUTES_PREFIXES).
+  route "/api/expert/automotive" method=GET {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    return respond(ExpertAutomotiveLookup(redact(query_param("query"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
+  }
+
+  route "/api/expert/compare" method=GET {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    return respond(ExpertCompareVehicles(redact(query_param("vehicles"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
+  }
+
+  route "/api/expert/residual-value" method=GET {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    return respond(ExpertResidualValueData(redact(query_param("vehicle"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
+  }
+
+  route "/api/expert/operation-cost" method=GET {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    return respond(ExpertOperationCostData(redact(query_param("vehicle"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
+  }
+
+  route "/api/expert/chart" method=POST {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let data = json_body()
+    let _ = InitDB()
+    return respond(ExpertGenerateChart(redact(to_string(json_get(data, "chart_type", "")), "all"), redact(to_string(json_get(data, "vehicle", "")), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
+  }
+
+  route "/api/expert/briefings" method=GET {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    return respond(ExpertListBriefings(redact(env("OWNER_TELEGRAM_ID"), "all")))
+  }
+
+  route "/api/expert/briefing" method=POST {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let data = json_body()
+    let _ = InitDB()
+    return respond(ExpertCreateBriefing(redact(to_string(json_get(data, "topic", "")), "all"), redact(to_string(json_get(data, "depth", "2")), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
   }
 
   // ============================================================
@@ -2516,7 +2639,10 @@ pattern WebhookBody() -> String {
 
     // /status
     if text == "/status" then {
-      let _ = SendTelegramReply(chat_id, "Fosved Office v2 — Status\n\nDepartments: yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya, admin\nAll 14 online.\nVoice: " + kv_get("voice_enabled") + "\nArchive: " + kv_get("auto_archive"))
+      // №376: «All 14 online» был захардкожен — офис не пингует отделы из этого
+      // роута, утверждение было ложным. Честная формулировка: перечень
+      // зарегистрированных отделов + живая телеметрия того, что реально известно.
+      let _ = SendTelegramReply(chat_id, "Fosved Office v2 — Status\n\nDepartments (registered): yana, osp, lz, expert, marketing, finance, legal, dev, design, qa, visual, engineering, kavalnya, admin\nVoice: " + kv_get("voice_enabled") + "\nArchive: " + kv_get("auto_archive"))
       let _ = AuditLog("status_check", "system", "status requested")
       return respond("200 ok")
     }

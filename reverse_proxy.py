@@ -55,6 +55,7 @@ logging.getLogger("werkzeug").addFilter(QuerySecretMasker())
 # Routes that go to LLM Proxy (Mini App + dashboards + archive + scheduler + learning)
 LLM_ROUTES_PREFIXES = [
     # "/webhook/",   # Telegram webhook — Python handler
+    "/api/lz/",            # №376: LZ API — Python-слой (proxy/routes_admin.py); перенос из MLOG_ROUTES_PREFIXES — mlog-роутов нет, форвардинг заслонял живые эндпоинты
     "/webhook/miniapp-action",  # Mini App action bar → LLM Proxy (must precede generic mlog routing)
     "/cron/collect-news",  # registered in LLM Proxy, not in Metalogos; guarded by CRON_SECRET
     "/cron/backup",        # FO-001 db-backup: роут был только здесь — раньше уходил в mlog и молча 404 (нашли FO-042)
@@ -134,8 +135,14 @@ def is_internal_only(path):
 # NOTE: mlog routes checked BEFORE LLM routes (specific > catch-all)
 # "/" is exact-only — see is_mlog_route (must not swallow /miniapp, /api, …)
 MLOG_ROUTES_PREFIXES = [
-    "/api/expert/",  # Expert automotive API — served by mlog (dept/expert.mlog)
-    "/api/lz/",      # LZ multi-domain API — served by mlog (dept/lz.mlog)
+    # №376: /api/expert/* восстановлены (7 роутов в app.mlog, auth CRON_SECRET);
+    # до наряда обёртки были удалены (TODO dept/expert.mlog:804) — форвардер
+    # отдавал mlog-404 на мёртвый класс.
+    "/api/expert/",  # Expert automotive API — routes in app.mlog (mlogserver block), logic in dept/expert.mlog
+    # №376: "/api/lz/" ПЕРЕНЕСЁН в LLM_ROUTES_PREFIXES — LZ API живёт на
+    # Python-слое (proxy/routes_admin.py: /api/lz/rss, /api/lz/notices, …),
+    # mlog-роутов /api/lz/* нет; форвардинг на mlog заслонял Python-эндпоинты
+    # (тихий 404 через фронт-дверь — тот же класс, что FO-042 /cron/backup).
     "/webhook/",    # Telegram webhook — mlog handler
     "/cron/",
     "/health",
