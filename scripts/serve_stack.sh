@@ -8,7 +8,7 @@ set -u
 BIN="$1"; TAG="$2"
 BASE=/home/z/my-project/n349-serve/$TAG
 RES=/home/z/my-project/n349-results
-mkdir -p "$BASE"
+mkdir -p "$BASE" "$RES"
 
 cd /home/z/my-project/FOSVED-office-v2
 git archive HEAD | tar -x -C "$BASE"
