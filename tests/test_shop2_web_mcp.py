@@ -196,6 +196,12 @@ def _env_with_private():
                 WEB_MIN_INTERVAL="0")
 
 
+def _env_robots_respect():
+    """ADR-0011: robots-проверка по умолчанию ВЫКЛЮЧЕНА; эти тесты
+    проверяют опт-ин дисциплину SHOP-2 (SHOP_ROBOTS_RESPECT=1)."""
+    return dict(_env_with_private(), SHOP_ROBOTS_RESPECT="1")
+
+
 # ── 1. Протокол ──────────────────────────────────────────────────────────
 def test_initialize_tools_list_unknown_tool():
     m = McpProc(_env_with_private())
@@ -295,7 +301,7 @@ def test_fetch_api_json_401_is_data_and_ssrf_still_gated(stub_url):
 
 
 def test_robots_disallow_is_refused(stub_url):
-    m = McpProc(_env_with_private())
+    m = McpProc(_env_robots_respect())
     try:
         m.initialize()
         d = result_data(m.call("fetch_page", {"url": f"{stub_url}/private"}))
@@ -307,8 +313,9 @@ def test_robots_disallow_is_refused(stub_url):
 
 def test_robots_missing_404_allows_with_note(stub_norobots_url):
     """Урок SHOP-3: непарсенный robotparser в 3.12 даёт can_fetch=False —
-    404 robots должен РАЗРЕШАТЬ с note, а не запрещать весь хост."""
-    m = McpProc(_env_with_private())
+    404 robots должен РАЗРЕШАТЬ с note, а не запрещать весь хост.
+    (ADR-0011: дисциплина robots — opt-in через SHOP_ROBOTS_RESPECT=1.)"""
+    m = McpProc(_env_robots_respect())
     try:
         m.initialize()
         d = result_data(m.call("fetch_page", {"url": f"{stub_norobots_url}/page"}))
@@ -420,8 +427,21 @@ def test_probe_url_head_rejected_falls_back_to_get(stub_url):
         m.close()
 
 
-def test_probe_url_respects_robots_and_ssrf(stub_url):
+def test_robots_check_disabled_by_default(stub_url):
+    """ADR-0011 (#406): красная линия robots снята — по умолчанию /private
+    ДОСТУПЕН (проба реально уходит на страницу), discipline opt-in."""
     m = McpProc(_env_with_private())
+    try:
+        m.initialize()
+        d = result_data(m.call("fetch_page", {"url": f"{stub_url}/private"}))
+        assert d["ok"] is True, d
+        assert _Stub.hits.get("/private", 0) >= 1
+    finally:
+        m.close()
+
+
+def test_probe_url_respects_robots_and_ssrf(stub_url):
+    m = McpProc(_env_robots_respect())
     try:
         m.initialize()
         d = result_data(m.call("probe_url", {"url": f"{stub_url}/private"}))

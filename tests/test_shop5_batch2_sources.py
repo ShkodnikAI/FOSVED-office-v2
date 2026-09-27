@@ -53,8 +53,7 @@ def _clean_kv():
 @pytest.mark.parametrize("platform,kind", [
     ("7745", "recon_unreachable"),
     ("shopby", "recon_unreachable"),
-    ("tomas", "robots_disallow_surface"),
-    ("unishop", "robots_disallow_surface"),
+    ("unishop", "antibot_blocked"),
 ])
 def test_batch2_refusals_are_honest(platform, kind):
     r = sc.collect(platform, "смартфон")
@@ -62,6 +61,35 @@ def test_batch2_refusals_are_honest(platform, kind):
     assert r["kind"] == kind
     assert r["platform"] == platform
     assert r["error"], "отказ обязан быть с текстом, не молчанкой"
+
+
+# ── #406: tomas — живая попытка (стаб транспорта, без сети) ────────────
+def test_tomas_live_attempt_captcha_is_honest(monkeypatch):
+    """Антибот-стена «Проверка безопасности» → antibot_blocked с диагнозом."""
+    def fake(tool, args):
+        assert tool == "fetch_page" and "tomas.by/search/" in args["url"]
+        return {"ok": True, "content": "<title>Проверка безопасности</title> recaptcha"}
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
+    r = sc.collect_tomas("смартфон")
+    assert r["ok"] is False and r["kind"] == "antibot_blocked"
+    assert "антибот" in r["error"]
+
+
+def test_tomas_parses_jsonld_products(monkeypatch):
+    """Если egress не встречает антибот — витрина берётся из JSON-LD."""
+    ld = ('<script type="application/ld+json">'
+          '{"@type":"ItemList","itemListElement":[{"item":{"@type":"Product",'
+          '"name":"Смартфон X","sku":"X100","offers":{"price":899.0,'
+          '"priceCurrency":"BYN","url":"https://tomas.by/item/x100",'
+          '"seller":{"name":"Магазин Плюс"}}}}]}</script>')
+    def fake(tool, args):
+        return {"ok": True, "content": ld}
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
+    r = sc.collect_tomas("смартфон")
+    assert r["ok"] is True and r["offers"]
+    o = r["offers"][0]
+    assert o["seller_name"] == "Магазин Плюс"  # продавец-участник, не «Tomas.by»
+    assert o["price_byn"] == 899.0
 
 
 def test_batch2_registered_in_collectors_and_mvp():
