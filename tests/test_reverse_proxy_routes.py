@@ -91,8 +91,11 @@ def test_flask_cron_scheduler_shop_routes_routed():
     internal = _proxy_list("INTERNAL_ONLY_PREFIXES")  # SEC-1 гейт: 404 наружу, зовёт mlog
     rules = {r.rule for r in app.url_map.iter_rules()
              if r.endpoint != "static"}
+    # "/metrics/" — с 2026-09-27: класс FO-042 повторился на /metrics/activity
+    # (FO-053 смёржнут, а фронт-дверь забыли — прод отвечал 404). Все будущие
+    # /metrics/*-роуты обязаны быть явно маршрутизированы или явно внутренние.
     unrouted = [r for r in sorted(rules)
-                if r.startswith(("/cron/", "/scheduler/", "/shop/"))
+                if r.startswith(("/cron/", "/scheduler/", "/shop/", "/metrics/"))
                 and not _covered(r, llm)
                 and not _covered(r, internal)
                 and r not in KNOWN_INTERNAL]
@@ -119,6 +122,23 @@ def test_shop_post_endpoints_stay_internal(path):
     assert not _covered(path, _proxy_list("LLM_ROUTES_PREFIXES")), (
         f"{path} не должен быть публично маршрутизирован: у роута нет auth, "
         f"его дёргает только mlog webhook напрямую на 127.0.0.1:4000")
+
+
+# ── 4b. FO-053: фид счётчиков маршрутизирован наружу (класс FO-042) ──────
+def test_metrics_activity_is_publicly_routed():
+    """GET /metrics/activity (FO-053, office#325) — фид owner_activity для
+    FO-052 ступени 1: VM-экспортёр опрашивает его через публичный порт,
+    auth (ACTIVITY_FEED_TOKEN, fail-closed) несёт сам роут на 4000.
+    2026-09-27: префикса не было → прод отвечал 404 на мёржнутый эндпоинт
+    (путь проваливался в default → mlog); тесты ловить не могли — гоняли
+    4000 напрямую, минуя reverse_proxy."""
+    prefixes = _proxy_list("LLM_ROUTES_PREFIXES")
+    assert _covered("/metrics/activity", prefixes), (
+        "GET /metrics/activity должен маршрутизироваться в LLM Proxy "
+        "(фид owner_activity, FO-052); auth — токен в самом роуте")
+    assert not _covered("/metrics/activity", _proxy_list("INTERNAL_ONLY_PREFIXES")), (
+        "/metrics/activity не должен попасть в INTERNAL_ONLY: "
+        "фид по дизайну опрашивается снаружи (VM исполнителя)")
 
 
 # ── 5. Flask-приложение реально владеет роутами SHOP (ловит переименование)

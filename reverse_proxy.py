@@ -77,6 +77,12 @@ LLM_ROUTES_PREFIXES = [
     "/miniapp-spa/",
     "/miniapp-spa",
     "/api/",
+    # FO-053 (office#325): фид счётчиков активности для FO-052 ступени 1 —
+    # VM-экспортёр опрашивает его ЧЕРЕЗ публичный порт, auth (ACTIVITY_FEED_TOKEN,
+    # fail-closed) несёт сам роут на 4000. Без префикса путь проваливается в
+    # default → mlog → тихий 404 (класс FO-042); найдено живой пробой 2026-09-27:
+    # прод отвечал 404 на мёржнутый эндпоинт (тесты гоняли 4000 напрямую).
+    "/metrics/activity",
     "/dept-dashboard/",
     "/dept-dashboard",
     "/office-dashboard",
