@@ -94,8 +94,60 @@ def dossier_url(dossier_id, base_url=None):
 
 
 # ── единый срез ──────────────────────────────────────────────────────────
+# ── #407: статус источников сбора — причины человеческими словами ────────
+# Досье #7 (2026-09-27): «предложения не собраны» без причин — диагноз
+# невозможен ни владельцу, ни исполнителю. Теперь причины по каждой площадке
+# сохраняются в снимок и показываются в тексте и HTML.
+SOURCE_KIND_LABELS = {
+    "source_disabled": "источник выключен",
+    "mcp_no_response": "транспорт (web-MCP) не ответил",
+    "mcp_bad_response": "ответ транспорта не разобран",
+    "transport": "транспортная ошибка",
+    "antibot_blocked": "антибот площадки",
+    "api_form_unknown": "форма ответа не опознана",
+    "api_form_mismatch": "неожиданная форма ответа API",
+    "no_category": "категория не найдена",
+    "recon_unreachable": "сайт не отвечает",
+    "robots_disallow_surface": "закрыто правилом robots",
+    "config_missing": "нет конфига категории",
+    "daily_limit": "дневной лимит источника",
+    "no_collector": "нет сборщика",
+    "not_found": "не найдено",
+    "disabled": "магазин выключен",
+}
+
+
+def humanize_source_status(status):
+    """dict статуса сбора → человеческая фраза. Без выдумок: что видно
+    (kind/error/HTTP-код), то и показываем."""
+    if status is None:
+        return "не собиралось в этом срезе"
+    if not isinstance(status, dict):
+        return str(status)
+    if status.get("ok"):
+        n = status.get("offers")
+        return f"{n} предложений" if n is not None else "ok"
+    kind = status.get("kind") or "transport"
+    label = SOURCE_KIND_LABELS.get(kind, kind)
+    err = str(status.get("error") or "")
+    if "403" in err:
+        return "доступ с сервера закрыт (HTTP 403)"
+    if err and label == kind:
+        return f"{kind}: {err[:120]}"
+    return label if label != kind else f"{kind}: {err[:120]}"
+
+
+def sources_display_rows(details):
+    """details из ensure_product → [(platform, человеко-статус)]."""
+    rows = []
+    for platform, status in (details or {}).items():
+        rows.append({"platform": platform,
+                     "status": humanize_source_status(status)})
+    return rows
+
+
 def build_snapshot(product_id, profile="default", target_price_byn=None,
-                   save=True):
+                   save=True, collect_details=None):
     """Срез данных досье: продукт + скоринг + URLs + история.
 
     Единственный источник правды для render_text / render_caption /
@@ -187,6 +239,10 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
         "median_best": median_best,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
+    # #407 A.1: статус сбора по площадкам — в снимок (попадает в snapshot_json)
+    if collect_details is not None:
+        snapshot["sources"] = collect_details
+        snapshot["sources_display"] = sources_display_rows(collect_details)
     if save:
         from proxy.core import _query as _q
         _q("INSERT INTO shop_dossiers (product_id, format, payload, snapshot_json) "
@@ -225,8 +281,8 @@ def verdict_display(snapshot):
         elif snapshot.get("offers") or snapshot.get("unscored_offers"):
             text = "предложения есть, но без цены BYN — вердикт не строим"
         else:
-            text = ("предложения не собраны — повторите /товар "
-                    "или поставьте вотч")
+            text = ("предложения не собраны — причины по каждой площадке "
+                    "в блоке «Источники» ниже")
         return "—", text
     return f"{score:g}", text
 
@@ -271,6 +327,11 @@ def render_text(snapshot):
         lines.append("Осторожно:")
         for f in dict.fromkeys(flags):
             lines.append(f"⚠ {f}")
+    # #407 A.1: статус каждой площадки — причина пустого сбора видна сразу
+    if snapshot.get("sources_display"):
+        lines.append("Источники:")
+        for row in snapshot["sources_display"]:
+            lines.append(f"· {row['platform']}: {row['status']}")
     n = snapshot.get("unscored_total")
     if n is None:
         n = len(snapshot["unscored"])
@@ -556,6 +617,13 @@ def render_html(snapshot):
         f'<tr><td><a href="{e(u["url"])}" rel="noopener">{e(u["platform"])}</a></td>'
         f'<td class="muted">цена не получена — не ранжирован</td></tr>'
         for u in (snapshot.get("unscored_offers") or []))
+    # #407 A.1: блок «Источники» в HTML — статус каждой площадки
+    sources_rows = "".join(
+        f'<tr><td><b>{e(r["platform"])}</b></td><td>{e(r["status"])}</td></tr>'
+        for r in (snapshot.get("sources_display") or []))
+    sources_block = (f'<div class="card"><b>Источники</b><table>'
+                     f'<tr><th>Площадка</th><th>Статус сбора</th></tr>'
+                     f'{sources_rows}</table></div>' if sources_rows else "")
     hidden = (snapshot.get("unscored_total") or 0) - len(snapshot.get("unscored_offers") or [])
     unscored_note = (f'<p class="meta">…и ещё {hidden} офф. — полный список '
                      'появится после среза с ценами.</p>' if hidden > 0 else "")
@@ -621,6 +689,7 @@ a{{color:var(--red-light);text-decoration:none}} a:hover{{text-decoration:underl
 {''.join(rows)}
 </table></div>
 {unscored_block}
+{sources_block}
 <div class="card"><b>Как читать</b><p class="meta">«Реальная цена» — цена с учётом
 способа оплаты и доставки (rank_price). «Честная скидка» — процент к медиане
 истории цен, не к зачёркнутой «старой цене»; фейк — когда зачёркнутая выше

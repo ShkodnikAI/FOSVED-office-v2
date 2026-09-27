@@ -640,13 +640,53 @@ def shop_product_endpoint():
     from proxy.shop_watch import ensure_product  # noqa: E402 — ленивый импорт
     pid, details = ensure_product(query, title=d.get("title"))
     from proxy.shop_dossier import build_snapshot
-    snapshot = build_snapshot(pid, profile=profile)
+    # #407 A.1: детали сбора сохраняются в снимок досье (блок «Источники»)
+    snapshot = build_snapshot(pid, profile=profile, collect_details=details)
     if snapshot.get("dossier_id") and chat_id:
         _shop_send_dossier(snapshot, chat_id)
+    # #407 A.2: отвечаем kind/error по каждой площадке, не только bool
     return jsonify({"ok": True, "product_id": pid,
                     "dossier_id": snapshot.get("dossier_id"),
-                    "collect": {k: (v.get("ok") if isinstance(v, dict) else v)
+                    "collect": {k: _collect_summary(v)
                                 for k, v in (details or {}).items()}})
+
+
+def _collect_summary(v):
+    """Статус площадки для ответа /shop/product: ok/kind/error/offers."""
+    if not isinstance(v, dict):
+        return {"ok": bool(v)}
+    return {"ok": bool(v.get("ok")), "kind": v.get("kind"),
+            "error": (str(v.get("error"))[:160] if v.get("error") else None),
+            "offers": v.get("offers") if v.get("ok") else None}
+
+
+# ── #407 A.4: диагноз сбора на проде ─────────────────────────────────────
+@app.get("/shop/diagnose")
+def shop_diagnose_endpoint():
+    """Прогнать сбор по запросу на ЭТОМ сервере и вернуть причины по каждой
+    площадке (kind/error/HTTP). Auth: CRON_SECRET (cron_secret_ok) —
+    диагностический эндпоинт, досье владельцу не шлёт.
+    Пример: GET /shop/diagnose?secret=…&query=чайник%20xiaomi"""
+    # fail-closed: cron_secret_ok при «оба пустых» пропускает (паритет с mlog
+    # RequireInternalAuth для /cron/*), но диагностика запускает РЕАЛЬНЫЙ сбор
+    # (сеть, LLM-расход косвенно) — открытой при незаданном CRON_SECRET быть
+    # не должна (паттерн ACTIVITY_FEED_TOKEN, урок #325).
+    if not os.environ.get("CRON_SECRET", ""):
+        return jsonify({"error": "403 Forbidden"}), 403
+    if not cron_secret_ok():
+        return jsonify({"error": "403 Forbidden"}), 403
+    query = (request.args.get("query") or "").strip()
+    if not query:
+        return jsonify({"ok": False, "error": "query обязателен"}), 400
+    from proxy.shop_watch import enabled
+    from proxy.shop_dossier import sources_display_rows
+    if not enabled():
+        return jsonify({"ok": False, "kind": "disabled"}), 200
+    from proxy.shop_watch import ensure_product  # noqa: E402
+    pid, details = ensure_product(query)
+    return jsonify({"ok": True, "query": query, "product_id": pid,
+                    "sources": sources_display_rows(details),
+                    "details": details})
 
 
 def _shop_product_url(url, chat_id, profile):

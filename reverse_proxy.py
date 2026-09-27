@@ -83,6 +83,9 @@ LLM_ROUTES_PREFIXES = [
     # default → mlog → тихий 404 (класс FO-042); найдено живой пробой 2026-09-27:
     # прод отвечал 404 на мёржнутый эндпоинт (тесты гоняли 4000 напрямую).
     "/metrics/activity",
+    # #407 A.4: диагноз сбора на проде; auth — CRON_SECRET в самом роуте
+    # (cron_secret_ok), досье не шлёт. Публично маршрутизируем сознательно.
+    "/shop/diagnose",
     "/dept-dashboard/",
     "/dept-dashboard",
     "/office-dashboard",
