@@ -276,6 +276,15 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
     return disclaimer + "\n🔄 Передано в ОСП для инвестиционного анализа: «" + q + "»"
   }
 
+  // ── #402 A.1: новинки GitHub из LZ Daily (lz_github_updates) ──────────
+  // Таблицу пишет LZ Daily (proxy/lz_github.py), раньше не читал никто:
+  // grep "FROM lz_github_updates" давал 0 совпадений. Дни — опционально
+  // (/lz github 3), дефолт 7, зажим 1..30.
+  if starts_with(t, "/lz github") then {
+    let rest = trim(substring(query, 10.0, length(query)))
+    return disclaimer + "\n" + LZGithubUpdates(rest)
+  }
+
   // ── Domain classification + enriched context ──
   let domain = LZClassifyDomain(query)
   let context = BuildLZContext(query, domain, chat_id)
@@ -336,6 +345,9 @@ pattern LZSourcesFooter(context: String, live: String) -> String {
   if contains(context, "APIscan:") and contains(context, "не нашёл релевантных результатов") == false then {
     let lines = lines + "\n· Детерминированный скан (arXiv/HN/GitHub)"
   }
+  if contains(context, "LZ Daily (GitHub)") then {
+    let lines = lines + "\n· LZ Daily (GitHub)"
+  }
   if length(lines) == 0.0 then { return "" }
   return "\n\n---\n**Источники:**" + lines
 }
@@ -354,7 +366,8 @@ pattern BuildLZContext(query: String, domain: String, chat_id: String) -> String
   let watch = LZWatchRelevance(query)
   let recent = LZRecentArtifacts(domain, 5.0)
   let scan = LZApiScanContext(query, domain, chat_id)
-  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan
+  // #402 A.2: данные LZ Daily по GitHub — только при GitHub-теме запроса
+  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan + LZGithubContextIfRelevant(query)
 }
 
 // ── FORGE (#221): детерминированные API-источники в общем пути /lz ──────
@@ -387,6 +400,66 @@ pattern LZApiScanContext(query: String, domain: String, chat_id: String) -> Stri
     return "APIscan: детерминированный скан (arXiv/HN/GitHub) не нашёл релевантных результатов по теме «" + topic + "»"
   }
   return "APIscan (тема: " + topic + "):\n" + text
+}
+
+// ── #402: чтение lz_github_updates (пишется LZ Daily, proxy/lz_github.py) ──
+// Ссылки НЕ выдумываются: они детерминированно выводятся из реального поля
+// channel_name (owner/repo из записи GitHub API), это данные, не генерация.
+pattern LZGithubUpdates(days_text: String) -> String {
+  let mut d = to_float(days_text)
+  if d <= 0.0 then { let d = 7.0 }
+  if d > 30.0 then { let d = 30.0 }
+  let ds = to_string(to_int(d))
+  let rows = query("SELECT update_id, channel_name, text, date FROM lz_github_updates WHERE date > datetime('now', '-' || ?1 || ' days') ORDER BY date DESC LIMIT 40", [ds])
+  if to_string(rows) == "()" or length(rows) == 0.0 then {
+    return "LZ Daily за " + ds + " дн. ничего не собрал — в lz_github_updates записей за период нет."
+  }
+  let mut releases = ""
+  let mut repos = ""
+  each row in rows {
+    let uid = to_string(json_get(row, "update_id", ""))
+    let name = redact(to_string(json_get(row, "channel_name", "")), "all")
+    let txt = redact(substring(to_string(json_get(row, "text", "")), 0.0, 200.0), "all")
+    let day = substring(to_string(json_get(row, "date", "")), 0.0, 10.0)
+    if starts_with(uid, "gh:repo:") then {
+      let repos = repos + "· [" + name + "](https://github.com/" + name + ") — " + txt + " (" + day + ")\n"
+    } else {
+      let releases = releases + "· [" + name + "](https://github.com/" + name + ") — релиз: " + txt + " (" + day + ")\n"
+    }
+  }
+  let mut out = "**Новинки GitHub (LZ Daily, " + ds + " дн.):**\n"
+  if releases != "" then { let out = out + "\n**Релизы:**\n" + releases }
+  if repos != "" then { let out = out + "\n**Новые репозитории:**\n" + repos }
+  // Краткий синтез ЛЗ ПОВЕРХ реальных записей; провайдеры недоступны —
+  // честный листинг без выдумок (TryVal-грейсфул).
+  let synth_src = substring(out, 0.0, 4000.0)
+  let synth = redact(to_string(TryVal(try call_llm("Синтезируй краткую выжимку (до 7 пунктов, без новых фактов) из этих записей LZ Daily по GitHub. Используй ТОЛЬКО приведённые записи — то, чего нет в записях, не упоминай.\n\nЗаписи:\n" + synth_src))), "all")
+  if to_string(synth) != "()" and length(synth) > 0.0 and contains(synth, "оценка недоступна") == false then {
+    let out = out + "\n**Синтез ЛЗ (только по записям выше):**\n" + synth
+  }
+  return out
+}
+
+// A.2: подмешивание в свободный запрос — только при GitHub-теме, с лимитом
+// объёма. Маркер "LZ Daily (GitHub)" читает LZSourcesFooter (A.3).
+pattern LZGithubContextIfRelevant(query: String) -> String {
+  let t = lower(query)
+  if contains(t, "github") == false and contains(t, "гитхаб") == false and contains(t, "гит хаб") == false and contains(t, "репозитор") == false and contains(t, "релиз") == false then {
+    return ""
+  }
+  let rows = query("SELECT update_id, channel_name, text, date FROM lz_github_updates ORDER BY date DESC LIMIT 12", [])
+  if to_string(rows) == "()" or length(rows) == 0.0 then { return "" }
+  let mut out = "LZ Daily (GitHub) — последние реальные записи:\n"
+  each row in rows {
+    let uid = to_string(json_get(row, "update_id", ""))
+    let name = redact(to_string(json_get(row, "channel_name", "")), "all")
+    let txt = redact(substring(to_string(json_get(row, "text", "")), 0.0, 150.0), "all")
+    let day = substring(to_string(json_get(row, "date", "")), 0.0, 10.0)
+    let kind = "релиз"
+    if starts_with(uid, "gh:repo:") then { let kind = "новый репозиторий" }
+    let out = out + "- " + name + " (" + kind + ", " + day + "): " + txt + "\n"
+  }
+  return "\n" + out
 }
 
 pattern LZContainsCyrillic(s: String) -> Bool {
