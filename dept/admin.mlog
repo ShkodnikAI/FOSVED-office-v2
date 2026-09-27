@@ -980,13 +980,83 @@ pattern AdminRejectNarad(narad_id: String) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// #405 A.1: чтение журналов офиса (error_log / audit_log / trace_log)
+// ═══════════════════════════════════════════════════════════════════════
+// Схемы (proxy/core.py InitDB): error_log(id, ts, source, dept, kind, detail),
+// audit_log(id, timestamp, action, actor, dept, details, status),
+// trace_log(id, timestamp, action, actor, dept, details, status).
+// Только ЧТЕНИЕ: immutable-зона (AdminGateImmutable) не затрагивается.
+// detail/details прогоняются через redact(..., "all") — в журналах могут
+// быть фрагменты запросов/ключей. Честное «записей нет» на пустоте.
+pattern AdminLogDigest(hours_text: String) -> String {
+  let mut h = to_float(hours_text)
+  if h <= 0.0 then { let h = 24.0 }
+  if h > 168.0 then { let h = 168.0 }
+  let hs = to_string(to_int(h))
+  let mut out = "Журналы офиса за " + hs + " ч:"
+  let mut found = 0.0
+
+  // error_log: группировка по dept, kind
+  let errs = query("SELECT dept, kind, COUNT(*) as c FROM error_log WHERE ts > datetime('now', '-' || ?1 || ' hours') GROUP BY dept, kind ORDER BY c DESC LIMIT 8", [hs])
+  if to_string(errs) != "()" and length(errs) > 0.0 then {
+    let out = out + "\nОшибки (error_log):"
+    each row in errs {
+      let out = out + "\n· " + to_string(json_get(row, "dept", "?")) + "/" + to_string(json_get(row, "kind", "?")) + " × " + to_string(json_get(row, "c", "0"))
+      let found = found + 1.0
+    }
+    // последние 10 записей с detail (усечено, redact)
+    let last = query("SELECT ts, source, dept, kind, detail FROM error_log WHERE ts > datetime('now', '-' || ?1 || ' hours') ORDER BY id DESC LIMIT 10", [hs])
+    each row in last {
+      let detail = redact(substring(to_string(json_get(row, "detail", "")), 0.0, 120.0), "all")
+      let out = out + "\n  [" + substring(to_string(json_get(row, "ts", "")), 0.0, 16.0) + " " + to_string(json_get(row, "source", "?")) + "] " + detail
+    }
+  }
+
+  // audit_log: действия с ошибочными статусами
+  let audits = query("SELECT action, dept, status, COUNT(*) as c FROM audit_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND status IS NOT NULL AND status != 'ok' GROUP BY action, dept, status ORDER BY c DESC LIMIT 5", [hs])
+  if to_string(audits) != "()" and length(audits) > 0.0 then {
+    let out = out + "\nНестатусные действия (audit_log, status != ok):"
+    each row in audits {
+      let out = out + "\n· " + to_string(json_get(row, "action", "?")) + " (" + to_string(json_get(row, "dept", "?")) + ", status=" + to_string(json_get(row, "status", "?")) + ") × " + to_string(json_get(row, "c", "0"))
+      let found = found + 1.0
+    }
+  }
+
+  // trace_log: чекпоинты со статусом != ok
+  let traces = query("SELECT action, dept, status, COUNT(*) as c FROM trace_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND status IS NOT NULL AND status != 'ok' GROUP BY action, dept, status ORDER BY c DESC LIMIT 5", [hs])
+  if to_string(traces) != "()" and length(traces) > 0.0 then {
+    let out = out + "\nТрейсы со сбоем (trace_log, status != ok):"
+    each row in traces {
+      let out = out + "\n· " + to_string(json_get(row, "action", "?")) + " (" + to_string(json_get(row, "dept", "?")) + ", status=" + to_string(json_get(row, "status", "?")) + ") × " + to_string(json_get(row, "c", "0"))
+      let found = found + 1.0
+    }
+  }
+
+  if found == 0.0 then { return "Журналы офиса за " + hs + " ч: записей нет (ошибок, сбоев и нестатусных действий не зафиксировано)." }
+  return out
+}
+
+// A.3: подмешивание в свободный вопрос — реальные журналы в контекст
+pattern AdminLogsIfRelevant(query: String) -> String {
+  let t = lower(query)
+  if contains(t, "ошибк") or contains(t, "сбой") or contains(t, "лог") or contains(t, "упал") or contains(t, "не работает") then {
+    return "\n\n[Журналы офиса — РЕАЛЬНАЯ выборка за 24 ч. Отвечай ТОЛЬКО по этим данным; не называй пути, сервисы и компоненты, которых здесь нет. Если выборка пуста — прямо скажи, что записей нет.]\n" + AdminLogDigest("24")
+  }
+  return ""
+}
+
 // HandleAdmin — generic admin query via NATIVE call_llm
 // ═══════════════════════════════════════════════════════════════════════
 pattern HandleAdmin(query: String, chat_id: String) -> String {
   let dept = "admin"
   let context = BuildContext(dept, query, chat_id)
+  // #405 A.3/A.4: журналы — при вопросах про ошибки/сбои; запрет выдумывать
+  // пути и компоненты (инцидент 2026-09-27: Админ выдумал /var/log/fosved/
+  // и «OmniRoute»). Данные — только из контекста; нет данных — сказать честно.
+  let logs = AdminLogsIfRelevant(query)
   let disclaimer = AdminDisclaimer()
-  let llm_result = redact(to_string(TryVal(try call_llm(disclaimer + "\n\n" + context, query))), "all")
+  let llm_result = redact(to_string(TryVal(try call_llm(disclaimer + "\n\nЗАПРЕТ ВЫДУМЫВАТЬ ИНФРАСТРУКТУРУ: не называй пути, сервисы и компоненты, которых нет в контексте. Если данных нет — прямо скажи «в журналах за период записей нет» или «журнал недоступен».\n\n" + context + logs, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
