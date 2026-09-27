@@ -609,12 +609,12 @@ def _shop_send_dossier(snapshot, chat_id):
     caption = render_caption(snapshot)
     markup = build_inline_buttons(snapshot)
     from proxy.telegram import _tg_send_photo
+    # #409 A.1: РОВНО ОДНО сообщение с досье — карточка (постер + caption
+    # с вердиктом/топ-3/источниками + кнопки). Отдельная текстовая выжимка
+    # снята: на одну просьбу приходило 2-3 сообщения (досье #7).
+    # Полное текстовое досье живёт на веб-странице «Полное досье».
     _tg_send_photo(chat_id, path, caption=caption, parse_mode="HTML",
                    reply_markup=markup)
-    # текст-формат А следом: полная выжимка без лимита caption
-    from proxy.shop_dossier import render_text
-    from proxy.telegram import _tg_send_message
-    _tg_send_message(chat_id, render_text(snapshot))
     return True
 
 
