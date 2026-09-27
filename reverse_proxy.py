@@ -86,6 +86,11 @@ LLM_ROUTES_PREFIXES = [
     # #407 A.4: диагноз сбора на проде; auth — CRON_SECRET в самом роуте
     # (cron_secret_ok), досье не шлёт. Публично маршрутизируем сознательно.
     "/shop/diagnose",
+    # SHOP-SUPPLY-1 (#421): очередь снабженца — GET /supply/next,
+    # POST /supply/result; auth Bearer SUPPLY_AGENT_TOKEN (fail-closed)
+    # несёт сам роут на 4000. Без префикса путь проваливается в default →
+    # mlog → тихий 404 (класс FO-042, прецедент /metrics/activity FO-053).
+    "/supply/",
     "/dept-dashboard/",
     "/dept-dashboard",
     "/office-dashboard",

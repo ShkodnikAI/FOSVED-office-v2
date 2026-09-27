@@ -1199,19 +1199,15 @@ def _upsert_seller(platform, o):
     return back[0]["id"] if back else None
 
 
-def refresh_product(product_id, platform, query, **kw):
-    """Собрать площадку и уложить офферы + срез истории. Идемпотентно.
-
-    История: строка на каждый успешный сбор с ценой (2–4 раза/сутки —
-    копейки объёма, зато медианы честные с первого дня).
-    """
+def _persist_offers(product_id, platform, offers):
+    """Сохранение офферов collect()-результата (вербатим из refresh_product,
+    SHOP-SUPPLY-1 #421): офферы снабженца из /supply/result проходят ТЕМ ЖЕ
+    путём (shop_offers/_upsert_seller/история цен) — SQL не дублируется.
+    Возвращает (count_offers, count_hist)."""
     from proxy.core import _query
-    res = collect(platform, query, **kw)
-    if not res.get("ok"):
-        return res
     count_offers = 0
     count_hist = 0
-    for o in res["offers"]:
+    for o in offers:
         sid = _upsert_seller(platform, o)
         existing = _query(
             "SELECT id FROM shop_offers WHERE platform=? AND platform_code=? LIMIT 1",
@@ -1248,6 +1244,29 @@ def refresh_product(product_id, platform, query, **kw):
                 (oid, o.get("price_byn"), o.get("old_price_byn"), o.get("in_stock")))
             count_hist += 1
     _audit(platform, f"refresh product={product_id}", "ok")
+    return count_offers, count_hist
+
+
+def refresh_product(product_id, platform, query, **kw):
+    """Собрать площадку и уложить офферы + срез истории. Идемпотентно.
+
+    История: строка на каждый успешный сбор с ценой (2–4 раза/сутки —
+    копейки объёма, зато медианы честные с первого дня).
+    """
+    # SHOP-SUPPLY-1 (#421): площадки снабженца не собираются с сервера
+    # (антибот/GeoIP с датацентровых IP — recog. наряда) — задание ставится
+    # в очередь /supply/*, офферы приложит снабженец с домашнего IP.
+    # wb/onliner/ym не в SUPPLY_AGENT_PLATFORMS — путь ниже не меняется.
+    from proxy.shop_supply import SUPPLY_AGENT_PLATFORMS, enqueue_supply_task
+    if platform in SUPPLY_AGENT_PLATFORMS:
+        task_id = enqueue_supply_task(product_id, platform, query)
+        return {"ok": False, "platform": platform,
+                "kind": "supply_pending", "task_id": task_id}
+    from proxy.core import _query
+    res = collect(platform, query, **kw)
+    if not res.get("ok"):
+        return res
+    count_offers, count_hist = _persist_offers(product_id, platform, res["offers"])
     # #408 A.1: фото после сохранения офферов — топ-N с общим бюджетом;
     # не успели — честный плейсхолдер «нет фото», подбор продолжится при
     # следующем срезе (офферы и цены уже сохранены).
