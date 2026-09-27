@@ -1026,7 +1026,8 @@ def audit_recent():
         limit = request.args.get("limit", 20, type=int)
         limit = min(limit, 200)
 
-        rows = _query("SELECT id, action, details, timestamp FROM audit_log ORDER BY id DESC LIMIT ?", (limit,), fetch=True)
+        # #407 A.3: статус в выдаче — ok/refused виден в журнале Mini App
+        rows = _query("SELECT id, action, details, timestamp, status FROM audit_log ORDER BY id DESC LIMIT ?", (limit,), fetch=True)
 
         entries = []
         for r in rows:
@@ -1034,6 +1035,7 @@ def audit_recent():
                 "id": r["id"],
                 "action": r["action"],
                 "created": r["timestamp"],
+                "status": r["status"],
             }
             try:
                 entry["details"] = json.loads(r["details"]) if r["details"] else {}
