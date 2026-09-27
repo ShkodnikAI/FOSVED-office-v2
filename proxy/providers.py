@@ -300,6 +300,14 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
         # всех отделов без исключения — обрубленный ответ вреден для любого
         # отдела одинаково, не только для тех, что формально считаются
         # "глубокими". openai formats: "length"; anthropic: "max_tokens".
+        #
+        # ГРАНИЦА ЗАЩИТЫ (ADR-0010, #399 A.1): эта проверка стоит ТОЛЬКО на
+        # Python-пути (auto-memorize, мини-экшены, call_python-вызовы).
+        # Нативный call_llm отделов (блок llm {} в app.mlog, провайдеры
+        # Metalogos) сюда НЕ приходит — там действует апстрим-лимит 1024
+        # токена, сигнала обрезки нет. Снятие — после апстрим-релиза
+        # Metalogos-#757: max_tokens в llm{} + видимый finish_reason (#399 A.2,
+        # гейт: #757 выпущен И #401 закрыт).
         if finish_reason in ("length", "max_tokens"):
             _breaker.record_success(provider_name)  # сам провайдер жив, не штрафуем его circuit breaker
             log.warning(f"LLM truncated: provider={provider_name} model={model} dept={dept} "
