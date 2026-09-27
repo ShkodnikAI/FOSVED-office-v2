@@ -318,16 +318,27 @@ WB_BASKET_MISS_TTL = 12 * 3600
 
 
 def _wb_basket_probe(basket, vol, part, pid):
-    """HEAD-проба одной ссылки; True только на HTTP 200."""
+    """HEAD-проба одной ссылки; True только на HTTP 200.
+
+    #408 A.2: проба — прямой HEAD в ЭТОМ процессе (timeout 5 с), не новый
+    web-MCP subprocess на каждую пробу (было: до 40 процессов на vol,
+    до ~4000 на сбор). SSRF-гейт по построению: host — константа
+    *.wbbasket.ru, vol/part/pid — только целые числа, пользовательских
+    строк в URL нет."""
     host = f"basket-{basket:02d}" if basket < 10 else f"basket-{basket}"
     url = (f"https://{host}.wbbasket.ru/vol{vol}/part{part}/{pid}"
            "/images/big/1.webp")
-    r = FETCH_JSON_FN("probe_url", {"url": url})
-    if not r.get("ok"):
-        return False
+    return _wb_direct_probe(url)
+
+
+def _wb_direct_probe(url):
+    """Прямой HEAD без запуска процесса (#408 A.2). Точка подмены в тестах."""
     try:
-        return int(r.get("status") or 0) == 200
-    except (TypeError, ValueError):
+        req = urllib.request.Request(url, method="HEAD",
+                                     headers={"User-Agent": "fosved-shop/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status == 200
+    except Exception:
         return False
 
 
@@ -346,13 +357,18 @@ def _wb_basket_map_write(mapping):
     _setting_set(WB_BASKET_CACHE_KEY, json.dumps(mapping, ensure_ascii=False))
 
 
-def wb_basket_for_vol(vol, pid=None):
+def wb_basket_for_vol(vol, pid=None, deadline=None):
     """Номер basket-хоста для vol-диапазона (None — не найден в диапазоне).
 
     Кэш в system_settings: {"vol:{vol}": {"basket": N|None, "ts": epoch}}.
     Проба конкретного pid нужна, потому что 200 зависит и от наличия фото
     у товара — но false-negative кэшируется всего на 12ч (miss), так что
     появление фото/нового шарда подхватится при следующем сборе.
+
+    #408 A.2: перебор начинается с корзины БЛИЖАЙШЕГО кэшированного vol
+    (у близких vol одна корзина), не с basket-01. При исчерпании бюджета
+    (deadline) промах НЕ кэшируется — подбор продолжится при следующем
+    сборе, ложный miss на 12ч не записывается.
     """
     mapping = _wb_basket_map_read() or {}
     entry = mapping.get(f"vol:{vol}")
@@ -364,7 +380,21 @@ def wb_basket_for_vol(vol, pid=None):
     found = None
     if pid is not None:
         part = int(pid) // 1000
-        for basket in range(1, 41):
+        # соседи из кэша: ближайшие vol с известной корзиной — до 3 кандидатов
+        neighbors = sorted(
+            (abs(int(key[4:]) - vol), val["basket"])
+            for key, val in mapping.items()
+            if key.startswith("vol:") and isinstance(key[4:], str)
+            and key[4:].isdigit() and val.get("basket") is not None
+        )[:3]
+        tried = []
+        order = [b for _, b in neighbors] + [b for b in range(1, 41)]
+        for basket in order:
+            if basket in tried:
+                continue
+            tried.append(basket)
+            if deadline is not None and time.monotonic() > deadline:
+                return None  # бюджет исчерпан — без кэширования промаха
             if _wb_basket_probe(basket, vol, part, int(pid)):
                 found = basket
                 break
@@ -373,14 +403,17 @@ def wb_basket_for_vol(vol, pid=None):
     return found
 
 
-def wb_image_url(pid):
-    """Ссылка на фото WB для id товара (None — шарди не подобран)."""
+def wb_image_url(pid, deadline=None):
+    """Ссылка на фото WB для id товара (None — шарди не подобран).
+
+    deadline (time.monotonic) — общий бюджет подбора фото (#408 A.1);
+    исчерпан — None без кэширования промаха."""
     try:
         pid = int(pid)
     except (TypeError, ValueError):
         return None
     vol, part = pid // 100000, pid // 1000
-    basket = wb_basket_for_vol(vol, pid)
+    basket = wb_basket_for_vol(vol, pid, deadline=deadline)
     if basket is None:
         return None
     host = f"basket-{basket:02d}" if basket < 10 else f"basket-{basket}"
@@ -456,7 +489,12 @@ def collect_wb(query, page=1, rates=None):
             "seller_rating": _num(p.get("supplierRating")),
             "seller_deals": None,
             "seller_official": None,
-            "image_url": wb_image_url(pid),
+            # #408 A.1: фото НЕ в критическом пути сбора — подбираются после
+            # сохранения офферов, топ-N с бюджетом (см. _wb_fill_images).
+            # Раньше wb_image_url(pid) в цикле по ~100 товарам давал до ~4000
+            # HEAD-проб (процесс на пробу) ДО возврата офферов — сбор срывал
+            # 90-секундное ожидание Яны, офферы не сохранялись вовсе.
+            "image_url": None,
         })
     return {"ok": True, "platform": "wb", "url": url, "offers": offers}
 
@@ -1077,8 +1115,44 @@ def refresh_product(product_id, platform, query, **kw):
                 (oid, o.get("price_byn"), o.get("old_price_byn"), o.get("in_stock")))
             count_hist += 1
     _audit(platform, f"refresh product={product_id}", "ok")
+    # #408 A.1: фото после сохранения офферов — топ-N с общим бюджетом;
+    # не успели — честный плейсхолдер «нет фото», подбор продолжится при
+    # следующем срезе (офферы и цены уже сохранены).
+    images_filled = 0
+    if platform == "wb" and count_offers:
+        t0 = time.monotonic()
+        images_filled = _wb_fill_images(product_id, budget_secs=15.0, top_n=10)
+        _audit("wb", f"images:filled={images_filled} "
+                     f"took={time.monotonic() - t0:.1f}s", "ok")
     return {"ok": True, "platform": platform, "product_id": product_id,
-            "offers": count_offers, "history_rows": count_hist}
+            "offers": count_offers, "history_rows": count_hist,
+            "images_filled": images_filled}
+
+
+def _wb_fill_images(product_id, budget_secs=15.0, top_n=10):
+    """#408 A.1: подобрать image_url для топ-N офферов WB в бюджете времени.
+
+    Порядок — офферы с ценой (дешевле первым): это и есть топ досье.
+    Фото поднимаются в БД сразу по мере подбора; бюджет исчерпан —
+    остальные ждут следующего сбора, ничего не блокируют."""
+    from proxy.core import _query
+    deadline = time.monotonic() + budget_secs
+    rows = _query(
+        "SELECT platform_code FROM shop_offers "
+        "WHERE product_id=? AND platform='wb' AND image_url IS NULL "
+        "ORDER BY (price_byn IS NULL), price_byn, id LIMIT ?",
+        (product_id, top_n), fetch=True) or []
+    filled = 0
+    for r in rows:
+        if time.monotonic() > deadline:
+            break
+        url = wb_image_url(r["platform_code"], deadline=deadline)
+        if url:
+            _query("UPDATE shop_offers SET image_url=? "
+                   "WHERE platform='wb' AND platform_code=?",
+                   (url, r["platform_code"]))
+            filled += 1
+    return filled
 
 
 def score_product(product_id, profile="default", target_price_byn=None):

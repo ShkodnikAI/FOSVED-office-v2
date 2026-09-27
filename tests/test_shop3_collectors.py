@@ -400,23 +400,32 @@ def test_tmby_is_honest_unreachable_carrier():
 
 
 # ── WB basket-шарды и image_url (#329) ──────────────────────────────────
+@pytest.fixture(autouse=True)
+def no_real_wb_probe(monkeypatch):
+    """#408: транспорт проб — прямой HEAD (_wb_direct_probe); в тестах он
+    по умолчанию заглушен честным «нет ответа», чтобы ни один тест,
+    не занимающийся фото-WB, не ходил в сеть."""
+    monkeypatch.setattr(sc, "_wb_direct_probe", lambda url: False)
+
+
 def _probe_stub(monkeypatch, hit_basket=None):
     """Транспорт-стаб: probe_url даёт 200 только на hit_basket (счётчик
     проб возвращается), fetch_json — живой WB-снапшот."""
     calls = {"n": 0}
 
+    def fake_direct(url):
+        """#408: проба — прямой HEAD; 200 только на hit_basket."""
+        calls["n"] += 1
+        m = __import__("re").search(r"basket-(\d+)\.wbbasket", url)
+        return hit_basket is not None and m and int(m.group(1)) == hit_basket
+
     def fake(tool, args):
         url = args.get("url", "")
-        if tool == "probe_url":
-            calls["n"] += 1
-            m = __import__("re").search(r"basket-(\d+)\.wbbasket", url)
-            status = 200 if (hit_basket is not None
-                             and m and int(m.group(1)) == hit_basket) else 404
-            return {"ok": True, "url": url, "status": status, "method": "HEAD"}
         if "search.wb.ru" in url:
             return {"ok": True, "url": url, "status": 200, "data": WB_SNAPSHOT}
         return {"ok": False, "error": "неожиданный URL", "kind": "test"}
 
+    monkeypatch.setattr(sc, "_wb_direct_probe", fake_direct)
     monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
     return calls
 
@@ -454,14 +463,16 @@ def test_wb_image_url_without_basket_is_none(monkeypatch):
     assert sc.wb_image_url(1274546138) is None
 
 
-def test_collect_wb_offers_carry_image_url(monkeypatch):
+def test_collect_wb_offers_do_not_block_on_photos(monkeypatch):
+    """#408 A.1: сбор НЕ подбирает фото в цикле по товарам (было: до ~4000
+    HEAD-проб ДО возврата офферов) — image_url в офферах None, фото
+    добираются после сохранения (см. test_refresh_product_persists_image_url)."""
     _probe_stub(monkeypatch, hit_basket=28)
     res = sc.collect_wb("кофемолка", rates={"RUB": 0.034})
     assert res["ok"] is True
-    for o in res["offers"]:
-        vol = int(o["platform_code"]) // 100000
-        assert o["image_url"].startswith(f"https://basket-28.wbbasket.ru/vol{vol}/")
-        assert o["image_url"].endswith("/images/big/1.webp")
+    assert res["offers"], "ожидались офферы из WB-снапшота"
+    assert all(o["image_url"] is None for o in res["offers"]), (
+        "collect_wb больше не подбирает фото в критическом пути")
 
 
 def test_refresh_product_persists_image_url(monkeypatch):
