@@ -61,7 +61,9 @@ def test_ping_probe_present_no_llm():
 def test_route_dispatches_handle_osp_and_tg():
     block = _route_block()
     assert "HandleOSP(" in block, "анализ должен идти через HandleOSP"
-    assert "SendTelegramReply(" in block, "результат доставляется владельцу в TG"
+    # #401: доставка владельцу — через SendReport (архив Mini App + превью в TG);
+    # прямая отправка полным текстом теряла отчёт >4096 символов.
+    assert 'SendReport(reply, "osp"' in block, "результат доставляется владельцу через SendReport"
     assert "InitDB()" in block, "AuditLog/RecordAssistantMessage требуют контур БД"
 
 
