@@ -324,7 +324,8 @@ def test_endpoint_product_url_flow(shop_db, client, monkeypatch):
     assert r.status_code == 200, (r.status_code, r.get_data(as_text=True)[:400])
     assert data["ok"] is True and data["dossier_id"], data
     assert data["collect"]["vote_agree"] is True
-    assert sent["photo"] == 1 and sent["text"] == 1
+    # #409 A.1: одно сообщение с досье — карточка без отдельного текста
+    assert sent["photo"] == 1 and sent["text"] == 0
     prow = _query("SELECT title, query_text FROM shop_products WHERE id=?",
                   (data["product_id"],), fetch=True)
     assert prow[0]["title"] == "Холодильник ATLANT"  # имя из JSON-LD

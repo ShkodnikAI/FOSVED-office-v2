@@ -400,7 +400,9 @@ def test_endpoint_product_full_flow(shop_db, client, monkeypatch):
     path, caption, markup = sent["photo"]
     assert os.path.exists(path) and caption and markup
     json.loads(markup)  # reply_markup валидный JSON
-    assert sent["text"] and "Досье" in sent["text"]
+    # #409 A.1: РОВНО ОДНО сообщение с досье — карточка; отдельная
+    # текстовая выжимка снята (на одну просьбу приходило 2-3 сообщения)
+    assert sent["text"] is None and sent["photo"]
 
 
 # ── mlog-команды зарегистрированы (статическая проверка UX) ──────────────

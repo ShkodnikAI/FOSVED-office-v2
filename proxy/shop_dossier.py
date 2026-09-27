@@ -365,6 +365,18 @@ def render_caption(snapshot):
     if best:
         lines.append(f"Купить: <a href=\"{best['url']}\">{best['platform']} — "
                      f"{_fmt_price(best['rank_price'])}</a>")
+    # #409 A.1: карточка самодостаточна — топ-3 и статусы источников прямо
+    # в caption (отдельное текстовое сообщение отправлять больше не будем)
+    for i, o in enumerate(snapshot["offers"][:3], 1):
+        if o["id"] == (best or {}).get("id"):
+            continue
+        stock = "" if o["in_stock"] else " (нет в наличии)"
+        lines.append(f"{i}. <a href=\"{o['url']}\">{o['platform']}</a> — "
+                     f"{_fmt_price(o['rank_price'])}{stock}")
+    if snapshot.get("sources_display"):
+        srcs = "; ".join(f"{r['platform']}: {r['status']}"
+                         for r in snapshot["sources_display"][:5])
+        lines.append(f"Источники — {srcs}")
     if snapshot.get("dossier_id"):
         lines.append(f"<a href=\"{dossier_url(snapshot['dossier_id'])}\">Полное досье</a>"
                      " (все ссылки кликабельны)")

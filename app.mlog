@@ -4449,17 +4449,21 @@ return respond("200 ok") }
         let handled = 1.0
       } else {
         // Normal Yana reply — voice + text, no restrictions
-        let voice_on = redact(kv_get("voice_enabled"), "all")
-        if voice_on == "true" then {
-          let voice_name = redact(kv_get("tts_voice"), "all")
-          if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
-          // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
-          let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
-          let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
+        // #409: пустой ответ не отправляется (после [SHOP:]-обработки досье
+        // уже ушло карточкой, текст Яны был бы дублем подтверждения)
+        if length(reply) > 0.0 then {
+          let voice_on = redact(kv_get("voice_enabled"), "all")
+          if voice_on == "true" then {
+            let voice_name = redact(kv_get("tts_voice"), "all")
+            if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
+            // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
+            let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
+            let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
+          }
+          // Text: send via proxy (handles 4096 limit with splitting)
+          let text_body = json_encode({chat_id: chat_id, text: "Яна\n\n" + reply})
+          let _ = TryVal(try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json"))
         }
-        // Text: send via proxy (handles 4096 limit with splitting)
-        let text_body = json_encode({chat_id: chat_id, text: "Яна\n\n" + reply})
-        let _ = TryVal(try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json"))
         let handled = 1.0
       }
     }
@@ -4622,16 +4626,20 @@ return respond("200 ok") }
     if handled == 0.0 then {
       let _ = RecordUserMessage(chat_id, "yana", text)
       let reply = HandleYana(text, chat_id)
-      let voice_on = redact(kv_get("voice_enabled"), "all")
-      if voice_on == "true" then {
-        let voice_name = redact(kv_get("tts_voice"), "all")
-        if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
-        // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
-        let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
-        let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
+      // #409: пустой ответ не отправляется (после [SHOP:]-обработки досье
+      // уже ушло карточкой, текст Яны был бы дублем подтверждения)
+      if length(reply) > 0.0 then {
+        let voice_on = redact(kv_get("voice_enabled"), "all")
+        if voice_on == "true" then {
+          let voice_name = redact(kv_get("tts_voice"), "all")
+          if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
+          // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
+          let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
+          let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
+        }
+        let text_body = json_encode({chat_id: chat_id, text: reply})
+        let _ = TryVal(try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json"))
       }
-      let text_body = json_encode({chat_id: chat_id, text: reply})
-      let _ = TryVal(try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json"))
     }
 
     return respond("200 ok")
