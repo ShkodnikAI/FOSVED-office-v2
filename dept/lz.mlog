@@ -265,12 +265,26 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
     let q = substring(query, 11.0, 300.0)
     return LZDeepResearcherProfile(q, chat_id)
   }
+  // ── #400 A.3: явная пересылка в ОСП по команде (упомянута в дисклеймере) ──
+  // Единственный путь пересылки помимо гейта LZGateOSPReferral (A.2):
+  // один запрос — максимум одна пересылка. №318: redact-hash секрета,
+  // fire-and-forget (таймаут 5с), результат ОСП приходит владельцу отдельно.
+  if starts_with(t, "/lz invest") then {
+    let q = trim(substring(query, 10.0, length(query)))
+    if q == "" then { return disclaimer + "\nИспользование: /lz invest <тема> — явная пересылка запроса в ОСП для инвестиционного анализа." }
+    TryVal(try http_post("http://127.0.0.1:10001/osp/analyze?secret=" + redact(env("CRON_SECRET"), "hash_only"), json_encode({source: "lz", query: q, type: "explicit_invest"}), "application/json", 5.0))
+    return disclaimer + "\n🔄 Передано в ОСП для инвестиционного анализа: «" + q + "»"
+  }
 
   // ── Domain classification + enriched context ──
   let domain = LZClassifyDomain(query)
   let context = BuildLZContext(query, domain, chat_id)
 
-  // Gate 5: Check for investment implications
+  // Gate 5: ЕДИНСТВЕННЫЙ триггер пересылки в ОСП (#400 A.2): явный YES/NO-гейт
+  // LЗGateOSPReferral сам делает fire-and-forget POST /osp/analyze и возвращает
+  // "REFERRED..." / "PASS...". Генерирующий промпт больше НЕ просит модель
+  // ставить префикс INVEST_REFERRAL (снят #400: модель решала без строгого
+  // критерия — «новинки GitHub» улетали в ОСП, ответ ЛЗ выбрасывался).
   let ref = LZGateOSPReferral(query)
 
   // Для доменов, где важна свежесть (не «вечное» tech-знание) — добираем
@@ -283,12 +297,16 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   // отдела в свежести.
   let live = "\n\n" + LZTavilySearch(query, chat_id)
 
-  let result = redact(to_string(TryVal(try call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать». Если это involves investment — начни ответ со слова INVEST_REFERRAL.", query + "\nContext: " + context + live))), "all")
+  let result = redact(to_string(TryVal(try call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать».", query + "\nContext: " + context + live))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if starts_with(result, "INVEST_REFERRAL") then {
-    // №318: redact-hash секрета в query + fire-and-forget (см. LZGateOSPReferral)
-    let _ = TryVal(try http_post("http://127.0.0.1:10001/osp/analyze?secret=" + redact(env("CRON_SECRET"), "hash_only"), json_encode({source: "lz", query: query, domain: domain}), "application/json", 5.0))
-    return disclaimer + "\n🔄 Передано в ОСП для инвестиционного анализа"
+  // ── #400 A.1: пересылка — ДОПОЛНЕНИЕ, не замена ──────────────────────
+  // Ответ ЛЗ отдаётся владельцу ВСЕГДА; при срабатывании гейта (единственный
+  // триггер) — строка-пометка о фоновой пересылке. Ветка «выбросить ответ,
+  // вернуть только „Передано в ОСП“» удалена (#400: владелец спрашивал ЛЗ —
+  // получал отчёт ОСП; двойная пересылка — гейт + префиксная ветка).
+  let mut referral_note = ""
+  if starts_with(ref, "REFERRED") then {
+    let referral_note = "\n\n🔄 Запрос также передан в ОСП для инвестиционного анализа — ответ придёт отдельным сообщением."
   }
 
   // ── LLM-Verifier: intelligence quality scoring ──
@@ -302,7 +320,7 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   // Log scan
   let _ = TryVal(try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 1)", ["realtime", domain]))
 
-  return disclaimer + "\n" + result + LZSourcesFooter(context, live)
+  return disclaimer + "\n" + result + LZSourcesFooter(context, live) + referral_note
 }
 
 // Подвал со списком реально использованных источников. "context" уже
