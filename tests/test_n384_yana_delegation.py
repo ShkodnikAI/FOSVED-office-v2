@@ -42,8 +42,8 @@ def _run(binary: str):
 
 
 def test_delegation_probe_both_binaries():
-    """Живая проба: 29/29 PASS на 0.25.0 и 0.24.0 — таблица slug → гейт → диспетчер."""
-    for binary in ("bin/mlog", "bin/mlog-024"):
+    """Живая проба: таблица slug → гейт → диспетчер на бою и гварде (0.27+0.25)."""
+    for binary in ("bin/mlog", "bin/mlog-025"):
         proc = _run(binary)
         assert proc.returncode == 0, f"{binary}: rc={proc.returncode}\n{proc.stderr[-1500:]}"
         for mark in MARKS:

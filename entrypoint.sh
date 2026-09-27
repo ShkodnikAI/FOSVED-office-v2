@@ -89,14 +89,17 @@ echo "--- FORGE: repos dir=${FORGE_REPOS_DIR}/forge/repos, scratch swept ---"
 # Наряд №349 (2026-09-24): переход 0.19→0.22 (ADR-0005). Наряд N023 (2026-09-24):
 # 0.23.0 (ADR-0006). Наряд N024 (2026-09-25, прямое указание владельца):
 # 0.24.0 (ADR-0007). Наряд №372 (2026-09-25, office-параллель Волны 15):
-# боевой бинарь — bin/mlog = 0.25.0 (ADR-0008; бинарь из CI-артефакта тегового
-# коммита afbcfc7); 0.24 вендорен как bin/mlog-024 (прошлый-хороший,
-# тест-гвард), mlog-023 выведен из репо (история git сохраняет).
+# 0.25.0 (ADR-0008). Наряд №494-office (2026-09-27, прямое указание владельца
+# «переходим на 0.27.0»): боевой бинарь — bin/mlog = 0.27.0 (ADR-0009; бинарь
+# из CI-артефакта тегового коммита 0d1cce9 — unfreeze-релиз: В17-фиксы памяти
+# + security-волна 0.26.0 №454-№459, включая file-ingest gate №455 — офисная
+# адаптация в блоке ниже); 0.25 вендорен как bin/mlog-025 (прошлый-хороший,
+# тест-гвард), mlog-024 выведен из репо (история git сохраняет).
 # Guard-проба №419 сохранена: перед стартом "$MLOG_CANDIDATE" audit
-# аугментированной копии (мост №421); 0.25-аудит на app.mlog без моста —
+# аугментированной копии (мост №421); 0.27-аудит на app.mlog без моста —
 # те же 42 строки [ERROR] долга №327 (0 Category A), с мостом — чисто;
-# check/audit/27-гвард dept/serve-батарея 40 проб/.mbc-кросс 4/4 —
-# 0.25 ≡ 0.24 байт-идентичны (проверено, ADR-0008 B.2–B.4).
+# check/audit/27-гвард dept/serve-батарея/.mbc-кросс 4/4 — 0.27 ≡ 0.25
+# байт-идентичны (проверено, ADR-0009 B.2–B.4).
 # Явный MLOG_BIN из env пробу не отменяет, но откат не трогает.
 # Фолбэк — mlog-020 (0.20.0): последний бинарь с корректным try-контрактом И
 # lax-аудитом (грузит сырой app.mlog без моста). 0.21/0.19/0.22/0.23 выведены из ротации.
@@ -137,6 +140,27 @@ export METALOGOS_HTTP_ALLOW_PRIVATE="${METALOGOS_HTTP_ALLOW_PRIVATE:-1}"
 # office-путь держим на интерпретаторе до починки апстрима (находка №419).
 # №349/B.1: пин ЯВНЫЙ и здесь, и в render.yaml — VM-дефолт 0.21+ не подхватывается.
 export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-interpreter}"
+
+# ── №455 (0.26.0): file-ingest gate — офисная адаптация (ADR-0009) ──────────
+# Serve-чтения файлов содержатся в METALOGOS_DATA_DIR (дефолт ./data).
+# Офисный корпус читает ~100 ресурсов приложения из корня (skills/,
+# library/, config/, VERSION, METHODOLOGY.md) — снапшотить их всё в data/
+# = миграция ~100 сайтов чтения. Осознанное решение (ADR-0009): корень
+# containment = корень приложения; layer-1 deny-list (.env*, *.db,
+# *.sqlite*, .git/**, metalogos.toml) сохранён ПОЛНОСТЬЮ и теперь закрывает
+# чтения, которые 0.25 разрешала. Чтения *.mlog (снапшоты исходников:
+# app/dept/library/memories) снимаются с deny-list загрузочным allowlist'ом
+# имён; контент помечается Secret движком меток и на каждом сайте обёрнут
+# в redact(..., "all"). Рантайм-записи (config/priority_*.txt,
+# memories/consensus.mlog) гейту №455 не подчиняются — поведение как в 0.25.
+export METALOGOS_DATA_DIR="${METALOGOS_DATA_DIR:-.}"
+M455_NAMES="app.mlog,consensus.mlog"
+for M455_F in dept/*.mlog library/*.mlog memories/*.mlog; do
+  [ -e "$M455_F" ] || continue
+  M455_NAMES="${M455_NAMES},$(basename "$M455_F")"
+done
+export METALOGOS_SENSITIVE_PATH_ALLOWLIST="${METALOGOS_SENSITIVE_PATH_ALLOWLIST:-$M455_NAMES}"
+echo "--- №455: DATA_DIR=app-root, sensitive-allowlist(names): ${M455_NAMES}"
 
 # №427 (инцидент 2026-09-24, продолжение): один app.mlog на два бинаря
 # невозможен — мост `profile legacy { egress: permissive_with_audit }`

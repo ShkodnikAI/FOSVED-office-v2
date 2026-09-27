@@ -15,16 +15,16 @@ WORKDIR /office
 COPY requirements.txt /office/requirements.txt
 RUN pip3 install -r requirements.txt --break-system-packages
 
-# Metalogos v0.25.0 — прод-бинарь (наряд №372, переход 0.24.0→0.25.0, ADR-0008;
-# бинарь из официального CI-артефакта тегового коммита afbcfc7, Wave 15 —
-# полный statement-kind taint-инференс + модуль эффектов)
+# Metalogos v0.27.0 — прод-бинарь (переход 0.25.0→0.27.0, ADR-0009;
+# бинарь из официального CI-артефакта тегового коммита 0d1cce9 —
+# unfreeze-релиз: В17-фиксы памяти + security-волна 0.26.0 №454-№459)
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
-# грузит сырой app.mlog). bin/mlog-024 (0.24.0) вендорен как прошлый-хороший
-# тест-гвард (ADR-0008); mlog-023 выведен из репо (история git сохраняет).
+# грузит сырой app.mlog). bin/mlog-025 (0.25.0) вендорен как прошлый-хороший
+# тест-гвард (ADR-0009); mlog-024 выведен из репо (история git сохраняет).
 COPY bin/mlog /usr/local/bin/mlog
 COPY bin/mlog-020 /usr/local/bin/mlog-020
-COPY bin/mlog-024 /usr/local/bin/mlog-024
-RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 /usr/local/bin/mlog-024 && /usr/local/bin/mlog --version
+COPY bin/mlog-025 /usr/local/bin/mlog-025
+RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 /usr/local/bin/mlog-025 && /usr/local/bin/mlog --version
 
 COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
@@ -39,7 +39,7 @@ COPY . .
 # стали 100644, а эта строка по-прежнему chmod'ила УДАЛЁННЫЙ mlog-023 →
 # docker build падал, деплой не проходил. Страховка теперь гоняет ВСЕ
 # вендоренные бинари (защита от регресса exec-бит) и верифицирует кандидата.
-RUN chmod +x /office/bin/mlog /office/bin/mlog-020 /office/bin/mlog-024 \
+RUN chmod +x /office/bin/mlog /office/bin/mlog-020 /office/bin/mlog-025 \
     && /office/bin/mlog --version
 
 # Node.js deps (Prisma client for PostgreSQL)
