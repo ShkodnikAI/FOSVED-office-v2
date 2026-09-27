@@ -386,11 +386,33 @@ def test_onliner_form_mismatch_is_loud(monkeypatch):
     assert res["ok"] is False and res["kind"] == "api_form_mismatch"
 
 
-# ── 21vek (#328): robots-граница / tm.by (#331): недоступен ──────────
-def test_21vek_robots_surface_is_refused():
-    res = sc.collect_21vek("x")
-    assert res["ok"] is False and res["kind"] == "robots_disallow_surface"
-    assert "robots" in res["error"]
+# ── 21vek (#328/#406): живой сборщик — SSR-разбор или честный диагноз ──
+def test_21vek_live_attempt_honest_refusal(monkeypatch):
+    """SPA: страница отдаётся, товары не серверены → recon_unreachable."""
+    def fake(tool, args):
+        assert tool == "fetch_page" and "21vek.by/search/" in args["url"]
+        return {"ok": True, "content": "<html><body>no products here</body></html>"}
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
+    res = sc.collect_21vek("чайник")
+    assert res["ok"] is False and res["kind"] == "recon_unreachable"
+    assert "не серверены" in res["error"]
+
+
+def test_21vek_parses_jsonld_products(monkeypatch):
+    """Если платформа серверит товары (JSON-LD) — сборщик их берёт."""
+    ld = ('<script type="application/ld+json">'
+          '{"@type":"ItemList","itemListElement":[{"item":{"@type":"Product",'
+          '"name":"Чайник Bosch","sku":"TWK7604","offers":{"price":249.9,'
+          '"priceCurrency":"BYN","url":"https://www.21vek.by/items/twk7604"}}}]}'
+          '</script>')
+    def fake(tool, args):
+        return {"ok": True, "content": ld}
+    monkeypatch.setattr(sc, "FETCH_JSON_FN", fake)
+    res = sc.collect_21vek("чайник")
+    assert res["ok"] is True and res["offers"]
+    o = res["offers"][0]
+    assert o["platform_code"] == "TWK7604" and o["price_byn"] == 249.9
+    assert o["seller_name"] == "21vek.by"
 
 
 def test_tmby_is_honest_unreachable_carrier():

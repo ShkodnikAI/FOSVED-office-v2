@@ -41,13 +41,11 @@
     (страницы по 20, 886 схем на 2026-09-24; дозагрузка по курсору,
     ≤8 страниц за вызов — бюджет таймаутов; кэш kv 7 дней) →
     не нашлось — честный kind:"no_category", слаг наугад не берём;
-  - 21vek.by (#328) — ЖИВОЙ robots.txt 2026-09-24: User-agent: *
-    Disallow: /search, /api/* и ВСЕ URL с query ("*?*") — поисковая
-    поверхность закрыта для честных клиентов, включая Googlebot.
-    Дисциплина SHOP-2 (robots уважается) сбор запрещает; каркас отвечает
-    честный kind:"robots_disallow_surface". Реализация возможна только
-    явным решением владельца отступить от robots-красной линии (#172) —
-    вопрос вынесен в отчёт наряда;
+  - 21vek.by (#328/#406) — красная линия robots СНЯТА (ADR-0011,
+    решение владельца 2026-09-27). Живой сборщик: пробует страницу поиска
+    каждый раз; товары в SSR не серверены (SPA, gate session-bound) —
+    честный kind:"recon_unreachable" с диагнозом до первого живого
+    прогона с браузерным контекстом;
   - tm.by (#331) — недоступен из песочницы исполнителя: TLS
     «unexpected eof» на все 4 варианта (https/http × с/без www) —
     площадка обрывает соединения с датацентровых IP. Форма не снята —
@@ -64,12 +62,12 @@
     shop.by (#337) — 403 на robots.txt И на сайт (HTTP/2 + браузерный
     UA тоже 403) — robots unverifiable → консервативный отказ,
     kind:"recon_unreachable";
-    tomas.by (#338) — robots живой: Disallow *?* , */poisk/,
-    */search/ — ВСЯ поисковая поверхность закрыта для честных
-    клиентов → kind:"robots_disallow_surface" (как 21vek #328);
-    unishop.by (#339) — robots запрещает /search; на / — капча-стена
-    reagate (антибот) → kind:"robots_disallow_surface" + note об
-    антиботе;
+    tomas.by (#338/#406) — robots-правило снято (ADR-0011); живой
+    сборщик: пробует /search/<запрос>, антибот-стена «Проверка
+    безопасности» (recaptcha) → честный kind:"antibot_blocked";
+    unishop.by (#339/#406) — капча-стена reagate (антибот на весь
+    сайт с датацентровых IP) → kind:"antibot_blocked"; браузерный
+    контур — решение владельца (robots-правило снято ADR-0011);
   - Яндекс.Маркет (#340) — ЕДИНСТВЕННЫЙ из батча с официальным API:
     контентный API для покупателей (базовый тариф 100 запросов/сутки).
     Регистрация ключа — шаг владельца (A.1 наряда); сам хост
@@ -91,6 +89,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -786,35 +785,108 @@ def collect_shopby(query, page=1):
 
 
 def collect_tomas(query, page=1, region="minsk"):
-    """Tomas.by — живой robots.txt 2026-09-24 (наряд #338).
+    """Tomas.by — живая попытка сбора (#406, ADR-0011: красная линия robots
+    снята решением владельца 2026-09-27; раньше #338: robots запрещал *?*,
+    */poisk/, */search/ — теперь правило не является основанием отказа).
 
-    User-agent: * запрещает *?* (все URL с query), */poisk/,
-    */search/, /filters/*, /ajax/* — ВСЯ поисковая поверхность закрыта
-    для честных клиентов (тот же класс запрета, что 21vek #328).
-    Дисциплина SHOP-2: robots уважается — сбор запрещён без явного
-    решения владельца. Региональные поддомены (minsk.tomas.by и др.)
-    — тот же robots на каждом.
+    Форма: https://tomas.by/search/<запрос> (региональные поддомены —
+    параметр region, дефолт minsk → tomas.by). Продавец-участник агрегатора —
+    в seller_name (для всех офферов «Tomas.by» ставить нельзя).
+    Живая разведка 2026-09-27 из песочницы: и /, и /search/ отдают страницу
+    «Проверка безопасности» с recaptcha (антибот-стена для датацентровых IP) —
+    сборщик пробует реальную страницу каждый раз: если egress прода отличается
+    (или антибот смягчается) — витрина подхватится без правки кода; иначе
+    честный отказ с диагнозом. Транспорт — SHOP-2 (web-MCP: SSRF/rate-limit/
+    кэш), A.5 наряда соблюдён.
     """
-    return {"ok": False, "platform": "tomas",
-            "error": "robots.txt Tomas.by запрещает все URL с query (*?*) и пути "
-                     "*/poisk/, */search/ — поисковая поверхность закрыта для "
-                     "честных клиентов; нужно явное решение владельца",
-            "kind": "robots_disallow_surface"}
+    host = "tomas.by" if region in ("", "minsk") else f"{region}.tomas.by"
+    url = f"https://{host}/search/" + urllib.parse.quote(query)
+    page_res = FETCH_JSON_FN("fetch_page", {"url": url, "max_chars": 120000})
+    _audit("tomas", f"search:{query} reg:{region}",
+           "ok" if page_res.get("ok") else "refused")
+    if not page_res.get("ok"):
+        return {"ok": False, "platform": "tomas", "error": page_res.get("error"),
+                "kind": page_res.get("kind", "transport"), "url": url}
+    html = str(page_res.get("content") or "")
+    low = html.lower()
+    if "проверка безопасности" in low or "recaptcha" in low or "reagate" in low:
+        return {"ok": False, "platform": "tomas", "url": url,
+                "error": "Tomas.by отдаёт антибот-стену («Проверка безопасности», "
+                         "recaptcha) — живая проба 2026-09-27 с датацентрового "
+                         "egress; прод может отличаться — прогон через /shop/diagnose",
+                "kind": "antibot_blocked"}
+    offers = _parse_tomas_html(html, url)
+    if offers:
+        return {"ok": True, "platform": "tomas", "url": url, "offers": offers}
+    return {"ok": False, "platform": "tomas", "url": url,
+            "error": "страница получена, но товарных карточек в HTML нет "
+                     "(форма вернулась антиботу или изменилась) — разбор "
+                     "оборонительный, слаги наугад не подставляем",
+            "kind": "api_form_mismatch"}
+
+
+def _parse_tomas_html(html, base_url):
+    """Оборонительный разбор товарных карточек Tomas.by (schema.org Product).
+
+    Работает только с реальными данными страницы: JSON-LD Product /
+    ItemList. Нет карточек — пустой список (вызывающий код отдаст честный
+    отказ, не выдумку)."""
+    def _name_of(x):
+        # schema.org: brand/seller могут быть строкой ИЛИ {"name": "..."}
+        if isinstance(x, dict):
+            return x.get("name")
+        return x
+
+    offers = []
+    for m in re.findall(r'<script[^>]*application/ld\+json[^>]*>(.*?)</script>',
+                        html, re.S | re.I):
+        try:
+            data = json.loads(m.strip())
+        except ValueError:
+            continue
+        items = data.get("itemListElement") if isinstance(data, dict) else None
+        candidates = items or ([data] if isinstance(data, dict) else [])
+        for it in candidates:
+            if not isinstance(it, dict):
+                continue
+            node = it.get("item") if isinstance(it.get("item"), dict) else it
+            if (node.get("@type") or "").lower() not in ("product", ""):
+                continue
+            name = node.get("name")
+            offer = node.get("offers") or {}
+            price = _num(offer.get("price") if isinstance(offer, dict) else None)
+            if not name or price is None:
+                continue
+            page_url = offer.get("url") or node.get("url") or it.get("url") or base_url
+            offers.append({
+                "platform": "tomas",
+                "platform_code": str(node.get("sku") or node.get("gtin13") or name)[:64],
+                "url": canonical_url(str(page_url)),
+                "title": str(name)[:200],
+                "price_byn": price,
+                "old_price_byn": None,
+                "in_stock": 0 if "outofstock" in str(offer.get("availability", "")).lower() else 1,
+                "rating": None, "reviews_count": 0,
+                "seller_name": _name_of(node.get("brand")) or _name_of(offer.get("seller")) or None,
+                "seller_platform_code": None,
+                "seller_rating": None, "seller_deals": None, "seller_official": None,
+            })
+    return offers
 
 
 def collect_unishop(query, page=1):
     """UniShop.by — живой robots.txt + живая проба 2026-09-24 (наряд #339).
 
-    robots.txt (200): Disallow /search — поисковая поверхность закрыта.
-    Дополнительно живая проба /: капча-стена reagate (обязательное поле
-    reagate_captcha_value) — антибот на весь сайт с датацентровых IP.
-    Красная линия SHOP-2: robots уважается → сбор запрещён.
+    robots.txt (200): Disallow /search (с ADR-0011 правило снято — не
+    основание отказа). Реальная причина отказа — живая проба /: капча-стена
+    reagate (обязательное поле reagate_captcha_value) — антибот на весь сайт
+    с датацентровых IP; браузерный контур ждёт решения владельца (#406).
     """
     return {"ok": False, "platform": "unishop",
-            "error": "robots.txt UniShop.by запрещает /search; дополнительно сайт "
-                     "закрыт капчей reagate с датацентровых IP — сбор запрещён "
-                     "дисциплиной SHOP-2 без явного решения владельца",
-            "kind": "robots_disallow_surface"}
+            "error": "UniShop.by закрыт капчей reagate (антибот на весь сайт с "
+                     "датацентровых IP) — нужен браузерный контур, решение "
+                     "владельца (см. ADR-0011)",
+            "kind": "antibot_blocked"}
 
 
 # ── Яндекс.Маркет (#340): официальный контентный API ─────────────────
@@ -984,19 +1056,80 @@ def collect_yandexmarket(query, page=1):
 
 
 # ── 21vek (#328): robots запрещает поисковую поверхность ─────────────
-def collect_21vek(query):
-    """Живой robots.txt 2026-09-24 (наряд #328): User-agent: * запрещает
-    /search, /api/* и ВСЕ URL с query (*?*) — поисковая поверхность
-    21vek закрыта для честных клиентов. Красная линия SHOP-2 (#172):
-    robots уважается — сбор запрещён без явного решения владельца.
-    Вопрос вынесен в отчёт наряда: отступление от robots меняет
-    дисциплину сбора всего офиса, единолично не принимается.
+def collect_21vek(query, page=1):
+    """21vek.by — живая попытка сбора (#406, ADR-0011: красная линия robots
+    снята решением владельца 2026-09-27; раньше #328: robots запрещал /search,
+    /api/* и все URL с query — теперь правило не является основанием отказа).
+
+    Форма: https://www.21vek.by/search/?query=… (SSR-HTML). Живая разведка
+    2026-09-27 из песочницы: страница отдаётся (200, ~180KB), но товары в
+    HTML НЕ серверены — Next.js SPA, витрина через session-bound
+    gate.21vek.by (проб gate-путей: 404/415 без браузерного контекста).
+    Сборщик пробует реальную страницу каждый раз: если платформа начнёт
+    серверить товары или egress прода получит иной ответ — витрина
+    подхватится без правки кода; иначе честный отказ с диагнозом.
+    Транспорт — SHOP-2 (web-MCP: SSRF/rate-limit/кэш), A.5 наряда.
     """
-    return {"ok": False, "platform": "21vek",
-            "error": "robots.txt 21vek запрещает /search, /api/* и все URL "
-                     "с query (*?*) — сбор поисковой поверхности нарушает "
-                     "дисциплину SHOP-2; нужно явное решение владельца",
-            "kind": "robots_disallow_surface"}
+    url = ("https://www.21vek.by/search/?"
+           + urllib.parse.urlencode({"query": query, "page": str(page)}))
+    page_res = FETCH_JSON_FN("fetch_page", {"url": url, "max_chars": 150000})
+    _audit("21vek", f"search:{query}", "ok" if page_res.get("ok") else "refused")
+    if not page_res.get("ok"):
+        return {"ok": False, "platform": "21vek", "error": page_res.get("error"),
+                "kind": page_res.get("kind", "transport"), "url": url}
+    html = str(page_res.get("content") or "")
+    offers = _parse_21vek_html(html, url)
+    if offers:
+        return {"ok": True, "platform": "21vek", "url": url, "offers": offers}
+    return {"ok": False, "platform": "21vek", "url": url,
+            "error": "страница поиска получена, но товары в HTML не серверены "
+                     "(Next.js SPA: витрина через session-bound gate.21vek.by — "
+                     "живая разведка 2026-09-27, gate 404/415 без браузерного "
+                     "контекста); живой прогон на проде — /shop/diagnose",
+            "kind": "recon_unreachable"}
+
+
+def _parse_21vek_html(html, base_url):
+    """Оборонительный разбор товарных карточек 21vek.by из SSR-HTML.
+
+    Ищет JSON-LD Product/ItemList (schema.org). Нет карточек — пустой
+    список (вызывающий код отдаст честный отказ, не выдумку)."""
+    offers = []
+    for m in re.findall(r'<script[^>]*application/ld\+json[^>]*>(.*?)</script>',
+                        html, re.S | re.I):
+        try:
+            data = json.loads(m.strip())
+        except ValueError:
+            continue
+        items = data.get("itemListElement") if isinstance(data, dict) else None
+        candidates = items or ([data] if isinstance(data, dict) else [])
+        for it in candidates:
+            if not isinstance(it, dict):
+                continue
+            node = it.get("item") if isinstance(it.get("item"), dict) else it
+            if (node.get("@type") or "").lower() not in ("product", ""):
+                continue
+            name = node.get("name")
+            offer = node.get("offers") or {}
+            price = _num(offer.get("price") if isinstance(offer, dict) else None)
+            if not name or price is None:
+                continue
+            page_url = offer.get("url") or node.get("url") or it.get("url") or base_url
+            offers.append({
+                "platform": "21vek",
+                "platform_code": str(node.get("sku") or node.get("gtin13") or name)[:64],
+                "url": canonical_url(str(page_url)),
+                "title": str(name)[:200],
+                "price_byn": price,
+                "old_price_byn": None,
+                "in_stock": 0 if "outofstock" in str(offer.get("availability", "")).lower() else 1,
+                "rating": None, "reviews_count": 0,
+                "seller_name": "21vek.by",
+                "seller_platform_code": None,
+                "seller_rating": None, "seller_deals": None,
+                "seller_official": 1,
+            })
+    return offers
 
 
 # ── tm.by (#331): площадка недоступна для разведки ───────────────────
