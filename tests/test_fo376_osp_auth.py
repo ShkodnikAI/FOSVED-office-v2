@@ -13,13 +13,22 @@ Hash-form (мост LZ→ОСП №318) продолжала проходить 
 
 Гвард гоняет scripts/fo376_probe_auth.sh — изолированный mlogserver
 (scripts/probe318qp.mlog, роут /qp2 = точная реплика роута app.mlog) —
-на обоих бинарях (боевой 0.25.0 + гвард 0.24.0) и ассертит матрицу.
+на обоих бинарях (боевой 0.27.0 + гвард 0.25.0, ADR-0009) и ассертит матрицу.
+
+ВНИМАНИЕ: probe-скрипты — локальные инструменты (scripts/ в .gitignore,
+не трекаются); на свежем клоне тест честно SKIP'ается, верификация
+воспроизводится по процедуре отчёта №376/ADR.
 """
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROBE = REPO_ROOT / "scripts" / "fo376_probe_auth.sh"
+
+pytestmark = pytest.mark.skipif(
+    not PROBE.exists(), reason="probe-скрипт — локальный незатреканный инструмент (gitignore scripts/)")
 
 EXPECTED_ROWS = [
     ("raw correct", "match [HTTP 200]"),
@@ -28,7 +37,7 @@ EXPECTED_ROWS = [
     ("none", "mismatch [HTTP 403]"),
     ("selfcheck", "selfcheck-match [HTTP 200]"),
 ]
-BINS = ["bin/mlog", "bin/mlog-024"]
+BINS = ["bin/mlog", "bin/mlog-025"]
 
 
 def _probe_output() -> str:

@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -69,17 +70,20 @@ def client():
         yield c
 
 
-def _seed_activity():
-    """Час A: 2 входящих, 1 исходящий, 1 dept_query, 2 cron; час B: 1 входящий."""
+def _seed_activity(a_hour, b_hour):
+    """Час A: 2 входящих, 1 исходящий, 1 dept_query, 2 cron; час B: 1 входящий.
+    Сиды ОТНОСИТЕЛЬНЫЕ (a_hour/b_hour = '%Y-%m-%d %H' от now): дефект 2026-09-27 —
+    фиксированные даты 2026-09-24 выпадали из 48-часового окна при прогоне
+    позже 26.09 (тест календарно-хрупкий был, не поведение фида)."""
     _query("INSERT INTO dialog_message (session_id, role, created_at) VALUES "
-           "('555', 'user', '2026-09-24 10:05:00'), "
-           "('555', 'user', '2026-09-24 10:20:00'), "
-           "('555', 'assistant', '2026-09-24 10:21:00'), "
-           "('555', 'user', '2026-09-24 11:00:00')")
+           f"('555', 'user', '{a_hour}:05:00'), "
+           f"('555', 'user', '{a_hour}:20:00'), "
+           f"('555', 'assistant', '{a_hour}:21:00'), "
+           f"('555', 'user', '{b_hour}:00:00')")
     _query("INSERT INTO audit_log (action, actor, timestamp) VALUES "
-           "('dept_query', 'yana', '2026-09-24 10:07:00'), "
-           "('cron_admin_reply', 'scheduler', '2026-09-24 10:25:00'), "
-           "('cron_shop_tick', 'scheduler', '2026-09-24 10:40:00')")
+           f"('dept_query', 'yana', '{a_hour}:07:00'), "
+           f"('cron_admin_reply', 'scheduler', '{a_hour}:25:00'), "
+           f"('cron_shop_tick', 'scheduler', '{a_hour}:40:00')")
 
 
 def test_auth_fail_closed_without_token(feed_db, client, monkeypatch):
@@ -114,16 +118,19 @@ def test_auth_token_raw_plus_matches_decoded(feed_db, client, monkeypatch):
 
 def test_feed_counters_hourly_buckets(feed_db, client, monkeypatch):
     monkeypatch.setenv("ACTIVITY_FEED_TOKEN", "tkn")
-    _seed_activity()
+    # Окно сидов фиксируем ОДИН раз (защита от гонки через границу часа):
+    a_hour = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H")
+    b_hour = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H")
+    _seed_activity(a_hour, b_hour)
     r = client.get("/metrics/activity?token=tkn&hours=48")
     data = r.get_json()
     assert r.status_code == 200
     assert set(data.keys()) == {"ok", "window_hours", "generated_at", "hours"}
     by_hour = {row["hour"]: row for row in data["hours"]}
-    a = by_hour["2026-09-24T10:00:00"]
+    a = by_hour[a_hour.replace(" ", "T") + ":00:00"]
     assert a["incoming_owner"] == 2 and a["outgoing_office"] == 1
     assert a["dept_llm_calls"] == 1 and a["cron_slots"] == 2
-    b = by_hour["2026-09-24T11:00:00"]
+    b = by_hour[b_hour.replace(" ", "T") + ":00:00"]
     assert b["incoming_owner"] == 1 and b["outgoing_office"] == 0
     # только числа: все счётчики — int (privacy by design, проверка формы)
     for row in data["hours"]:

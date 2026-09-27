@@ -12,9 +12,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Все вендоренные бинари, которые entrypoint/Dockerfile обязаны уметь запустить.
 VENDORED_BINARIES = [
-    "bin/mlog",       # боевой (ADR-0008: 0.25.0)
+    "bin/mlog",       # боевой (ADR-0009: 0.27.0)
     "bin/mlog-020",   # аварийный фолбэк guard-пробы
-    "bin/mlog-024",   # прошлый-хороший / тест-гвард (ADR-0008)
+    "bin/mlog-025",   # прошлый-хороший / тест-гвард (ADR-0009)
 ]
 
 
