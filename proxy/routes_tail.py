@@ -869,6 +869,68 @@ def shop_dossier_page(dossier_id):
     return Response(render_html(snapshot), mimetype="text/html")
 
 
+# ── SHOP-SUPPLY-1 (#421): очередь заданий снабженцу (/supply/*) ──────────
+# Внешний клиент-снабженец (домашний IP, настоящий браузер; сам клиент —
+# волна 2, отдельный наряд в закрытом fosved-supply-agent) опрашивает
+# офис: GET /supply/next → задание из shop_supply_queue, POST
+# /supply/result → офферы или честный отказ. Площадки-кандидаты —
+# SUPPLY_AGENT_PLATFORMS в proxy/shop_supply.py (wb/onliner/ym не в
+# списке — собираются сервером как раньше). Auth: Bearer
+# SUPPLY_AGENT_TOKEN (только Render env, не в коде — п.4 наряда),
+# fail-closed при незаданном токене (паттерн ACTIVITY_FEED_TOKEN, урок
+# #325). Публичная достижимость: префикс "/supply/" в LLM_ROUTES_PREFIXES
+# reverse_proxy (класс FO-042: без префикса путь проваливается в mlog и
+# молча 404 — тот же урок, что /metrics/activity FO-053).
+def _supply_agent_ok():
+    from proxy.shop_supply import token_ok
+    return token_ok(request.headers.get("Authorization", ""))
+
+
+@app.get("/supply/next")
+def supply_next_endpoint():
+    """Выдать снабженцу следующее задание (FIFO по created_at).
+
+    Одно задание — одному вызову: pending → dispatched атомарно
+    (proxy.shop_supply.dequeue_next_task), повторная выдача того же
+    задания без результата исключена до истечения timeout_s. Пустая
+    очередь → 200 {"task": null} — п.9 контракта решён в JSON,
+    единообразно с остальными эндпоинтами офиса (наряд #421).
+    """
+    if not _supply_agent_ok():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    from proxy.shop_supply import dequeue_next_task
+    return jsonify({"task": dequeue_next_task()})
+
+
+@app.post("/supply/result")
+def supply_result_endpoint():
+    """Принять результат снабженца (тело — разделы 4/5 CONTRACT.md).
+
+    ok:true в ответе — «приём принят офисом»; успех на площадке — это
+    ok ВНУТРИ payload, другое поле (наряд #421 п.3): честный отказ
+    снабженца (antibot_blocked и т.п.) принимается {"ok": true}, а
+    задание уходит в failed с kind/error от снабженца. Повторный POST
+    по закрытому заданию — 404 (дубль не перезаписывает честный исход).
+    """
+    if not _supply_agent_ok():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    d = request.get_json(force=True, silent=True)
+    if not isinstance(d, dict):
+        return jsonify({"ok": False,
+                        "error": "тело должно быть JSON-объектом"}), 400
+    task_id = str(d.get("task_id", "") or "").strip()
+    if not task_id:
+        return jsonify({"ok": False, "error": "task_id обязателен"}), 400
+    from proxy.shop_supply import apply_supply_result
+    res = apply_supply_result(task_id, d)
+    if not res.get("applied"):
+        return jsonify({"ok": False, "error": res.get("error")}), 404
+    return jsonify({"ok": True, "task_id": task_id,
+                    "offers_saved": res.get("offers_saved", 0),
+                    "platform_ok": res.get("ok"),
+                    "kind": res.get("kind")})
+
+
 # ── FO-042 B: выгрузка состояния FORGE (наряд #149) ──────────────────────
 # Выборка forge_projects / открытых задач / гейтов без решения / открытых
 # замечаний → JSON-файл на постоянном диске → документом владельцу.
