@@ -1013,23 +1013,53 @@ pattern AdminLogDigest(hours_text: String) -> String {
     }
   }
 
-  // audit_log: действия с ошибочными статусами
-  let audits = query("SELECT action, dept, status, COUNT(*) as c FROM audit_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND status IS NOT NULL AND status != 'ok' GROUP BY action, dept, status ORDER BY c DESC LIMIT 5", [hs])
+  // audit_log: отказы и сбои
+  // #431 A.1: не-ошибочные статусы (очередь снабженца pending/dispatched/done,
+  // отложенные queued/skipped, живые процессы) — НЕ ошибки, из выборки
+  // исключены (досье #9: pending/dispatched ×7 каждый Админ счёл техдолгом).
+  let audits = query("SELECT action, dept, status, COUNT(*) as c FROM audit_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND status IS NOT NULL AND status != 'ok' AND status NOT IN ('pending','dispatched','done','queued','skipped','in_work','running','started','collector_not_implemented') GROUP BY action, dept, status ORDER BY c DESC LIMIT 5", [hs])
   if to_string(audits) != "()" and length(audits) > 0.0 then {
-    let out = out + "\nНестатусные действия (audit_log, status != ok):"
+    let out = out + "\nОтказы и сбои (audit_log):"
     each row in audits {
       let out = out + "\n· " + to_string(json_get(row, "action", "?")) + " (" + to_string(json_get(row, "dept", "?")) + ", status=" + to_string(json_get(row, "status", "?")) + ") × " + to_string(json_get(row, "c", "0"))
       let found = found + 1.0
     }
+    // #431 A.2: причина отказа — details последних записей (усечено, redact)
+    let audit_last = query("SELECT timestamp, action, dept, status, details FROM audit_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND status IS NOT NULL AND status != 'ok' AND status NOT IN ('pending','dispatched','done','queued','skipped','in_work','running','started','collector_not_implemented') ORDER BY id DESC LIMIT 10", [hs])
+    each row in audit_last {
+      let adetail = redact(substring(to_string(json_get(row, "details", "")), 0.0, 120.0), "all")
+      if adetail != "" then {
+        let out = out + "\n  [" + substring(to_string(json_get(row, "timestamp", "")), 0.0, 16.0) + " " + to_string(json_get(row, "action", "?")) + " " + to_string(json_get(row, "dept", "?")) + " " + to_string(json_get(row, "status", "?")) + "] " + adetail
+      }
+    }
   }
 
-  // trace_log: чекпоинты со статусом != ok
-  let traces = query("SELECT action, dept, status, COUNT(*) as c FROM trace_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND status IS NOT NULL AND status != 'ok' GROUP BY action, dept, status ORDER BY c DESC LIMIT 5", [hs])
+  // #431 A.3: задания, ждущие снабженца, — не ошибки, отдельная строка.
+  // Очередь снабженца (action=shop_supply, pending/dispatched) и
+  // исторический статус collector_not_implemented, если встречался.
+  let waiting = query("SELECT COUNT(*) as c FROM audit_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND ((action = 'shop_supply' AND status IN ('pending','dispatched')) OR status = 'collector_not_implemented')", [hs])
+  if to_string(waiting) != "()" and length(waiting) > 0.0 {
+    let wn = to_float(json_get(waiting[0], "c", "0"))
+    if wn > 0.0 then {
+      let out = out + "\nЖдут снабженца: " + to_string(wn)
+    }
+  }
+
+  // trace_log: чекпоинты со сбоем (не-ошибочные статусы исключены так же)
+  let traces = query("SELECT action, dept, status, COUNT(*) as c FROM trace_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND status IS NOT NULL AND status != 'ok' AND status NOT IN ('pending','dispatched','done','queued','skipped','in_work','running','started','collector_not_implemented') GROUP BY action, dept, status ORDER BY c DESC LIMIT 5", [hs])
   if to_string(traces) != "()" and length(traces) > 0.0 then {
     let out = out + "\nТрейсы со сбоем (trace_log, status != ok):"
     each row in traces {
       let out = out + "\n· " + to_string(json_get(row, "action", "?")) + " (" + to_string(json_get(row, "dept", "?")) + ", status=" + to_string(json_get(row, "status", "?")) + ") × " + to_string(json_get(row, "c", "0"))
       let found = found + 1.0
+    }
+    // #431 A.2: детали сбоев трейсов — усечено, redact
+    let trace_last = query("SELECT timestamp, action, dept, status, details FROM trace_log WHERE timestamp > datetime('now', '-' || ?1 || ' hours') AND status IS NOT NULL AND status != 'ok' AND status NOT IN ('pending','dispatched','done','queued','skipped','in_work','running','started','collector_not_implemented') ORDER BY id DESC LIMIT 10", [hs])
+    each row in trace_last {
+      let tdetail = redact(substring(to_string(json_get(row, "details", "")), 0.0, 120.0), "all")
+      if tdetail != "" then {
+        let out = out + "\n  [" + substring(to_string(json_get(row, "timestamp", "")), 0.0, 16.0) + " " + to_string(json_get(row, "action", "?")) + " " + to_string(json_get(row, "dept", "?")) + " " + to_string(json_get(row, "status", "?")) + "] " + tdetail
+      }
     }
   }
 
