@@ -1,0 +1,55 @@
+// Живой тест наряда #430 — YanaCheckShop: различение «маркера не было»
+// (обычный диалог, "") и «досье-поток отработал, текста нет» (SHOP_HANDLED).
+// Суррогаты app-зависимостей (serve-неймспейс недоступен в mlog run).
+// Запуск: rm -rf /tmp/n430-test && mkdir -p /tmp/n430-test && ./bin/mlog run test_n430v1.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/n430-test/yana.db" }
+import dept/yana
+
+// суррогат: перехват отправок в Telegram (счёт в kv)
+pattern SendTelegramReply(chat_id: String, text: String) -> String {
+  let n = kv_get("n430_sent_count")
+  let mut next = 1.0
+  if to_string(n) != "()" then { let next = to_float(n) + 1.0 }
+  let _ = kv_set("n430_sent_count", next)
+  let _ = kv_set("n430_sent_last", text)
+  return "sent"
+}
+
+// суррогат: аудит без БД-схемы
+pattern AuditLog(action: String, actor: String, details: String) -> String {
+  return "ok"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(input: String) -> String {
+  let mut out = ""
+  let _ = kv_set("n430_sent_count", 0)
+  // 1) маркера нет — обычный диалог, возврат пустой (текст Яны живёт)
+  let r1 = YanaCheckShop("привет, как дела", "1")
+  let out = out + _Mark("нет_маркера_пусто", r1 == "")
+  let c1 = kv_get("n430_sent_count")
+  let out = out + _Mark("нет_маркера_без_отправок", to_float(c1) == 0.0)
+  // 2) битый маркер (нет закрывающей скобки) — ничего не отправлено, возврат ""
+  let r2 = YanaCheckShop("[SHOP: чайник без скобки", "1")
+  let out = out + _Mark("битый_маркер_пусто", r2 == "")
+  // 3) только маркер, shop-плоскость недоступна (песочница: порт закрыт):
+  //    отказ отправлен, возврат SHOP_HANDLED — ответ Яны не формируется
+  let r3 = YanaCheckShop("[SHOP: электрочайник Xiaomi]", "1")
+  let out = out + _Mark("отказной_поток_SHOP_HANDLED", r3 == "SHOP_HANDLED")
+  let last = kv_get("n430_sent_last")
+  let out = out + _Mark("отказ_владельцу_отправлен", contains(to_string(last), "ОТКАЗ"))
+  // 4) непустой остаток при живом shop не проверяем (нужен прод) — гвард
+  let fails = split(out, "FAILED ")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS ")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
