@@ -99,7 +99,7 @@ def dossier_url(dossier_id, base_url=None):
 # невозможен ни владельцу, ни исполнителю. Теперь причины по каждой площадке
 # сохраняются в снимок и показываются в тексте и HTML.
 SOURCE_KIND_LABELS = {
-    "source_disabled": "источник выключен",
+    "source_disabled": "выключено в настройках",
     "mcp_no_response": "транспорт (web-MCP) не ответил",
     "mcp_bad_response": "ответ транспорта не разобран",
     "transport": "транспортная ошибка",
@@ -114,6 +114,8 @@ SOURCE_KIND_LABELS = {
     "no_collector": "нет сборщика",
     "not_found": "не найдено",
     "disabled": "магазин выключен",
+    # #429 A.2: очередь снабженца — человеческий статус вместо сырого кода
+    "supply_pending": "передано снабженцу, ждёт выполнения",
 }
 
 
@@ -132,9 +134,12 @@ def humanize_source_status(status):
     err = str(status.get("error") or "")
     if "403" in err:
         return "доступ с сервера закрыт (HTTP 403)"
-    if err and label == kind:
-        return f"{kind}: {err[:120]}"
-    return label if label != kind else f"{kind}: {err[:120]}"
+    # #429 A.2: пустая деталь не печатается (сырой «kind: » с хвостовым
+    # двоеточием и пробелом — виденный в досье #9 вариант отказа)
+    detail = err[:120]
+    if label != kind:
+        return f"{label}: {detail}" if detail else label
+    return f"{kind}: {detail}" if detail else kind
 
 
 def sources_display_rows(details):
@@ -374,8 +379,10 @@ def render_caption(snapshot):
         lines.append(f"{i}. <a href=\"{o['url']}\">{o['platform']}</a> — "
                      f"{_fmt_price(o['rank_price'])}{stock}")
     if snapshot.get("sources_display"):
+        # #429 A.1: все 10 площадок (было [:5] — остальные пропадали без
+        # объяснения); компактный формат строкой, полный — в тексте и HTML
         srcs = "; ".join(f"{r['platform']}: {r['status']}"
-                         for r in snapshot["sources_display"][:5])
+                         for r in snapshot["sources_display"])
         lines.append(f"Источники — {srcs}")
     if snapshot.get("dossier_id"):
         lines.append(f"<a href=\"{dossier_url(snapshot['dossier_id'])}\">Полное досье</a>"

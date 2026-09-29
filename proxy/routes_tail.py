@@ -584,6 +584,28 @@ def cron_shop_tick():
         return jsonify({"ok": False, "error": str(e)[:300]}), 500
 
 
+# ── #429 A.3: прогрев каталога схем Onliner ──────────────────────────────
+@app.route("/cron/onliner-warm", methods=["GET", "POST"])
+def cron_onliner_warm():
+    """Фоновая догрузка словаря /schemas до complete (наряд #429 A.3).
+
+    Auth: CRON_SECRET (cron_secret_ok) — реальный сетевой вызов, открытой
+    при незаданном CRON_SECRET быть не должна (паттерн /shop/diagnose).
+    Идемпотентен: свежий полный кэш — no-op без сети. Вызывается из
+    entrypoint.sh (фон при старте) и слота onliner-warm
+    (dept/schedules.mlog, включается владельцем по протоколу №419).
+    """
+    if not os.environ.get("CRON_SECRET", ""):
+        return jsonify({"error": "403 Forbidden"}), 403
+    if not cron_secret_ok():
+        return jsonify({"error": "403 Forbidden"}), 403
+    from proxy.shop_collectors import onliner_warm_catalog
+    try:
+        return jsonify(onliner_warm_catalog())
+    except Exception as e:  # noqa: BLE001 — крон должен видеть ошибку, а не 500-стек
+        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+
+
 # ── SHOP-5: досье товара — команды /товар /вотч + три формата (#172) ─────
 # UX единым блоком: mlog webhook дергает POST /shop/* (chat_id из телеграма),
 # питон-слой делает срез → рендеры → отправку владельцу. HTML-досье
