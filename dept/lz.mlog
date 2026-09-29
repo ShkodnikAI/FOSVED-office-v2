@@ -165,6 +165,44 @@ pattern LZGateCrossDomain(technology: String, src_domain: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // MAIN DISPATCHER
 // ═══════════════════════════════════════════════════════════════════════
+// ── #427 A.1: чистый текст темы ─────────────────────────────────────────
+// После #362 HandleLZ получает ПОЛНЫЙ текст команды с префиксом. Домен-ветки
+// выше вырезают префикс substring-ами с захардкоженными смещениями, общий
+// путь — нет: в Tavily уходило «/lz новинки GitHub» → выдача про LZ4/lz-string.
+// Снимает ведущие /lz или /лз и известную подкоманду диспетчера, если она
+// присутствует; возвращает смысловую часть. Идемпотентен: текст без префикса
+// возвращается как есть (подрезанные запросы из домен-веток проходят сквозь
+// повторную чистку без изменений) — поэтому безопасно применять и в
+// LZTavilySearch, и в LZExtractTopic, и в промпте общего пути.
+pattern LZStripCommand(text: String) -> String {
+  let t = lower(trim(text))
+  let mut rest = text
+  if starts_with(t, "/lz") or starts_with(t, "/лз") then {
+    let rest = substring(text, 3.0, length(text))
+  }
+  let t2 = lower(trim(rest))
+  if t2 == "" then { return "" }
+  // первое слово rest — подкоманда диспетчера? (список = ветки HandleLZ выше)
+  // Составные «watch add» / «watch remove» — точное двухсловное имя, снимаются
+  // целиком, а не пословно.
+  let sp = index_of(t2, " ")
+  let mut first = t2
+  if sp > 0.0 then { let first = substring(t2, 0.0, sp) }
+  if starts_with(t2, "watch add") or starts_with(t2, "watch remove") then {
+    let first = "watch add"
+    if starts_with(t2, "watch remove") then { let first = "watch remove" }
+  }
+  let is_sub = (first == "politics") or (first == "economics") or (first == "economy") or (first == "event") or (first == "events") or (first == "geopolitics") or (first == "geopol") or (first == "tavily") or (first == "tg") or (first == "telegram") or (first == "digest") or (first == "hype") or (first == "disrupt") or (first == "inflection") or (first == "oob") or (first == "cross-domain") or (first == "watch") or (first == "watch add") or (first == "watch remove") or (first == "watchlist") or (first == "archive") or (first == "deep") or (first == "all") or (first == "score") or (first == "recalibrate") or (first == "leaked") or (first == "dark") or (first == "profile") or (first == "invest") or (first == "github")
+  if is_sub then {
+    if length(t2) > length(first) then {
+      let rest = substring(rest, length(first) + 1.0, length(rest))
+    } else {
+      let rest = ""
+    }
+  }
+  return trim(rest)
+}
+
 pattern HandleLZ(query: String, chat_id: String) -> String {
   let dept = "lz"
   let t = lower(query)
@@ -286,15 +324,21 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   }
 
   // ── Domain classification + enriched context ──
-  let domain = LZClassifyDomain(query)
-  let context = BuildLZContext(query, domain, chat_id)
+  // #427 A.1: во внешний поиск, в извлечение темы, в гейт ОСП и в промпт
+  // синтеза уходит чистый текст темы — не команда с префиксом. Случай
+  // из наряда: «/lz новинки GitHub» целиком уходил в Tavily → выдача
+  // про LZ4/lz-string.
+  let topic_query = LZStripCommand(query)
+  if topic_query == "" then { return disclaimer + "\nЗадай тему: /lz <тема> или /lz <подкоманда> <аргументы>." }
+  let domain = LZClassifyDomain(topic_query)
+  let context = BuildLZContext(topic_query, domain, chat_id)
 
   // Gate 5: ЕДИНСТВЕННЫЙ триггер пересылки в ОСП (#400 A.2): явный YES/NO-гейт
   // LЗGateOSPReferral сам делает fire-and-forget POST /osp/analyze и возвращает
   // "REFERRED..." / "PASS...". Генерирующий промпт больше НЕ просит модель
   // ставить префикс INVEST_REFERRAL (снят #400: модель решала без строгого
   // критерия — «новинки GitHub» улетали в ОСП, ответ ЛЗ выбрасывался).
-  let ref = LZGateOSPReferral(query)
+  let ref = LZGateOSPReferral(topic_query)
 
   // Для доменов, где важна свежесть (не «вечное» tech-знание) — добираем
   // живой веб-поиск перед синтезом, а не отдаём модель без данных.
@@ -304,9 +348,9 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   // при реальном запросе владельца). Живой поиск нужен всем пяти
   // доменам, не трём — «вечных» тем в LZ по определению нет, вся суть
   // отдела в свежести.
-  let live = "\n\n" + LZTavilySearch(query, chat_id)
+  let live = "\n\n" + LZTavilySearch(topic_query, chat_id)
 
-  let result = redact(to_string(TryVal(try call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать».", query + "\nContext: " + context + live))), "all")
+  let result = redact(to_string(TryVal(try call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать».", topic_query + "\nContext: " + context + live))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // ── #400 A.1: пересылка — ДОПОЛНЕНИЕ, не замена ──────────────────────
   // Ответ ЛЗ отдаётся владельцу ВСЕГДА; при срабатывании гейта (единственный
@@ -338,11 +382,20 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
 // "live" — отдельная переменная (Tavily), не часть context, добавлена
 // напрямую в промпт модели, проверяем отдельно.
 pattern LZSourcesFooter(context: String, live: String) -> String {
+  // #427 A.2: подвал показывает источник, только когда его данные реально
+  // вошли в ответ, а не когда секция формально присутствует. Маркеры-ошибки
+  // и отказы (сеть недоступна, ключ не задан, пустая выдача, «не по теме»,
+  // провайдеры молчат) — не источники.
+  let live_trim = trim(live)
   let mut lines = ""
-  if trim(live) != "" then {
+  if live_trim != "" and starts_with(live_trim, "[tavily:") == false and starts_with(live_trim, "[оценка недоступна") == false then {
     let lines = lines + "\n· Живой веб-поиск (Tavily)"
   }
-  if contains(context, "APIscan:") and contains(context, "не нашёл релевантных результатов") == false then {
+  // «APIscan (тема: …):» — маркер успешного скана (подстрока «APIscan:»
+  // в нём отсутствует — предсуществующий дефект: при находке источник
+  // не показывался вовсе); «APIscan: …» без «(тема» — только отказы,
+  // их отсекают условия ниже.
+  if (contains(context, "APIscan (тема:") or contains(context, "APIscan:")) and contains(context, "не нашёл релевантных результатов") == false and contains(context, "не удалось выделить английские ключевые слова") == false then {
     let lines = lines + "\n· Детерминированный скан (arXiv/HN/GitHub)"
   }
   if contains(context, "LZ Daily (GitHub)") then {
@@ -477,8 +530,11 @@ pattern LZContainsCyrillic(s: String) -> Bool {
 // Fallback — усечённый исходный запрос: источники честно вернут пусто и
 // LZApiScanContext отразит это, молчаливой подмены данных нет.
 pattern LZExtractTopic(query: String) -> String {
-  let result = redact(to_string(TryVal(try call_llm("Extract 2-4 English search keywords from the query below for arXiv/HackerNews/GitHub search. Reply with the keywords separated by spaces, nothing else. Query: " + substring(query, 0.0, 400.0)))), "all")
-  if to_string(result) == "()" then { return substring(query, 0.0, 120.0) }
+  // #427 A.1: во внешний скан уходит чистая тема — команда-префикс
+  // здесь мусор (выдача по «/lz …» шла про библиотеки сжатия).
+  let q = LZStripCommand(query)
+  let result = redact(to_string(TryVal(try call_llm("Extract 2-4 English search keywords from the query below for arXiv/HackerNews/GitHub search. Reply with the keywords separated by spaces, nothing else. Query: " + substring(q, 0.0, 400.0)))), "all")
+  if to_string(result) == "()" then { return substring(q, 0.0, 120.0) }
   return substring(result, 0.0, 120.0)
 }
 
@@ -657,9 +713,22 @@ pattern LZTavilySearch(query: String, chat_id: String) -> String {
   // office#354: транспорт вынесен в общий паттерн TavilySearch (utils.mlog),
   // прямой вызов api.tavily.com — единственный путь к Tavily на проект.
   // Достижимость сети честно проверяется /lz/diagnose.
-  let response = TavilySearch(query, "lz")
+  // #427 A.1: внутри тоже чистим префикс — паттерн зовётся и из домен-веток
+  // (там уже чистый запрос — идемпотентная чистка без изменений), и из
+  // общего пути. В Tavily уходит смысловая часть, не команда.
+  let q = LZStripCommand(query)
+  if q == "" then { return "[tavily: пустой запрос после снятия префикса — тема не задана]" }
+  let response = TavilySearch(q, "lz")
   if response == "()" then { return "[tavily: сеть недоступна или ключ не задан — см. /lz/diagnose]" }
-  let analysis = redact(to_string(TryVal(try call_llm("Synthesize Tavily results for ЛЗ intelligence: extract key findings, disruption signals, inflection indicators, cross-domain opportunities.", "Запрос: " + query + "\nРезультаты: " + to_string(response)))), "all")
+  // #427 A.2: пустая выдача — не источник, подвал её не покажет (маркер-строка).
+  let parsed_resp = TryVal(try parse_json(response))
+  if to_string(parsed_resp) != "()" then {
+    let results = json_get(parsed_resp, "results")
+    if to_string(results) == "()" or length(results) == 0.0 then {
+      return "[tavily: релевантных результатов нет]"
+    }
+  }
+  let analysis = redact(to_string(TryVal(try call_llm("Synthesize Tavily results for ЛЗ intelligence: extract key findings, disruption signals, inflection indicators, cross-domain opportunities. Если результаты не относятся к запросу — верни ровно одну строку [tavily: результаты не по теме запроса] без другого текста.", "Запрос: " + q + "\nРезультаты: " + to_string(response)))), "all")
   if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
   let _ = TryVal(try db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, ?)", ["tavily", "tavily", 5]))
   return analysis
