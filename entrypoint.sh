@@ -202,6 +202,31 @@ else
   fi
 fi
 mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs" "${DATABASE_PATH:-./data}"
+
+# ── №428 A.5: KV-стор Metalogos на постоянный диск ──────────────────────────
+# Декларация memory persist в app.mlog допускает только строковый литерал
+# ("data/metalogos_kv.db"): env-выражение грамматикой не разрешено (проверено
+# прогоном 0.27.0), отдельной env-переменной пути kv-стора у бинаря нет.
+# На проде data/ — эфемерный слой контейнера: стор нативных расписаний
+# (ключ cron_jobs) и KV-память терялись при каждом деплое/рестарте.
+# DATABASE_PATH задаёт постоянный диск (Render: /var/data) — направляем
+# файл туда симлинком; существующий эфемерный файл переносится разово.
+KV_DISK_PATH="${DATABASE_PATH:-}/metalogos_kv.db"
+if [ -n "${DATABASE_PATH:-}" ] && [ "$DATABASE_PATH" != "./data" ]; then
+  if [ -f "data/metalogos_kv.db" ] && [ ! -L "data/metalogos_kv.db" ] && [ ! -e "$KV_DISK_PATH" ]; then
+    if mv data/metalogos_kv.db "$KV_DISK_PATH" 2>/dev/null; then
+      echo "KV store migrated: data/metalogos_kv.db -> $KV_DISK_PATH"
+    fi
+  fi
+  if [ ! -e "data/metalogos_kv.db" ]; then
+    if ln -s "$KV_DISK_PATH" data/metalogos_kv.db 2>/dev/null; then
+      echo "KV store: data/metalogos_kv.db -> $KV_DISK_PATH (persistent disk)"
+    fi
+  fi
+  if [ ! -e "data/metalogos_kv.db" ]; then
+    echo "WARNING: KV store symlink was not created — native cron state stays ephemeral"
+  fi
+fi
 # naryad-361: каталог артефактов Визуала — html_to_pdf пишет туда относительными
 # путями (visuals/*.pdf); без mkdir запись падала ENOENT в рантайме
 mkdir -p visuals
@@ -239,14 +264,23 @@ if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
     # Секрет только в URL внутреннего curl, в лог не печатаем.
     # №426: -w добавляет HTTP-код отдельной строкой — прежнее «no answer»
     # сливало 403/404/conn-refused/таймаут (бут 2026-09-23T07:29Z: причина
-    # из лога не видна). Тело не-2xx в отчёт не попадает (2*-фильтр).
+    # из лога не видна). С №428 тело не-2xx печатается в лог (причина отказа),
+    # в отчёт не попадает — отчётный путь ждёт только 2xx.
     BOOT_RAW=$(curl -s --max-time 90 -G "http://127.0.0.1:10001/schedules/bootstrap" --data-urlencode "secret=${CRON_SECRET}" -w $'\n%{http_code}' 2>/dev/null || true)
     BOOT_CODE="${BOOT_RAW##*$'\n'}"
     BOOT_REPORT="${BOOT_RAW%$'\n'*}"
     case "$BOOT_CODE" in
       2*) : ;;
       000|"") BOOT_CODE="conn-fail"; BOOT_REPORT="" ;;
-      *) BOOT_REPORT="" ;;
+      *)
+        # №428 A.2: тело не-2xx печатаем в бут-лог — иначе причина отказа
+        # не устанавливается (бут 2026-09-29: три попытки 403 без причины).
+        # Роут /schedules/bootstrap отвечает литералами cron_key_unset /
+        # key_mismatch — значение секрета в теле не присутствует.
+        # В BOOT_REPORT не возвращаем: отчётный путь ниже ждёт только 2xx.
+        echo "  bootstrap attempt ${BOOT_ATTEMPT}: HTTP ${BOOT_CODE} body: ${BOOT_REPORT}"
+        BOOT_REPORT=""
+        ;;
     esac
     if [ -n "$BOOT_REPORT" ]; then break; fi
     if [ "$BOOT_ATTEMPT" != "3" ]; then
