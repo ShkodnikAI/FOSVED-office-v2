@@ -117,7 +117,7 @@ CRON_SECRET (засветился на скрине → ротация посл�
   тумблер включения:** Control Check `/cron/control` (пауза с 05.08, HTTP error),
   Evening Summary `/cron/evening` (с 05.08), Night Cycle `/cron/night` (с 06.08),
   Weekly Digest `/cron/weekly` (с 10.08, понедельники).
-- News Collect в списке больше нет — вопрос снят.
+- News Collect снят с внешнего крона при переносе расписаний; наряд #424 (2026-09-29) вернул сбор как нативный слот `collect-news` в реестре `dept/schedules.mlog` — ленты в `proxy/news.py` есть и проверены вживую.
 - **Лимит числа задач (free)** → консолидация (#280): Night Cycle НЕ создавать заново,
   а редактировать: URL → `/cron/night-tick` (`0 2 * * *`) — диспетчер сам обходит
   `/cron/backup` → `/cron/indicator-reminders` → `/cron/shop-tick` →
@@ -130,7 +130,9 @@ CRON_SECRET (засветился на скрине → ротация посл�
   без трафика, холодный старт роняет ночные задачи).
 - **Не создавать:** Reminders — тикает внутренним шедулером mlog-serve (5s interval);
   tool-output-cleanup — ретеншн FO-016 не реализован как endpoint (отдельная мелочь);
-  narad-tick (FO-047) — диспетчер не реализован; collect-news — нет источников.
+  narad-tick (FO-047) — диспетчер не реализован.
+  Устаревшее утверждение о том, что у collect-news источников нет, снято
+  нарядом #424: источников 20 (15 RU/EN + 5 news_by), слот в нативном кроне.
 - После настройки: обновить эту секцию фактами (имена задач, расписания) — правило дрейфа.
 
 ## Native cron Metalogos (наряд №419, 2026-09-21) — целевая архитектура
@@ -167,6 +169,7 @@ create/remove остаются mlog-internal (админ-домен).
 | night-tick | `0 5 * * *` | NightTickSlot (цепочка backup → indicators → shop → evals → night) | «Night Cycle»/night-tick |
 | weekly-digest | `0 9 * * 1` | WeeklySlot | «Weekly Digest» (понедельники) |
 | lz-daily | `10 9 * * *` | LzDailySlot | cron-job.org «LZ daily» |
+| collect-news | `0 */6 * * *` | CollectNewsSlot (HTTP `/cron/collect-news`, наряд #424: RSS 20 лент + GDELT + Tavily) | — (внешний аналог снят при переносе) |
 | keep-alive | `*/10 * * * *` | GH Actions **Metalogos-** `.github/workflows/waker.yml` (№420; переезд FO-051, 2026-09-23) | «Keep Alive» |
 
 **HTTP-фолбэк (п.4 наряда):** все `/cron/*`-роуты остаются ручным/аварийным
