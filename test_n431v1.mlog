@@ -1,0 +1,54 @@
+// Живой тест наряда #431 — AdminLogDigest: не-ошибочные статусы не считаются
+// ошибками; у отказов видна причина; ждущие снабженца — отдельной строкой.
+// Запуск: rm -rf /tmp/n431-test && mkdir -p /tmp/n431-test && ./bin/mlog run test_n431v1.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/n431-test/admin.db" }
+import dept/utils
+import dept/admin
+
+pattern InitTest(input: String) -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS trace_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS error_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT (datetime('now')), source TEXT, dept TEXT, kind TEXT, detail TEXT)")
+  let _ = db_execute("DELETE FROM audit_log")
+  let _ = db_execute("DELETE FROM trace_log")
+  let _ = db_execute("DELETE FROM error_log")
+  // нормальная очередь снабженца: pending/dispatched — НЕ ошибки
+  let _ = db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('shop_supply', 'shop', 'shop', 'enqueue task=T1 platform=21vek product=9 query=чайник', 'pending')")
+  let _ = db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('shop_supply', 'shop', 'shop', 'enqueue task=T2 platform=tomas product=11 query=пылесос', 'pending')")
+  let _ = db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('shop_supply', 'shop', 'shop', 'dispatch task=T1 platform=21vek product=9', 'dispatched')")
+  // исторический статус: ждут снабженца
+  let _ = db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('shop_fetch', 'shop', 'shop', 'platform=tmby purpose=refresh', 'collector_not_implemented')")
+  // настоящий отказ с деталью
+  let _ = db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('shop_fetch', 'shop', 'shop', 'platform=wb purpose=search:чайник xiaomi', 'refused')")
+  // нормальные ok — не попадают никуда
+  let _ = db_execute("INSERT INTO audit_log (action, actor, dept, details, status) VALUES ('shop_fetch', 'shop', 'shop', 'platform=onliner purpose=search:чайник', 'ok')")
+  return "seeded"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(input: String) -> String {
+  let _ = InitTest(input)
+  let digest = AdminLogDigest("24")
+  let mut out = ""
+  let out = out + _Mark("pending_не_ошибка", contains(digest, "status=pending") == false)
+  let out = out + _Mark("dispatched_не_ошибка", contains(digest, "status=dispatched") == false)
+  let out = out + _Mark("старый_заголовок_ушёл", contains(digest, "Нестатусные действия") == false)
+  let out = out + _Mark("отказ_refused_виден", contains(digest, "status=refused"))
+  let out = out + _Mark("деталь_отказа_видна", contains(digest, "platform=wb purpose=search:чайник xiaomi"))
+  let out = out + _Mark("ждут_снабженца_строка", contains(digest, "Ждут снабженца: 4"))
+  let out = out + _Mark("ok_не_в_отказах", contains(digest, "status=ok") == false)
+  let out = out + _Mark("collector_not_implemented_не_ошибка", contains(digest, "status=collector_not_implemented") == false)
+  let fails = split(out, "FAILED ")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS ")) - 1.0) + " проверок):\n" + out + "\n---\n" + digest }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ":\n" + out + "\n---\n" + digest
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
