@@ -1,0 +1,60 @@
+// Живой тест наряда #427 (A.1 чистка + A.2 подвал) — паттерны из dept/lz.mlog.
+// Запуск: rm -rf /tmp/n427-test && mkdir -p /tmp/n427-test && ./bin/mlog run tests/test_n427v1.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/n427-test/lz.db" }
+import dept/utils
+import dept/lz
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return "PASS " + name + "\n" }
+  return "FAILED " + name + "\n"
+}
+
+pattern Main1(input: String) -> String {
+  let mut out = ""
+  // ── A.1: LZStripCommand ──
+  let r1 = LZStripCommand("/lz новинки GitHub")
+  let out = out + _Mark("a1_общий_путь", r1 == "новинки GitHub")
+  let r2 = LZStripCommand("/лз новые батареи")
+  let out = out + _Mark("a1_рус_префикс", r2 == "новые батареи")
+  let r3 = LZStripCommand("/lz github 3")
+  let out = out + _Mark("a1_подкоманда_и_аргумент", r3 == "3")
+  let r4 = LZStripCommand("/lz politics бюджет ЕС")
+  let out = out + _Mark("a1_домен_подкоманда", r4 == "бюджет ЕС")
+  let r5 = LZStripCommand("прорывные технологии в автомобилестроении")
+  let out = out + _Mark("a1_без_префикса_как_есть", r5 == "прорывные технологии в автомобилестроении")
+  let r6 = LZStripCommand("/lz  ")
+  let out = out + _Mark("a1_пустая_тема", r6 == "")
+  let r7 = LZStripCommand(LZStripCommand("/lz github 3"))
+  let out = out + _Mark("a1_идемпотентность", r7 == "3")
+  let r8 = LZStripCommand("/lz watch add нейросети")
+  let out = out + _Mark("a1_составная_подкоманда", r8 == "нейросети")
+  // слово «не-подкоманда» не снимается
+  let r9 = LZStripCommand("/lz снабжение фронтовая логистика")
+  let out = out + _Mark("a1_смысловая_часть_цела", r9 == "снабжение фронтовая логистика")
+  // ── A.2: LZSourcesFooter ──
+  let f1 = LZSourcesFooter("KB: x", "\n\nреальный синтез Tavily")
+  let out = out + _Mark("a2_tavily_показан", contains(f1, "Живой веб-поиск (Tavily)"))
+  let f2 = LZSourcesFooter("KB: x", "\n\n[tavily: сеть недоступна или ключ не задан — см. /lz/diagnose]")
+  let out = out + _Mark("a2_сеть_недоступна_скрыт", contains(f2, "Tavily") == false)
+  let f3 = LZSourcesFooter("KB: x", "\n\n[tavily: релевантных результатов нет]")
+  let out = out + _Mark("a2_пустая_выдача_скрыт", contains(f3, "Tavily") == false)
+  let f4 = LZSourcesFooter("KB: x", "\n\n[tavily: результаты не по теме запроса]")
+  let out = out + _Mark("a2_нерелевант_скрыт", contains(f4, "Tavily") == false)
+  let f5 = LZSourcesFooter("KB: x", "\n\n[оценка недоступна — провайдеры модели не ответили]")
+  let out = out + _Mark("a2_провайдеры_молчат_скрыт", contains(f5, "Tavily") == false)
+  let f6 = LZSourcesFooter("APIscan (тема: robotics):\nнайдено", "\n\n[tavily: результаты не по теме запроса]")
+  let b6a = contains(f6, "Детерминированный скан")
+  let b6b = contains(f6, "Tavily") == false
+  let out = out + _Mark("a2_apiscan_показан_tavily_скрыт", b6a and b6b)
+  let f7 = LZSourcesFooter("APIscan: детерминированный скан (arXiv/HN/GitHub) не нашёл релевантных результатов по теме «x»", "")
+  let out = out + _Mark("a2_apiscan_пусто_скрыт", contains(f7, "Источники") == false)
+  let fails = split(out, "FAILED ")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "PASS ")) - 1.0) + " проверок):\n" + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ":\n" + out
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
