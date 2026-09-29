@@ -305,12 +305,23 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   // маркер вырезан из reply до REMIND-чека, авто-памяти и отправки
   let shop_stripped = YanaCheckShop(reply, chat_id)
   let mut reply = reply
+  let mut shop_handled = 0.0
   if shop_stripped != "" then {
     // #409 A.2: системное подтверждение («Собираю досье…») отправлено ДО
     // сбора, досье ушло карточкой следом — текст Яны после результата был бы
     // ДУБЛЕМ подтверждения («запускаю подбор» после готового досье).
     // Ровно два сообщения владельцу: подтверждение, затем досье.
+    // #430 A.1: shop_stripped — остаток текста ИЛИ маркер SHOP_HANDLED
+    // (досье-поток уже отчитался владельцу, текста нет). В обоих случаях
+    // ответ Яны не формируется: и дубль, и пустое сообщение с футером
+    // («Яна» + модель/токены без текста) владельцу не уходят.
     let reply = ""
+    let shop_handled = 1.0
+  }
+  if shop_handled == 1.0 then {
+    // #430 A.1: ранний выход до RecordAssistantMessage/AutoMemorize/футера —
+    // пустой ответ с модельным футером не записывается и не отправляется.
+    return ""
   }
   // F-3: check for [REMIND: ...] marker after delegation check
   let remind_result = YanaCheckRemind(reply, chat_id)
@@ -453,22 +464,32 @@ pattern YanaCheckShop(reply: String, chat_id: String) -> String {
   let resp = TryVal(try http_post("http://127.0.0.1:4000/shop/product", json_encode({query: shop_query, chat_id: chat_id}), "application/json", 90.0))
   if to_string(resp) == "()" then {
     let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость недоступна (llm_proxy не отвечает).")
-    return ""
+    // #430 A.1: отказ уже отправлен — поток отработан, текста нет
+    return "SHOP_HANDLED"
   }
   let parsed = TryVal(try parse_json(resp))
   if to_string(parsed) == "()" then {
     let _ = SendTelegramReply(chat_id, "ОТКАЗ: shop-плоскость вернула нечитаемый ответ.")
-    return ""
+    // #430 A.1: отказ уже отправлен — поток отработан, текста нет
+    return "SHOP_HANDLED"
   }
   let ok = redact(to_string(json_get(parsed, "ok", "")), "all")
   if ok != "True" and ok != "true" then {
     let _ = redact(SendTelegramReply(chat_id, "ОТКАЗ: досье не собрано: " + to_string(json_get(parsed, "error", "нет деталей"))), "all")
-    return ""
+    // #430 A.1: отказ уже отправлен владельцу — поток отработан, текста нет
+    return "SHOP_HANDLED"
   }
   // маркер вырезаем из видимого текста Яны
   let head = substring(reply, 0.0, marker_start)
   let rest = substring(tail, marker_end_rel + 1.0, length(tail))
-  return trim(head + " " + rest)
+  let remainder = trim(head + " " + rest)
+  // #430 A.1: модель ответила только маркером — остаток пуст. Возврат не
+  // пустой строки-флага: вызывающий обязан отличить «досье-поток отработал,
+  // текста нет» (ответ не отправлять вовсе) от «маркера не было» (диалог).
+  // Факт наряда: пустой остаток с футером уходил владельцу пустым сообщением
+  // «Яна + модель/токены».
+  if remainder == "" then { return "SHOP_HANDLED" }
+  return remainder
 }
 
 // ── Natural Reminder Marker (F-3) ──────────────────────────────────────
