@@ -165,9 +165,14 @@ pattern InitDB() -> String {
   // таблица существует в sqlite_master — разовый ALTER-апгрейд + копия данных
   // (INSERT OR IGNORE гасит дубли по UNIQUE update_id) + DROP; после первого прогона
   // — no-op. Ретро-читателей у старого имени нет (grep по дереву, #252) — VIEW не нужна.
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:lz_telegram_posts", 3600.0, "once"), "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT"))
+  // #428 A.4: весь блок — только если старая таблица существует. Раньше
+  // ALTER шёл безусловно и ловил no such table при каждом старте, а гейт
+  // сравнивал сериализацию пустого выборка с литеральной парой скобок —
+  // на 0.27.0 пустой выбор сериализуется иначе, гейт всегда был истинным,
+  // и INSERT/DROP добавляли ещё две caught-error строки в бут-лог.
   let lz_old_posts = query("SELECT name FROM sqlite_master WHERE type='table' AND name='lz_telegram_posts'", [])
-  if to_string(lz_old_posts) != "()" then {
+  if length(lz_old_posts) > 0.0 then {
+    let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:lz_telegram_posts", 3600.0, "once"), "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT"))
     let _ = TryVal(try db_execute("INSERT OR IGNORE INTO lz_github_updates (update_id, channel_id, channel_name, text, date, scanned_at) SELECT update_id, channel_id, channel_name, text, date, scanned_at FROM lz_telegram_posts"))
     let _ = TryVal(try db_execute_with_grant(grant_issue("db:drop:lz_telegram_posts", 3600.0, "once"), "DROP TABLE lz_telegram_posts"))
   }
@@ -391,7 +396,14 @@ pattern InitDB() -> String {
   let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN test_log TEXT"))
   let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN test_status TEXT"))
   let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN testing_at TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))"))
+  // #428 A.3: колонка без выражения по умолчанию. Форма с выражением в
+  // DEFAULT отвергается частью движков SQLite на ALTER (прод-бут 2026-09-29:
+  // non-constant default) — у базы на диске колонки могло не быть, а
+  // dept/admin.mlog пишет updated_at при создании и смене статуса наряда.
+  // Заполнение — отдельным идемпотентным UPDATE (при каждом старте дёшево:
+  // после первого прогона WHERE updated_at IS NULL не находит строк).
+  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN updated_at TEXT"))
+  let _ = TryVal(try db_execute("UPDATE narads SET updated_at = datetime('now') WHERE updated_at IS NULL"))
   let _ = TryVal(try db_execute("ALTER TABLE training_sessions ADD COLUMN checklist_progress TEXT"))
   let _ = TryVal(try db_execute("ALTER TABLE training_sessions ADD COLUMN debrief_notes TEXT"))
   let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN active TEXT"))
@@ -2185,8 +2197,13 @@ mlogserver {
   route "/schedules/bootstrap" method=GET {
     let secret = redact(query_param("secret"), "all")
     let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    // #428 A.1: две разные причины отказа были неразличимы в бут-логе
+    // (одинаковое 403 Forbidden). Код причины — литерал, значение секрета
+    // в ответ не попадает ни в каком виде. Имена кодов — без слова secret:
+    // аудитор 0.27.0 помечает respond-литералы со словом secret как
+    // секретоподобные (sink clearance violation), проверено бисекцией.
+    if cron_secret == "" then { return respond("403 cron_key_unset") }
+    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 key_mismatch") }
     let _ = InitDB()
     let report = BootstrapSchedules()
     return respond("200 " + report)
