@@ -37,7 +37,8 @@ def test_humanize_reasons_human_words():
     assert "не собиралось" in sd.humanize_source_status(None)
     assert "предложений" in sd.humanize_source_status({"ok": True, "offers": 7})
     assert sd.humanize_source_status({"ok": True}) == "ok"
-    assert "источник выключен" in sd.humanize_source_status({"ok": False, "kind": "source_disabled"})
+    # формулировку source_disabled обновил #429 A.2: «выключено в настройках»
+    assert "выключено в настройках" in sd.humanize_source_status({"ok": False, "kind": "source_disabled"})
     assert "антибот" in sd.humanize_source_status({"ok": False, "kind": "antibot_blocked"})
     assert "HTTP 403" in sd.humanize_source_status(
         {"ok": False, "kind": "transport", "error": "HTTP 403 Forbidden"})

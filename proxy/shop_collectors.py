@@ -620,6 +620,55 @@ def _onliner_schemas_cache_write(data):
     _setting_set(ONLINER_SCHEMAS_KEY, json.dumps(data, ensure_ascii=False))
 
 
+def onliner_warm_catalog(max_pages=None):
+    """#429 A.3: фоновый прогрев каталога схем Onliner.
+
+    Догружает словарь /schemas до complete — до ONLINER_SCHEMAS_PAGE_CAP
+    страниц за вызов. Запрос владельца больше не расходует бюджет дозагрузки
+    (onliner_resolve_category при неполном каталоге читает только накопленное
+    + карту синонимов). Кэш персистный (system_settings — постоянный диск),
+    TTL 7 дней после полной выгрузки: свежий полный каталог — мгновенный
+    no-op (0 сетевых вызовов). Вызывается из entrypoint.sh (фон при старте)
+    и слота onliner-warm (dept/schedules.mlog).
+    """
+    cache = _onliner_schemas_cache_read() or {"schemas": [], "next_page": 1, "complete": False, "ts": 0}
+    schemas = [s for s in cache.get("schemas") or []
+               if isinstance(s, dict) and s.get("key")]
+    if cache.get("complete") and (time.time() - (cache.get("ts") or 0)) < ONLINER_SCHEMAS_TTL:
+        return {"ok": True, "complete": True, "fresh": True,
+                "total_schemas": len(schemas), "pages_fetched": 0, "added": 0}
+    budget = max_pages or ONLINER_SCHEMAS_PAGE_CAP
+    page = cache.get("next_page") or 1
+    known = {s["key"] for s in schemas}
+    added = 0
+    fetched = 0
+    while page <= ONLINER_SCHEMAS_PAGE_CAP and budget > 0:
+        r = FETCH_JSON_FN("fetch_json", {"url": ONLINER_SCHEMAS_URL.format(n=page)})
+        if not r.get("ok"):
+            log.warning("onliner warm: /schemas стр.%s не получена: %s", page, r.get("error"))
+            break
+        chunk = ((r.get("data") or {}).get("schemas")) or []
+        for s in chunk:
+            if isinstance(s, dict) and s.get("key") and s["key"] not in known:
+                known.add(s["key"])
+                schemas.append(s)
+                added += 1
+        fetched += 1
+        page += 1
+        budget -= 1
+        if not chunk:
+            cache["complete"] = True
+            break
+    cache["schemas"] = schemas
+    cache["next_page"] = page
+    if fetched or cache.get("complete"):
+        cache["ts"] = time.time()
+        _onliner_schemas_cache_write(cache)
+    return {"ok": True, "complete": bool(cache.get("complete")), "fresh": False,
+            "total_schemas": len(schemas), "pages_fetched": fetched,
+            "added": added, "next_page": page}
+
+
 def onliner_resolve_category(query, max_pages=None):
     """Слаг категории Onliner для произвольного запроса (None — не нашли).
 

@@ -265,6 +265,18 @@ if [ "$MLOG_BIN" = "$MLOG_CANDIDATE" ] && [ -n "$CRON_SECRET" ]; then
   fi
 fi
 
+# ── #429 A.3: фоновый прогрев каталога схем Onliner ──────────────────────
+# Дозагрузка словаря /schemas до complete (худший случай ~80×3с ≈ 240с);
+# свежий полный кэш — мгновенный no-op (TTL 7 дней). Фон (nohup) — бут
+# не ждёт; секрет в URL внутреннего запроса, в лог не печатаем (№425).
+# Регулярный пере-прогрев — слот onliner-warm (dept/schedules.mlog,
+# включается владельцем).
+if [ -n "$CRON_SECRET" ]; then
+  nohup curl -s --max-time 300 -G "http://127.0.0.1:4000/cron/onliner-warm" \
+    --data-urlencode "secret=${CRON_SECRET}" >/dev/null 2>&1 &
+  echo "Onliner catalog warm-up started in background (#429 A.3)"
+fi
+
 echo "--- Version check ---"
 # №422: /version за RequireInternalAuth — без token-параметра роут честно отвечает
 # 401 и проверка всегда падала («version endpoint not available» в бут-логе).
