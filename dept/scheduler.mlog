@@ -417,6 +417,22 @@ pattern LzDailySlot() -> String {
   return "lz-daily ok"
 }
 
+// Наряд #424: регулярный сбор новостей в news_cache — RSS (20 лент) +
+// GDELT + Tavily + обогащение полнотекстом. По образцу NightTickSlot:
+// секрет в query (env CRON_SECRET, нативный файр — доверенный контекст,
+// №376), HTTP-фолбэк /cron/collect-news остаётся ручным/аварийным
+// триггером; дедуп окон №418 делает двойной запуск безопасным.
+// Ежечасный Telegram-отчёт владельцу НЕ шлём — только AuditLog.
+pattern CollectNewsSlot() -> String {
+  let _ = AuditLog("cron_collect_news", "system", "collect-news triggered by native cron")
+  let qs = "?secret=" + env("CRON_SECRET")
+  let r = redact(to_string(TryVal(try http_get("http://127.0.0.1:4000/cron/collect-news" + qs, 120.0))), "all")
+  let report = "collect-news"
+  if to_string(r) == "()" then { let report = report + " FAIL" } else { let report = report + " ok: " + r }
+  let _ = AuditLog("cron_collect_news", "system", report)
+  return report
+}
+
 pattern ShopTickSlot() -> String {
   if env("SHOP_ENABLED") != "1" then { return "shop skip (SHOP_ENABLED != 1)" }
   let _ = AuditLog("cron_shop_tick", "shop", "shop-tick triggered by native cron")

@@ -30,13 +30,12 @@ RSS_FEEDS = {
     "rbk": {"url": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss", "category": "news_ru", "language": "ru", "name": "РБК"},
     "interfax": {"url": "https://www.interfax.ru/rss.asp", "category": "news_ru", "language": "ru", "name": "Интерфакс"},
     "kommersant": {"url": "https://www.kommersant.ru/RSS/news.xml", "category": "news_ru", "language": "ru", "name": "Коммерсантъ"},
-    # NB: Reuters закрыл публичные RSS-ленты в районе 2020 года (по памяти
-    # обучения, не проверено вживую — сеть песочницы не пропускает внешние
-    # хосты). feedparser.parse() на мёртвом URL обычно не бросает исключение,
-    # а тихо отдаёт пустой feed.entries — try выше это не поймает, значит
-    # источник мог годами не наполнять news_cache незаметно. Проверить
-    # реальным запросом после деплоя; если мёртв — заменить, не гадая тут.
-    "reuters": {"url": "https://feeds.reuters.com/reuters/topNews", "category": "news_en", "language": "en", "name": "Reuters"},
+    # NB: Reuters закрыл публичные RSS-ленты (подозрение AGENTS §7 подтверждено
+    # живой проверкой нарядом #424, 2026-09-29: feeds.reuters.com не отвечает,
+    # ConnectionError) — заменена на The Guardian World. Живая проверка всех
+    # лент и замены — в отчёте наряда #424; arXiv-ленты живы (1446/621 записей,
+    # ложная тревога чекера с brotli — feedparser видит обе).
+    "guardian_world": {"url": "https://www.theguardian.com/world/rss", "category": "news_en", "language": "en", "name": "The Guardian World"},
     "bbc": {"url": "http://feeds.bbci.co.uk/news/world/rss.xml", "category": "news_en", "language": "en", "name": "BBC World"},
     "aljazeera": {"url": "https://www.aljazeera.com/xml/rss/all.xml", "category": "news_en", "language": "en", "name": "Al Jazeera"},
     "techcrunch": {"url": "https://techcrunch.com/feed/", "category": "tech", "language": "en", "name": "TechCrunch"},
@@ -46,6 +45,17 @@ RSS_FEEDS = {
     "arxiv_cl": {"url": "https://rss.arxiv.org/rss/cs.CL", "category": "science", "language": "en", "name": "arXiv NLP"},
     "investing_ru": {"url": "https://ru.investing.com/rss/news.rss", "category": "finance", "language": "ru", "name": "Investing.com RU"},
     "foreignaffairs": {"url": "https://www.foreignaffairs.com/rss.xml", "category": "geopolitics", "language": "en", "name": "Foreign Affairs"},
+    # Наряд #424 A.2: белорусские источники (news_by), проверены вживую
+    # 2026-09-29 — все отдают 200 и свежие записи (метод и таблица — в отчёте
+    # наряда). Баланс: государственные (БелТА, Sputnik, Минск-Новости) и
+    # независимые (Zerkalo, Onliner). Отклонённые кандидаты: sb.by (403
+    # антибот), charter97.org (403), belsat.eu (connection reset), euroradio
+    # (404), naviny.by (timeout), tvr.by (timeout) — в отчёте наряда.
+    "belta": {"url": "https://www.belta.by/rss", "category": "news_by", "language": "ru", "name": "БелТА"},
+    "sputnik_by": {"url": "https://sputnik.by/export/rss2/archive/index.xml", "category": "news_by", "language": "ru", "name": "Sputnik Беларусь"},
+    "minsknews": {"url": "https://minsknews.by/feed/", "category": "news_by", "language": "ru", "name": "Минск-Новости"},
+    "zerkalo": {"url": "https://news.zerkalo.io/rss/all.rss", "category": "news_by", "language": "ru", "name": "Зеркало"},
+    "onliner": {"url": "https://people.onliner.by/feed", "category": "news_by", "language": "ru", "name": "Onlíner"},
 }
 
 GDELT_BASE = "https://api.gdeltproject.org/api/v2"
@@ -60,7 +70,9 @@ DEPT_QUERIES = {
 }
 
 DEPT_CATEGORIES = {
-    "osp": ("news_ru", "geopolitics", "news_en"),
+    # news_by добавлена нарядом #424: белорусская повестка — событийное ядро
+    # ОСП (smoke-кейс 2: /news/fresh по Беларуси должен возвращать news_by).
+    "osp": ("news_ru", "geopolitics", "news_en", "news_by"),
     "lz": ("tech", "science"),
     "finance": ("finance",),
     "legal": ("geopolitics", "news_ru"),
