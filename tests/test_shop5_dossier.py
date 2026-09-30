@@ -180,25 +180,39 @@ def test_render_caption_html_links_limit(shop_db):
         assert "Полное досье" in caption
 
 
-def test_inline_buttons_valid_bot_api(shop_db):
+def test_inline_buttons_removed_n438(shop_db):
+    """#438 A.1: кнопки «Купить» убраны — build_inline_buttons — гвард,
+    громко падает вместо молчаливого возврата кнопок."""
     pid, _ = _seed_product()
     snap = sd.build_snapshot(pid)
-    markup = sd.build_inline_buttons(snap)
-    data = json.loads(markup)
-    buttons = data["inline_keyboard"][0]
-    assert 1 <= len(buttons) <= sd.MAX_BUTTONS + 1
-    for b in buttons:
-        assert len(b["text"]) <= 64
-        assert b["url"].startswith(("http://", "https://"))
-    # первая кнопка — лучший (дешевле всех) оффер
-    assert buttons[0]["url"] == snap["offers"][0]["url"]
+    with pytest.raises(NotImplementedError, match="#438"):
+        sd.build_inline_buttons(snap)
 
 
-def test_inline_buttons_empty_without_urls(shop_db):
-    pid, _ = _seed_product()
-    _query("UPDATE shop_offers SET url=''")
+def test_best_offer_image_by_verdict(shop_db):
+    """#438 A.3: фото берётся ТОЛЬКО у лучшего оффера (verdict
+    best_offer_id, иначе первый по сортировке) — фото не-лучшего
+    не показывается за него."""
+    pid, oids = _seed_product()
     snap = sd.build_snapshot(pid)
-    assert sd.build_inline_buttons(snap) is None
+    best_id = snap["verdict"].get("best_offer_id") or oids[0]
+    other = next(oid for oid in oids if oid != best_id)
+    # фото у НЕ-лучшего — не попадает в карточку
+    _query("UPDATE shop_offers SET image_url=? WHERE id=?",
+           ("https://imgproxy.onliner.by/wrong.jpg", other))
+    snap = sd.build_snapshot(pid)
+    assert sd.best_offer_image(snap) is None
+    # фото у лучшего — попадает
+    _query("UPDATE shop_offers SET image_url=? WHERE id=?",
+           ("https://imgproxy.onliner.by/best.jpg", best_id))
+    snap = sd.build_snapshot(pid)
+    assert sd.best_offer_image(snap) == "https://imgproxy.onliner.by/best.jpg"
+
+
+def test_best_offer_image_none_without_photo(shop_db):
+    pid, _ = _seed_product()
+    snap = sd.build_snapshot(pid)
+    assert sd.best_offer_image(snap) is None
 
 
 def test_render_poster_png_verified(shop_db):
@@ -332,7 +346,8 @@ def test_endpoint_dossier_json(shop_db, client):
     data = r.get_json()
     assert r.status_code == 200 and data["ok"] is True
     assert data["text"] and data["caption"] and data["html_url"]
-    assert data["reply_markup"] is not None
+    # #438 A.1: reply_markup убран из JSON — кнопок больше нет
+    assert "reply_markup" not in data
     assert "/shop/dossier/" in data["html_url"]
 
 
@@ -398,8 +413,8 @@ def test_endpoint_product_full_flow(shop_db, client, monkeypatch):
     data = r.get_json()
     assert data["ok"] is True and data["dossier_id"], data
     path, caption, markup = sent["photo"]
-    assert os.path.exists(path) and caption and markup
-    json.loads(markup)  # reply_markup валидный JSON
+    # #438 A.1: reply_markup не передаётся вовсе (None)
+    assert os.path.exists(path) and caption and markup is None
     # #409 A.1: РОВНО ОДНО сообщение с досье — карточка; отдельная
     # текстовая выжимка снята (на одну просьбу приходило 2-3 сообщения)
     assert sent["text"] is None and sent["photo"]

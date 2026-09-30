@@ -744,9 +744,14 @@ def collect_onliner(query, page=1):
     """Каталог Onliner — ЖИВАЯ форма (пробы 2026-09-24, наряд #327).
 
     products[].prices: price_min/price_max {amount, currency}, offers.count;
-    reviews: rating 0..50 + count. Слаг категории — динамически
+    reviews: rating 0..50 + count; photo: products[].images.header (#438 A.2,
+    снято с живого ответа 2026-09-30). Слаг категории — динамически
     (onliner_resolve_category); не нашли — честный no_category, не слаг
     наугад. Парсер оборонительный: расхождение формы → api_form_mismatch.
+
+    Правило для будущих сборщиков (21vek, Tomas.by, снабженец — #438 A.4):
+    image_url — обязательное поле оффера, ЕСЛИ площадка отдаёт фото;
+    нет фото — None, URL не выдумываем.
     """
     category = onliner_resolve_category(query)
     if not category:
@@ -791,6 +796,13 @@ def collect_onliner(query, page=1):
             "in_stock": 1 if offers_count else 0,
             "rating": rating,
             "reviews_count": int(_num(reviews.get("count")) or 0),
+            # #438 A.2: фото товара — products[].images.header, снято с живого
+            # ответа /search/iron 2026-09-30 (URL imgproxy.onliner.by); поле
+            # необязательное — нет photo, нет фото, не угадываем
+            "image_url": ((p.get("images") or {}).get("header")
+                          if isinstance(p.get("images"), dict)
+                          and str((p.get("images") or {}).get("header") or "")
+                          .startswith(("http://", "https://")) else None),
             "seller_name": None, "seller_platform_code": None,
             "seller_rating": None, "seller_deals": None, "seller_official": None,
         })
