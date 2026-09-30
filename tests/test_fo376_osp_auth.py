@@ -37,7 +37,7 @@ EXPECTED_ROWS = [
     ("none", "mismatch [HTTP 403]"),
     ("selfcheck", "selfcheck-match [HTTP 200]"),
 ]
-BINS = ["bin/mlog", "bin/mlog-025"]
+BINS = ["bin/mlog", "bin/mlog-027"]
 
 
 def _probe_output() -> str:

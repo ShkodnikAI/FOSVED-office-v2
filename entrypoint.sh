@@ -201,6 +201,18 @@ else
     MLOG_BIN="$MLOG_LEGACY"
   fi
 fi
+# ── #399 A.2: фолбэк-патч фичи Metalogos-#757 ────────────────────────────────
+# app.mlog несёт llm { max_tokens: 8192 } и SendReport вызывает
+# llm_last_finish_reason() — обе фичи понимает ТОЛЬКО бинарь 0.27.1
+# (проверено пробами: 0.20/0.25/0.27.0 дают parse-ошибку "expected
+# llm_providers, COMMA, or RBRACE" / "undefined: function"). Фолбэк-ветка
+# (кандидат не прошёл пробу — редкий crash-сценарий) служит 0.20, поэтому
+# вырезает фичу из serve-копии; граница — до вывода 0.20 из ротации (ADR-0009).
+if [ "$MLOG_BIN" = "$MLOG_LEGACY" ]; then
+  sed -i '/max_tokens: 8192,/d' "$MLOG_SERVE_FILE"
+  sed -i 's/llm_last_finish_reason()/""/g' "$MLOG_SERVE_FILE"
+  echo "#399 A.2: fallback $MLOG_LEGACY — фича #757 (max_tokens + пометка обрезки) вырезана из serve-копии"
+fi
 mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs" "${DATABASE_PATH:-./data}"
 
 # ── №428 A.5: KV-стор Metalogos на постоянный диск ──────────────────────────

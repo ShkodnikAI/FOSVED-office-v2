@@ -265,6 +265,18 @@ pattern BuildReport(dept: String, query: String, reply: String, chat_id: String)
 // ── Router: plain text vs Mini App + AUTO-ARCHIVE ──────────────────
 // Yana NEVER goes through miniapp — she sends plain text + voice directly
 pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
+  // #399 A.2 (Metalogos-#757, бинарь 0.27.1): обрезанный по лимиту ответ не
+  // уходит владельцу молча. Билтин llm_last_finish_reason() возвращает
+  // "length"/"max_tokens" после call_llm при обрезке; сам текст апстрим
+  // доставляет ("the caller decides") — пометка добавляется здесь, на общем
+  // пути SendReport, для любого отдела. На фолбэке 0.20 вызов неизвестен —
+  // entrypoint заменяет его на "" (sed-патч #399), пометка выключается.
+  let mut trunc_note = ""
+  let fr = to_string(llm_last_finish_reason())
+  if fr == "length" or fr == "max_tokens" then {
+    trunc_note = "\n\n⚠ ОТВЕТ ОБРЕЗАН ПО ЛИМИТУ max_tokens — полный текст не уместился; увеличьте llm { max_tokens } в app.mlog или проверьте лимит модели."
+  }
+  let reply = reply + trunc_note
   if dept == "yana" or dept == "admin" then {
     let _ = SendTelegramReplyMDV2(chat_id, reply)
     return reply
