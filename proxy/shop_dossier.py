@@ -171,7 +171,7 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
 
     offers = []
     for s in scored["offers"]:
-        row = _query("SELECT url, platform, price_byn, old_price_byn, "
+        row = _query("SELECT url, platform, title, price_byn, old_price_byn, "
                      "card_price_byn, delivery_days, delivery_cost_byn, "
                      "installment_ok, rating, reviews_count, seller_id, "
                      "image_url "
@@ -187,6 +187,7 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
         offers.append({
             "id": s["id"], "platform": o["platform"],
             "url": canonical_url(o["url"]),
+            "title": o.get("title"),
             "rank_price": s["rank_price"], "price_byn": o["price_byn"],
             "old_price_byn": o["old_price_byn"],
             "card_price_byn": o["card_price_byn"],
@@ -204,6 +205,26 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
     # без цены — в конец (участвуют в HTML, не в ранжировании)
     offers.sort(key=lambda o: (o["rank_price"] is None,
                                o["rank_price"] if o["rank_price"] is not None else 0.0))
+
+    # #437 A.3: проверка соответствия выдачи запросу — доля предложений,
+    # в названии которых есть главный предмет запроса. Ниже порога — досье
+    # честно сообщает «найдено не то» и не даёт вердикта «Купить»
+    # (фактура: «утюг» → 30 отпаривателей было выдано за подбор утюга).
+    relevance = None
+    try:
+        from proxy.shop_collectors import relevance_mismatch, onliner_category_name
+        qrow = _query("SELECT query_text FROM shop_products WHERE id=?",
+                      (product_id,), fetch=True)
+        product_query = (qrow[0]["query_text"] if qrow else None) or \
+                        (product.get("query_text") or "")
+        relevance = relevance_mismatch(product_query, offers)
+        if relevance:
+            # категория для сообщения — из деталей сбора (slug), имя —
+            # из накопленного словаря схем (без сети)
+            cat_slug = ((collect_details or {}).get("onliner") or {}).get("category")
+            relevance["category"] = onliner_category_name(cat_slug) if cat_slug else ""
+    except Exception:  # noqa: BLE001 — проверка соответствия не роняет досье
+        relevance = None
 
     # офферы без цены: живой диагноз досье #2 (99 офф. без цены → пустое
     # досье без единой ссылки). Не ранжируем, но ссылки не прячем —
@@ -244,6 +265,8 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
         "median_best": median_best,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
+    if relevance:
+        snapshot["relevance_mismatch"] = relevance
     # #407 A.1: статус сбора по площадкам — в снимок (попадает в snapshot_json)
     if collect_details is not None:
         snapshot["sources"] = collect_details
@@ -297,6 +320,13 @@ def render_text(snapshot):
     вердикт, стоп-флаги). ≤3800 симв (tg_send_long-лимит)."""
     lines = [f"Досье: {snapshot['product'].get('title', '?')}",
              f"профиль {snapshot['profile']} · {snapshot['generated_at']}"]
+    rel = snapshot.get("relevance_mismatch")
+    if rel:
+        # #437 A.3: нерелевантная выдача не выдаётся за результат
+        cat = f" ({rel['category']})" if rel.get("category") else ""
+        lines.append(f"НАЙДЕНО НЕ ТО{cat}: подборка в основном про «{rel['subject']}» "
+                     f"не похожа — совпадений {int(round(rel['hit_rate'] * 100))}% "
+                     f"(порог {int(round(rel['min_rate'] * 100))}%)")
     score_str, vtext = verdict_display(snapshot)
     lines.append(f"Вердикт: {score_str}/100 — {vtext}")
     badge_parts = []
@@ -363,11 +393,18 @@ def render_caption(snapshot):
     title = snapshot["product"].get("title", "?")
     lines = [f"<b>Досье: {title}</b>",
              f"Вердикт: <b>{v_score}/100</b> — {v_text}"]
+    rel = snapshot.get("relevance_mismatch")
+    if rel:
+        # #437 A.3: предупреждение + БЕЗ предложения «Купить» —
+        # нерелевантная выдача не выдаётся за результат
+        cat = f" ({rel['category']})" if rel.get("category") else ""
+        lines.append(f"НАЙДЕНО НЕ ТО{cat}: подборка в основном не про «{rel['subject']}» "
+                     f"(совпадений {int(round(rel['hit_rate'] * 100))}%)")
     best = next((o for o in snapshot["offers"]
                  if o["id"] == (snapshot.get("verdict") or {}).get("best_offer_id")), None)
     if best is None and snapshot["offers"]:
         best = snapshot["offers"][0]
-    if best:
+    if best and not rel:
         lines.append(f"Купить: <a href=\"{best['url']}\">{best['platform']} — "
                      f"{_fmt_price(best['rank_price'])}</a>")
     # #409 A.1: карточка самодостаточна — топ-3 и статусы источников прямо
@@ -643,6 +680,17 @@ def render_html(snapshot):
     sources_block = (f'<div class="card"><b>Источники</b><table>'
                      f'<tr><th>Площадка</th><th>Статус сбора</th></tr>'
                      f'{sources_rows}</table></div>' if sources_rows else "")
+    # #437 A.3: предупреждение о нерелевантной выдаче — вверху страницы
+    rel = snapshot.get("relevance_mismatch")
+    relevance_block = ""
+    if rel:
+        cat = f" ({e(rel['category'])})" if rel.get("category") else ""
+        relevance_block = (f'<div class="card" style="border-color:var(--red)">'
+                           f'<b>НАЙДЕНО НЕ ТО{cat}</b><p class="muted">'
+                           f'подборка в основном не про «{e(rel["subject"])}» '
+                           f'(совпадений {int(round(rel["hit_rate"] * 100))}%, '
+                           f'порог {int(round(rel["min_rate"] * 100))}%) — '
+                           f'вердикт «Купить» скрыт.</p></div>')
     hidden = (snapshot.get("unscored_total") or 0) - len(snapshot.get("unscored_offers") or [])
     unscored_note = (f'<p class="meta">…и ещё {hidden} офф. — полный список '
                      'появится после среза с ценами.</p>' if hidden > 0 else "")
@@ -703,6 +751,7 @@ a{{color:var(--red-light);text-decoration:none}} a:hover{{text-decoration:underl
 <span style="font-size:1.4rem"> / 100</span>
 <p style="margin-top:8px;font-size:1.1rem">{e(v_text)}</p>
 <p style="margin-top:8px">{badges_html}</p></div>
+{relevance_block}
 <div class="card"><table>
 <tr><th>Фото</th><th>Оффер (дешевле — первым)</th><th>Реальная цена</th><th>Наличие</th><th>Честная скидка</th><th>Балл</th><th>Группы</th></tr>
 {''.join(rows)}
