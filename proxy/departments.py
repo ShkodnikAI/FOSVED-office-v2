@@ -28,6 +28,14 @@ ALLOWED_MODES = {"primary", "subagent", "all"}
 ALLOWED_ACTIONS = {"allow", "ask", "deny"}
 DEFAULT_TEMPERATURE = 0.7  # прежний хардкод _call_single_provider
 
+# #447 A.2: один источник правды по тексту промпта. departments/<dept>.md
+# несёт ТОЛЬКО машинную декларацию (frontmatter); текст — в
+# library/<dept>.md (секция PROMPT_SECTION_HEADER), на которую тело
+# декларации ссылается директивой @include. Расхождение полей теперь
+# структурно невозможно: текст один, декларация ссылается.
+INCLUDE_PREFIX = "@include:"
+PROMPT_SECTION_HEADER = "## Системный промпт"
+
 _ENV_RE = re.compile(r"\{env:([A-Z0-9_]+)\}")
 
 
@@ -137,7 +145,53 @@ def load_declaration(dept):
     validate_declaration(dept, fm, body, source=str(path))
     return {"dept": dept, "model": fm.get("model"), "temperature": fm.get("temperature"),
             "tools": fm.get("tools") or [], "permission": fm.get("permission") or {},
-            "mode": fm.get("mode", "primary"), "prompt": body, "path": str(path)}
+            "mode": fm.get("mode", "primary"), "prompt": _resolve_prompt(body, source=str(path)),
+            "path": str(path)}
+
+
+def _resolve_prompt(body, source):
+    """#447 A.2: тело декларации — либо текст 1-в-1 (legacy), либо директива
+    @include:<path>. Резолвит include в секцию «## Системный промпт» целевого
+    файла. Путь — только внутри корня офиса; секция не найдена / файл не найден
+    → DepartmentsConfigError (громко, при старте)."""
+    body = body.strip()
+    if not body.startswith(INCLUDE_PREFIX):
+        return body
+    target_rel = body[len(INCLUDE_PREFIX):].strip()
+    if not target_rel:
+        raise DepartmentsConfigError(f"{source}: директива @include без пути")
+    if ".." in target_rel or target_rel.startswith("/"):
+        raise DepartmentsConfigError(f"{source}: @include вне корня офиса запрещён: {target_rel}")
+    target = BASE_DIR / target_rel
+    if not target.exists():
+        raise DepartmentsConfigError(f"{source}: @include цель не найдена: {target_rel}")
+    section = extract_prompt_section(target.read_text(encoding="utf-8"), source=str(target))
+    return section
+
+
+def extract_prompt_section(text, source="<include>"):
+    """Секция «## Системный промпт» (до следующего «## » или EOF).
+    Нет секции → громкая ошибка (гвард единственного источника текста)."""
+    lines = text.split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == PROMPT_SECTION_HEADER:
+            start = i + 1
+            break
+    if start is None:
+        raise DepartmentsConfigError(
+            f"{source}: секция «{PROMPT_SECTION_HEADER}» не найдена — "
+            "единый источник текста промпта сломан (#447)"
+        )
+    out = []
+    for line in lines[start:]:
+        if line.strip().startswith("## "):
+            break
+        # маркер конца профиля (v1.x) — не часть промпта
+        if line.strip().startswith("**End of profile"):
+            break
+        out.append(line)
+    return "\n".join(out).strip()
 
 
 def load_all():
@@ -166,7 +220,13 @@ def _decls():
 def _mtime_version():
     if not DEPARTMENTS_DIR.exists():
         return 0
-    return tuple(sorted((p.name, int(p.stat().st_mtime)) for p in DEPARTMENTS_DIR.glob("*.md")))
+    # #447 A.2: промпт резолвится из library/<dept>.md (@include) — mtime
+    # library тоже должен сбрасывать кэш, иначе правка текста не подхватится.
+    lib_dir = BASE_DIR / "library"
+    return (
+        tuple(sorted((p.name, int(p.stat().st_mtime)) for p in DEPARTMENTS_DIR.glob("*.md"))),
+        tuple(sorted((p.name, int(p.stat().st_mtime)) for p in lib_dir.glob("*.md"))) if lib_dir.exists() else (),
+    )
 
 
 def get_declaration(dept):

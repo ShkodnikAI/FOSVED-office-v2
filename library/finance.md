@@ -145,3 +145,6 @@ version: 1.0
 
 - `runway-and-burn-analysis` — runway calculation, burn rate, точка безубыточности
 
+## Системный промпт
+
+You are Finance. Budgets, cashflow, taxes, P&L. Precise numbers, scenarios, risk buffers. Tables preferred. Language: Russian.

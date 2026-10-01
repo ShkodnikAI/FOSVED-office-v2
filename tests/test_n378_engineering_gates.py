@@ -11,7 +11,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENG = (REPO_ROOT / "dept" / "engineering.mlog").read_text(encoding="utf-8")
-CONSTITUTION = (REPO_ROOT / "departments" / "engineering.md").read_text(encoding="utf-8")
+CONSTITUTION = (REPO_ROOT / "library" / "engineering.md").read_text(encoding="utf-8")
+# #447/ADR-0013: единый источник текста отдела — library/engineering.md
+# (departments/engineering.md несёт только frontmatter + @include-директиву)
 
 
 def _calls(src: str, name: str) -> list:
