@@ -1680,6 +1680,36 @@ pattern NightSlot() -> String {
   return result
 }
 
+// ============================================================
+// Наряд #442: веб-гвард FORGE-панели /repos/* — stateless токен ?t=.
+// Токен = первые 16 hex-символов sha256(CRON_SECRET + ":repos") —
+// это redact(..., "hash_only") без обёртки "[HASH:...] hex": чистый
+// hex URL-safe и не задевает VM-вывод строк (проба 0.27.0: строки с
+// "[HASH:" и "<" в respond режутся — substring 6..22 обходной путь).
+// Один секрет с cron-роутами, но scope ":repos" делает токены
+// невзаимозаменяемыми: H(CRON_SECRET) из cron-гварда панель не
+// открывает, и наоборот. Raw-секрет по сети не ходит.
+// Fail-closed: секрет не настроен → "fail" → 403 на все 8 роутов.
+// Куда ходит токен: владелец строит ссылку однострочником (отчёт
+// #442); проброс t в href-ссылки страниц не делается нарочно —
+// страницы /repos/* сейчас падают в respond_html (регрессия
+// сигнатуры 0.27.0, отдельный апстрим-факт) — минимальное
+// вмешательство: только доступ, без изменений UI-кода страниц.
+// ============================================================
+pattern ReposAccessToken() -> String {
+  let s = env("CRON_SECRET")
+  if s == "" then { return "" }
+  return substring(to_string(redact(s + ":repos", "hash_only")), 6.0, 22.0)
+}
+
+pattern ReposAccessGuard() -> String {
+  let t = redact(query_param("t"), "all")
+  let expected = ReposAccessToken()
+  if expected == "" then { return "fail" }
+  if t == expected then { return "ok" }
+  return "fail"
+}
+
 mlogserver {
   port: 10001
   host: "127.0.0.1"
@@ -1868,6 +1898,9 @@ mlogserver {
   // узкий экран, query-роуты exact-match, ForgeEscape на всё)
   // ============================================================
   route "/repos" method=GET {
+    // №442 A.2: гвард владельца — только владелец читает FORGE
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let rows = query("SELECT slug, name, project_type, status, gate_policy, updated_at FROM forge_projects ORDER BY updated_at DESC LIMIT 50", [])
     let mut items = ""
     each r in rows {
@@ -1882,6 +1915,9 @@ mlogserver {
   }
 
   route "/repos/project" method=GET {
+    // №442 A.2: гвард владельца — только владелец читает FORGE
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let slug = redact(query_param("slug"), "all")
     let rows = query("SELECT slug, name, description, goal, project_type, gate_policy, model_combo, departments, status, updated_at FROM forge_projects WHERE slug = ? LIMIT 1", [slug])
     if length(rows) == 0.0 then { return respond("404 project not found") }
@@ -1897,6 +1933,9 @@ mlogserver {
 
   // ── FO-038 C.1: страница задачи — гейты, этапы, прогоны, замечания, история ──
   route "/repos/task" method=GET {
+    // №442 A.2: гвард владельца — только владелец читает FORGE
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     // №422: тело в ReposTaskPage() — route-исполнитель 0.21 (execute_route_body)
     // выполняет ветвления через eval_statements с чистым mut-контекстом:
     // присваивание в if/each внутри route-тела = 500. Паттерн-контур
@@ -1907,6 +1946,9 @@ mlogserver {
   // решение по гейту из веба (дубль Telegram-кнопок)
   // FO-039: подъём/гашение живого превью из веба
   route "/repos/task/preview-up" method=GET {
+    // №442 A.1: гвард владельца — первым делом, до любого эффекта
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let task_id = redact(query_param("task_id"), "all")
     let rows = query("SELECT t.project_slug, p.project_type, (SELECT name FROM forge_repos WHERE project_slug = t.project_slug LIMIT 1) as repo_name, (SELECT COUNT(*) FROM forge_repos r WHERE r.project_slug = t.project_slug AND r.name LIKE '%package%') as has_pkg FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
     if length(rows) < 1.0 then { return respond("404 task not found") }
@@ -1921,12 +1963,18 @@ mlogserver {
   }
 
   route "/repos/task/preview-down" method=GET {
+    // №442 A.1: гвард владельца — первым делом, до любого эффекта
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let slug = redact(query_param("slug"), "all")
     let result = ForgePreviewDown(slug)
     return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(result) + "</body></html>")
   }
 
   route "/repos/task/decide" method=GET {
+    // №442 A.1: гвард владельца — первым делом, до любого эффекта
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let gate = redact(query_param("gate"), "all")
     let idx = redact(query_param("idx"), "all")
     let result = ForgeGateDecide(gate, idx, "owner-web")
@@ -1934,6 +1982,9 @@ mlogserver {
   }
 
   route "/repos/repo" method=GET {
+    // №442 A.2: гвард владельца — только владелец читает FORGE
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let name = redact(query_param("name"), "all")
     let files_out = ForgeRepoFiles(name, "main")
     let commits_out = ForgeCommits(name, "20")
@@ -1942,6 +1993,9 @@ mlogserver {
   }
 
   route "/repos/file" method=GET {
+    // №442 A.2: гвард владельца — только владелец читает FORGE
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let name = redact(query_param("name"), "all")
     let refv = redact(query_param("ref"), "all")
     let path = redact(query_param("path"), "all")
