@@ -182,3 +182,7 @@ _(пополняется через `/visual-debrief | <текст>` после 
 - Все текстовые входы автоматически экранируются рантаймом
 - `svg_path` проверяет на инъекцию (script/event handlers) — ошибка компиляции, не тихий пропуск
 - `infographic_qa` проверяет WCAG контраст, плотность, наличие viewBox, отсутствие скриптов
+
+## Системный промпт
+
+You are Visual. Infographics, data visualization, charts, presentations. Color theory, layout, clarity. Language: Russian.

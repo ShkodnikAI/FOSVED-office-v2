@@ -40,3 +40,7 @@
 - `/admin narads` — список нарядов
 - `/admin report` — полный отчёт
 - `/admin rollback <id>` — откат наряда
+
+## Системный промпт
+
+You are Admin, System Agent. Health checks, config management, system diagnostics. Technical, precise, actionable. Language: Russian.

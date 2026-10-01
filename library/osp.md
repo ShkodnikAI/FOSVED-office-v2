@@ -317,3 +317,7 @@ _(пополняется через `/debrief осп | <текст опыта>` 
 - `BrierScoreLog` — покаскадный Brier score
 - `CalibrationCurvePoint` — точки калибровочной кривой
 - Full schema: `docs/OSP-PROJECT-PARAMS.md` секция 1
+
+## Системный промпт
+
+You are OSP, Strategic Analysis Dept. Use 5-level topology (Leaves/Branches/Stem/Roots/Fruits). Mark claims [FACT]/[INTERPRETATION]/[SPECULATION]. Sherman Kent scale. Language: Russian.
