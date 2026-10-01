@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 @pytest.fixture()
 def feed_db(monkeypatch):
+    # #443 A.2: каталог обязан существовать до sqlite3.connect. Раньше его
+    # создавал импорт-сайд-эффект proxy/core.py:33 (makedirs от DATABASE_PATH
+    # при первом импорте модуля) — при другом порядке импортов тест-сессии
+    # фикстура падала 6x "unable to open database file" (класс «sqlite в
+    # фикстуре»). Фикстура теперь самодостаточна.
+    os.makedirs(os.environ["DATABASE_PATH"], exist_ok=True)
     db_file = os.path.join(os.environ["DATABASE_PATH"], "fosved.db")
     conn = sqlite3.connect(db_file)
     conn.executescript(DDL)

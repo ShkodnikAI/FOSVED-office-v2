@@ -49,8 +49,10 @@ def test_lz_answer_is_never_replaced():
 def test_single_referral_trigger():
     """A.2: ровно один гейт-триггер; POST /osp/analyze — ровно в двух местах
     (гейт + явная команда /lz invest), один запрос исполняет максимум один."""
-    assert LZ_SRC.count("LZGateOSPReferral(query)") == 1, (
-        "гейт должен вызываться из HandleLZ ровно один раз")
+    # #427: в гейт ОСП уходит чистая тема topic_query = LZStripCommand(query),
+    # а не сырой текст команды (текст команды в Tavily уводил выдачу в сторону)
+    assert LZ_SRC.count("LZGateOSPReferral(topic_query)") == 1, (
+        "гейт должен вызываться из HandleLZ ровно один раз (аргумент topic_query, #427)")
     posts = LZ_SRC.count('http_post("http://127.0.0.1:10001/osp/analyze')
     assert posts == 2, (
         f"POST /osp/analyze в lz.mlog должен быть ровно 2 (гейт + /lz invest), "

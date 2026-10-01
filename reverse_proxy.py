@@ -133,6 +133,9 @@ INTERNAL_ONLY_PREFIXES = [
     "/archive/save",
     "/extract-document",
     "/expert/chart",  # Expert chart gen — called by mlog internally
+    "/cron/onliner-warm",  # #429 A.3/#443: прогрев словаря Onliner — зовут только
+                           # entrypoint (фон) и слот schedules.mlog, напрямую на :4000;
+                           # auth CRON_SECRET в роуте, наружу не светим (как /forge/export-state)
 ]
 
 

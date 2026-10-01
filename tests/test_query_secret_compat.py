@@ -45,8 +45,11 @@ def test_entrypoint_has_no_raw_token_in_query():
 
 def test_entrypoint_encodes_secret_and_token():
     src = _ep()
-    # бутстрап (три попытки) и version-чек — через -G --data-urlencode
-    assert src.count('--data-urlencode "secret=${CRON_SECRET}"') == 1
+    # бутстрап (три попытки) и version-чек — через -G --data-urlencode;
+    # #429 A.3 добавил второй --data-urlencode "secret=..." — фоновый прогрев
+    # /cron/onliner-warm при старте (curl -G на 127.0.0.1:4000, секрет в query
+    # внутреннего запроса, в лог не печатается)
+    assert src.count('--data-urlencode "secret=${CRON_SECRET}"') == 2
     assert src.count('--data-urlencode "token=${INTERNAL_API_TOKEN:-}"') == 1
     assert src.count('--data-urlencode "token=${INTERNAL_API_TOKEN}"') == 1
     # все три вызова используют -G (data уходит в query, метод остаётся GET)

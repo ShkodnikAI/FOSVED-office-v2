@@ -109,7 +109,8 @@ def test_domain_scope_is_explicit_tech_economics():
 def test_explicit_subcommands_untouched():
     # явные подкоманды резолвятся РАНЬШЕ общего пути (порядок строк в HandleLZ)
     handle = next(i for i, l in enumerate(LZ_MLOG_LINES) if "pattern HandleLZ(" in l)
-    build = next(i for i, l in enumerate(LZ_MLOG_LINES) if "BuildLZContext(query, domain, chat_id)" in l)
+    # #427: общий путь HandleLZ строит контекст по чистой теме topic_query
+    build = next(i for i, l in enumerate(LZ_MLOG_LINES) if "BuildLZContext(topic_query, domain, chat_id)" in l)
     for sub in ('starts_with(t, "/lz tavily")', 'starts_with(t, "/lz politics")',
                 'starts_with(t, "/lz dark")'):
         idx = next((i for i in range(handle, build) if sub in LZ_MLOG_LINES[i]), None)
