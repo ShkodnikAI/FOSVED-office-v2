@@ -103,7 +103,7 @@ class TestRebuild:
 
 class TestPrivacy:
     def test_secrets_blocked_by_construction(self, clean_profile, monkeypatch):
-        _seed_fact("Ключ от гитхаба: github_pat_11BST2XAI0AR7bhZZfNKwt1234", dept="dev")
+        _seed_fact("Ключ от гитхаба: github_pat_FAKEFAKEFAKEFAKEFAKEFAKE00", dept="dev")
         _seed_fact("Любит эспрессо", dept="design")
         # даже LLM «пытается» протянуть секрет — выходной контур режет
         _rebuild_with_llm_mock(monkeypatch, {
