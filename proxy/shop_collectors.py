@@ -562,14 +562,118 @@ ONLINER_SCHEMAS_URL = "https://catalog.api.onliner.by/schemas?page={n}"
 # /schemas 2026-09-24 (ключ существует, имя подтверждено); при ренейме
 # ключа площадкой запись честно деградирует (проверка наличия в словаре).
 # Расширение — новой записью с проверкой по живому словарю, не по памяти.
+# Наряд #437 A.2: бытовая техника первой необходимости — слаги сверены
+# с живым словарём /schemas 2026-09-30 (887 схем, 45 страниц снято
+# целиком; имена подтверждены: iron=«Утюги», steamcleaner=«Пароочистители
+# и отпариватели», kettles=«Чайники», microvawe=«Микроволновые печи» —
+# слаг самой площадки, не наша опечатка). Ключ — основа слова: матчится
+# startswith (утюг/утюги/утюгом).
 ONLINER_KEYWORD_MAP = {
     "телефон": "mobile", "смартфон": "mobile", "iphone": "mobile",
-    "android": "mobile", "ноутбук": "notebook", "наушники": "headphones",
+    "android": "mobile", "ноутбук": "notebook", "наушник": "headphones",
     "кофеварка": "coffee", "кофемашина": "coffee",
     "стиральная": "washingmachine", "пылесос": "vacuumcleaner",
     "холодильник": "refrigerator", "телевизор": "tv",
     "газонокосилка": "mowers",
+    # #437 A.2 — бытовая техника/электроника первой необходимости
+    "утюг": "iron", "отпаривател": "steamcleaner",
+    "пароочистител": "steamcleaner",
+    "чайник": "kettles", "электрочайник": "kettle",
+    "микроволнов": "microvawe", "блендер": "blender",
+    "тостер": "toaster", "миксер": "mixer",
+    "мультиварк": "multicooker", "мясорубк": "meatgrinder",
+    "посудомоечн": "dishwasher", "плита": "cooker",
+    "обогревател": "heater", "увлажнител": "humidifier",
+    "водонагревател": "waterheater", "робот": "robotcleaner",
+    "планшет": "tabletpc", "монитор": "display",
 }
+
+# Слова-маски для главного предмета запроса (#437 A.1): глаголы покупки,
+# оценочные прилагательные, вопросительные слова. ТОЛЬКО точные слова —
+# основы опасны (основа «куп» съела бы «купальник», «сам» — «самовар»).
+_SUBJECT_STOPWORDS = {
+    "купить", "куплю", "купим", "подбери", "подобрать", "подбирал",
+    "ищу", "искал", "искала", "нужен", "нужна", "нужно", "нужны",
+    "хочу", "хотел", "хотела", "выбери", "выбрать",
+    "лучший", "лучшая", "лучшие", "лучшее",
+    "самый", "самая", "самые", "самое",
+    "какой", "какая", "какие", "где", "порекомендуй", "рекомендуешь",
+    "хороший", "хорошая", "хорошее", "качественный", "качественная",
+    # местоимения/предлоги между маской и предметом: «подбери мне утюг»
+    "мне", "меня", "для", "пожалуйста",
+}
+
+
+def _main_subject_word(query_words):
+    """Главный предмет запроса (#437 A.1) — первое значимое слово.
+
+    Ведущие слова-маски (купить/подбери/лучший…) пропускаются: в
+    «лучший утюг с паром» предмет — «утюг». Ничего не нашли — None
+    (запрос из одних масок — приоритет главного предмета не применяется).
+    """
+    for w in query_words:
+        if w not in _SUBJECT_STOPWORDS:
+            return w
+    return None
+
+
+# Бонус главному предмету в нечётком скоринге (#437 A.1). Фактура 2026-09-30:
+# «утюг» (4 буквы) и «паром» против «Пароочистители» давали равные 7 очков,
+# побеждала категория, встреченная раньше. Совпадение имени схемы с главным
+# предметом весит больше описательных слов запроса.
+MAIN_SUBJECT_BONUS = 10
+
+
+def _words_prefix_hit(a, b):
+    """Словоформы: общий префикс по порогу _schema_match_score."""
+    if not a or not b:
+        return False
+    c = len(os.path.commonprefix([a, b]))
+    return c >= max(4, min(len(a), len(b)) - 2)
+
+
+def relevance_mismatch(query, offers, min_rate=None):
+    """Проверка соответствия выдачи запросу (#437 A.3).
+
+    Считает долю предложений, в названии которых есть главный предмет
+    запроса (с учётом словоформ). Ниже порога — dict с предметом и долей
+    (досье покажет «найдено не то» и не даст вердикта «Купить»); при
+    нормальной доле или без главного предмета — None.
+    Порог: env SHOP_RELEVANCE_MIN, дефолт 0.3 — примеси аксессуаров
+    («подошвы для утюгов» рядом с утюгами) допустимы, полная нерелевантность
+    («утюг» → 30 отпаривателей, hit 0.0) — нет.
+    """
+    subject = _main_subject_word(_norm_words(query))
+    if not subject or not offers:
+        return None
+    if min_rate is None:
+        try:
+            min_rate = float(os.environ.get("SHOP_RELEVANCE_MIN", "0.3"))
+        except ValueError:
+            min_rate = 0.3
+    hits = 0
+    for o in offers:
+        title_words = _norm_words((o.get("title") or ""))
+        if any(_words_prefix_hit(tw, subject) for tw in title_words):
+            hits += 1
+    rate = hits / len(offers)
+    if rate >= min_rate:
+        return None
+    return {"subject": subject, "hit_rate": round(rate, 2),
+            "min_rate": round(min_rate, 2)}
+
+
+def onliner_category_name(slug):
+    """Человекочитаемое имя категории по слагу из накопленного словаря
+    схем (без сети; #437 A.3 — сообщение «найдено не то: <категория>»).
+    Нет в кеше — сам слаг, не выдумываем имя."""
+    if not slug:
+        return slug
+    cache = _onliner_schemas_cache_read() or {}
+    for s in cache.get("schemas") or []:
+        if isinstance(s, dict) and s.get("key") == slug:
+            return s.get("name") or slug
+    return slug
 
 
 def _norm_words(s):
@@ -688,10 +792,15 @@ def onliner_resolve_category(query, max_pages=None):
     fresh = cache.get("complete") and (time.time() - (cache.get("ts") or 0)) < ONLINER_SCHEMAS_TTL
 
     qwords = _norm_words(query)
+    # #437 A.1: главный предмет проверяется по карте ПЕРВЫМ — описательные
+    # слова запроса не могут увести категорию от предмета
+    subject = _main_subject_word(qwords)
+    ordered_words = ([subject] if subject else []) + \
+                    [w for w in qwords if w != subject]
     # 1) карта синонимов — только если слаг живой в словаре
     known_keys = {s["key"] for s in schemas} if fresh else None
     if fresh and known_keys:
-        for w in qwords:
+        for w in ordered_words:
             for kw, slug in ONLINER_KEYWORD_MAP.items():
                 if w.startswith(kw) and slug in known_keys:
                     return slug
@@ -722,15 +831,27 @@ def onliner_resolve_category(query, max_pages=None):
             _onliner_schemas_cache_write(cache)
 
     known_keys = {s["key"] for s in schemas}
-    # карта по накопленному словарю (даже если он ещё неполный)
-    for w in qwords:
+    # карта по накопленному словарю (даже если он ещё неполный),
+    # главный предмет — первым (#437 A.1)
+    for w in ordered_words:
         for kw, slug in ONLINER_KEYWORD_MAP.items():
             if w.startswith(kw) and slug in known_keys:
                 return slug
-    # 3) нечёткое совпадение по именам словаря (порог 7)
+    # 3) нечёткое совпадение по именам словаря (порог 7); #437 A.1:
+    # совпадение имени схемы с ГЛАВНЫМ предметом весит больше описательных
+    # слов — при равенстве очков побеждает категория предмета, а не первая
+    # встреченная с тем же баллом за слово-признак
     best, best_score = None, 0
     for s in schemas:
         sc = _schema_match_score(qwords, s)
+        if subject and len(subject) >= 4:
+            name_words = _norm_words(s.get("name") or "")
+            # len(nw) >= len(subject) - 1: имя — грамматическая форма
+            # предмета («Утюги» для «утюг»), а не вложенный корень
+            # составного слова («Семена трав, газон» для «газонокосилка»)
+            if any(_words_prefix_hit(nw, subject) and len(nw) >= len(subject) - 1
+                   for nw in name_words):
+                sc += MAIN_SUBJECT_BONUS
         if sc > best_score:
             best, best_score = s["key"], sc
     if best and best_score >= 7:
@@ -1264,20 +1385,20 @@ def _persist_offers(product_id, platform, offers):
         if existing:
             oid = existing[0]["id"]
             _query(
-                "UPDATE shop_offers SET url=?, price_byn=?, old_price_byn=?, "
+                "UPDATE shop_offers SET url=?, title=?, price_byn=?, old_price_byn=?, "
                 "in_stock=?, installment_ok=?, rating=?, reviews_count=?, "
                 "seller_id=?, image_url=COALESCE(?, image_url), "
                 "fetched_at=datetime('now') WHERE id=?",
-                (o["url"], o.get("price_byn"), o.get("old_price_byn"),
+                (o["url"], o.get("title"), o.get("price_byn"), o.get("old_price_byn"),
                  o.get("in_stock"), o.get("installment_ok"), o.get("rating"),
                  o.get("reviews_count"), sid, o.get("image_url"), oid))
         else:
             _query(
                 "INSERT INTO shop_offers (product_id, platform, platform_code, url, "
-                "price_byn, old_price_byn, in_stock, installment_ok, rating, "
-                "reviews_count, seller_id, image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "title, price_byn, old_price_byn, in_stock, installment_ok, rating, "
+                "reviews_count, seller_id, image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (product_id, platform, o["platform_code"], o["url"],
-                 o.get("price_byn"), o.get("old_price_byn"), o.get("in_stock"),
+                 o.get("title"), o.get("price_byn"), o.get("old_price_byn"), o.get("in_stock"),
                  o.get("installment_ok"), o.get("rating"), o.get("reviews_count"), sid,
                  o.get("image_url")))
             back = _query(

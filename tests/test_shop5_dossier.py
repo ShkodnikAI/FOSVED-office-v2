@@ -86,17 +86,20 @@ def _seed_product():
     pid = _query("SELECT id FROM shop_products ORDER BY id DESC LIMIT 1",
                  fetch=True)[0]["id"]
     offers = [
-        ("wb", "414389121", WB_URL, 23.94, None, None, 1, 4.8, 18790),
-        ("kufar", "1001", KUFAR_URL, 220.0, None, None, 1, None, None),
-        ("kufar", "1002", "https://www.kufar.by/item/1002", 300.0, 400.0,
+        ("wb", "414389121", WB_URL, "Кофемолка электрическая SM-200",
+         23.94, None, None, 1, 4.8, 18790),
+        ("kufar", "1001", KUFAR_URL, "Кофемолка ручная Manual",
+         220.0, None, None, 1, None, None),
+        ("kufar", "1002", "https://www.kufar.by/item/1002",
+         "Кофемолка SM-200 с жерновами", 300.0, 400.0,
          None, 1, None, None),
     ]
     oids = []
-    for platform, code, url, price, old, card, stock, rating, reviews in offers:
+    for platform, code, url, title, price, old, card, stock, rating, reviews in offers:
         _query("INSERT INTO shop_offers (product_id, platform, platform_code, "
-               "url, price_byn, old_price_byn, card_price_byn, in_stock, "
-               "rating, reviews_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-               (pid, platform, code, url, price, old, card, stock, rating,
+               "url, title, price_byn, old_price_byn, card_price_byn, in_stock, "
+               "rating, reviews_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               (pid, platform, code, url, title, price, old, card, stock, rating,
                 reviews))
         oids.append(_query("SELECT id FROM shop_offers WHERE platform=? AND "
                            "platform_code=? ORDER BY id DESC LIMIT 1",
