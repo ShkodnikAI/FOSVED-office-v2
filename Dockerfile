@@ -8,12 +8,13 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /office
 
-# Python deps — читаем из requirements.txt, не дублируем список руками.
-# (Было: жёсткий список pip install, из которого исчез feedparser —
-# сборщик новостей падал 'No module named feedparser' с самого начала
-# и никто не заметил, потому что try/except гасил ошибку молча.)
+# Python deps — сборка по LOCK-файлу (#450 A.2): версии закреплены pip-compile,
+# сборка воспроизводима. Обновление зависимостей — отдельный PR:
+#   pip-compile --output-file=requirements.lock requirements.txt
+# (локально: python3 -m piptools compile; diff ревьюится, апгрейды — осознанно).
 COPY requirements.txt /office/requirements.txt
-RUN pip3 install -r requirements.txt --break-system-packages
+COPY requirements.lock /office/requirements.lock
+RUN pip3 install -r requirements.lock --break-system-packages
 
 # Metalogos v0.27.0 — прод-бинарь (переход 0.25.0→0.27.0, ADR-0009;
 # бинарь из официального CI-артефакта тегового коммита 0d1cce9 —
@@ -48,12 +49,24 @@ RUN npx prisma generate 2>/dev/null || true
 
 RUN mkdir -p /office/data /tmp
 
+# ── #450 A.1: непривилегированный пользователь ──────────────────────────────
+# Процессы офиса (Flask/waitress, mlog, прокси, tg-monitor) не от root.
+# Постоянные диски Render: /var/data (DATABASE_PATH), /var/forge (FORGE exec
+# и бэкапы) — владелец office; /office целиком (data/, visuals/, forge-tmp,
+# VERSION, memories) тоже офису. Порты >1024 — root не нужен.
+RUN useradd -r -u 10001 -m -d /home/office office \
+    && mkdir -p /var/data /var/forge/repos \
+    && chown -R office:office /office /var/data /var/forge
+
+USER office
+# git-идентичность FORGE — теперь в HOME офиса (было в /root/.gitconfig)
+RUN git config --global user.email "agent@fosved.office" \
+    && git config --global user.name "Fosved Agent"
+
 # FO-014: office-owned MCP-серверы (github + filesystem) — исполняемые,
 # вызываются из mlog через mcp_call (allowlist: mcp_servers/github,mcp_servers/filesystem)
 RUN chmod +x /office/mcp_servers/github /office/mcp_servers/filesystem \
     && mkdir -p /office/data/documents /office/data/logs
-RUN git config --global user.email "agent@fosved.office" \
-    && git config --global user.name "Fosved Agent"
 
 EXPOSE 10000
 
