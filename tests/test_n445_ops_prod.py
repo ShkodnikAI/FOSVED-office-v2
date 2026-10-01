@@ -117,12 +117,19 @@ def test_entrypoint_exports_trusted_proxies():
     assert 'METALOGOS_TRUSTED_PROXIES="${METALOGOS_TRUSTED_PROXIES:-127.0.0.1}"' in ENTRYPOINT
 
 
-def test_client_ip_leftmost_xff_wins():
-    """Контракт №263 (REFERENCE §5.6): ключ лимита — leftmost XFF."""
+def test_client_ip_rightmost_edge_hop_wins():
+    """Контракт №263 (REFERENCE §5.6) + замечание 2 аудита 2026-10-01 (#451):
+    ключ лимита — rightmost XFF (последний хоп, дописанный доверенным edge
+    Render). Leftmost контролирует сам клиент — подменой XFF он получал
+    новый лимит-ключ на каждый запрос."""
     with reverse_proxy.app.test_request_context(
         "/", headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"}
     ):
-        assert reverse_proxy._client_ip() == "203.0.113.7"
+        assert reverse_proxy._client_ip() == "10.0.0.1"
+    with reverse_proxy.app.test_request_context(
+        "/", headers={"X-Forwarded-For": "  198.51.100.9  "}
+    ):
+        assert reverse_proxy._client_ip() == "198.51.100.9"
 
 
 def test_client_ip_falls_back_to_peer():
@@ -140,7 +147,8 @@ def test_client_ip_falls_back_to_peer():
 
 def test_upstream_headers_overwrite_xff():
     """Прокси ОБЯЗАН перезаписывать XFF клиентским адресом (не append):
-    иначе клиент подделывает чужой лимит-ключ через дописывание в цепочку."""
+    иначе клиент подделывает чужой лимит-ключ через дописывание в цепочку.
+    Клиентский адрес = rightmost XFF (замечание 2 аудита #451)."""
     with reverse_proxy.app.test_request_context(
         "/health",
         headers={"Host": "office.example.com",
@@ -148,8 +156,8 @@ def test_upstream_headers_overwrite_xff():
                  "X-Real-IP": "1.2.3.4"},
     ):
         headers = reverse_proxy._upstream_headers()
-    assert headers["X-Forwarded-For"] == "203.0.113.7"
-    assert headers["X-Real-IP"] == "203.0.113.7"
+    assert headers["X-Forwarded-For"] == "10.0.0.1"
+    assert headers["X-Real-IP"] == "10.0.0.1"
     assert "host" not in {k.lower() for k in headers}
 
 
