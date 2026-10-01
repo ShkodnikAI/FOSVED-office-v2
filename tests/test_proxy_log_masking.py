@@ -63,6 +63,12 @@ class TestQuerySecretMasking:
             # несколько чувствительных параметров в одной строке
             ('"GET /cron/night-tick?secret=S1&token=T2 HTTP/1.1" 200',
              "S1", "secret=<redacted>&token=<redacted>"),
+            # замечание 3 аудита (#451): t= — статичный токен гварда /repos (#442)
+            ('"GET /repos/task/decide?t=ReposTok77 HTTP/1.1" 403',
+             "ReposTok77", "t=<redacted>"),
+            # и HMAC-токен досье SHOP-5 (соседний q=2 не задет)
+            ('"GET /shop/dossier/x?t=abc&q=2 HTTP/1.1" 200',
+             "abc", "t=<redacted>&q=2"),
             # версия werkzeug с полным URL в сообщении об ошибке
             ("Proxy error: 404 on http://127.0.0.1:10001/cron/x?secret=Zz9",
              "Zz9", "secret=<redacted>"),
@@ -84,7 +90,9 @@ class TestQuerySecretMasking:
             '"GET /miniapp/ HTTP/1.1" 200',
             "Waiting for LLM proxy... (1)",
             # нечувствительные параметры остаются как есть
-            '"GET /shop/dossier/x?t=abc&q=2 HTTP/1.1" 200',
+            # (t= теперь чувствительный — проверяем соседние, не начинающиеся с t=)
+            '"GET /shop/dossier/x?q=2 HTTP/1.1" 200',
+            '"GET /shop/list?limit=10&format=json HTTP/1.1" 200',
         ],
     )
     def test_passes_normal_lines_through(self, line):
@@ -112,6 +120,6 @@ class TestQuerySecretMasking:
         assert any(isinstance(f, QuerySecretMasker) for f in werkzeug_filters)
 
     def test_regex_covers_registered_param_names(self):
-        for name in ("secret", "token", "password", "api_key", "apikey"):
+        for name in ("secret", "token", "password", "api_key", "apikey", "t"):
             assert SENSITIVE_QUERY_RE.search(f"?{name}=v"), name
             assert SENSITIVE_QUERY_RE.search(f"&{name}=v"), name
