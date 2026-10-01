@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
-    ca-certificates git python3 python3-pip curl nodejs npm \
+    ca-certificates git python3 python3-pip curl nodejs npm gosu \
     tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-jpn tesseract-ocr-kor \
     fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
@@ -59,12 +59,15 @@ RUN useradd -r -u 10001 -m -d /home/office office \
     && mkdir -p /var/data /var/forge/repos \
     && chown -R office:office /office /var/data /var/forge
 
-# ХОТФИКС 2026-10-01: USER office ВРЕМЕННО СНЯТ. Постоянный диск Render
-# монтируется поверх /var/data при запуске — chown выше действует только на
-# слой образа; база на диске создана процессами от root → под office запись
-# в базу не гарантирована. Вернуть USER только вместе со сбросом привилегий в
-# entrypoint (chown диска от root, затем setpriv/gosu → office) — наряд #450.
-# USER office
+# ХОТФИКС 2026-10-01: USER office снят — сборка падала с 30.09, а постоянный
+# диск Render монтируется поверх /var/data при запуске: chown выше действует
+# только на слой образа; база на диске создана процессами от root.
+# ВОЗВРАТ non-root (#450, замечание 1 аудита #451) — через сброс привилегий
+# в entrypoint: контейнер стартует от root, entrypoint делает chown
+# персистентных путей (DATABASE_PATH=/var/data, /var/forge), затем
+# exec gosu office — ВСЕ процессы офиса работают от office (uid 10001).
+# USER office НЕ возвращаем: бут-логика (bootstrap, seed, backup, chown)
+# требует root только до первой строки сброса.
 # git-идентичность FORGE — системная, работает под любым пользователем
 RUN git config --system user.email "agent@fosved.office" \
     && git config --system user.name "Fosved Agent"
