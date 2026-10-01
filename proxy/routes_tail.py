@@ -3,6 +3,7 @@
 Вырезано из llm_proxy.py вербатим (стренглер, шаг 4e; наряд #68, стоп-гейт SG-F2).
 """
 
+import hashlib
 import os
 import re
 import json
@@ -344,13 +345,23 @@ def cron_secret_ok() -> bool:
     декодированное значение ИЛИ сырую выжимку secret= из query_string без
     '+'->space — совпадение любого = авторизован. Прежний контракт сохранён:
     оба пустых = pass-through (паритет с mlog RequireInternalAuth).
+
+    #443 (зелёный main): mlog-слоты шлют секрет по сети ТОЛЬКО hash-form
+    (redact(..., "hash_only"), конвенция №327/№318) — raw env-значение в URL
+    это private-egress (Category-A, гвард №391/№312). Формат верифицирован
+    пробой bin/mlog 0.27.1: `[HASH:<sha256(secret)[:16]>] hex`. Принимаем
+    hash-form встречно; raw остаётся для внешних кронов (cron-job.org).
     """
+
     expected = os.environ.get("CRON_SECRET", "")
     provided = request.args.get("secret", "")
     if provided == expected:
         return True
     if not expected:
         return False
+    hash_form = f"[HASH:{hashlib.sha256(expected.encode()).hexdigest()[:16]}] hex"
+    if provided == hash_form:
+        return True
     for part in request.query_string.decode("utf-8", "replace").split("&"):
         if part.startswith("secret=") and part[len("secret="):] == expected:
             return True

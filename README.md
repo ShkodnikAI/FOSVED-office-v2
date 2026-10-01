@@ -250,7 +250,7 @@ Reverse Proxy (Flask)
 ```
 .
 ├── app.mlog                  # Главный роутер (~4500 строк)
-├── bin/mlog                  # Metalogos v0.27.0 бинарник (x86-64, Rust, боевой, ADR-0009)
+├── bin/mlog                  # Metalogos v0.27.1 бинарник (x86-64, Rust, боевой, ADR-0009; 0.27.1 — unfreeze #399, фактическая версия bin/mlog)
 ├── bin/mlog-020              # Metalogos 0.20.0 wave-3 (main 29de25a) — стейджинг-догфуд (FO-050)
 ├── bin/mlog-025              # Metalogos 0.25.0 (afbcfc7) — прошлый-хороший, тест-гвард (ADR-0009)
 ├── VERSION                   # runtime-генерируется при буте из RENDER_GIT_COMMIT; коммит в git — снимок последнего деплоя

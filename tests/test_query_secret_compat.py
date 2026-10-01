@@ -127,3 +127,38 @@ def test_secret_with_env_unset_rejected(monkeypatch):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ── #443: hash-form (mlog redact hash_only) принимается cron_secret_ok ──────
+# mlog-слоты шлют секрет по сети ТОЛЬКО hash-form (private-egress гвард
+# №391/№312). Формат верифицирован эмпирической пробой bin/mlog 0.27.1
+# (scripts/…hashprobe): [HASH:<sha256(secret)[:16]>] hex.
+
+def test_mlog_hash_form_matches(monkeypatch):
+    from proxy.routes_tail import cron_secret_ok
+    secret = "test-secret-for-probe-12345"
+    monkeypatch.setenv("CRON_SECRET", secret)
+    import hashlib
+    hash_form = f"[HASH:{hashlib.sha256(secret.encode()).hexdigest()[:16]}] hex"
+    with _ctx("?secret=" + hash_form.replace(" ", "%20")):
+        assert cron_secret_ok() is True
+
+
+def test_mlog_hash_form_raw_query_string(monkeypatch):
+    """Плюс проба через raw query_string (без percent-кодирования пробела)."""
+    from proxy.routes_tail import cron_secret_ok
+    secret = "another-secret"
+    monkeypatch.setenv("CRON_SECRET", secret)
+    import hashlib
+    hash_form = f"[HASH:{hashlib.sha256(secret.encode()).hexdigest()[:16]}] hex"
+    # werkzeug декодирует query: пробел в "hex" придёт из '%20' или '+' —
+    # для сырой выжимки проверяем и вариант без пробела в query_string
+    with _ctx("?secret=%5BHASH%3A" + hashlib.sha256(secret.encode()).hexdigest()[:16] + "%5D%20hex"):
+        assert cron_secret_ok() is True
+
+
+def test_wrong_hash_form_rejected(monkeypatch):
+    from proxy.routes_tail import cron_secret_ok
+    monkeypatch.setenv("CRON_SECRET", "Shkodnik+vto")
+    with _ctx("?secret=%5BHASH%3Adeadbeefdeadbeef%5D%20hex"):
+        assert cron_secret_ok() is False
