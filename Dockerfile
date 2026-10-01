@@ -16,7 +16,7 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.27.0 — прод-бинарь (переход 0.25.0→0.27.0, ADR-0009;
+# Metalogos v0.27.1 — прод-бинарь (линия 0.25.0→0.27.0→0.27.1, ADR-0009;
 # бинарь из официального CI-артефакта тегового коммита 0d1cce9 —
 # unfreeze-релиз: В17-фиксы памяти + security-волна 0.26.0 №454-№459)
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
