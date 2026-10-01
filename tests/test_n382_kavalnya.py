@@ -19,10 +19,12 @@ def test_kk_routes_removed():
 
 
 def test_allowlist_381_updated():
-    """TEMP_ALLOW #381: kavalnya выведена (мостов 0), osp осталась (4, нек вызываемые)."""
-    assert "#382 (KKRoute* вычищены)" in GUARD381 or "удалён из allowlist нарядом #382" in GUARD381
+    """TEMP_ALLOW #381: kavalnya выведена #382 (мостов 0), osp выведена #446
+    (2026-10-02: OSPRoute* вычищены по решению владельца — классы B+C, убрать)."""
+    assert "KKRoute* → #382, OSPRoute* → #446" in GUARD381
     assert '"kavalnya.mlog": 2' not in GUARD381
-    assert '"osp.mlog": 4' in GUARD381
+    assert '"osp.mlog": 4' not in GUARD381, (
+        "osp выведена из allowlist нарядом #446 — мосты вычищены, любое возвращение — регресс")
 
 
 def test_lifecycle_intact():

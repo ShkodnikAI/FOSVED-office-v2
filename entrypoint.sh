@@ -1,5 +1,20 @@
 #!/bin/bash
+# ── #450: сброс привилегий — замечание 1 аудита 2026-10-01 (#451) ───────────
+# Постоянный диск Render монтируется ПОВЕРХ /var/data при запуске: chown в
+# Dockerfile действует только на слой образа, а база на диске создана
+# процессами от root → под office запись в базу не гарантирована
+# (attempt to write a readonly database / Permission denied).
+# Контейнер стартует от root: разово выравниваем владельца персистентных
+# путей и сбрасываем привилегии — ВСЕ процессы офиса (bootstrap, seed,
+# backup, LLM-прокси, mlog, reverse_proxy, tg-monitor) работают от office.
+if [ "$(id -u)" = "0" ]; then
+  echo "--- #450: root-bootstrap: chown persistent disk, drop privileges -> office ---"
+  chown -R office:office "${DATABASE_PATH:-/var/data}" /var/forge /office/data 2>/dev/null || true
+  exec gosu office bash "$0" "$@"
+fi
+
 echo "=== Fosved Office v2 Starting ==="
+echo "--- running as $(id -u):$(id -gn) ---"
 export DATABASE_URL="${DATABASE_URL:-sqlite:${DATABASE_PATH:-./data}/fosved.db}"
 
 # Metalogos: VERSION file written from RENDER_GIT_COMMIT for /version route.

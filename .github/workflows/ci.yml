@@ -16,8 +16,10 @@ env:
   PYTHON_VERSION: "3.12"
 
 # gh#306: cancel superseded intermediate runs (final commit is always
-# verified in full). Saves billed minutes on hosted runners and serial
-# queue time on the self-hosted runner.
+# verified in full). Saves billed minutes on hosted runners.
+# #443 A.1 (решение владельца 2026-10-02): исполнитель CI — hosted раннеры
+# (ubuntu-latest, минуты Actions, лимит 2000/мес). Self-hosted раннеры
+# fosved-office-runner-01/02 offline с 2026-09-30 — очередь не разгребалась.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -32,7 +34,7 @@ jobs:
   # класс проблемы, просто раньше на этапе разработки, не на этапе PR.
   branch-freshness:
     name: Branch freshness (blocking)
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +60,7 @@ jobs:
   # ── Job 1: Python tests (pytest) ─────────────────────────────────────
   pytest:
     name: Python tests
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -70,12 +72,12 @@ jobs:
         run: pip install -r requirements.txt pytest
 
       - name: Run pytest
-        env:
-          API_SECRET: ci-test-secret
-          TELEGRAM_WEBHOOK_SECRET: ci-wh-secret
-          OWNER_TELEGRAM_ID: "99999"
-          DATABASE_PATH: /tmp/fosved-ci-test-db
-          ZAI_API_KEY: ci-fake-key
+        # #443: env НЕ задаём — тесты герметичны (conftest + каждый файл ставит
+        # свои env ДО импорта прокси). Заданные здесь API_SECRET/WEBHOOK_SECRET
+        # активировали auth-режим на первом импорте proxy.core с чужим тестам
+        # секретом — 88 падений 401 на первом прогоне hosted-раннера (лог job
+        # 110480201886). Отсутствие env = open mode первого импорта = та же
+        # среда, в которой локальный полный pytest зелёный.
         run: pytest tests/ -v --tb=short
 
       - name: Run SEC-3 webhook secret test
@@ -86,7 +88,7 @@ jobs:
   # ── Job 1b: FO-007 error-hygiene policy ──────────────────────────────
   error-hygiene:
     name: No silent excepts (FO-007)
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -100,7 +102,7 @@ jobs:
   # ── Job 2: Metalogos check (mlog check) ──────────────────────────────
   mlog-check:
     name: Metalogos syntax check
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -197,7 +199,7 @@ jobs:
   # ── Job 3: Version consistency ────────────────────────────────────────
   version-check:
     name: Version consistency
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -243,15 +245,13 @@ jobs:
   # ── Job 4: Docker build ──────────────────────────────────────────────
   docker-build:
     name: Docker build
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # gh#306: self-hosted runner may lack docker (sandbox). Detect
-      # and degrade to an explicit warning instead of a red gate —
-      # the production image is built by Render from the same
-      # Dockerfile at deploy time. Gate stays blocking on runners
-      # where docker exists.
+      # gh#306: на hosted раннере docker есть всегда; degrade-логика
+      # сохранена как страховка (локальный запуск workflow через act и т.п.).
+      # Прод-образ собирает Render из того же Dockerfile при деплое.
       - name: Detect docker availability
         id: detect
         run: |
@@ -282,7 +282,7 @@ jobs:
   # Реальные LLM-сценарии остаются production-режимом (scripts/SMOKE.md).
   smoke:
     name: Smoke test (local lift)
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 

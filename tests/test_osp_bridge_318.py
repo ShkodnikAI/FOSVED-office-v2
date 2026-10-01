@@ -70,8 +70,10 @@ def test_route_dispatches_handle_osp_and_tg():
 def test_lz_bridge_has_exactly_two_sites():
     # naryad-355: роут /osp/analyze — нативный serve (:10001), не Flask (:4000);
     # прежний адрес :4000/osp/analyze был 404 на каждый вызов
-    assert LZ.count("127.0.0.1:10001/osp/analyze?secret=") == 2, \
-        "мост LZ→OSP: ровно 2 вызывающих сайта на serve :10001 (LZGateOSPReferral + HandleLZ)"
+    # #446 A.2 (2026-10-02): третий легитимный сайт — LZInflectionDetect
+    # (инфлекшн-алерт, решение владельца: построить через живой /osp/analyze)
+    assert LZ.count("127.0.0.1:10001/osp/analyze?secret=") == 3, \
+        "мост LZ→OSP: ровно 3 вызывающих сайта на serve :10001 (гейт + HandleLZ + inflection-alert)"
     assert LZ.count("127.0.0.1:4000/osp/analyze") == 0, \
         "мёртвый Flask-адрес должен исчезнуть полностью"
 
@@ -79,8 +81,9 @@ def test_lz_bridge_has_exactly_two_sites():
 def test_lz_bridge_sends_one_way_hash_not_secret():
     # в query — redact-hash секрета (public-метка: нет private-egress;
     # hex — URL-safe: нет '+'/' ', не ломается на декоде 0.21/прокси)
-    assert LZ.count('?secret=" + redact(env("CRON_SECRET"), "hash_only")') == 2, \
-        "оба сайта обязаны слать redact-hash, не сам секрет"
+    # #446 A.2: третий сайт (inflection-alert) — тот же контракт
+    assert LZ.count('?secret=" + redact(env("CRON_SECRET"), "hash_only")') == 3, \
+        "все сайты обязаны слать redact-hash, не сам секрет"
     for tail in LZ.split("127.0.0.1:10001/osp/analyze?secret=")[1:]:
         chunk = tail[:600]
         assert '"application/json", 5.0))' in chunk, \
