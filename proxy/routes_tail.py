@@ -617,27 +617,65 @@ def _shop_dossier_dir():
 
 
 def _shop_send_dossier(snapshot, chat_id):
-    """Постер PNG + HTML-caption + inline-кнопки «Купить» одним сообщением.
+    """Досье одним сообщением (#409): картинка + HTML-caption.
 
-    PNG гиперссылок не несёт — кликабельность дают caption-ссылки,
-    URL-кнопки и полное HTML-досье на вебе (#172, решение владельца).
+    #438 A.3: картинка сообщения — фото лучшего предложения (если есть);
+    постер PNG — запасной вариант. #438 A.1: inline-кнопки «Купить»
+    (reply_markup) убраны по прямому запросу владельца — кликабельность
+    несут caption-ссылки и полное HTML-досье на вебе.
     """
-    from proxy.shop_dossier import (build_inline_buttons, render_caption,
+    from proxy.shop_dossier import (best_offer_image, render_caption,
                                     render_poster)
     import tempfile
+    caption = render_caption(snapshot)
+    from proxy.telegram import _tg_send_photo
+    # #438 A.3: фото лучшего предложения — картиной сообщения
+    img = best_offer_image(snapshot)
+    if img:
+        tmp = os.path.join(tempfile.gettempdir(),
+                           f"shop-offer-img-{snapshot['product']['id']}.img")
+        if _shop_fetch_offer_image(img, tmp):
+            try:
+                _tg_send_photo(chat_id, tmp, caption=caption, parse_mode="HTML")
+                return True
+            finally:
+                try:
+                    os.remove(tmp)
+                except OSError as e:  # FO-007: не молчим
+                    log.warning("shop досье: temp-файл %s не удалён: %s", tmp, e)
+        # скачать/отправить фото не удалось — постер ниже, без тишины
     path = os.path.join(tempfile.gettempdir(),
                         f"shop-poster-{snapshot['product']['id']}.png")
     render_poster(snapshot, path)
-    caption = render_caption(snapshot)
-    markup = build_inline_buttons(snapshot)
-    from proxy.telegram import _tg_send_photo
     # #409 A.1: РОВНО ОДНО сообщение с досье — карточка (постер + caption
-    # с вердиктом/топ-3/источниками + кнопки). Отдельная текстовая выжимка
-    # снята: на одну просьбу приходило 2-3 сообщения (досье #7).
-    # Полное текстовое досье живёт на веб-странице «Полное досье».
-    _tg_send_photo(chat_id, path, caption=caption, parse_mode="HTML",
-                   reply_markup=markup)
+    # с вердиктом/топ-3/источниками). Полное текстовое досье живёт на
+    # веб-странице «Полное досье».
+    _tg_send_photo(chat_id, path, caption=caption, parse_mode="HTML")
     return True
+
+
+def _shop_fetch_offer_image(url, out_path):
+    """Скачать фото товара для карточки досье (#438 A.3).
+
+    Только http/https, ≤8 МБ, таймаут 15 с. Любая неудача — False
+    (отправитель молча уйдёт на постер — это запасной путь, не ошибка
+    сбора)."""
+    import requests as _rq
+    if not url.startswith(("http://", "https://")):
+        return False
+    try:
+        r = _rq.get(url, timeout=15, stream=True,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; fosved-office)"})
+        if r.status_code != 200:
+            return False
+        blob = r.raw.read(8 * 1024 * 1024 + 1, decode_content=True)
+        if not blob or len(blob) > 8 * 1024 * 1024:
+            return False
+        with open(out_path, "wb") as f:
+            f.write(blob)
+        return True
+    except Exception:  # noqa: BLE001 — запасной путь: постер вместо фото
+        return False
 
 
 @app.route("/shop/product", methods=["POST"])
@@ -854,8 +892,8 @@ def shop_dossier_endpoint():
     pid = d.get("product_id")
     if not pid:
         return jsonify({"ok": False, "error": "product_id обязателен"}), 400
-    from proxy.shop_dossier import (build_inline_buttons, build_snapshot,
-                                    dossier_url, render_caption, render_text)
+    from proxy.shop_dossier import (build_snapshot, dossier_url,
+                                    render_caption, render_text)
     snapshot = build_snapshot(int(pid), profile=d.get("profile", "default"),
                               target_price_byn=d.get("target_price_byn"))
     if not snapshot.get("ok"):
@@ -864,7 +902,7 @@ def shop_dossier_endpoint():
                     "dossier_id": snapshot.get("dossier_id"),
                     "text": render_text(snapshot),
                     "caption": render_caption(snapshot),
-                    "reply_markup": build_inline_buttons(snapshot),
+                    # #438 A.1: reply_markup убран — кнопок «Купить» больше нет
                     "html_url": dossier_url(snapshot["dossier_id"]),
                     "snapshot": snapshot})
 

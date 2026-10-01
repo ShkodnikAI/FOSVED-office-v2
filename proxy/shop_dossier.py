@@ -1,13 +1,13 @@
 """SHOP-5 (диспатч #172) — досье товара: текст / постер PNG / HTML.
 
 Все форматы рендерятся из ОДНОГО среза build_snapshot() (решение #172:
-«оба формата рендерятся из одного среза») — текст, caption, кнопки,
+«оба формата рендерятся из одного среза») — текст, caption,
 постер и HTML не могут разойтись в цифрах.
 
 Кликабельность (вопрос владельца из #172): PNG гиперссылок не несёт →
   (1) caption под постером с HTML-ссылками на офферы,
-  (2) inline URL-кнопки «Купить» на сообщении с постером (Bot API
-      reply_markup — офисный бот, тот же контур, что SHOP-4),
+  (2) inline URL-кнопки «Купить» УДАЛЕНЫ нарядом #438 A.1
+      (прямое решение владельца «убери кнопки покупки»),
   (3) полное HTML-досье на вебе офиса (GET /shop/dossier/<id>?t=<hmac>)
       — там все ссылки кликабельны.
 Сами ссылки — canonical URL из shop_offers (чистка utm в SHOP-3 при
@@ -64,7 +64,8 @@ LINE = "#D8D1C4"
 POSTER_W, POSTER_H = 1080, 1350
 MAX_TEXT = 3800        # tg_send_long-лимит офиса
 MAX_CAPTION = 1000     # лимит caption в sendPhoto
-MAX_BUTTONS = 3        # кнопки «Купить» (плюс «Полное досье» отдельным рядом)
+# #438 A.1: inline-кнопки «Купить» (build_inline_buttons, MAX_BUTTONS) удалены
+# по прямому запросу владельца; кликабельность — caption-ссылки + HTML-досье.
 
 _BADGE_LABELS = {
     "cheapest": "дешевле всех",
@@ -156,7 +157,7 @@ def build_snapshot(product_id, profile="default", target_price_byn=None,
     """Срез данных досье: продукт + скоринг + URLs + история.
 
     Единственный источник правды для render_text / render_caption /
-    build_inline_buttons / render_poster / render_html (тест следит,
+    render_poster / render_html (тест следит,
     что все рендеры читают ровно этот dict).
     """
     from proxy.core import _query
@@ -430,26 +431,27 @@ def render_caption(snapshot):
     return text
 
 
-def build_inline_buttons(snapshot):
-    """reply_markup JSON: до MAX_BUTTONS кнопок «Купить» (по порядку
-    «дешевле — первым») + кнопка «Полное досье». Bot API: label ≤64,
-    URL только http/https. Пустые URL не превращаются в кнопку."""
-    buttons = []
-    for o in snapshot["offers"]:
-        url = o.get("url") or ""
-        if not url.startswith(("http://", "https://")):
-            continue
-        label = f"Купить: {o['platform']} — {_fmt_price(o['rank_price'])}"[:64]
-        buttons.append({"text": label, "url": url})
-        if len(buttons) >= MAX_BUTTONS:
-            break
-    if snapshot.get("dossier_id"):
-        du = dossier_url(snapshot["dossier_id"])
-        if du.startswith("http"):
-            buttons.append({"text": "Полное досье", "url": du})
-    if not buttons:
-        return None
-    return json.dumps({"inline_keyboard": [buttons]}, ensure_ascii=False)
+def build_inline_buttons(snapshot):  # REMOVED #438
+    """Удалена нарядом #438 A.1: владелец просил убрать кнопки покупки.
+    Функция сохранена как заглушка-гвард, чтобы любые оставшиеся вызовы
+    падали громко, а не возвращали кнопки молча. Кликабельность —
+    caption-ссылки + полное HTML-досье."""
+    raise NotImplementedError("#438 A.1: inline-кнопки «Купить» убраны по запросу владельца")
+
+
+def best_offer_image(snapshot):
+    """URL фото лучшего предложения (#438 A.3) — картинка сообщения досье.
+
+    Лучший оффер — по тому же правилу, что в render_caption: verdict
+    best_offer_id, иначе первый оффер. Фото берётся только у него
+    (не у первого с фото) — сообщение показывает именно предложение,
+    которое досье называет лучшим."""
+    best = next((o for o in snapshot.get("offers") or []
+                 if o.get("id") == (snapshot.get("verdict") or {}).get("best_offer_id")), None)
+    if best is None and snapshot.get("offers"):
+        best = snapshot["offers"][0]
+    url = (best or {}).get("image_url") or ""
+    return url if url.startswith(("http://", "https://")) else None
 
 
 # ── формат Б: постер PNG ─────────────────────────────────────────────────
