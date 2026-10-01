@@ -272,6 +272,11 @@ if __name__ == "__main__":
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
              f"expert/chart, tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*, "
              f"scheduler/watch-sweep, scheduler/indicator-pre-reminders, call-python")
-    app.run(host="127.0.0.1", port=PORT, threaded=True)
+    # #445 A.1: прод-сервер waitress вместо dev-сервера Werkzeug.
+    # threads=16 под 512 МБ; channel_timeout=360 — длинные LLM/TTS-вызовы
+    # не рвутся канальным таймаутом (дефолт 120 с меньше upstream-запросов).
+    from waitress import serve
+
+    serve(app, host="127.0.0.1", port=PORT, threads=16, channel_timeout=360)
 
 

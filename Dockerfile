@@ -57,4 +57,11 @@ RUN git config --global user.email "agent@fosved.office" \
 
 EXPOSE 10000
 
+# #445 A.4: HEALTHCHECK — /health через reverse_proxy → mlog (программный
+# роут app.mlog:1744; serve гарантирует 200 даже без объявления). Падение
+# цепочки прокси+mlog роняет контейнер (совместно с супервизией #445 A.2).
+# start-period=120 с: бут долгий (skills bootstrap, DB backup, mlog serve).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -sf http://127.0.0.1:${PORT:-10000}/health || exit 1
+
 CMD ["bash", "entrypoint.sh"]

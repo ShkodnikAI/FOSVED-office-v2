@@ -16,6 +16,37 @@ LLM_URL = "http://127.0.0.1:4000"
 PORT = int(os.environ.get("PORT", 10000))
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 
+# ── #445 A.3: XFF по контракту Metalogos №263 ───────────────────────────────
+# METALOGOS_TRUSTED_PROXIES=127.0.0.1 (entrypoint.sh) делает mlog:10001
+# доверяющим XFF только от петлевого пира — а это мы. ОПЕРАТОРСКИЙ КОНТРАКТ
+# (REFERENCE §5.6, server.rs №263): прокси ПЕРЕЗАПИСЫВАЕТ X-Forwarded-For
+# адресом клиента, который он видит (левое значение входящего XFF от
+# доверенного edge Render'а, иначе сам peer) — НЕ аппендит. Тогда rate-limit
+# ключ в mlog — реальный клиент, а не 127.0.0.1 на всех (бут-лог 2026-09-30:
+# один общий лимит 100 req/min на Telegram, Mini App и кроны).
+def _client_ip():
+    """Адрес клиента по контракту №263: leftmost XFF (от доверенного edge)
+    или сам peer. Перезаписывается в исходящие заголовки целиком."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip() or "unknown"
+    return request.remote_addr or "unknown"
+
+
+def _upstream_headers():
+    """Заголовки для upstream: без host и без клиентских прокси-заголовков,
+    X-Forwarded-For/X-Real-IP — перезаписанные адресом клиента (№445 A.3)."""
+    headers = {
+        k: v
+        for k, v in request.headers
+        if k.lower() not in ("host", "x-forwarded-for", "x-real-ip")
+    }
+    client = _client_ip()
+    headers["X-Forwarded-For"] = client
+    headers["X-Real-IP"] = client
+    return headers
+
+
 # ── №423: маскирование секретов в access-логах прокси ──────────────────────
 # Контекст: CRON_SECRET ходит в query string у внешних кронов (cron-job.org),
 # а dev-сервер werkzeug пишет в лог строку запроса ЦЕЛИКОМ — инцидент
@@ -251,7 +282,7 @@ def proxy(path):
             return Response("Превью неактивно, поднять снова (кнопка на странице задачи).", status=410)
         target_url = f"http://127.0.0.1:{port}" + full_path[len(f"/preview-live/{slug}"):] or "/"
         try:
-            headers = {k: v for k, v in request.headers if k.lower() != "host"}
+            headers = _upstream_headers()
             resp = requests.request(
                 method=request.method, url=target_url, headers=headers,
                 data=request.get_data(), params=request.args,
@@ -277,7 +308,7 @@ def proxy(path):
 
     # Forward request
     try:
-        headers = {k: v for k, v in request.headers if k.lower() != "host"}
+        headers = _upstream_headers()
         resp = requests.request(
             method=request.method,
             url=target_url,
@@ -304,4 +335,27 @@ def proxy(path):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, threaded=True)
+    # #445 A.1: прод-сервер waitress вместо dev-сервера Werkzeug
+    # (бут-лог «This is a development server» больше не появляется).
+    # threads=16 под 512 МБ контейнера; channel_timeout=360 покрывает
+    # долгие прокси-вызовы (upstream timeout=300 на LLM-запросы).
+    # trusted_proxy='*': waitress по умолчанию СРЕЗАЕТ XFF/X-Real-IP
+    # (clear_untrusted_proxy_headers=True) — на Render edge не loopback,
+    # IP edge заранее не известен, поэтому доверяем входящим прокси-заголовкам.
+    # Спуф-риск XFF содержит сам перезапись: _upstream_headers() шлёт mlog
+    # ровно ОДНО значение (leftmost), а mlog принимает XFF только от
+    # доверенного пира 127.0.0.1 (METALOGOS_TRUSTED_PROXIES, №263).
+    from waitress import serve
+
+    logging.getLogger(__name__).info(f"Reverse proxy (waitress) on 0.0.0.0:{PORT}")
+    serve(
+        app,
+        host="0.0.0.0",
+        port=PORT,
+        threads=16,
+        channel_timeout=360,
+        trusted_proxy="*",
+        trusted_proxy_headers={
+            "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
+        },
+    )
