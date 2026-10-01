@@ -292,30 +292,13 @@ pattern OSPVerifyIndicatorAPI(indicator_id: String, result: Boolean) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // CROSS-DEPARTMENT ROUTING
 // ═══════════════════════════════════════════════════════════════════════
-pattern OSPRouteToFinance(thesis: String, forecast: String) -> String {
-  let payload = json_encode({source: "osp", thesis: thesis, forecast: forecast})
-  let result = TryVal(try http_post("http://127.0.0.1:4000/dept/finance/cross-check", payload, "application/json"))
-  if to_string(result) == "()" then { return "Finance unavailable" }
-  return json_get(parse_json(result), "assessment", "Finance check failed")
-}
-pattern OSPRouteToExpert(analysis_id: Int, context: String) -> String {
-  let payload = json_encode({source: "osp", analysis_id: analysis_id, context: context})
-  let result = TryVal(try http_post("http://127.0.0.1:4000/dept/expert/briefing", payload, "application/json"))
-  if to_string(result) == "()" then { return "Expert unavailable" }
-  return json_get(parse_json(result), "briefing", "Expert check failed")
-}
-pattern OSPRouteToLZ(technology: String, question: String) -> String {
-  let payload = json_encode({source: "osp", technology: technology, question: question})
-  let result = TryVal(try http_post("http://127.0.0.1:4000/dept/lz/assess", payload, "application/json"))
-  if to_string(result) == "()" then { return "LZ unavailable" }
-  return json_get(parse_json(result), "assessment", "LZ check failed")
-}
-pattern OSPRouteToLegal(thesis: String, jurisdiction: String) -> String {
-  let payload = json_encode({source: "osp", thesis: thesis, jurisdiction: jurisdiction})
-  let result = TryVal(try http_post("http://127.0.0.1:4000/dept/legal/regulatory", payload, "application/json"))
-  if to_string(result) == "()" then { return "Legal unavailable" }
-  return json_get(parse_json(result), "assessment", "Legal check failed")
-}
+// #446 (решение владельца 2026-10-02, классы B+C — убрать): прямые HTTP-мосты
+// OSPRouteToFinance/Expert/LZ/Legal вычищены — все четыре вели на
+// несуществующие Flask-роуты (:4000/dept/*), ошибки глотались, носители
+// недостижимы из прода (DEAD/STRING_ONLY по реестру #449). Если межотдельное
+// ОСП-маршрутизация понадобится — строить через живой механизм цепочек
+// /chain/step (:10001, chain_parallel/chain_durable), не прямыми HTTP-роутами.
+// Гвард: tests/test_n446_bridges.py + scripts/deadcall_detector.py в CI.
 
 // ═══════════════════════════════════════════════════════════════════════
 // MAIN DISPATCHER
@@ -873,7 +856,12 @@ pattern OSPTavilySearch(query: String, chat_id: String) -> String {
   return reply
 }
 pattern OSPTelegramSearch(query: String, chat_id: String) -> String {
-  let result = TryVal(try http_post("http://127.0.0.1:4000/lz/telegram", json_encode({query: query, dept: "osp"}), "application/json"))
+  // #446 A.1 (решение владельца: построить): TG-скан идёт через ЖИВОЙ
+  // mlog-роут /lz/telegram (:10001, app.mlog — тот же секрет-контракт №318,
+  // hash-form), внутри — живой LZTelegramSearch (dept/lz.mlog).
+  // Раньше: http_post на несуществующий Flask-роут :4000/lz/telegram —
+  // поиск «/osp tg» молча терялся (класс ошибок №1, #381).
+  let result = TryVal(try http_post("http://127.0.0.1:10001/lz/telegram?secret=" + redact(env("CRON_SECRET"), "hash_only"), json_encode({query: query, dept: "osp", chat_id: chat_id}), "application/json", 90.0))
   if to_string(result) == "()" then { return "Telegram недоступен." }
   let reply = redact(to_string(json_get(parse_json(result), "response", "Search failed.")), "all")
   let _ = RecordAssistantMessage(chat_id, "osp", reply)
