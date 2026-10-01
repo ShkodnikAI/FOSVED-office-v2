@@ -1680,6 +1680,36 @@ pattern NightSlot() -> String {
   return result
 }
 
+// ============================================================
+// Наряд #442: веб-гвард FORGE-панели /repos/* — stateless токен ?t=.
+// Токен = первые 16 hex-символов sha256(CRON_SECRET + ":repos") —
+// это redact(..., "hash_only") без обёртки "[HASH:...] hex": чистый
+// hex URL-safe и не задевает VM-вывод строк (проба 0.27.0: строки с
+// "[HASH:" и "<" в respond режутся — substring 6..22 обходной путь).
+// Один секрет с cron-роутами, но scope ":repos" делает токены
+// невзаимозаменяемыми: H(CRON_SECRET) из cron-гварда панель не
+// открывает, и наоборот. Raw-секрет по сети не ходит.
+// Fail-closed: секрет не настроен → "fail" → 403 на все 8 роутов.
+// Куда ходит токен: владелец строит ссылку однострочником (отчёт
+// #442); проброс t в href-ссылки страниц не делается нарочно —
+// страницы /repos/* сейчас падают в respond_html (регрессия
+// сигнатуры 0.27.0, отдельный апстрим-факт) — минимальное
+// вмешательство: только доступ, без изменений UI-кода страниц.
+// ============================================================
+pattern ReposAccessToken() -> String {
+  let s = env("CRON_SECRET")
+  if s == "" then { return "" }
+  return substring(to_string(redact(s + ":repos", "hash_only")), 6.0, 22.0)
+}
+
+pattern ReposAccessGuard() -> String {
+  let t = redact(query_param("t"), "all")
+  let expected = ReposAccessToken()
+  if expected == "" then { return "fail" }
+  if t == expected then { return "ok" }
+  return "fail"
+}
+
 mlogserver {
   port: 10001
   host: "127.0.0.1"
@@ -1907,6 +1937,9 @@ mlogserver {
   // решение по гейту из веба (дубль Telegram-кнопок)
   // FO-039: подъём/гашение живого превью из веба
   route "/repos/task/preview-up" method=GET {
+    // №442 A.1: гвард владельца — первым делом, до любого эффекта
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let task_id = redact(query_param("task_id"), "all")
     let rows = query("SELECT t.project_slug, p.project_type, (SELECT name FROM forge_repos WHERE project_slug = t.project_slug LIMIT 1) as repo_name, (SELECT COUNT(*) FROM forge_repos r WHERE r.project_slug = t.project_slug AND r.name LIKE '%package%') as has_pkg FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
     if length(rows) < 1.0 then { return respond("404 task not found") }
@@ -1921,12 +1954,18 @@ mlogserver {
   }
 
   route "/repos/task/preview-down" method=GET {
+    // №442 A.1: гвард владельца — первым делом, до любого эффекта
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let slug = redact(query_param("slug"), "all")
     let result = ForgePreviewDown(slug)
     return respond("<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif;background:#1a1a2e;color:#eee'>" + ForgeEscape(result) + "</body></html>")
   }
 
   route "/repos/task/decide" method=GET {
+    // №442 A.1: гвард владельца — первым делом, до любого эффекта
+    let auth = ReposAccessGuard()
+    if auth != "ok" then { return respond("403 Forbidden") }
     let gate = redact(query_param("gate"), "all")
     let idx = redact(query_param("idx"), "all")
     let result = ForgeGateDecide(gate, idx, "owner-web")
