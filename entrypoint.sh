@@ -140,6 +140,11 @@ export METALOGOS_HTTP_ALLOW_PRIVATE="${METALOGOS_HTTP_ALLOW_PRIVATE:-1}"
 # office-путь держим на интерпретаторе до починки апстрима (находка №419).
 # №349/B.1: пин ЯВНЫЙ и здесь, и в render.yaml — VM-дефолт 0.21+ не подхватывается.
 export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-interpreter}"
+# #445 A.3: rate-limit по реальному клиенту. Доверенный пир mlog — только
+# reverse_proxy (127.0.0.1), XFF от него ПЕРЕЗАПИСЫВАЕТСЯ клиентским адресом
+# (контракт №263, reverse_proxy.py:_upstream_headers). До наряда: peer 127.0.0.1
+# был лимит-ключом для всего внешнего трафика — один общий лимит на всех.
+export METALOGOS_TRUSTED_PROXIES="${METALOGOS_TRUSTED_PROXIES:-127.0.0.1}"
 
 # ── №455 (0.26.0): file-ingest gate — офисная адаптация (ADR-0009) ──────────
 # Serve-чтения файлов содержатся в METALOGOS_DATA_DIR (дефолт ./data).
@@ -358,4 +363,14 @@ python3 telegram_monitor.py &
 TG_MONITOR_PID=$!
 echo "LZ Telegram monitor started (PID: $TG_MONITOR_PID)"
 
-wait $LLM_PID $MLOG_PID $PROXY_PID $TG_MONITOR_PID
+# #445 A.2: супервизия — падение ЛЮБОГО критичного процесса (LLM-прокси,
+# mlog serve, reverse_proxy) завершает контейнер с ненулевым кодом, Render
+# перезапускает сервис целиком (раньше: wait всех — при падении mlog офис
+# жил полумёртвым, Render считал сервис живым). tg-monitor НЕ критичен —
+# его смерть офис не роняет (kill-switch TG_MONITOR_ENABLED остаётся).
+wait -n $LLM_PID $MLOG_PID $PROXY_PID
+SUP_EXIT=$?
+echo "!!! CRITICAL PROCESS DIED (wait exit=${SUP_EXIT}) — shutting down for container restart (naryad #445 A.2)"
+kill $LLM_PID $MLOG_PID $PROXY_PID 2>/dev/null || true
+sleep 2
+exit "${SUP_EXIT:-1}"
