@@ -20,16 +20,23 @@ WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
 # METALOGOS_TRUSTED_PROXIES=127.0.0.1 (entrypoint.sh) делает mlog:10001
 # доверяющим XFF только от петлевого пира — а это мы. ОПЕРАТОРСКИЙ КОНТРАКТ
 # (REFERENCE §5.6, server.rs №263): прокси ПЕРЕЗАПИСЫВАЕТ X-Forwarded-For
-# адресом клиента, который он видит (левое значение входящего XFF от
-# доверенного edge Render'а, иначе сам peer) — НЕ аппендит. Тогда rate-limit
-# ключ в mlog — реальный клиент, а не 127.0.0.1 на всех (бут-лог 2026-09-30:
-# один общий лимит 100 req/min на Telegram, Mini App и кроны).
+# адресом клиента, который он видит (rightmost значение входящего XFF —
+# последний хоп, дописанный доверенным edge Render'а; иначе сам peer) —
+# НЕ аппендит. Тогда rate-limit ключ в mlog — реальный клиент, а не 127.0.0.1
+# на всех (бут-лог 2026-09-30: один общий лимит 100 req/min на Telegram,
+# Mini App и кроны).
+# Замечание 2 аудита 2026-10-01 (#451): leftmost XFF — контролируемое
+# клиентом значение (первый элемент цепочки присылает сам клиент), подменой
+# XFF клиент получал новый лимит-ключ на каждый запрос. Edge Render
+# дописывает адрес клиента СПРАВА — rightmost (последний хоп) устойчив
+# к клиентской подмене.
 def _client_ip():
-    """Адрес клиента по контракту №263: leftmost XFF (от доверенного edge)
-    или сам peer. Перезаписывается в исходящие заголовки целиком."""
+    """Адрес клиента по контракту №263: rightmost XFF (последний хоп от
+    доверенного edge) или сам peer. Перезаписывается в исходящие заголовки
+    целиком."""
     xff = request.headers.get("X-Forwarded-For", "")
     if xff:
-        return xff.split(",")[0].strip() or "unknown"
+        return xff.split(",")[-1].strip() or "unknown"
     return request.remote_addr or "unknown"
 
 
@@ -343,8 +350,8 @@ if __name__ == "__main__":
     # (clear_untrusted_proxy_headers=True) — на Render edge не loopback,
     # IP edge заранее не известен, поэтому доверяем входящим прокси-заголовкам.
     # Спуф-риск XFF содержит сам перезапись: _upstream_headers() шлёт mlog
-    # ровно ОДНО значение (leftmost), а mlog принимает XFF только от
-    # доверенного пира 127.0.0.1 (METALOGOS_TRUSTED_PROXIES, №263).
+    # ровно ОДНО значение (rightmost — последний хоп от доверенного edge),
+    # а mlog принимает XFF только от доверенного пира 127.0.0.1 (№263).
     from waitress import serve
 
     logging.getLogger(__name__).info(f"Reverse proxy (waitress) on 0.0.0.0:{PORT}")
