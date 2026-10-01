@@ -20,12 +20,13 @@ RUN pip3 install -r requirements.lock --break-system-packages
 # бинарь из официального CI-артефакта тегового коммита 0d1cce9 —
 # unfreeze-релиз: В17-фиксы памяти + security-волна 0.26.0 №454-№459)
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
-# грузит сырой app.mlog). bin/mlog-025 (0.25.0) вендорен как прошлый-хороший
-# тест-гвард (ADR-0009); mlog-024 выведен из репо (история git сохраняет).
+# грузит сырой app.mlog). bin/mlog-027 (0.27.0) вендорен как прошлый-хороший
+# тест-гвард (ADR-0012; было mlog-025 — выведен #399, а COPY здесь забыли →
+# сборка падала 30.09–01.10, хотфикс 2026-10-01).
 COPY bin/mlog /usr/local/bin/mlog
 COPY bin/mlog-020 /usr/local/bin/mlog-020
-COPY bin/mlog-025 /usr/local/bin/mlog-025
-RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 /usr/local/bin/mlog-025 && /usr/local/bin/mlog --version
+COPY bin/mlog-027 /usr/local/bin/mlog-027
+RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 /usr/local/bin/mlog-027 && /usr/local/bin/mlog --version
 
 COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
@@ -40,7 +41,7 @@ COPY . .
 # стали 100644, а эта строка по-прежнему chmod'ила УДАЛЁННЫЙ mlog-023 →
 # docker build падал, деплой не проходил. Страховка теперь гоняет ВСЕ
 # вендоренные бинари (защита от регресса exec-бит) и верифицирует кандидата.
-RUN chmod +x /office/bin/mlog /office/bin/mlog-020 /office/bin/mlog-025 \
+RUN chmod +x /office/bin/mlog /office/bin/mlog-020 /office/bin/mlog-027 \
     && /office/bin/mlog --version
 
 # Node.js deps (Prisma client for PostgreSQL)
@@ -58,10 +59,15 @@ RUN useradd -r -u 10001 -m -d /home/office office \
     && mkdir -p /var/data /var/forge/repos \
     && chown -R office:office /office /var/data /var/forge
 
-USER office
-# git-идентичность FORGE — теперь в HOME офиса (было в /root/.gitconfig)
-RUN git config --global user.email "agent@fosved.office" \
-    && git config --global user.name "Fosved Agent"
+# ХОТФИКС 2026-10-01: USER office ВРЕМЕННО СНЯТ. Постоянный диск Render
+# монтируется поверх /var/data при запуске — chown выше действует только на
+# слой образа; база на диске создана процессами от root → под office запись
+# в базу не гарантирована. Вернуть USER только вместе со сбросом привилегий в
+# entrypoint (chown диска от root, затем setpriv/gosu → office) — наряд #450.
+# USER office
+# git-идентичность FORGE — системная, работает под любым пользователем
+RUN git config --system user.email "agent@fosved.office" \
+    && git config --system user.name "Fosved Agent"
 
 # FO-014: office-owned MCP-серверы (github + filesystem) — исполняемые,
 # вызываются из mlog через mcp_call (allowlist: mcp_servers/github,mcp_servers/filesystem)
