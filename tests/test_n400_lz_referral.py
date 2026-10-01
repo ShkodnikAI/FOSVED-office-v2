@@ -54,9 +54,12 @@ def test_single_referral_trigger():
     assert LZ_SRC.count("LZGateOSPReferral(topic_query)") == 1, (
         "гейт должен вызываться из HandleLZ ровно один раз (аргумент topic_query, #427)")
     posts = LZ_SRC.count('http_post("http://127.0.0.1:10001/osp/analyze')
-    assert posts == 2, (
-        f"POST /osp/analyze в lz.mlog должен быть ровно 2 (гейт + /lz invest), "
-        f"сейчас {posts} — двойная пересылка одного запроса недопустима")
+    # #446 A.2 (2026-10-02): третий легитимный отправитель — LZInflectionDetect
+    # (инфлекшн-алерт, решение владельца: построить через живой /osp/analyze;
+    # раньше ходил на несуществующий :4000/osp/inflection-alert)
+    assert posts == 3, (
+        f"POST /osp/analyze в lz.mlog должен быть ровно 3 (гейт + /lz invest + "
+        f"inflection-alert #446 A.2), сейчас {posts} — дубли одного запроса недопустимы")
     assert "INVEST_REFERRAL" in LZ_SRC, (
         "упоминание INVEST_REFERRAL должно остаться только в комментарии истории #400")
 
@@ -76,7 +79,7 @@ def test_explicit_invest_command():
 def test_gate_pattern_untouched_contract():
     """Гейт остаётся YES/NO-вызовом с fire-and-forget (№318: redact-hash)."""
     assert "pattern LZGateOSPReferral(query: String) -> String" in LZ_SRC
-    gate_seg = LZ_SRC[LZ_SRC.index("pattern LZGateOSPReferral"):LZ_SRC.index("pattern LZGateEmissionCheck")]
+    gate_seg = LZ_SRC[LZ_SRC.index("pattern LZGateOSPReferral"):LZ_SRC.index("pattern LZGateCompetingCheck")]
     assert 'if result == "YES" then' in gate_seg
     assert 'redact(env("CRON_SECRET"), "hash_only")' in gate_seg, (
         "секрет в мосте №318 ходит только односторонним redact-hash")

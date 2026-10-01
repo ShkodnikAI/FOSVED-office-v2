@@ -539,9 +539,13 @@ pattern ExpertCompareVehicles(query: String, chat_id: String) -> String {
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
-  // Save comparison to DB
-  let save_body = json_encode({vehicles: query, result: substring(reply, 0.0, 2000.0), dept: "expert"})
-  let _ = TryVal(try http_post("http://127.0.0.1:4000/archive/save", save_body, "application/json"))
+  // #446 A.3 (решение владельца: построить на существующий механизм):
+  // сравнение авто уходит в общий исходящий путь SendReport (dept/miniapp.mlog):
+  // владелец получает TG-превью, длинные отчёты — в архив miniapp_responses
+  // (/archive/browse, dept=expert), гвард обрезки #399 включён.
+  // Раньше: несуществующий роут :4000/archive/save — сравнения молча терялись
+  // (класс ошибок №1, #381).
+  let _ = SendReport(substring(reply, 0.0, 2000.0), "expert", "compare: " + query, "3", chat_id)
 
   let _ = RecordAssistantMessage(chat_id, "expert", reply)
   let _ = AuditLog("expert_compare", "expert", "compare: " + substring(query, 0.0, 100.0))

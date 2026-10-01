@@ -1832,6 +1832,33 @@ mlogserver {
     return respond("200 analysis complete")
   }
 
+  // ── #446 A.1: OSP→LZ мост — POST /lz/telegram ─────────────────────────
+  // Решение владельца 2026-10-02: построить. «/osp tg» (dept/osp.mlog
+  // OSPTelegramSearch) раньше ходил на несуществующий Flask-роут
+  // :4000/lz/telegram — TG-поиск молча терялся (класс ошибок №1, #381).
+  // Внутри — живой LZTelegramSearch (dept/lz.mlog, поиск по отслеживаемым
+  // TG-каналам; база скана — lz_channels/telegram_monitor, MON-1).
+  // Секрет-контракт №318 — тот же, что у /osp/analyze: hash-form
+  // (redact(..., "hash_only"), URL-safe hex) или raw (cron-стиль),
+  // сравнение против ОДНОГО H(secret).
+  // LLM-вызов внутри LZTelegramSearch синхронный — вызывающая сторона
+  // ставит таймаут 90с и читает ответ (JSON {"response": ...}).
+  route "/lz/telegram" method=POST {
+    let received = redact(query_param("secret"), "all")
+    let cron_secret = env("CRON_SECRET")
+    if cron_secret == "" then { return respond("403 Forbidden") }
+    let expected = to_string(redact(cron_secret, "hash_only"))
+    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let data = json_body()
+    let q = redact(to_string(json_get(data, "query", "")), "all")
+    if redact(q, "hash_only") == redact("", "hash_only") then { return respond("400 empty query") }
+    let chat_id = redact(to_string(json_get(data, "chat_id", "0")), "all")
+    let _ = InitDB()
+    let _ = AuditLog("lz_telegram_bridge", "lz", "osp tg-search bridge (naryad #446 A.1)")
+    let result = LZTelegramSearch(q, chat_id)
+    return respond(json_encode({response: result}))
+  }
+
   // ── №376: REST /api/expert/* — восстановление обёрток (TODO dept/expert.mlog:804) ──
   // route допустим только в главном файле (в импортируемом модуле — parse
   // error, проверено пробой 25.09), поэтому обёртки живут здесь тонкими

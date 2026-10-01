@@ -135,16 +135,9 @@ pattern LZGateOSPReferral(query: String) -> String {
   return "PASS: no investment implication"
 }
 
-// Gate 6: Emerging tech must check emission flow (Cantillon)
-pattern LZGateEmissionCheck(technology: String) -> String {
-  let result = redact(to_string(TryVal(try call_llm("Does " + technology + " involve or depend on monetary emission, credit expansion, or fiscal subsidy flows? Reply YES or NO."))), "all")
-  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if result == "YES" then {
-    TryVal(try http_post("http://127.0.0.1:4000/osp/cantillon", json_encode({technology: technology, source: "lz"}), "application/json"))
-    return "REFERRED: emission flow check sent to OSP"
-  }
-  return "PASS: no emission dependency"
-}
+// Gate 6 УДАЛЁН (#446, решение владельца 2026-10-02 — класс B, убрать):
+// LZGateEmissionCheck сам недостижим из прода (STRING_ONLY по реестру #449),
+// а его мост /osp/cantillon (:4000) никогда не существовал — ошибки глотались.
 
 // Gate 7: Single-tech focus must check competing alternatives
 pattern LZGateCompetingCheck(technology: String) -> String {
@@ -604,8 +597,13 @@ pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
   if to_string(check) == "()" then { let check = "[оценка недоступна — провайдеры модели не ответили]" }
   if check == "YES" then {
     db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE title LIKE ?", ["hot", "%" + technology + "%"])
-    // Auto-trigger OSP if disruption >= 70%
-    TryVal(try http_post("http://127.0.0.1:4000/osp/inflection-alert", json_encode({technology: technology, source: "lz", analysis: result}), "application/json"))
+    // #446 A.2 (решение владельца: построить): алерт уходит в ЖИВОЙ
+    // /osp/analyze (:10001) по контракту №318 — hash-form секрета,
+    // fire-and-forget 5с: анализ продолжается на сервере, отчёт приходит
+    // владельцу через SendReport (прецедент — LZGateOSPReferral выше).
+    // Раньше: несуществующий роут :4000/osp/inflection-alert — инфлекшн-алерты
+    // ЛЗ молча терялись (класс ошибок №1, #381).
+    TryVal(try http_post("http://127.0.0.1:10001/osp/analyze?secret=" + redact(env("CRON_SECRET"), "hash_only"), json_encode({source: "lz", query: "Inflection alert: " + technology + ". Анализ: " + result, type: "inflection_alert"}), "application/json", 5.0))
   }
   return "🔬 Inflection: " + technology + "\n" + result
 }
@@ -645,19 +643,10 @@ pattern LZTalentFlow(technology: String) -> String {
   return "👥 Talent Flow: " + technology + "\n" + result
 }
 
-// Skill 8: vc-tracking
-pattern LZVCTracking(technology: String) -> String {
-  let result = redact(to_string(TryVal(try call_llm("VC TRACKING for: " + technology + "\n\nAnalyze venture capital patterns:\n1. Recent funding rounds (Crunchbase)\n2. Investor quality signal (track record firms)\n3. Capital concentration by subfield\n4. Stage distribution (seed/A/B/C)\n5. Smart money vs dumb money ratio"))), "all")
-  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  db_execute("UPDATE tracked_technologies SET vc_investment = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [result, "%" + technology + "%"])
-  // Cross-dept: notify Finance if significant VC signal
-  let sig_check = redact(to_string(TryVal(try call_llm("Is this VC signal significant enough to notify Finance? Reply YES or NO. Analysis: " + result))), "all")
-  if to_string(sig_check) == "()" then { let sig_check = "[оценка недоступна — провайдеры модели не ответили]" }
-  if sig_check == "YES" then {
-    TryVal(try http_post("http://127.0.0.1:4000/finance/vc-signal", json_encode({technology: technology, analysis: result, source: "lz"}), "application/json"))
-  }
-  return "💰 VC: " + technology + "\n" + result
-}
+// Skill 8 (vc-tracking) УДАЛЁН (#446, решение владельца 2026-10-02 — класс C,
+// двойной труп): LZVCTracking мёртв (0 вызовов), мост /finance/vc-signal
+// (:4000) не существует. Оживёт вызывающий — мост строить через живой
+// механизм (не прямым HTTP-роутом).
 
 // Skill 9 (competing-alternatives) УДАЛЁН — решение владельца по #284 (вариант 2):
 // единственная точка входа была мёртвой подкомандой compare в app.mlog;
@@ -948,42 +937,12 @@ pattern LZMetricsScore() -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// LIFECYCLE STATE MACHINE
-// tracking → hot → confirmed_disruption | tracking → cooled | tracking → failed
-// ═══════════════════════════════════════════════════════════════════════
-
-pattern LZLifecycleTransition(artifact_id: Int, new_status: String) -> String {
-  let rows = query("SELECT status, confirmation_count FROM knowledge_artifacts WHERE id = ?", [artifact_id])
-  if length(rows) == 0 then { return "FAIL: artifact not found" }
-  let current = to_string(json_get(get(rows, 0), "status", ""))
-  let confirmations = to_float(to_string(json_get(get(rows, 0), "confirmation_count", "0")))
-  // Valid transitions
-  if current == "tracking" and new_status == "hot" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["hot", artifact_id])
-    return "✅ tracking → hot"
-  }
-  if current == "tracking" and new_status == "cooled" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["cooled", artifact_id])
-    return "✅ tracking → cooled"
-  }
-  if current == "tracking" and new_status == "failed" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["failed", artifact_id])
-    return "✅ tracking → failed"
-  }
-  if current == "hot" and new_status == "confirmed_disruption" then {
-    // Gate 1: Need 3+ confirmations
-    if confirmations < 3.0 then { return "⛔ Need " + to_string(3.0 - confirmations) + " more confirmations" }
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["confirmed_disruption", artifact_id])
-    // Auto-trigger OSP analysis
-    TryVal(try http_post("http://127.0.0.1:4000/osp/disruption-confirmed", json_encode({artifact_id: artifact_id, source: "lz"}), "application/json"))
-    return "✅ hot → confirmed_disruption (OSP notified)"
-  }
-  if current == "hot" and new_status == "cooled" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["cooled", artifact_id])
-    return "✅ hot → cooled"
-  }
-  return "⛔ Invalid transition: " + current + " → " + new_status
-}
+// LIFECYCLE STATE MACHINE: LZLifecycleTransition УДАЛЁН (#446, решение
+// владельца 2026-10-02 — класс B, убрать): носитель недостижим из прода
+// (DOC_ONLY по реестру #449), мост /osp/disruption-confirmed (:4000) не
+// существовал — ошибки глотались. Переходы статусов knowledge_artifacts
+// выполняются напрямую db_execute (LZInflectionDetect и т.п.), OSP-алерт —
+// через живой /osp/analyze (см. LZInflectionDetect).
 
 // ═══════════════════════════════════════════════════════════════════════
 // SCHEDULED TASKS (5 horizons)
@@ -1030,16 +989,10 @@ pattern LZMonthlyRescoring() -> String {
 }
 
 // Quarterly: report to owner
-pattern LZQuarterlyReport() -> String {
-  let top = query("SELECT title, domain, disruption_score, hype_cycle_stage, status FROM knowledge_artifacts WHERE status IN (?, ?) ORDER BY disruption_score DESC LIMIT 10", ["hot", "confirmed_disruption"])
-  let result = redact(to_string(TryVal(try call_llm("Quarterly ЛЗ report to owner:\nTop 10 emerging technologies:\n" + to_string(top) + "\n\nFor each: disruption assessment, investment implications (referral to ОСП), timeline, confidence level.\n\nDISCLAIMER: This is intelligence, not investment advice."))), "all")
-  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  // Cross-dept: send to OSP for strategic analysis
-  TryVal(try http_post("http://127.0.0.1:4000/osp/quarterly-intel", json_encode({source: "lz", report: result}), "application/json"))
-  // Cross-dept: send to KK for arsenal review
-  TryVal(try http_post("http://127.0.0.1:4000/kk/arsenal-input", json_encode({source: "lz", skills_used: "hype-cycle,disruption-scoring,inflection-detection"}), "application/json"))
-  return result
-}
+// LZQuarterlyReport УДАЛЁН (#446, решение владельца 2026-10-02 — класс C,
+// двойной труп): носитель мёртв (0 вызовов), его мосты /osp/quarterly-intel
+// и /kk/arsenal-input (:4000) не существуют. Оживёт вызывающий — строить
+// через живой механизм, не прямыми HTTP-роутами.
 
 pattern LZChannelAdd(channel_id: String, category: String) -> String {
   db_execute("INSERT INTO lz_channels (channel_id, category, status) VALUES (?, ?, ?)", [channel_id, category, "active"])
