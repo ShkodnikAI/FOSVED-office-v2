@@ -1,0 +1,27 @@
+// ═══════════════════════════════════════════════════════════════════════
+// АРХИВ DEAD-паттернов из dept/forge.mlog — #449 A.1, решение владельца 2026-10-02
+// (вариант «в архив», история git сохранена; файл НЕ импортируется app.mlog
+// и не входит в прод-неймспейс). SHA256 фрагмента: 1077b6b4
+// Оживёт потребность — переносить назад осознанно, с вызовом и тестом.
+// ═══════════════════════════════════════════════════════════════════════
+
+// запись исхода: контекст задачи/этапа выводится из репозитория (шов как в
+// ForgeCheckPipeline: repo → project → активная задача → этап)
+pattern ForgeEditStatsRecord(repo_name: String, path: String, outcome: String, marker: String) -> String {
+  if outcome != "first_try" and outcome != "fuzzy" and outcome != "reject" then { return "ОТКАЗ: outcome ∈ {first_try, fuzzy, reject}" }
+  let probe = TryVal(try query("SELECT COUNT(*) as c FROM forge_edit_stats", []))
+  if to_string(probe) == "()" then { return "stats-off: таблицы нет (деградация, запись пропущена)" }
+  let proj_rows = query("SELECT project_slug FROM forge_repos WHERE name = ? LIMIT 1", [repo_name])
+  if length(proj_rows) < 1.0 then { return "ok: репо не найдено — без привязки" }
+  let project_slug = redact(to_string(json_get(get(proj_rows, 0), "project_slug", "")), "all")
+  let task_id = ""
+  let stage_id = ""
+  let task_rows = TryVal(try query("SELECT id FROM forge_tasks WHERE project_slug = ? AND status IN ('in_progress','awaiting_owner') ORDER BY id DESC LIMIT 1", [project_slug]))
+  if to_string(task_rows) != "()" and length(task_rows) > 0.0 then {
+    let task_id = redact(to_string(json_get(get(task_rows, 0), "id", "")), "all")
+    let stage_rows = query("SELECT id FROM forge_stages WHERE task_id = ? AND status = 'in_progress' ORDER BY seq DESC LIMIT 1", [task_id])
+    if length(stage_rows) > 0.0 then { let stage_id = to_string(json_get(get(stage_rows, 0), "id", "")) }
+  }
+  let _ = db_execute("INSERT INTO forge_edit_stats (task_id, stage_id, path, outcome, fuzzy) VALUES (?, ?, ?, ?, ?)", [task_id, stage_id, substring(path, 0.0, 300.0), outcome, marker])
+  return "ok"
+}

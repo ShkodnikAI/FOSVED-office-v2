@@ -13,12 +13,6 @@ pattern LegalGateJurisdiction(jx: String) -> String {
   return "BLOCK:unsupported_jurisdiction"
 }
 
-pattern LegalGateConfidential(data: String) -> String {
-  // Never output data marked as confidential
-  if contains(data, "[CONFIDENTIAL]") then { return "BLOCK:confidential" }
-  if contains(data, "[ПРИВИЛЕГОВАННЫЙ]") then { return "BLOCK:privileged" }
-  return "PASS"
-}
 //   1 Tier 3 placeholder), 7 hard rules, 12 red flag categories,
 //   risk mapping with 4 categories, lifecycle state machine,
 //   mandatory disclaimer enforcement, 4 jurisdictions, 3 business forms.
@@ -82,7 +76,6 @@ pattern DEPT() -> String { return "legal" }
 pattern METRIC() -> String { return "pct-clean-signings" }
 pattern TARGET_Y1() -> String { return "≥ 80%" }
 pattern TARGET_Y2() -> String { return "≥ 90%" }
-pattern VERIFICATION_DAYS() -> Int { return 90 }
 
 // Jurisdictions
 pattern JX_BY() -> String { return "BY" }
@@ -95,7 +88,6 @@ pattern VALID_JURISDICTIONS() -> String { return "BY,RU,EU,US" }
 pattern BF_OOO() -> String { return "ooo" }
 pattern BF_IP() -> String { return "ip" }
 pattern BF_SELFEMPLOYED() -> String { return "selfemployed" }
-pattern VALID_FORMS() -> String { return "ooo,ip,selfemployed" }
 
 // Document types
 pattern DT_NDA() -> String { return "NDA" }
@@ -105,40 +97,17 @@ pattern DT_TZ() -> String { return "TZ" }
 pattern DT_ANALYSIS() -> String { return "analysis" }
 pattern DT_RISK_MAP() -> String { return "risk_map" }
 pattern DT_RED_FLAG() -> String { return "red_flag_review" }
-pattern DT_TEMPLATE() -> String { return "template_draft" }
 
-// Lifecycle statuses
-pattern ST_DRAFTED() -> String { return "drafted" }
-pattern ST_PUBLISHED() -> String { return "published" }
-pattern ST_LAWYER_REVIEW() -> String { return "under-lawyer-review" }
-pattern ST_SIGNED() -> String { return "signed" }
 pattern ST_VERIFIED() -> String { return "verified-clean" }
 pattern ST_REWRITE() -> String { return "rewrite" }
 pattern ST_DISPUTE() -> String { return "dispute" }
-pattern ST_SUPERSEDED() -> String { return "superseded" }
 
-// Risk levels
-pattern RL_LOW() -> String { return "low" }
 pattern RL_MEDIUM() -> String { return "medium" }
 pattern RL_HIGH() -> String { return "high" }
 pattern RL_CRITICAL() -> String { return "critical" }
 
-// Red flag severity
-pattern RF_CRITICAL() -> String { return "CRITICAL" }
-pattern RF_HIGH() -> String { return "HIGH" }
-pattern RF_MEDIUM() -> String { return "MEDIUM" }
-pattern RF_LOW() -> String { return "LOW" }
 
-// Risk categories
-pattern RC_FINANCIAL() -> String { return "financial" }
-pattern RC_OPERATIONAL() -> String { return "operational" }
-pattern RC_REPUTATIONAL() -> String { return "reputational" }
-pattern RC_REGULATORY() -> String { return "regulatory" }
 
-// Likelihood/Impact
-pattern LI_HIGH() -> String { return "High" }
-pattern LI_MEDIUM() -> String { return "Medium" }
-pattern LI_LOW() -> String { return "Low" }
 
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 1: HARD RULES — 7 non-negotiable constraints
@@ -609,23 +578,7 @@ pattern RedFlagDetection(contractText: String, jx: String, bf: String, positionI
 // 7 placeholder skills: 2 Tier 1, 4 Tier 2, 1 Tier 3
 // Each returns honest placeholder response + redirect to full Tier 1 skills.
 
-pattern CrossJurisdictionComparison(jx1: String, jx2: String, question: String, chat_id: String) -> String {
-  let jx1Knowledge = LoadJurisdictionKnowledge(jx1)
-  let jx2Knowledge = LoadJurisdictionKnowledge(jx2)
 
-  let prompt = "Сравни нормы " + jx1 + " и " + jx2 + " по вопросу: " + question + ".\n\n" +
-    "Знания " + jx1 + ": " + jx1Knowledge + "\n" +
-    "Знания " + jx2 + ": " + jx2Knowledge + "\n\n" +
-    "Дай базовое сравнение: ключевые различия, риски каждой юрисдикции по этому вопросу, рекомендация по choice of law."
-
-  let result = redact(to_string(TryVal(try call_llm(prompt))), "all")
-  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  return result + "\n\n⚠ Скилл cross-jurisdiction-comparison — базовая реализация. Для глубокой работы рекомендую привлечение лицензированного юриста в обеих юрисдикциях."
-}
-
-pattern PrecedentSearchApplication(jx: String, disputeType: String, chat_id: String) -> String {
-  return "Скилл precedent-search-application в процессе наполнения. Базовая методология применима через Tier 1 скиллы (risk-mapping-protocol, contract-drafting-discipline).\n\nДля поиска прецедентов в " + jx + " по типу '" + disputeType + "' рекомендую:\n- BY: Верховный суд РБ (court.gov.by)\n- RU: Верховный суд РФ + КонсультантПлюс\n- EU: ECJ (curia.europa.eu)\n- US: Westlaw / LexisNexis\n\nДля глубокой работы — привлечение лицензированного юриста."
-}
 
 pattern NdaMslaSlaTemplates(docType: String, jx: String, bf: String, chat_id: String) -> String {
   let jxKnowledge = LoadJurisdictionKnowledge(jx)
@@ -676,9 +629,6 @@ pattern IpClauseDiscipline(workType: String, jx: String, chat_id: String) -> Str
   return result + "\n\n⚠ Скилл ip-clause-discipline — базовая реализация. Для сложных IP-структур — юрист-специалист по IP."
 }
 
-pattern ConsumerProtectionCheck(productContext: String, jx: String, chat_id: String) -> String {
-  return "Скилл consumer-protection-check в процессе наполнения.\n\nДля B2C-продукта в " + jx + ":\n- BY: Закон 'О защите прав потребителей' (возврат 14 дней, претензии 2-10 лет)\n- RU: Закон РФ о ЗПП (аналогично)\n- EU: Consumer Rights Directive (14 дней возврат для online, unfair terms директива)\n- US: varies by state, FTC Act Section 5\n\nДля проверки terms of service / оферты на соответствие — привлечение юриста."
-}
 
 pattern DisputeResolutionStrategy(disputeContext: String, jx: String, chat_id: String) -> String {
   let prompt = "Оцени стратегию разрешения спора.\n\nКонтекст: " + disputeContext + "\nЮрисдикция: " + jx + "\n\n" +
@@ -707,18 +657,7 @@ pattern TransitionLifecycle(assessmentId: String, newStatus: String) -> String {
   return newStatus
 }
 
-pattern SetVerificationDate(assessmentId: String, signingDate: String) -> String {
-  // Verification = 90 days after signing
-  let verDate = format_date(to_float(signingDate) + (86400.0 * to_float(to_string(VERIFICATION_DAYS()))), "yyyy-MM-dd")
-  let _ = db_execute("UPDATE legal_assessments SET verification_date = ?, status = ? WHERE id = ?", [verDate, ST_SIGNED(), assessmentId])
-  return verDate
-}
 
-pattern GetCurrentStatus(assessmentId: String) -> String {
-  let rows = query("SELECT status FROM legal_assessments WHERE id = ?", [assessmentId])
-  if length(rows) > 0 then { return json_get(parse_json(rows), "0.status", ST_DRAFTED()) }
-  return "not_found"
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 10: VERIFICATION & LEARNING LOOP

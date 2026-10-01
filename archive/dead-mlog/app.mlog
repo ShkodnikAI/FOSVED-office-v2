@@ -1,0 +1,38 @@
+// ═══════════════════════════════════════════════════════════════════════
+// АРХИВ DEAD-паттернов из app.mlog — #449 A.1, решение владельца 2026-10-02
+// (вариант «в архив», история git сохранена; файл НЕ импортируется app.mlog
+// и не входит в прод-неймспейс). SHA256 фрагмента: c9e9a887
+// Оживёт потребность — переносить назад осознанно, с вызовом и тестом.
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern SaveAnalysis(topic: String, result: String) -> String {
+  db_execute("INSERT INTO analysis (topic, full_result, status) VALUES (?1, ?2, 'drafted')", [topic, result])
+  let rows = query("SELECT last_insert_rowid() as lid", [])
+  let count = length(rows)
+  if count == 0.0 then { return "0" }
+  return json_get(rows[0], "lid", "0")
+}
+pattern AttachSource(analysis_id: String, title: String, claim: String) -> String {
+  db_execute("INSERT INTO research_source (analysis_id, title, claim) VALUES (?1, ?2, ?3)", [analysis_id, title, claim])
+  return "ok"
+}
+pattern SetProviderRateLimit(provider: String, limit: String) -> String {
+  let _ = kv_set("rate_limit:" + provider, limit)
+  return "ok"
+}
+// ── FOIP-003.4: Smart Model Routing — stats-aware fallback ──
+pattern GetModelErrorRate(model: String) -> String {
+  let date_rows = query("SELECT date('now') as d", [])
+  let today = ""
+  each dr in date_rows { let today = to_string(json_get(dr, "d", "")) }
+  let rows = query("SELECT total_calls, total_errors FROM daily_stats WHERE date = ? AND model = ?", [today, model])
+  if length(rows) == 0.0 then { return "0" }
+  let calls = to_int(json_get(rows[0], "total_calls", "0"))
+  let errors = to_int(json_get(rows[0], "total_errors", "0"))
+  if calls == 0 then { return "0" }
+  return to_string(to_float(errors) / to_float(calls) * 100.0)
+}
+pattern SaveToGenericArchive(dept: String, query: String, response: String) -> Int {
+  let topic = substring(query, 0.0, 120.0)
+  return db_insert("dept_archive", {dept: dept, topic: topic, full_result: response, status: "drafted"})
+}

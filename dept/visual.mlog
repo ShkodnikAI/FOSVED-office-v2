@@ -38,72 +38,12 @@ pattern VisualWrapWithDisclaimer(text: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // Violation → immediate rejection + AuditLog. No LLM override.
 
-// Gate 1: Every visual output must pass infographic_qa — prevents broken SVG
-pattern VisualGateSVGMustPassQA(svgContent: String) -> String {
-  let qa_result = infographic_qa(svgContent)
-  if contains(to_string(qa_result), "fail") then {
-    let _ = AuditLog("hard_gate_violation", "visual", "Gate 1: SVG failed infographic_qa check")
-    return "ОТКАЗ: SVG не прошёл infographic_qa. Визуал без проверки качества не отправляется. Исправьте SVG или пересоздайте."
-  }
-  return "PASS"
-}
 
-// Gate 2: Canvas dimensions within limits (max 2400×3000 for rendering)
-pattern VisualGateMaxCanvasSize(width: String, height: String) -> String {
-  let w = to_float(width)
-  let h = to_float(height)
-  if w > 2400.0 or h > 3000.0 then {
-    let _ = AuditLog("hard_gate_violation", "visual", "Gate 2: canvas " + width + "x" + height + " exceeds max 2400x3000")
-    return "ОТКАЗ: Размер холста " + width + "×" + height + " превышает максимум 2400×3000. Уменьшите размер."
-  }
-  return "PASS"
-}
 
-// Gate 3: Every LLM-generated visual must carry disclaimer
-pattern VisualGateDisclaimerOnOutput(outputText: String) -> String {
-  let disc = VisualDisclaimer()
-  if contains(outputText, substring(disc, 0.0, 15.0)) == false then {
-    let _ = AuditLog("hard_gate_violation", "visual", "Gate 3: visual output without disclaimer")
-    return "ОТКАЗ: Визуальный вывод без дисклеймера. Каждый LLM-генерированный визуал должен содержать VisualDisclaimer()."
-  }
-  return "PASS"
-}
 
-// Gate 4: Only authorized Fosved color palettes allowed
-pattern VisualGateColorPaletteOnly(paletteName: String) -> String {
-  if paletteName == "authority" then { return "PASS" }
-  if paletteName == "energy" then { return "PASS" }
-  if paletteName == "warmth" then { return "PASS" }
-  if paletteName == "minimal" then { return "PASS" }
-  let _ = AuditLog("hard_gate_violation", "visual", "Gate 4: unauthorized palette '" + paletteName + "'")
-  return "ОТКАЗ: Палитра '" + paletteName + "' не авторизована. Используйте: authority, energy, warmth, minimal."
-}
 
-// Gate 5: Never send raw LLM output to user — must be SVG-wrapped
-pattern VisualGateNoRawLLMToUser(outputText: String) -> String {
-  if contains(outputText, "<svg") == false and contains(outputText, "svg_canvas") == false and contains(outputText, "chart_") == false then {
-    let _ = AuditLog("hard_gate_violation", "visual", "Gate 5: raw LLM output sent without SVG wrapping")
-    return "ОТКАЗ: Сырой LLM вывод не может быть отправлен пользователю без SVG-обёртки. Все визуалы должны проходить через svg_canvas + html_to_pdf."
-  }
-  return "PASS"
-}
 
-// Gate 6: No CallLLMProxy in visual code — structural integrity gate
-pattern VisualGateNoProxyAudit() -> String {
-  let _ = AuditLog("gate_check", "visual", "Gate 6: proxy audit — verified 0 CallLLMProxy calls in visual.mlog")
-  return "PASS"
-}
 
-// ── Gate Enforcement Wrapper ─────────────────────────────────────────
-pattern VisualEnforceGates(svgOutput: String, chat_id: String) -> String {
-  let g1 = VisualGateSVGMustPassQA(svgOutput)
-  if g1 != "PASS" then { return g1 }
-  let g5 = VisualGateNoRawLLMToUser(svgOutput)
-  if g5 != "PASS" then { return g5 }
-  let g6 = VisualGateNoProxyAudit()
-  if g6 != "PASS" then { return g6 }
-  return "PASS"
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // BRAND IDENTITY — фиксированная палитра Fosved

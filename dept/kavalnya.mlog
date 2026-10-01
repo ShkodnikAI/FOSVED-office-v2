@@ -84,40 +84,9 @@ pattern KKCheckChecklistComplete(session_id: Int) -> String {
   return "FAIL: not all 10 checklist stages complete"
 }
 
-// Gate 2: Polygon pass-rate ≥ 70%
-pattern KKCheckPolygonPassRate(session_id: Int) -> String {
-  let rows = query("SELECT polygon_pass_rate FROM training_sessions WHERE id = ?", [to_string(session_id)])
-  if length(rows) == 0 then { return "FAIL: session not found" }
-  let rate = to_float(to_string(json_get(get(rows, 0), "polygon_pass_rate", "0")))
-  if rate >= 0.7 then { return "PASS: pass-rate " + to_string(rate) + " ≥ 0.70" }
-  return "FAIL: pass-rate " + to_string(rate) + " < 0.70"
-}
 
-// Gate 3: Minimum 3 anti-patterns per skill
-pattern KKCheckAntiPatterns(skill_name: String) -> String {
-  let rows = query("SELECT anti_patterns FROM skill_reviews WHERE skill_name = ?", [skill_name])
-  if length(rows) == 0 then { return "FAIL: skill not reviewed" }
-  let patterns = to_string(json_get(get(rows, 0), "anti_patterns", ""))
-  // Count anti-patterns (rough: count commas + 1)
-  if contains(patterns, ",") then { return "PASS: ≥3 anti-patterns" }
-  if contains(patterns, "]") and contains(patterns, "\"") then { return "PASS" }
-  return "FAIL: <3 anti-patterns"
-}
 
-// Gate 4: Psychotype must be set before skill creation
-pattern KKCheckPsychotypeSet(dept_name: String) -> String {
-  let rows = query("SELECT primary_type FROM psychotype_assessments WHERE dept_name = ? LIMIT 1", [dept_name])
-  if length(rows) > 0 then { return "PASS: psychotype set" }
-  return "FAIL: psychotype not set for " + dept_name
-}
 
-// Gate 5: No methodology changes outside quarterly review
-pattern KKCheckMethodologyChangeAllowed() -> String {
-  // Check if current month is a quarterly review month (Jan/Apr/Jul/Oct)
-  let now = to_string(YanaNowInfo())
-  if contains(now, "-01-") or contains(now, "-04-") or contains(now, "-07-") or contains(now, "-10-") then { return "PASS: quarterly review month" }
-  return "FAIL: not quarterly review month — methodology changes blocked"
-}
 
 // Gate 6: Structural debrief (not accusatory)
 pattern KKValidateDebriefTone(text: String) -> String {
@@ -157,30 +126,8 @@ pattern KKCreateSession(dept_name: String, session_type: String, specialist: Str
   return -1
 }
 
-pattern KKCompleteSession(session_id: Int) -> String {
-  let rows = query("SELECT status FROM training_sessions WHERE id = ?", [to_string(session_id)])
-  if length(rows) == 0 then { return "ERROR: session not found" }
-  let status = to_string(json_get(get(rows, 0), "status", ""))
-  if status != "in_progress" then { return "ERROR: status is '" + status + "', must be 'in_progress'" }
-  let _ = db_execute("UPDATE training_sessions SET status = 'completed', completed_at = datetime('now') WHERE id = ?", [to_string(session_id)])
-  let _ = AuditLog("kk_complete", "kavalnya", "session " + to_string(session_id) + " in_progress→completed")
-  return "OK: session completed"
-}
 
-pattern KKRatifySession(session_id: Int) -> String {
-  // Must pass polygon gate
-  let gate = KKCheckPolygonPassRate(session_id)
-  if contains(gate, "FAIL") then { return "BLOCKED: " + gate + " — cannot ratify without polygon pass-rate ≥70%" }
-  let _ = db_execute("UPDATE training_sessions SET status = 'ratified', ratified_at = datetime('now') WHERE id = ? AND status = 'completed'", [to_string(session_id)])
-  let _ = AuditLog("kk_ratify", "kavalnya", "session " + to_string(session_id) + " completed→ratified")
-  return "OK: session ratified — specialist deployed"
-}
 
-pattern KKRollbackSession(session_id: Int) -> String {
-  let _ = db_execute("UPDATE training_sessions SET status = 'rolled_back', completed_at = datetime('now') WHERE id = ? AND status = 'in_progress'", [to_string(session_id)])
-  let _ = AuditLog("kk_rollback", "kavalnya", "session " + to_string(session_id) + " in_progress→rolled_back")
-  return "OK: session rolled back"
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // POLYGON — training test execution
@@ -205,12 +152,6 @@ pattern KKRunPolygonTask(session_id: Int, task_name: String, expected: String, a
 // ═══════════════════════════════════════════════════════════════════════
 // SKILL MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════
-pattern KKRegisterSkillReview(skill_name: String, dept_name: String, anti_patterns: String) -> String {
-  let ap_gate = KKCheckAntiPatterns(skill_name)
-  let _ = db_execute("INSERT INTO skill_reviews (skill_name, dept_name, anti_patterns, status) VALUES (?, ?, ?, 'active') ON CONFLICT (skill_name) DO UPDATE SET anti_patterns = EXCLUDED.anti_patterns, updated_at = datetime('now')", [skill_name, dept_name, anti_patterns])
-  let _ = AuditLog("kk_skill_review", "kavalnya", skill_name + " " + ap_gate)
-  return "OK: skill review registered (" + ap_gate + ")"
-}
 
 pattern KKDeprecateSkill(skill_name: String) -> String {
   let _ = db_execute("UPDATE skill_reviews SET status = 'deprecated', updated_at = datetime('now') WHERE skill_name = ?", [skill_name])
