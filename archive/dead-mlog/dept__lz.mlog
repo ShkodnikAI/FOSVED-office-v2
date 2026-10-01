@@ -1,0 +1,72 @@
+// ═══════════════════════════════════════════════════════════════════════
+// АРХИВ DEAD-паттернов из dept/lz.mlog — #449 A.1, решение владельца 2026-10-02
+// (вариант «в архив», история git сохранена; файл НЕ импортируется app.mlog
+// и не входит в прод-неймспейс). SHA256 фрагмента: e9d3598c
+// Оживёт потребность — переносить назад осознанно, с вызовом и тестом.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Gate 2: Impact claims must include timeline
+pattern LZGateTimeline(claim: String) -> String {
+  let result = redact(to_string(TryVal(try call_llm("Does this impact claim include a specific timeline (years to commercial/mass adoption)? Claim: " + claim + " Reply YES or NO only."))), "all")
+  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
+  if result != "YES" then { return "FAIL: no timeline in impact claim" }
+  return "PASS: timeline present"
+}
+// Skill 6: patent-prosecution-analysis
+pattern LZPatentAnalysis(technology: String) -> String {
+  let result = redact(to_string(TryVal(try call_llm("PATENT PROSECUTION ANALYSIS for: " + technology + "\n\nAnalyze patent activity to reveal real R&D priorities:\n1. Recent filings (USPTO/EPO/WIPO/CN)\n2. Assignee concentration\n3. Claim direction analysis\n4. Filing velocity trend\n5. What they protect reveals what they build"))), "all")
+  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
+  db_execute("UPDATE tracked_technologies SET patent_activity = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [result, "%" + technology + "%"])
+  return "📋 Patents: " + technology + "\n" + result
+}
+// Skill 7: talent-flow-tracking
+pattern LZTalentFlow(technology: String) -> String {
+  let result = redact(to_string(TryVal(try call_llm("TALENT FLOW TRACKING for: " + technology + "\n\nTrack migration of top researchers/engineers:\n1. Key researchers in this field\n2. Recent moves (LinkedIn, conferences)\n3. Concentration points (where talent goes)\n4. Exodus signals (where talent leaves)\n5. Implications for capability direction"))), "all")
+  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
+  db_execute("UPDATE tracked_technologies SET talent_flow = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [result, "%" + technology + "%"])
+  return "👥 Talent Flow: " + technology + "\n" + result
+}
+// Science: via arxiv RSS (already in news_cache as category=science)
+pattern ScanScience(query: String) -> String {
+  let body = json_encode({query: query, dept: "lz", limit: 5})
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/news/fresh", body, "application/json"))
+  if to_string(resp) == "()" then { return "[science: no data]" }
+  let parsed = TryVal(try parse_json(resp))
+  if to_string(parsed) == "()" then { return "[science: parse error]" }
+  return to_string(json_get(parsed, "news", "no results"))
+}
+// Darknet: not available — honest placeholder
+pattern ScanDarknet(query: String) -> String {
+  return "[darknet scan: unavailable — no anonymous access infrastructure]"
+}
+// Every 4h: incremental scan
+pattern LZIncrementalScan() -> String {
+  let result = redact(to_string(TryVal(try call_llm("Incremental scan: check arxiv, biorxiv, medrxiv, USPTO for new publications in tracked domains. Summarize top 5 new findings."))), "all")
+  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
+  db_execute("INSERT INTO scan_logs (scan_type, sources_queried, artifacts_found) VALUES (?, ?, 5)", ["incremental", "arxiv,biorxiv,medrxiv,uspto"])
+  return result
+}
+// Weekly: inflection candidates review
+pattern LZWeeklyReview() -> String {
+  let candidates = query("SELECT title, hype_cycle_stage, disruption_score FROM knowledge_artifacts WHERE status IN (?, ?) ORDER BY disruption_score DESC LIMIT 10", ["tracking", "hot"])
+  let result = redact(to_string(TryVal(try call_llm("Weekly ЛЗ inflection review:\nCandidates: " + to_string(candidates) + "\n\nFor each: Is inflection approaching? Any new signals? Update hype cycle position if changed."))), "all")
+  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
+  db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 10)", ["weekly"])
+  return result
+}
+// Monthly: disruption probability re-scoring
+pattern LZMonthlyRescoring() -> String {
+  let tracked = query("SELECT id, title, disruption_score FROM tracked_technologies ORDER BY disruption_score DESC LIMIT 20", [])
+  let result = redact(to_string(TryVal(try call_llm("Monthly re-scoring of tracked technologies:\n" + to_string(tracked) + "\n\nRe-evaluate disruption probability at 1y/3y/5y/10y horizons based on latest data."))), "all")
+  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
+  db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 20)", ["monthly"])
+  return result
+}
+pattern LZFinalSafetyCheck(output: String) -> String {
+  let check = redact(to_string(TryVal(try call_llm("Does this text contain specific investment advice (buy/sell/hold recommendations, portfolio allocations, price targets)? Text: " + output + " Reply YES or NO."))), "all")
+  if to_string(check) == "()" then { let check = "[оценка недоступна — провайдеры модели не ответили]" }
+  if check == "YES" then {
+    return "⛔ BLOCKED: Investment advice detected. ЛЗ provides intelligence, not investment recommendations. Forwarded to ОСП. " + LZDisclaimer()
+  }
+  return output
+}

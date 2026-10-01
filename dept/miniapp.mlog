@@ -5,90 +5,20 @@ import dept/visual
 // Auto-archive integration, SendReport with archive support
 // ENRICHED: 0 CallLLMProxy, 3 native call_llm, disclaimer, 6 hard gates
 
-// ── Model Selector & Disclaimer ────────────────────────────────────
-// TODO: мёртвый код после MLG-3 — выбор модели теперь делает SmartRouter. Удалить отдельным нарядом по чистке.
-pattern MiniappSelectModel() -> String {
-  return "claude-sonnet-4-20250514"
-}
 
-pattern MiniappDisclaimer() -> String {
-  return "FOSVED MINIAPP — автоматическая визуализация. Результат зависит от LLM-генерации."
-}
 
-pattern MiniappWrapWithDisclaimer(text: String) -> String {
-  return MiniappDisclaimer() + "\n\n" + text + "\n\n" + MiniappDisclaimer()
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // HARD GATES — 6 non-negotiable constraints for Miniapp Department
 // ═══════════════════════════════════════════════════════════════════════
 // Violation → immediate rejection + AuditLog. No LLM override.
 
-// Gate 1: yana/admin NEVER stored in miniapp_responses — privacy shield
-pattern MiniappGateNoYanaAdminStore(dept: String) -> String {
-  if dept == "yana" or dept == "admin" then {
-    let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 1: " + dept + " must NEVER be stored in miniapp")
-    return "ОТКАЗ: " + dept + " никогда не сохраняется в miniapp_responses. Это критический privacy gate."
-  }
-  return "PASS"
-}
 
-// Gate 2: Every report must include disclaimer HTML
-pattern MiniappGateDisclaimerOnEveryReport(htmlContent: String) -> String {
-  if contains(htmlContent, "disclaimer") == false and contains(htmlContent, "report-disclaimer") == false then {
-    let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 2: report HTML without disclaimer")
-    return "ОТКАЗ: Отчёт без дисклеймера. Каждый HTML-отчёт должен содержать DeptDisclaimer()."
-  }
-  return "PASS"
-}
 
-// Gate 3: Telegram message length must respect limits (4096 chars)
-pattern MiniappGateMaxTelegramLength(messageText: String) -> String {
-  if length(messageText) > 4096.0 then {
-    let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 3: Telegram message " + to_string(length(messageText)) + " > 4096 limit")
-    return "ОТКАЗ: Сообщение превышает лимит Telegram (4096). Обрежьте или используйте Mini App."
-  }
-  return "PASS"
-}
 
-// Gate 4: Only known departments can generate reports
-pattern MiniappGateDeptValidation(dept: String) -> String {
-  let valid_depts = "yana,osp,lz,expert,marketing,finance,legal,dev,design,qa,visual,engineering,kavalnya,admin"
-  if contains(valid_depts, dept) == false then {
-    let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 4: unknown department '" + dept + "'")
-    return "ОТКАЗ: Отдел '" + dept + "' не существует. Отчёт может быть создан только для известного отдела."
-  }
-  return "PASS"
-}
 
-// Gate 5: Deepen actions limited to levels 1-4
-pattern MiniappGateDeepenLevelValid(level: String) -> String {
-  if level == "1" then { return "PASS" }
-  if level == "2" then { return "PASS" }
-  if level == "3" then { return "PASS" }
-  if level == "4" then { return "PASS" }
-  let _ = AuditLog("hard_gate_violation", "miniapp", "Gate 5: invalid deepen level '" + level + "'")
-  return "ОТКАЗ: Уровень углубления '" + level + "' недействителен. Допустимы только 1-4."
-}
 
-// Gate 6: No CallLLMProxy in miniapp code — structural integrity gate
-pattern MiniappGateNoProxyAudit() -> String {
-  let _ = AuditLog("gate_check", "miniapp", "Gate 6: proxy audit — verified 0 CallLLMProxy calls in miniapp.mlog")
-  return "PASS"
-}
 
-// ── Gate Enforcement Wrapper ─────────────────────────────────────────
-pattern MiniappEnforceGates(dept: String, htmlContent: String) -> String {
-  let g1 = MiniappGateNoYanaAdminStore(dept)
-  if g1 != "PASS" then { return g1 }
-  let g2 = MiniappGateDisclaimerOnEveryReport(htmlContent)
-  if g2 != "PASS" then { return g2 }
-  let g4 = MiniappGateDeptValidation(dept)
-  if g4 != "PASS" then { return g4 }
-  let g6 = MiniappGateNoProxyAudit()
-  if g6 != "PASS" then { return g6 }
-  return "PASS"
-}
 
 // ── Gradient start colors ──────────────────────────────────────────
 pattern DeptColorStart(dept: String) -> String {
@@ -128,24 +58,6 @@ pattern DeptColorEnd(dept: String) -> String {
   return "#1e293b"
 }
 
-// ── Accent colors ──────────────────────────────────────────────────
-pattern DeptAccent(dept: String) -> String {
-  if dept == "yana" then { return "#3d4a4d" }
-  if dept == "osp" then { return "#dc2626" }
-  if dept == "lz" then { return "#0891b2" }
-  if dept == "expert" then { return "#4f46e5" }
-  if dept == "marketing" then { return "#ea580c" }
-  if dept == "finance" then { return "#16a34a" }
-  if dept == "legal" then { return "#64748b" }
-  if dept == "dev" then { return "#2563eb" }
-  if dept == "design" then { return "#ec4899" }
-  if dept == "qa" then { return "#65a30d" }
-  if dept == "visual" then { return "#a855f7" }
-  if dept == "engineering" then { return "#78716c" }
-  if dept == "kavalnya" then { return "#d97706" }
-  if dept == "admin" then { return "#3b82f6" }
-  return "#64748b"
-}
 
 // ── Display names ──────────────────────────────────────────────────
 pattern DeptName(dept: String) -> String {
@@ -199,68 +111,6 @@ pattern DeptDisclaimer(dept: String) -> String {
   return "<div class=\"report-disclaimer\">Generated by Fosved Office v2 — " + DeptName(dept) + " department.</div>"
 }
 
-// ── Full Mini App HTML report builder ──────────────────────────────
-// YANA and ADMIN are NEVER stored in miniapp — hard guard
-pattern BuildReport(dept: String, query: String, reply: String, chat_id: String) -> String {
-  if dept == "yana" or dept == "admin" then {
-    let _ = SendTelegramReplyMDV2(chat_id, reply)
-    return reply
-  }
-  let doc_id = "doc-" + to_string(now())
-  // №422: try оборачивает в TryResult — redact(Struct) падает даже на успехе;
-  // файл в репо — читаем без try (как /version читает VERSION)
-  let css = redact(read_file("report_css.txt"), "all")
-  if css == "()" then { let css = "" }
-  let name = DeptName(dept)
-  let start = DeptColorStart(dept)
-  let end = DeptColorEnd(dept)
-  let accent = DeptAccent(dept)
-  let formatted = FormatReportBody(dept, reply)
-  let confidence = "2.0"
-  let date_str = to_string(now())
-
-  let mut header = "<div class=\"report-header\" style=\"background:linear-gradient(135deg, " + start + ", " + end + ")\">"
-  let header = header + "<h1>" + name + "</h1>"
-  let header = header + "<div class=\"subtitle\">" + query + "</div></div>"
-
-  let mut meta = "<div class=\"report-meta\"><span>ID: " + doc_id + "</span>"
-  let meta = meta + "<span>" + date_str + "</span>"
-  let meta = meta + "<span>Confidence: " + confidence + "/4</span></div>"
-
-  let body_block = "<div class=\"report-body\">" + formatted + "</div>"
-
-  let disclaimer = DeptDisclaimer(dept)
-
-  let mut html = "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-  let html = html + "<style>" + css + "</style></head><body>"
-  let html = html + "<div class=\"report-container\">" + header + meta + body_block + disclaimer + "</div>"
-  let html = html + "</body></html>"
-
-  let _ = TryVal(try query("INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))", [doc_id, dept, query, query, reply, html, confidence]))
-
-  let reply_len = length(reply)
-  if reply_len > 800.0 then {
-    let short = substring(reply, 0.0, 200.0) + "..."
-    let _ = AuditLog("miniapp_dispatch", dept, "doc=" + doc_id + " chat=" + chat_id)
-    let render_url = RenderUrl()
-    let miniapp_url = render_url + "/miniapp/" + doc_id
-    let token = TgToken()
-    let body = json_encode({
-      chat_id: to_float(chat_id),
-      text: short,
-      reply_markup: {
-        inline_keyboard: [[{
-          text: "Открыть отчёт",
-          web_app: { url: miniapp_url }
-        }]]
-      }
-    })
-    let _ = http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json")
-    return short
-  }
-
-  return reply
-}
 
 // ── Router: plain text vs Mini App + AUTO-ARCHIVE ──────────────────
 // Yana NEVER goes through miniapp — she sends plain text + voice directly

@@ -1,0 +1,55 @@
+// ═══════════════════════════════════════════════════════════════════════
+// АРХИВ DEAD-паттернов из dept/qa.mlog — #449 A.1, решение владельца 2026-10-02
+// (вариант «в архив», история git сохранена; файл НЕ импортируется app.mlog
+// и не входит в прод-неймспейс). SHA256 фрагмента: 289c6fd8
+// Оживёт потребность — переносить назад осознанно, с вызовом и тестом.
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern QA_TR_COMPLETED() -> String { return "completed" }
+pattern QA_TR_VERDICT_PASSED() -> String { return "passed" }
+pattern QA_TR_VERDICT_FAILED() -> String { return "failed" }
+pattern QA_VALID_VERDICTS() -> String { return "passed,failed,partial,error" }
+pattern QA_AI_GROUNDEDNESS_MIN() -> String { return "0.85" }
+pattern QA_AI_RELEVANCE_MIN() -> String { return "0.85" }
+pattern QA_AI_FAITHFULNESS_MIN() -> String { return "0.90" }
+pattern QA_AI_COHERENCE_MIN() -> String { return "0.80" }
+pattern QA_AI_PROMPT_INJECTION_MIN() -> String { return "0.95" }
+pattern QA_TARGET_ESCAPE_RATE() -> String { return "10" }
+pattern QA_TARGET_MTTD_CRITICAL_HR() -> String { return "1" }
+pattern QA_TARGET_MTTR_CRITICAL_HR() -> String { return "4" }
+pattern CalculateDefectEscapeRate(project: String) -> String {
+  // Escape rate = defects found in production / total defects × 100
+  let prodDefects = db_execute(
+    "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ? AND environment = 'production'",
+    [project]
+  )
+  let totalDefects = db_execute(
+    "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ?",
+    [project]
+  )
+  let parsed = parse_json(totalDefects)
+  let total = to_int(json_get(parsed, "0.cnt", "0"))
+  if total == 0 then { return "0" }
+  let parsed2 = parse_json(prodDefects)
+  let prod = to_int(json_get(parsed2, "0.cnt", "0"))
+  let rate = to_string(to_float(prod) / to_float(total) * 100.0)
+  return rate
+}
+pattern CalculateMTTD(project: String) -> String {
+  // Mean Time To Detect for critical defects
+  let rows = db_execute(
+    "SELECT AVG(EXTRACT(EPOCH FROM (verified_at - created_at)) / 3600.0) as mttd_hours FROM defect_records WHERE project = ? AND severity = 'critical' AND verified_at IS NOT NULL",
+    [project]
+  )
+  if length(rows) == 0 then { return "N/A" }
+  return rows
+}
+pattern CalculateMTTR(project: String) -> String {
+  // Mean Time To Resolve for critical defects
+  let rows = db_execute(
+    "SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 3600.0) as mttr_hours FROM defect_records WHERE project = ? AND severity = 'critical' AND status = 'verified'",
+    [project]
+  )
+  if length(rows) == 0 then { return "N/A" }
+  return rows
+}

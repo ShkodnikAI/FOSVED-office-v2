@@ -67,12 +67,6 @@ import dept/utils
 // ═══════════════════════════════════════════════════════════════════════
 // MODEL SELECTOR (native — no proxy)
 // ═══════════════════════════════════════════════════════════════════════
-pattern AdminSelectModel(complexity: Int) -> String {
-  // complexity: 1=fast/cheap, 2=balanced, 3=deep/verbose
-  if complexity == 1 then { return "claude-sonnet-4-20250514" }
-  if complexity == 2 then { return "claude-sonnet-4-20250514" }
-  return "claude-sonnet-4-20250514"
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // DISCLAIMER ENFORCEMENT (top + bottom)
@@ -81,10 +75,6 @@ pattern AdminDisclaimer() -> String {
   return "FOSVED ADMIN — системный агент, не заменяет инженера. Все автофиксы — предложения, требуют подтверждения. НИКАКИХ изменений в immutable зонах (audit_log, lockdown, bin/mlog)."
 }
 
-pattern AdminWrapWithDisclaimer(text: String) -> String {
-  let top = AdminDisclaimer()
-  return top + "\n\n" + text + "\n\n—" + top
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // HARD RULE GATES (programmatic — not prompt-based)
@@ -175,12 +165,6 @@ pattern SendAdminButtons(chat_id: String, text: String, approve_data: String, re
   return result
 }
 
-pattern SendAdminTyping(chat_id: String) -> String {
-  let token = TgToken()
-  let body = json_encode({chat_id: to_float(chat_id), action: "typing"})
-  let _ = http_post("https://api.telegram.org/bot" + token + "/sendChatAction", body, "application/json")
-  return "ok"
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Save findings from LLM audit
@@ -229,94 +213,10 @@ pattern SaveFindings(issues: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // Save graph nodes from LLM analysis
 // ═══════════════════════════════════════════════════════════════════════
-pattern SaveGraphNodes(file_path: String, analysis: String) -> String {
-  let mut nodes_saved = 0.0
-  let mut edges_saved = 0.0
-
-  // Save file node
-  db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at, valid_from) VALUES ('file', ?1, ?1, 'Department dispatcher', datetime('now'), datetime('now'))", [file_path])
-  let mut nodes_saved = nodes_saved + 1.0
-
-  // Look for pattern definitions
-  let _nl = "\n"
-  let pattern_lines = split(analysis, _nl)
-  each line in pattern_lines {
-    let trimmed = trim(to_string(line))
-    if contains(trimmed, "pattern") and contains(trimmed, "()") then {
-      let p_start = index_of(trimmed, "pattern") + 8.0
-      let p_end = index_of(trimmed, "(", p_start)
-      if p_end > p_start then {
-        let pattern_name = substring(trimmed, p_start, p_end)
-        if length(pattern_name) > 2.0 then {
-          db_execute("INSERT INTO knowledge_graph (node_type, node_name, file_path, description, updated_at, valid_from) VALUES ('pattern', ?1, ?2, 'Function', datetime('now'), datetime('now'))", [pattern_name, file_path])
-          db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?1, ?2, 'calls', ?1, datetime('now'))", [file_path, pattern_name])
-          let nodes_saved = nodes_saved + 1.0
-          let edges_saved = edges_saved + 1.0
-        }
-      }
-    }
-  }
-
-  // Look for imports
-  each line in pattern_lines {
-    let trimmed = trim(to_string(line))
-    if starts_with(trimmed, "import") then {
-      let imp_start = index_of(trimmed, "import") + 7.0
-      let imp_name = substring(trimmed, imp_start, length(trimmed))
-      if length(imp_name) > 2.0 then {
-        db_execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?1, ?2, 'imports', ?1, datetime('now'))", [file_path, imp_name])
-        let edges_saved = edges_saved + 1.0
-      }
-    }
-  }
-
-  return "nodes=" + to_string(nodes_saved) + " edges=" + to_string(edges_saved)
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Build Knowledge Graph (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
-pattern BuildKnowledgeGraph() -> String {
-  let _ = AuditLog("graph_build_start", "admin", "knowledge graph rebuild started")
-
-  // FO-009: узлы не стираются — закрываются (история графа сохраняется)
-  db_execute("UPDATE knowledge_graph SET valid_to = datetime('now') WHERE valid_to IS NULL")
-  db_execute_with_grant(grant_issue("db:delete:knowledge_edges", 3600.0, "once"), "DELETE FROM knowledge_edges")
-
-  let admin_profile = redact(read_file("library/admin.md"), "all")
-  let disclaimer = AdminDisclaimer()
-
-  // 1. Analyze app.mlog
-  let app_content = redact(read_file("app.mlog"), "all")
-  let extract_prompt = disclaimer + "\n\nAnalyze this Metalogos code file. Extract:\n1. All pattern definitions (name only)\n2. All import statements\n3. All route definitions (path only)\n4. All db_execute CREATE TABLE statements (table name only)\n\nFormat each item on separate line:\nPATTERN: name\nIMPORT: module\nROUTE: /path\nTABLE: name"
-  let analysis = redact(to_string(TryVal(try call_llm(admin_profile + "\n\n" + extract_prompt, "File: app.mlog\n\n" + substring(app_content, 0, 3000)))), "all")
-  if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(analysis) == "()" then { return "Сервис временно недоступен." }
-  let result = SaveGraphNodes("app.mlog", to_string(analysis))
-
-  // 2. Analyze dept/*.mlog files
-  let dept_files = list_dir("dept/")
-  each f in dept_files {
-    let fname = trim(to_string(f))
-    if ends_with(fname, ".mlog") then {
-      let content = redact(read_file("dept/" + fname), "all")
-      let file_analysis = redact(to_string(TryVal(try call_llm(admin_profile + "\n\n" + extract_prompt, "File: dept/" + fname + "\n\n" + substring(content, 0, 3000)))), "all")
-      if to_string(file_analysis) == "()" then { let file_analysis = "[оценка недоступна — провайдеры модели не ответили]" }
-      if to_string(file_analysis) == "()" then { return "Сервис временно недоступен." }
-      let _ = SaveGraphNodes("dept/" + fname, to_string(file_analysis))
-    }
-  }
-
-  // Count results
-  let node_rows = query("SELECT COUNT(*) as cnt FROM knowledge_graph WHERE valid_to IS NULL", [])
-  let edge_rows = query("SELECT COUNT(*) as cnt FROM knowledge_edges", [])
-  let node_count = redact(to_string(TryVal(try json_get(node_rows[0], "cnt", "0"))), "all")
-  let edge_count = redact(to_string(TryVal(try json_get(edge_rows[0], "cnt", "0"))), "all")
-
-  let _ = AuditLog("graph_build_done", "admin", "nodes=" + node_count + " edges=" + edge_count)
-
-  return "Knowledge graph rebuilt: " + node_count + " nodes, " + edge_count + " edges"
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Impact Analysis
@@ -347,58 +247,10 @@ pattern ImpactAnalysis(file_path: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // Find Orphans (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
-pattern FindOrphans() -> String {
-  let all_files = query("SELECT DISTINCT node_name FROM knowledge_graph WHERE valid_to IS NULL AND node_type = 'file'", [])
-  let imported = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE edge_type = 'imports'", [])
-  let all_patterns = query("SELECT DISTINCT node_name FROM knowledge_graph WHERE valid_to IS NULL AND node_type = 'pattern'", [])
-  let called = query("SELECT DISTINCT target_name FROM knowledge_edges WHERE edge_type = 'calls'", [])
-
-  let admin_profile = redact(read_file("library/admin.md"), "all")
-  let disclaimer = AdminDisclaimer()
-  let llm_result = redact(to_string(TryVal(try call_llm(disclaimer + "\n\n" + admin_profile + "\n\nFind orphaned files and dead functions. Return a short summary.", "All files:\n" + to_string(all_files) + "\n\nImported files:\n" + to_string(imported) + "\n\nAll patterns:\n" + to_string(all_patterns) + "\n\nCalled patterns:\n" + to_string(called)))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = to_string(llm_result)
-
-  let _ = AuditLog("find_orphans", "admin", "analysis complete")
-
-  return reply
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Admin Code Audit (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
-pattern AdminCodeAudit() -> String {
-  let admin_profile = redact(read_file("library/admin.md"), "all")
-  let disclaimer = AdminDisclaimer()
-
-  // Read key files for context
-  let app_content = redact(read_file("app.mlog"), "all")
-  let mut files_summary = "app.mlog: " + to_string(length(app_content)) + " chars\n"
-
-  let dept_files = list_dir("dept/")
-  each f in dept_files {
-    let fname = trim(to_string(f))
-    if ends_with(fname, ".mlog") then {
-      let content = redact(read_file("dept/" + fname), "all")
-      let files_summary = files_summary + "dept/" + fname + ": " + to_string(length(content)) + " chars\n"
-    }
-  }
-
-  let audit_prompt = disclaimer + "\n\nAudit this codebase. Find:\n1. BUGS: undefined functions, crash points, race conditions\n2. DEAD CODE: unused files and functions\n3. DUPLICATION: similar code in multiple places\n4. SECURITY: SQL injection, XSS, open endpoints\n5. PERFORMANCE: unnecessary LLM calls, large contexts\n6. PROXY: any remaining CallLLMProxy references (MUST be replaced with call_llm)\n\nFormat: [SEVERITY:high/medium/low] FILE:path ISSUE:description FIX:suggestion\nOne per line. Be thorough."
-
-  let llm_result = redact(to_string(TryVal(try call_llm(admin_profile + "\n\n" + audit_prompt, "Files:\n" + files_summary + "\n\napp.mlog (first 2000 chars):\n" + substring(app_content, 0, 2000)))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
-  let issues = to_string(llm_result)
-
-  // Save findings
-  let saved = SaveFindings(issues)
-
-  let _ = AuditLog("code_audit", "admin", "found issues, saved=" + saved)
-
-  return issues
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Admin Metrics Analysis (NATIVE call_llm)
@@ -669,33 +521,6 @@ pattern AdminBuild(task: String, chat_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // /admin fix — native call_llm bug fix with lifecycle
 // ═══════════════════════════════════════════════════════════════════════
-pattern AdminFix(bug_description: String, chat_id: String) -> String {
-  let admin_profile = redact(read_file("library/admin.md"), "all")
-  let disclaimer = AdminDisclaimer()
-
-  let fix_prompt = disclaimer + "\n\nFix this bug in the Fosved Office. Analyze the code, find the problem, propose a fix.\n\nBug: " + bug_description + "\n\nFormat:\nFILE:path\nPROBLEM:description\nFIX:old code -> new code\nEND_FIX\n\nHARD RULE: Never modify audit_log, lockdown, or bin/mlog."
-
-  // Read key files for context
-  let app_content = redact(read_file("app.mlog"), "all")
-  let llm_result = redact(to_string(TryVal(try call_llm(admin_profile + "\n\n" + fix_prompt, "app.mlog:\n" + substring(app_content, 0, 3000)))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
-  let fix_text = to_string(llm_result)
-
-  // Create narad with lifecycle (not auto-fix — complex bug)
-  let narad_id = "fix-" + to_string(to_int(now()))
-
-  db_execute("INSERT INTO narads (id, title, description, requested_by, risk_level, status, created_at, updated_at) VALUES (?1, 'Fix: ' || ?2, ?3, 'admin', 'medium', 'pending', datetime('now'), datetime('now'))", [narad_id, bug_description, fix_text])
-
-  // Send with approve/reject
-  let short_fix = substring(fix_text, 0, 1500)
-  let msg = "Admin found a solution:\n\n" + short_fix + "\n\nNarad: " + narad_id
-  let _ = SendAdminButtons(chat_id, msg, "approve_" + narad_id, "reject_" + narad_id)
-
-  let _ = AuditLog("admin_fix", "admin", "fix narad created: " + narad_id + " (lifecycle: pending)")
-
-  return narad_id
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // /admin analyze — full 6-subagent UA analysis
@@ -948,36 +773,10 @@ pattern AdminHealth() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // /admin approve <narad_id> — lifecycle transition
 // ═══════════════════════════════════════════════════════════════════════
-pattern AdminApproveNarad(narad_id: String) -> String {
-  let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
-  let current_status = redact(to_string(TryVal(try json_get(current[0], "status", "unknown"))), "all")
-
-  let new_status = AdminGateNaradTransition(current_status, "approve")
-  if new_status == "DENY" then {
-    return "BLOCKED: Cannot approve narad " + narad_id + " from status '" + current_status + "'"
-  }
-
-  db_execute("UPDATE narads SET status = ?1, updated_at = datetime('now') WHERE id = ?2", [new_status, narad_id])
-  let _ = AuditLog("narad_approved", "admin", narad_id + " " + current_status + " → " + new_status)
-  return "Narad " + narad_id + " approved (" + current_status + " → " + new_status + ")."
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // /admin reject <narad_id> — lifecycle transition
 // ═══════════════════════════════════════════════════════════════════════
-pattern AdminRejectNarad(narad_id: String) -> String {
-  let current = query("SELECT status FROM narads WHERE id = ?1", [narad_id])
-  let current_status = redact(to_string(TryVal(try json_get(current[0], "status", "unknown"))), "all")
-
-  let new_status = AdminGateNaradTransition(current_status, "reject")
-  if new_status == "DENY" then {
-    return "BLOCKED: Cannot reject narad " + narad_id + " from status '" + current_status + "'"
-  }
-
-  db_execute("UPDATE narads SET status = ?1, updated_at = datetime('now') WHERE id = ?2", [new_status, narad_id])
-  let _ = AuditLog("narad_rejected", "admin", narad_id + " " + current_status + " → " + new_status)
-  return "Narad " + narad_id + " rejected (" + current_status + " → " + new_status + ")."
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════

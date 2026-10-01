@@ -1,0 +1,51 @@
+// ═══════════════════════════════════════════════════════════════════════
+// АРХИВ DEAD-паттернов из dept/utils.mlog — #449 A.1, решение владельца 2026-10-02
+// (вариант «в архив», история git сохранена; файл НЕ импортируется app.mlog
+// и не входит в прод-неймспейс). SHA256 фрагмента: 6893776d
+// Оживёт потребность — переносить назад осознанно, с вызовом и тестом.
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── Publish daily digest to archive channel ──────────────────────────
+pattern PublishDailyDigest() -> String {
+  let body = json_encode({trigger: "scheduler"})
+  let _ = TryVal(try http_post("http://127.0.0.1:4000/archive/daily-digest", body, "application/json"))
+  let _ = AuditLog("daily_digest_channel", "scheduler", "")
+  return "ok"
+}
+// ── Learning: classify correction via LLM (MIGRATED from Python /learning/fix) ──
+// Native mlog: call_llm for classification → db_execute for saving
+pattern ClassifyCorrection(text: String, dept: String) -> String {
+  let dept_prompt = redact(read_file("library/" + dept + ".md"), "all")
+  let classify_prompt = dept_prompt + "\n\nYou are a quality control classifier. Analyze the user's correction text and classify the error type. Also suggest how to fix it going forward. Output JSON only: {\"error_type\": \"TOO_GENERAL|WRONG_FACTS|WRONG_DEPT|BAD_FORMAT|MISSING_CONTEXT|OTHER\", \"suggestion\": \"your suggestion\"}. Language: Russian."
+  let llm_result = redact(to_string(TryVal(try call_llm(classify_prompt, "Классифицируй эту коррекцию:\n\n" + text + "\n\nВерни только JSON."))), "all")
+  if to_string(llm_result) == "()" then {
+    // Fallback: save as OTHER
+    db_execute("INSERT INTO error_patterns (dept, error_type, query_text) VALUES (?1, 'OTHER', ?2)", [dept, substring(text, 0, 2000)])
+    db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, corr_type) VALUES (?1, ?2, '', 'OTHER')", [dept, substring(text, 0, 2000)])
+    return json_encode({status: "ok", error_type: "OTHER", suggestion: "LLM unavailable"})
+  }
+  let reply = redact(to_string(json_get(parse_json(llm_result), "content", "")), "all")
+
+  // Parse JSON from LLM response — find { } block
+  let json_start = index_of(reply, "{")
+  let json_end = (index_of(substring(reply, json_start, 10000.0), "}") + json_start)
+  let error_type = "OTHER"
+  let suggestion = reply
+  if json_start >= 0.0 and json_end > json_start then {
+    let json_str = substring(reply, json_start, json_end + 1.0)
+    let parsed = TryVal(try parse_json(json_str))
+    if to_string(parsed) != "()" then {
+      let et = redact(to_string(json_get(parsed, "error_type", "OTHER")), "all")
+      if et != "" then { let error_type = et }
+      let sg = redact(to_string(json_get(parsed, "suggestion", "")), "all")
+      if sg != "" then { let suggestion = sg }
+    }
+  }
+
+  // Save to error_patterns and adapt_corrections
+  db_execute("INSERT INTO error_patterns (dept, error_type, query_text) VALUES (?1, ?2, ?3)", [dept, error_type, substring(text, 0, 2000)])
+  db_execute("INSERT INTO adapt_corrections (dept, original_query, correction, corr_type) VALUES (?1, ?2, ?3, ?4)", [dept, substring(text, 0, 2000), substring(suggestion, 0, 2000), error_type])
+
+  let _ = AuditLog("learning_fix", dept, "error_type=" + error_type)
+  return json_encode({status: "ok", error_type: error_type, suggestion: suggestion})
+}

@@ -33,28 +33,7 @@
 // PROJECT PARAMETERS V1.0 — Token budgets, Models, Hard gates
 // ═══════════════════════════════════════════════════════════════════════
 
-// ── Depth → Model mapping ──
-// depth 0: claude-3-5-haiku (fast — listing, simple queries)
-// depth 1: claude-sonnet-4-20250514 (balanced — research, segmentation, forecasting)
-// depth 2: claude-sonnet-4-20250514 (high reasoning — competitive analysis, positioning)
-// depth 3: claude-opus-4-20250514 (deep — launch orchestration, quarterly review)
-pattern MarketingSelectModel(depth: Int) -> String {
-  if depth == 0.0 then { return "claude-3-5-haiku" }
-  if depth == 1.0 then { return "claude-sonnet-4-20250514" }
-  if depth == 2.0 then { return "claude-sonnet-4-20250514" }
-  if depth == 3.0 then { return "claude-opus-4-20250514" }
-  return "claude-sonnet-4-20250514"
-}
 
-// ── Per-operation token budgets ──
-// [Context, Analysis, Output] per depth level
-pattern MarketingOpBudget(depth: Int) -> String {
-  if depth == 0.0 then { return "2000,500,500" }        // total ~3000
-  if depth == 1.0 then { return "4000,2000,1000" }       // total ~7000
-  if depth == 2.0 then { return "6000,4000,1500" }       // total ~11500
-  if depth == 3.0 then { return "8000,6000,2000" }       // total ~16000
-  return "4000,2000,1000"
-}
 
 // ── Skill loading budget per depth ──
 pattern MarketingSkillBudget(depth: Int) -> Float {
@@ -70,19 +49,7 @@ pattern MarketingSkillBudget(depth: Int) -> Float {
 // These gates BLOCK execution if violated. No LLM can override them.
 // ═══════════════════════════════════════════════════════════════════════
 
-// Gate 1: No campaign launch without numeric forecast (3 required fields)
-pattern GateCampaignForecast(forecast_conversion: String, forecast_cac: String, forecast_reach: String) -> String {
-  if forecast_conversion == "" or forecast_conversion == "null" then { return "FAIL: hard rule 1 — forecast conversion rate is required before launch. A campaign without forecast is a guess, not work." }
-  if forecast_cac == "" or forecast_cac == "null" then { return "FAIL: hard rule 1 — forecast CAC is required before launch." }
-  if forecast_reach == "" or forecast_reach == "null" then { return "FAIL: hard rule 1 — forecast reach is required before launch." }
-  return "PASS"
-}
 
-// Gate 2: No unverifiable advertising claims
-pattern GateClaimsVerified(claims_verified: String) -> String {
-  if claims_verified == "true" then { return "PASS" }
-  return "FAIL: hard rule 2 — all advertising claims must be verified before launch. Run /campaign-verify-claims first."
-}
 
 // Gate 3: No abstract audience — concrete 4-field segments
 pattern GateConcreteSegment(name: String, pain_point: String, where_to_reach: String, current_alternative: String) -> String {
@@ -122,13 +89,6 @@ pattern GateNoManipulation(query: String) -> String {
 
 // Gate 7: Everything archived (enforced by db_execute in each operation)
 
-// Gate 8: No research without source + reliability tags
-pattern GateResearchHasSources(data_sources: String) -> String {
-  if data_sources == "[]" or data_sources == "" or data_sources == "null" then {
-    return "FAIL: hard rule 8 — research without data sources is an opinion, not research. Name every source and tag its reliability."
-  }
-  return "PASS"
-}
 
 // Gate 9: No ignoring failed campaigns
 pattern GateFailedCampaignsExist() -> String {
@@ -217,31 +177,8 @@ pattern MarketingCampaignsAPI(status: String, limit: Int) -> String {
   return json_encode(rows)
 }
 
-// GET /marketing/segments?status=validated&limit=20
-pattern MarketingSegmentsAPI(status: String, limit: Int) -> String {
-  // №312: литеральный SQL + параметры (см. выше)
-  let rows = query("SELECT id, name, pain_point, where_to_reach, current_alternative, estimated_size, status FROM audience_segments WHERE (?1 = '' OR status = ?1) ORDER BY created_at DESC LIMIT ?2", [status, limit])
-  return json_encode(rows)
-}
 
-// GET /marketing/research?status=published&limit=10
-pattern MarketingResearchAPI(status: String, limit: Int) -> String {
-  // №312: литеральный SQL + параметры (см. выше)
-  let rows = query("SELECT id, title, research_type, overall_confidence, status, verification_date FROM market_research WHERE (?1 = '' OR status = ?1) ORDER BY created_at DESC LIMIT ?2", [status, limit])
-  return json_encode(rows)
-}
 
-// GET /marketing/metrics — campaign accuracy snapshot
-pattern MarketingMetricsAPI() -> String {
-  let rows = query("SELECT AVG(v.conversion_accuracy) as avg_conv, AVG(v.cac_accuracy) as avg_cac, COUNT(*) as n FROM campaign_verifications v WHERE v.verified_at >= datetime('now', '-90 days')", [])
-  if length(rows) > 0.0 then {
-    let avg_conv = to_float(to_string(json_get(get(rows, 0.0), "avg_conv", "0")))
-    let avg_cac = to_float(to_string(json_get(get(rows, 0.0), "avg_cac", "0")))
-    let n = to_float(to_string(json_get(get(rows, 0.0), "n", "0")))
-    return json_encode({metric: "campaign-accuracy", avg_conversion_accuracy: avg_conv, avg_cac_accuracy: avg_cac, sample_size: n, period: "last_90_days"})
-  }
-  return json_encode({metric: "campaign-accuracy", value: null, sample_size: 0, period: "last_90_days", note: "no verified campaigns"})
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // MAIN DISPATCHER — routes sub-commands within Marketing
@@ -623,41 +560,6 @@ pattern MarketingCampaignHandler(query: String, chat_id: String) -> String {
 // States: drafted → forecasted → launched → running → completed → verified
 //                                                            → aborted
 
-pattern MarketingCampaignTransition(campaign_id: String, new_status: String, reason: String) -> String {
-  let rows = query("SELECT status, forecast_conversion_rate, forecast_cac, forecast_reach, claims_verified FROM marketing_campaigns WHERE id = ?", [campaign_id])
-  if length(rows) == 0.0 then { return "FAIL: campaign not found" }
-  let c = get(rows, 0.0)
-  let current = get(c, "status")
-
-  // Pre-launch gates: enforce hard rules 1 and 2
-  if new_status == "launched" then {
-    // Gate 1: forecast must exist
-    let fc = to_string(get(c, "forecast_conversion_rate"))
-    let fcac = to_string(get(c, "forecast_cac"))
-    let fr = to_string(get(c, "forecast_reach"))
-    let g1 = GateCampaignForecast(fc, fcac, fr)
-    if g1 != "PASS" then { return "🚫 " + g1 + "\n\nSet forecast first: /campaign-forecast " + campaign_id }
-    // Gate 2: claims must be verified
-    let cv = to_string(get(c, "claims_verified"))
-    let g2 = GateClaimsVerified(cv)
-    if g2 != "PASS" then { return "🚫 " + g2 + "\n\nVerify claims first." }
-  }
-
-  // Validate transition
-  let valid = "false"
-  if current == "drafted" and new_status == "forecasted" then { let valid = "true" }
-  if current == "forecasted" and new_status == "launched" then { let valid = "true" }
-  if current == "launched" and new_status == "running" then { let valid = "true" }
-  if current == "running" and new_status == "completed" then { let valid = "true" }
-  if current == "completed" and new_status == "verified" then { let valid = "true" }
-  if new_status == "aborted" then { let valid = "true" }
-
-  if valid == "false" then { return "FAIL: transition " + current + " → " + new_status + " is not allowed" }
-
-  let _ = db_execute("UPDATE marketing_campaigns SET status = ?, updated_at = datetime('now') WHERE id = ?", [new_status, campaign_id])
-  let _ = AuditLog("marketing_campaign_transition", "marketing", "id=" + campaign_id + " " + current + "→" + new_status + " reason=" + reason)
-  return "OK: " + current + " → " + new_status
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // SUB-COMMAND: CAMPAIGN FORECAST (hard rule 1 enforcement)
@@ -784,91 +686,11 @@ pattern MarketingScore(chat_id: String) -> String {
 // NATIVE VERIFICATION — campaign accuracy calculation
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern MarketingVerifyCampaignNative(campaign_id: String, actual_conversion: String, actual_cac: String, actual_reach: String) -> String {
-  let rows = query("SELECT id, forecast_conversion_rate, forecast_cac, forecast_reach, status FROM marketing_campaigns WHERE id = ?", [campaign_id])
-  if length(rows) == 0.0 then { return "Campaign #" + campaign_id + " not found." }
-  let c = get(rows, 0.0)
-  let status = get(c, "status")
-  if status != "completed" and status != "running" then { return "Campaign #" + campaign_id + " must be completed or running before verification. Current: " + status }
-
-  let f_conv = to_float(to_string(get(c, "forecast_conversion_rate")))
-  let f_cac = to_float(to_string(get(c, "forecast_cac")))
-  let f_reach = to_float(to_string(get(c, "forecast_reach")))
-
-  // Compute accuracy deltas
-  let mut conv_accuracy = 0.0
-  if f_conv > 0.0 then {
-    let diff = to_float(actual_conversion) - f_conv
-    if diff < 0.0 then { let diff = 0.0 - diff }
-    let conv_accuracy = diff / f_conv * 100.0
-  }
-  let mut cac_accuracy = 0.0
-  if f_cac > 0.0 then {
-    let diff = to_float(actual_cac) - f_cac
-    if diff < 0.0 then { let diff = 0.0 - diff }
-    let cac_accuracy = diff / f_cac * 100.0
-  }
-  let mut reach_accuracy = 0.0
-  if f_reach > 0.0 then {
-    let diff = to_float(actual_reach) - f_reach
-    if diff < 0.0 then { let diff = 0.0 - diff }
-    let reach_accuracy = diff / f_reach * 100.0
-  }
-
-  // Overoptimism detection
-  let was_overoptimistic = "false"
-  if f_conv > 0.0 and to_float(actual_conversion) > 0.0 then {
-    if f_conv / to_float(actual_conversion) > 1.5 then { let was_overoptimistic = "true" }
-  }
-
-  // Within target?
-  let conv_within = "true"
-  if conv_accuracy > 25.0 then { let conv_within = "false" }
-  let cac_within = "true"
-  if cac_accuracy > 30.0 then { let cac_within = "false" }
-
-  // Save verification
-  let _ = db_execute("INSERT INTO campaign_verifications (campaign_id, conversion_accuracy, cac_accuracy, reach_accuracy, conversion_within_target, cac_within_target, was_overoptimistic, verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))", [campaign_id, to_string(conv_accuracy), to_string(cac_accuracy), to_string(reach_accuracy), conv_within, cac_within, was_overoptimistic])
-  // Update campaign status
-  let _ = db_execute("UPDATE marketing_campaigns SET actual_conversion_rate = ?, actual_cac = ?, actual_reach = ?, status = 'verified', updated_at = datetime('now') WHERE id = ?", [actual_conversion, actual_cac, actual_reach, campaign_id])
-
-  let report = "✅ Campaign #" + campaign_id + " Verified\n\n"
-  let report = report + "Forecast → Actual:\n"
-  let report = report + "  Conversion: " + to_string(f_conv) + "% → " + actual_conversion + "% (accuracy: " + to_string(conv_accuracy) + "%, target ≤25%)\n"
-  let report = report + "  CAC: $" + to_string(f_cac) + " → $" + actual_cac + " (accuracy: " + to_string(cac_accuracy) + "%, target ≤30%)\n"
-  let report = report + "  Reach: " + to_string(f_reach) + " → " + actual_reach + " (accuracy: " + to_string(reach_accuracy) + "%)\n"
-  let report = report + "  Overoptimistic: " + was_overoptimistic + "\n"
-  if was_overoptimistic == "true" then { let report = report + "\n🚨 Overoptimism detected! Forecast was 50%+ above actual. Review forecast basis and consider using ranges instead of point estimates." }
-
-  return report
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // ERROR CLASSIFIER — 6 miss sources
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern MarketingClassifyMissSource(campaign_id: String) -> String {
-  let rows = query("SELECT c.forecast_conversion_rate, c.actual_conversion_rate, c.forecast_cac, c.actual_cac, v.was_overoptimistic, v.miss_source FROM marketing_campaigns c JOIN campaign_verifications v ON v.campaign_id = c.id WHERE c.id = ? ORDER BY v.verified_at DESC LIMIT 1", [campaign_id])
-  if length(rows) == 0.0 then { return "no data" }
-
-  let v = get(rows, 0.0)
-  let existing_miss = get(v, "miss_source")
-  if to_string(existing_miss) != "null" and to_string(existing_miss) != "" then { return to_string(existing_miss) }
-
-  // Heuristic classification
-  let overopt = get(v, "was_overoptimistic")
-  if overopt == 1.0 then { return "overoptimism: forecast systematically exceeded actual. Likely cause: point estimate instead of range, or benchmark from different market." }
-
-  let f_conv = to_float(to_string(get(v, "forecast_conversion_rate")))
-  let a_conv = to_float(to_string(get(v, "actual_conversion_rate")))
-  // If conversion much lower but CAC similar — likely wrong segment or channel
-  if f_conv > 0.0 and a_conv > 0.0 then {
-    let ratio = f_conv / a_conv
-    if ratio > 1.3 then { return "wrong_segment_or_channel: conversion significantly below forecast. Segment may not have the pain, or channel may not reach them." }
-  }
-
-  return "unclassified: manual review needed. Consider: was the message right? Was timing right? External factors?"
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1057,36 +879,9 @@ pattern MarketingQuarterlyReview() -> String {
 // CROSS-DEPARTMENT COLLABORATION
 // ═══════════════════════════════════════════════════════════════════════
 
-// Finance: verify Marketing's CAC/LTV against actual data
-pattern MarketingFinanceVerifyCAC(campaign_id: String) -> String {
-  let rows = query("SELECT id, title, forecast_cac, actual_cac, actual_conversion_rate FROM marketing_campaigns WHERE id = ?", [campaign_id])
-  if length(rows) == 0.0 then { return "Campaign not found" }
-  let c = get(rows, 0.0)
-  return json_encode({department: "marketing", context: "cac_ltv_verification", campaign_id: campaign_id, forecast_cac: get(c, "forecast_cac"), actual_cac: get(c, "actual_cac"), actual_conversion: get(c, "actual_conversion_rate"), note: "Finance verifies CAC/LTV: is actual CAC sustainable? Does LTV:CAC ratio hold with actual data?"})
-}
 
-// Visual: campaign brief for asset creation
-pattern MarketingVisualBrief(campaign_id: String) -> String {
-  let rows = query("SELECT id, title, product_promoted, core_message, channels, positioning FROM marketing_campaigns WHERE id = ?", [campaign_id])
-  if length(rows) == 0.0 then { return "Campaign not found" }
-  let c = get(rows, 0.0)
-  return json_encode({department: "marketing", context: "visual_brief", campaign_id: campaign_id, product: get(c, "product_promoted"), message: get(c, "core_message"), channels: get(c, "channels"), positioning: get(c, "positioning")})
-}
 
-// Legal: claim compliance check
-pattern MarketingLegalCheck(campaign_id: String) -> String {
-  let rows = query("SELECT id, title, core_message, claims_verified, claims_note FROM marketing_campaigns WHERE id = ?", [campaign_id])
-  if length(rows) == 0.0 then { return "Campaign not found" }
-  let c = get(rows, 0.0)
-  return json_encode({department: "marketing", context: "claim_compliance", campaign_id: campaign_id, message: get(c, "core_message"), claims_verified: get(c, "claims_verified"), note: "Legal reviews claims for compliance with advertising law, no misleading statements, no vulnerable group targeting."})
-}
 
-// OSP: strategic positioning context
-pattern MarketingOSPContext() -> String {
-  let segments = query("SELECT id, name, pain_point, status FROM audience_segments WHERE status = 'validated' ORDER BY created_at DESC LIMIT 5", [])
-  let campaigns = query("SELECT id, title, campaign_type, status FROM marketing_campaigns WHERE status IN ('launched', 'running', 'verified') ORDER BY created_at DESC LIMIT 5", [])
-  return json_encode({department: "marketing", segments: segments, campaigns: campaigns, note: "Marketing provides validated segments and campaign performance for OSP's strategic analysis. Investment decisions remain OSP domain."})
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // DB SCHEMA REFERENCE (5 Prisma models as SQL DDL)
@@ -1185,81 +980,14 @@ pattern MarketingOSPContext() -> String {
 // BOT HANDLER REGISTRY — 8 Telegram commands
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern MarketingBotHandlers() -> String {
-  let h = ""
-  let h = h + "/market-research <topic> → MarketingResearch\n"
-  let h = h + "/segment <product> → MarketingSegment\n"
-  let h = h + "/competitors <domain> → MarketingCompetitors\n"
-  let h = h + "/campaign [list|promote <product>] → MarketingCampaignHandler\n"
-  let h = h + "/campaign-forecast <id> → MarketingCampaignForecast (hard rule 1: 3 fields)\n"
-  let h = h + "/campaign-verify <id> → MarketingCampaignVerify (accuracy + overoptimism)\n"
-  let h = h + "/marketing-score → MarketingScore\n"
-  let h = h + "/marketing-archive [filter] → MarketingArchiveSearch\n"
-  return h
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // DEPARTMENT REGISTRY ENTRY — metadata for lib/departments-registry.js
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern MarketingRegistryEntry() -> String {
-  return json_encode({
-    slug: "marketing",
-    title: "Продвижение",
-    shortName: "МКТ",
-    status: "active",
-    psychotype_primary: "Эмпат",
-    psychotype_secondary: "Экспериментатор",
-    metric_name: "campaign-accuracy",
-    metric_targets: "conversion ±25%, CAC ±30%",
-    archiveModel: "MarketingCampaign",
-    verificationModel: "CampaignVerification",
-    monthlyReviewModel: "MarketingMonthlyReview",
-    aliases: "маркетинг,продвижение,реклама,кампания,mkt,marketing,campaign",
-    routingTriggers: "сегмент,кампания,конверсия,CAC,LTV,конкурент,позиционирование,канал,исследование рынка,audience,campaign,segment",
-    requiredContext: "workMode (internal/external)",
-    commands: "/marketing,/market-research,/segment,/competitors,/campaign,/campaign-forecast,/campaign-verify,/marketing-score,/marketing-archive",
-    schedule: "daily 09:00, monthly 1st 09:30, quarterly 1st 10:00"
-  })
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // UPRAVLENIE ROUTING — Yana's Marketing integration
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern MarketingYanaRouting(query: String) -> String {
-  let t = lower(query)
-  // Direct Marketing patterns
-  if contains(t, "исследован") and contains(t, "рынок") then { return "ROUTE:marketing:research" }
-  if contains(t, "сегмент") or contains(t, "аудитори") or contains(t, "целевая") then { return "ROUTE:marketing:segment" }
-  if contains(t, "конкурент") or contains(t, "аналог") then { return "ROUTE:marketing:competitors" }
-  if contains(t, "кампани") or contains(t, "продвижен") or contains(t, "реклам") then { return "ROUTE:marketing:campaign" }
-  if contains(t, "конверси") or contains(t, "cac") or contains(t, "ltv") then { return "ROUTE:marketing:unit_economics" }
-  // Boundary: OSP
-  if contains(t, "стратегическ ситуаци") or contains(t, "куда двигаться") then { return "ROUTE:osp:strategic" }
-  // Boundary: Finance
-  if contains(t, "сколько денег") or contains(t, "cashflow") then { return "ROUTE:finance:cashflow" }
-  // Boundary: Legal
-  if contains(t, "закон о реклам") or contains(t, "compliance") then { return "ROUTE:legal:compliance" }
-  // Cross-department
-  if contains(t, "запусти") and contains(t, "продукт") then { return "ROUTE:marketing+visual+legal:launch_pipeline" }
-  return "NO_ROUTE"
-}
 
-// Yana boundary disambiguation
-pattern MarketingYanaBoundaries(query: String) -> String {
-  let t = lower(query)
-  // Most common confusion: Marketing vs OSP
-  if (contains(t, "стратег") or contains(t, "позиционирован на рынке")) andcontains(t, "кампани") == false then {
-    return "BOUNDARY: это стратегический вопрос → OSP. Marketing делает тактическое позиционирование и кампании. OSP — стратегическое."
-  }
-  // Marketing vs ЛЗ (Knowledge Lab)
-  if contains(t, "технолог") and contains(t, "тренд") then {
-    return "BOUNDARY: technology trends → ЛЗ (Knowledge Lab). Marketing исследует рынок и конкурентов, не технологии."
-  }
-  // Marketing vs Visual
-  if contains(t, "дизайн") andcontains(t, "кампани") == false then {
-    return "BOUNDARY: design without campaign context → Visual. Marketing брифует, Visual создаёт."
-  }
-  return "NO_BOUNDARY"
-}

@@ -1,0 +1,190 @@
+// ═══════════════════════════════════════════════════════════════════════
+// АРХИВ DEAD-паттернов из dept/dev.mlog — #449 A.1, решение владельца 2026-10-02
+// (вариант «в архив», история git сохранена; файл НЕ импортируется app.mlog
+// и не входит в прод-неймспейс). SHA256 фрагмента: 2cadf5ec
+// Оживёт потребность — переносить назад осознанно, с вызовом и тестом.
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern DevDeptNameRu() -> String { return "Разработка" }
+pattern STORAGE_TELEGRAM() -> String { return "telegram_archive" }
+pattern STORAGE_LOCAL() -> String { return "local_deferred" }
+// Required repo files (hard rule 7)
+pattern REQUIRED_REPO_FILES() -> String { return "README.md,LICENSE,.gitignore,.github/workflows/ci.yml" }
+// ── Hard Rule 9: No libraries with critical security vulnerabilities ───
+pattern GateNoCriticalVulns(dependencies_json: String) -> Dict {
+  let deps = parse_json(dependencies_json)
+  let mut critical_count = 0
+  let mut critical_names = ""
+  let i = 0
+  while i < length(deps) {
+    let dep = get(deps, i)
+    let severity = redact(to_string(json_get(dep, "max_severity", "none")), "all")
+    if severity == "critical" then {
+      let critical_count = critical_count + 1
+      let critical_names = redact(critical_names + to_string(json_get(dep, "name", "unknown")) + " ", "all")
+    }
+    let i = i + 1
+  }
+  if critical_count == 0 then {
+    return { passed: true, message: "No critical vulnerabilities in dependencies" }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 9: Зависимости с критическими уязвимостями ЗАПРЕЩЕНЫ: " + critical_names + ". Обновите или замените." }
+}
+// ── Hard Rule 10: No API contract break without major version bump ─────
+pattern GateAPIContractBreak(contract_change: String, version_bump: String) -> Dict {
+  let is_breaking = contains(lower(contract_change), "breaking") or contains(lower(contract_change), "removed") or contains(lower(contract_change), "deleted field")
+  if is_breaking == false then {
+    return { passed: true, message: "No breaking API contract change detected" }
+  }
+  let is_major_bump = contains(version_bump, "major") or contains(lower(version_bump), "x.0.0") or contains(lower(version_bump), "v2") or contains(lower(version_bump), "v3")
+  if is_major_bump then {
+    return { passed: true, message: "Breaking change with major version bump — allowed" }
+  }
+  return { passed: false, message: "❌ ЖЁСТКОЕ ПРАВИЛО 10: Нарушение API контракта без major version bump ЗАПРЕЩЕНО. Увеличьте major version + напишите migration guide." }
+}
+pattern ListArchitectureDecisions(task_id: String) -> String {
+  let rows = query("SELECT id, title, status, created_at FROM architecture_decisions WHERE task_id = ? ORDER BY created_at DESC", [task_id])
+  if length(rows) == 0 then {
+    return "Нет ADR для задачи " + task_id + ". Создайте: /dev-decide " + task_id
+  }
+  let prompt = "Форматируй список Architecture Decision Records. JSON: " + to_string(rows)
+  return call_llm(prompt)
+}
+// ── Per-task: estimate vs actual verification ──────────────────────────
+pattern VerifyEstimateAccuracy(task_id: String) -> Dict {
+  let row = query("SELECT estimate_low, estimate_expected, estimate_high, actual_hours FROM dev_estimate_verifications WHERE task_id = ? AND actual_hours IS NOT NULL LIMIT 1", [task_id])
+  if length(row) == 0 then {
+    return { mape: 0.0, bias: "no_data", message: "Нет данных для верификации estimate по задаче " + task_id }
+  }
+
+  let data = get(row, 0)
+  let est_expected = to_float(to_string(json_get(data, "estimate_expected", "0")))
+  let actual = to_float(to_string(json_get(data, "actual_hours", "0")))
+
+  if est_expected == 0.0 or actual == 0.0 then {
+    return { mape: 0.0, bias: "no_data", message: "Нулевые значения, невозможно вычислить MAPE" }
+  }
+
+  let mape = (actual - est_expected) / est_expected * 100.0
+  let bias = ""
+  if mape > 20.0 then { let bias = "underestimate" }
+  let bias = bias
+  if mape < -20.0 then { let bias = "overestimate" }
+  let bias = bias
+  if bias == "" then { let bias = "calibrated" }
+
+  let _ = db_execute("UPDATE dev_estimate_verifications SET mape = ?, bias = ?, verified_at = datetime('now') WHERE task_id = ?", [to_string(mape), bias, task_id])
+
+  let msg = "Estimate verification для " + task_id + ":\n"
+  let msg = msg + "Expected: " + substring(to_string(est_expected), 0.0, 6.0) + "ч, Actual: " + substring(to_string(actual), 0.0, 6.0) + "ч\n"
+  let msg = msg + "MAPE: " + substring(to_string(mape), 0.0, 6.0) + "%\n"
+  let msg = msg + "Bias: " + bias
+
+  return { mape: mape, bias: bias, message: msg }
+}
+// ── Weekly: Wednesday 04:00 — Tech Radar scan ─────────────────────────
+pattern WeeklyTechRadarScan() -> String {
+  // Scan for technologies that need radar state review
+  let all_entries = query("SELECT name, category, radar_state, updated_at FROM tech_radar_entries ORDER BY radar_state, name", [])
+
+  let prompt = "Еженедельный обзор Tech Radar отдела Разработка.\n\n"
+  let prompt = prompt + "ЗАДАЧИ:\n"
+  let prompt = prompt + "1. Какие технологии пора перевести в adopt (достаточно опыта)?\n"
+  let prompt = prompt + "2. Какие в trial → пора в adopt или назад в assess?\n"
+  let prompt = prompt + "3. Какие в assess → пора в trial или удалить?\n"
+  let prompt = prompt + "4. Появились ли новые технологии, которые стоит добавить в assess?\n"
+  let prompt = prompt + "5. Какие технологии в hold — можно ли убрать (исправлены проблемы)?\n\n"
+  let prompt = prompt + "Текущий Tech Radar:\n" + to_string(all_entries)
+
+  let analysis = redact(to_string(TryVal(try call_llm(prompt))), "all")
+  if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
+
+  let _ = AuditLog("dev_radar_scan", DevDeptName(), "Weekly Tech Radar scan completed")
+  return "═══ Еженедельный Tech Radar Scan ═══\n\n" + analysis
+}
+// ── Monthly: 1st 11:00 — Estimate calibration ─────────────────────────
+pattern MonthlyEstimateCalibration() -> String {
+  let verifications = query("SELECT task_id, estimate_expected, actual_hours, mape, bias FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-30 days') AND actual_hours IS NOT NULL", [])
+
+  if length(verifications) == 0 then {
+    let _ = AuditLog("dev_monthly_cal", DevDeptName(), "No estimate verifications in past 30 days")
+    return "Нет верифицированных оценок за последние 30 дней."
+  }
+
+  let prompt = "Месячная калибровка оценок отдела Разработка.\n\n"
+  let prompt = prompt + "АНАЛИЗ:\n"
+  let prompt = prompt + "1. Средний MAPE — насколько точно оцениваем?\n"
+  let prompt = prompt + "2. Bias: систематически недооцениваем или переоцениваем?\n"
+  let prompt = prompt + "3. По типам задач: какие типы оцениваем хуже?\n"
+  let prompt = prompt + "4. Рекомендации: как улучшить оценки?\n\n"
+  let prompt = prompt + "Данные:\n" + to_string(verifications)
+
+  let analysis = redact(to_string(TryVal(try call_llm(prompt))), "all")
+  if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
+
+  // Store monthly calibration
+  let _ = db_execute("INSERT INTO dev_monthly_calibrations (period_start, period_end, verifications_count, analysis, created_at) VALUES (datetime('now', '-30 days'), datetime('now'), ?, ?, datetime('now'))", [to_string(length(verifications)), analysis])
+
+  let _ = AuditLog("dev_monthly_cal", DevDeptName(), "Monthly estimate calibration: " + to_string(length(verifications)) + " verifications")
+
+  return "═══ Месячная калибровка оценок ═══\n\n" + analysis
+}
+// ── Quarterly: Jan/Apr/Jul/Oct — Methodology review ───────────────────
+pattern DevQuarterlyMethodologyReview() -> String {
+  let prompt = "Квартальный обзор методологии отдела Разработка.\n\n"
+  let prompt = prompt + "1. Соблюдаются ли жёсткие правила? (статистика нарушений)\n"
+  let prompt = prompt + "2. Точность оценок — улучшается ли?\n"
+  let prompt = prompt + "3. Tech Radar — адекватно ли отражает технологический ландшафт?\n"
+  let prompt = prompt + "4. Качество ADR — достаточная ли глубина?\n"
+  let prompt = prompt + "5. Итеративная реализация — соблюдается ли (нет big-bang)?\n"
+  let prompt = prompt + "6. Code organization — все репо соответствуют стандартам?\n"
+  let prompt = prompt + "7. Психотип: Прагматик + Методист — соблюдается?\n\n"
+
+  let violations = query("SELECT rule_number, COUNT(*) as c FROM dev_rule_violations WHERE created_at >= datetime('now', '-90 days') GROUP BY rule_number ORDER BY c DESC", [])
+  let estimates = query("SELECT AVG(mape) as avg_mape, bias, COUNT(*) as c FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL GROUP BY bias", [])
+
+  let prompt = prompt + "Нарушения правил (90 дней):\n" + to_string(violations) + "\n\n"
+  let prompt = prompt + "Калибровка оценок (90 дней):\n" + to_string(estimates)
+
+  let analysis = redact(to_string(TryVal(try call_llm(prompt))), "all")
+  if to_string(analysis) == "()" then { let analysis = "[оценка недоступна — провайдеры модели не ответили]" }
+
+  let _ = AuditLog("dev_quarterly", DevDeptName(), "Quarterly methodology review completed")
+
+  return "═══ Квартальный обзор методологии ═══\n\n" + analysis
+}
+pattern DevScore() -> String {
+  // 90-day metrics
+  let total = query("SELECT COUNT(*) as c FROM dev_tasks WHERE created_at >= datetime('now', '-90 days')", [])
+  let deployed = query("SELECT COUNT(*) as c FROM dev_tasks WHERE status = 'deployed' AND updated_at >= datetime('now', '-90 days')", [])
+  let with_adr = query("SELECT COUNT(*) as c FROM dev_tasks t JOIN architecture_decisions a ON t.id = a.task_id WHERE t.created_at >= datetime('now', '-90 days')", [])
+  let with_range = query("SELECT COUNT(*) as c FROM dev_tasks WHERE estimate_low IS NOT NULL AND estimate_expected IS NOT NULL AND estimate_high IS NOT NULL AND created_at >= datetime('now', '-90 days')", [])
+  let avg_mape = query("SELECT AVG(ABS(mape)) as avg FROM dev_estimate_verifications WHERE verified_at >= datetime('now', '-90 days') AND actual_hours IS NOT NULL", [])
+
+  let total_count = to_int(to_string(json_get(get(total, 0), "c", "0")))
+  let deployed_count = to_int(to_string(json_get(get(deployed, 0), "c", "0")))
+  let adr_count = to_int(to_string(json_get(get(with_adr, 0), "c", "0")))
+  let range_count = to_int(to_string(json_get(get(with_range, 0), "c", "0")))
+  let mape_val = to_float(to_string(json_get(get(avg_mape, 0), "avg", "0")))
+
+  let adr_rate = 0.0
+  if total_count > 0 then { let adr_rate = to_float(to_string(adr_count)) / to_float(to_string(total_count)) * 100.0 }
+  let range_rate = 0.0
+  if total_count > 0 then { let range_rate = to_float(to_string(range_count)) / to_float(to_string(total_count)) * 100.0 }
+  let deploy_rate = 0.0
+  if total_count > 0 then { let deploy_rate = to_float(to_string(deployed_count)) / to_float(to_string(total_count)) * 100.0 }
+
+  let msg = "═══ МЕТРИКИ ОТДЕЛА РАЗРАБОТКА (90 дней) ═══\n\n"
+  let msg = msg + "Всего задач: " + to_string(total_count) + "\n"
+  let msg = msg + "Deployed: " + to_string(deployed_count) + " (" + substring(to_string(deploy_rate), 0.0, 5.0) + "%)\n"
+  let msg = msg + "ADR compliance: " + substring(to_string(adr_rate), 0.0, 5.0) + "% (цель: 100%, правило 1)\n"
+  let msg = msg + "Range estimate compliance: " + substring(to_string(range_rate), 0.0, 5.0) + "% (цель: 100%, правило 2)\n"
+  let msg = msg + "Estimate MAPE: " + substring(to_string(mape_val), 0.0, 5.0) + "% (цель: ≤30%)\n\n"
+  let msg = msg + "── ЦЕЛЕВЫЕ ПОКАЗАТЕЛИ ──\n"
+  let msg = msg + "• Production bug rate: ≤5 per month\n"
+  let msg = msg + "• Time to first commit: ≤4 hours\n"
+  let msg = msg + "• Code review pass rate: ≥70%\n"
+  let msg = msg + "• Tech radar churn rate: ≤2 changes/week"
+
+  return msg
+}
