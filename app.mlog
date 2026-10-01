@@ -36,6 +36,18 @@ db { url: env("DATABASE_URL") }
 memory { persist: "data/metalogos_kv.db" }
 
 llm {
+  // #399 A.2 (Metalogos-#757, бинарь 0.27.1): настраиваемый потолок вместо
+  // апстрим-жёстких 1024 токенов (≈600–800 слов русского — каждый структурированный
+  // отчёт отдела обрывался на полуслове; факт 2026-09-29: отчёт ОСП оборван,
+  // «Вердикт» пуст). Значение 8192 — верхний общий знаменатель output-лимитов
+  // подключённых моделей (deepseek-chat ≤8k, groq Llama ≤8k, kimi/zai/cerebras/sakana ≥8k):
+  // 8192 ток. ≈ 20–25 тыс. символов русского — покрывает самый длинный протокол
+  // (ОСП Deep, Эксперт: 4 слоя + 7 категорий + боевые вопросы, ЛЗ Deep Scan) с запасом.
+  // Превышение не тишина: SendReport добавляет пометку «ответ обрезан» через
+  // llm_last_finish_reason() (dept/miniapp.mlog). Env-переопределение: METALOGOS_LLM_MAX_TOKENS.
+  // ВНИМАНИЕ: поле не понимают 0.20/0.25/0.27.0 — фолбэк-ветка entrypoint вырезает
+  // его из serve-копии (sed-патч #399); граница — до вывода 0.20 из ротации (ADR-0009).
+  // Грамматика 0.27.1: max_tokens идёт СРАЗУ ПОСЛЕ providers (хвост — упорядоченная цепочка).
   providers: [
     { alias: kimi, provider: openai_compatible, key: env("KIMI_API_KEY"), url: "https://api.moonshot.ai/v1/chat/completions" },
     { alias: deepseek, provider: openai_compatible, key: env("DEEPSEEK_API_KEY"), url: "https://api.deepseek.com/v1/chat/completions" },
@@ -44,6 +56,7 @@ llm {
     { alias: cerebras, provider: openai_compatible, key: env("CEREBRAS_API_KEY"), url: "https://api.cerebras.ai/v1/chat/completions" },
     { alias: sakana, provider: openai_compatible, key: env("SAKANA_API_KEY"), url: "https://api.sakana.ai/v1/chat/completions" }
   ],
+  max_tokens: 8192,
   default_model: "deepseek-chat",
   failover: auto,
   circuit_breaker: 3
