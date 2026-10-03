@@ -224,18 +224,48 @@ def format_paragraphs(text):
 
 
 def wrap_verdict(text):
-    """Последний абзац >50 символов → verdict блок"""
-    # Ищем уже существующий вердикт
-    if 'verdict' in text.lower() or 'вердикт' in text.lower():
-        pattern = r'(?:##?\s*)?(?:Вердикт|Verdict|Итог|Итоговый вердикт)[:\s]*\n((?:.+\n?)+)'
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            verdict_text = match.group(1).strip()
-            verdict_html = f'''<div class="verdict-block">
+    """Блок «Вердикт» — только при непустом содержимом (#468 A.3).
+
+    Раздел отчётов ОСП может называться «Вердикт»/«Verdict»/«Итог»/
+    «Confidence» (наряд #468: regex обязан находить реальный вердикт
+    отчётов ОСП). Заголовок — строка, начинающаяся с метки (опционально
+    markdown-заголовок или **bold**), затем двоеточие или конец строки.
+    Содержимое — строки непосредственно после заголовка ДО пустой строки,
+    следующего заголовка или разделителя «---»: старый regex
+    `((?:.+\\n?)+)` глотал всё до конца документа и тянул в «Вердикт»
+    чужие секции, а при пустом содержимом рисовал блок с пустым телом.
+    """
+    head_re = re.compile(
+        r'^(?:#{1,4}\s*)?(?:\*\*)?\s*'
+        r'(?:Вердикт|Verdict|Итоговый вердикт|Итог|Confidence)'
+        r'(?:\*\*)?\s*(?::|$)',
+        re.IGNORECASE,
+    )
+    lines = text.split('\n')
+    for idx, line in enumerate(lines):
+        m = head_re.match(line.strip())
+        if not m:
+            continue
+        # содержимое может быть в той же строке после двоеточия:
+        # «Verdict: keep rates unchanged.» / «**Confidence:** medium»
+        tail = line.strip()[m.end():].replace('**', '').strip()
+        body_lines = [tail] if tail else []
+        j = idx + 1
+        while j < len(lines):
+            s = lines[j].strip()
+            if not s or s == '---' or s.startswith('#') or head_re.match(s):
+                break
+            body_lines.append(s)
+            j += 1
+        verdict_text = ' '.join(body_lines).strip()
+        # Заголовок без содержимого (или заглушка-тире) — блока нет (#468)
+        if not verdict_text or verdict_text in ('—', '-', '–'):
+            continue
+        verdict_html = f'''<div class="verdict-block">
   <div class="verdict-title">Вердикт</div>
   <div class="verdict-body">{format_paragraphs(verdict_text)}</div>
 </div>'''
-            return text[:match.start()] + verdict_html + text[match.end():]
+        return '\n'.join(lines[:idx]).rstrip('\n') + ('\n\n' if idx > 0 else '') + verdict_html + '\n' + '\n'.join(lines[j:])
 
     # Иначе — последний абзац
     paragraphs = text.strip().split('\n\n')
