@@ -535,10 +535,15 @@ pattern OSPClassifyDomain(query: String) -> String {
 // паттерне ненадёжна — date-функций нет, now() только Unix-секунды,
 // поэтому год/месяц в запросе НЕ является триггером. Расширение списка
 // маркеров — правкой этого паттерна, гварды — в тестах наряда #423.
+// #467 A.1: финансовые домены (monetary/financial) и ценовые маркеры
+// (цена, стоит, курс, котировк, активы, «на 20xx») — рыночный вопрос
+// обязан получать текущие данные, иначе прогноз неверифицируем
+// (инцидент: «цена золота в 2027» без текущей цены).
 pattern OSPNeedsLiveSearch(query: String, domain: String) -> Bool {
   if domain == "political" or domain == "geopolitical" or domain == "military" then { return true }
+  if domain == "financial" or domain == "monetary" then { return true }
   let t = lower(query)
-  return contains(t, "что происходит") or contains(t, "сейчас") or contains(t, "последние") or contains(t, "новости") or contains(t, "сегодня") or contains(t, "вчера") or contains(t, "на этой неделе") or contains(t, "кадров") or contains(t, "назнач") or contains(t, "перестанов")
+  return contains(t, "что происходит") or contains(t, "сейчас") or contains(t, "последние") or contains(t, "новости") or contains(t, "сегодня") or contains(t, "вчера") or contains(t, "на этой неделе") or contains(t, "кадров") or contains(t, "назнач") or contains(t, "перестанов") or contains(t, "цена") or contains(t, "стоит") or contains(t, "стоимость") or contains(t, "курс") or contains(t, "котировк") or contains(t, "золот") or contains(t, "нефт") or contains(t, "биткоин") or contains(t, "доллар") or contains(t, "индекс") or contains(t, "на 20")
 }
 
 // Живой поиск в обычном пути. Транспорт — общий TavilySearch (utils.mlog,
@@ -562,6 +567,115 @@ pattern OSPLiveSearchBlock(query: String) -> String {
   let block = TavilyFormatBlock(response)
   if block == "" then { return "(живой поиск вернул 0 результатов)" }
   return block
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MARKET DATA — наряд #467: текущие цены для рыночных вопросов
+// ═══════════════════════════════════════════════════════════════════════
+
+// Распознавание актива в запросе. Возврат "kind|p1|p2|label" или "".
+// Чистая функция — реальные кейсы в test-блоках внизу файла.
+// Осторожные маркеры: «евро/eur» одиночкой не ловим («Европа/Europe»
+// давали ложное срабатывание) — только в парах «курс евро», «доллар к евро».
+pattern OSPMarketAsset(query: String) -> String {
+  let t = lower(query)
+  if contains(t, "биткоин") or contains(t, "bitcoin") or contains(t, "btc") then { return "crypto|bitcoin|usd|Биткоин (BTC/USD)" }
+  if contains(t, "эфир") or contains(t, "ethereum") then { return "crypto|ethereum|usd|Эфир (ETH/USD)" }
+  if contains(t, "золот") or contains(t, "gold") then { return "forex|xau|usd|Золото (XAU/USD)" }
+  if contains(t, "серебр") or contains(t, "silver") then { return "forex|xag|usd|Серебро (XAG/USD)" }
+  if contains(t, "нефт") or contains(t, "oil") or contains(t, "brent") or contains(t, "wti") then { return "" }
+  if (contains(t, "курс") or contains(t, "цена") or contains(t, "стоит")) and (contains(t, "доллар") or contains(t, "usd")) then {
+    if contains(t, "евро") or contains(t, "eur") then { return "forex|usd|eur|Доллар/евро (USD/EUR)" }
+    if contains(t, "юань") or contains(t, "cny") then { return "forex|usd|cny|Доллар/юань (USD/CNY)" }
+    if contains(t, "рубл") or contains(t, "rub") then { return "forex|usd|rub|Доллар/рубль (USD/RUB)" }
+    return "forex|usd|byn|Доллар/белорусский рубль (USD/BYN)"
+  }
+  if (contains(t, "курс") or contains(t, "цена") or contains(t, "стоит")) and (contains(t, "евро") or contains(t, "eur")) then { return "forex|eur|usd|Евро/доллар (EUR/USD)" }
+  if contains(t, "aapl") then { return "stock|AAPL||Apple (AAPL)" }
+  if contains(t, "tsla") then { return "stock|TSLA||Tesla (TSLA)" }
+  if contains(t, "nvda") then { return "stock|NVDA||Nvidia (NVDA)" }
+  if contains(t, "gazp") then { return "stock|GAZP||Газпром (GAZP)" }
+  return ""
+}
+
+pattern OSPMarketSource(kind: String) -> String {
+  if kind == "crypto" then { return "CoinGecko" }
+  if kind == "forex" or kind == "stock" then { return "Alpha Vantage" }
+  return "markets MCP"
+}
+
+// Дата запроса (локальная зона) — для «текущее значение с датой» (#467).
+pattern OSPNowDate() -> String {
+  let dp = date_parts(now())
+  let mo = to_string(dp.month)
+  if length(mo) < 2.0 then { let mo = "0" + mo }
+  let d = to_string(dp.day)
+  if length(d) < 2.0 then { let d = "0" + d }
+  return to_string(dp.year) + "-" + mo + "-" + d
+}
+
+// Рыночная секция контекста. Сначала MCP get_* (крипта — CoinGecko без
+// ключа; forex/stock — Alpha Vantage, ключ ALPHAVANTAGE_API_KEY через шов
+// AvKey() в utils.mlog); если ключ не задан или MCP отказал — Tavily-запрос
+// «<актив> price today» (#467 A.1). Причина прямого отказа сохраняется в
+// секции. Дата и источник — в каждой строке данных.
+pattern OSPMarketDataBlock(query: String) -> String {
+  let asset = OSPMarketAsset(query)
+  if asset == "" then { return "" }
+  let parts = split(asset, "|")
+  let kind = get(parts, 0.0)
+  let p1 = get(parts, 1.0)
+  let p2 = get(parts, 2.0)
+  let label = get(parts, 3.0)
+  let need_key = kind != "crypto"
+  let mut r_ok = false
+  let mut r_body = ""
+  let mut r_note = ""
+  if need_key == false or trim(AvKey()) != "" then {
+    let mut tool = ""
+    let mut args_json = "{}"
+    if kind == "crypto" then {
+      let tool = "get_crypto_price"
+      let args_json = json_encode({coin_id: p1, vs_currency: p2})
+    }
+    if kind == "forex" then {
+      let tool = "get_forex_rate"
+      let args_json = json_encode({from_currency: p1, to_currency: p2})
+    }
+    if kind == "stock" then {
+      let tool = "get_stock_quote"
+      let args_json = json_encode({symbol: p1})
+    }
+    let r = McpMarketsCall("osp", tool, args_json, "osp market data (#467)")
+    let r_ok = r.ok
+    let r_body = r.body
+    let r_note = r.note
+  }
+  if r_ok == true then {
+    let d = TryVal(try parse_json(r_body))
+    let mut value = to_string(json_get(d, "price", ""))
+    if kind == "forex" then { let value = to_string(json_get(d, "rate", "")) }
+    let mut unit = "USD"
+    if kind == "forex" then { let unit = upper(p2) }
+    if trim(value) == "" or value == "0" or value == "0.0" then {
+      // форма ответа не распознана — честно отдаём весь ответ сервера
+      return "\n\n=== Рыночные данные ===\n" + label + ": " + r_body + " (источник: " + OSPMarketSource(kind) + ", " + OSPNowDate() + ")\n"
+    }
+    return "\n\n=== Рыночные данные ===\n" + label + ": " + value + " " + unit + " (источник: " + OSPMarketSource(kind) + ", дата: " + OSPNowDate() + ")\n"
+  }
+  // Прямой источник недоступен: точная причина (#467), затем Tavily-фолбэк
+  let cause = r_body
+  if trim(cause) == "" then { let cause = r_note }
+  if need_key and trim(AvKey()) == "" then { let cause = "ALPHAVANTAGE_API_KEY не установлен" }
+  let response = TavilySearch(label + " price today", "osp")
+  if response != "()" then {
+    let block = TavilyFormatBlock(response)
+    if block != "" then {
+      return "\n\n=== Рыночные данные ===\n" + block + "(прямой источник " + label + " недоступен: " + cause + "; значение — живой поиск Tavily, " + OSPNowDate() + ")\n"
+    }
+  }
+  if trim(cause) == "" then { let cause = "MCP-сервер markets недоступен" }
+  return "\n\n=== Рыночные данные ===\n" + label + " недоступен (" + cause + ")\n"
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -594,6 +708,11 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   // ставка ФРС, инфляция) — это и была реальная причина отчёта-каркаса
   // без цифр по долгу США. Фиксированный набор ключевых рядов, не
   // произвольный (нет лишнего вызова модели на извлечение series_id).
+  // #467 A.1: рыночная секция — текущее значение актива с датой и
+  // источником (MCP get_*, при отказе/отсутствии ключа — Tavily
+  // «<актив> price today»). Вплетается после FRED: гварды #423 требуют
+  // Live Search между News и FRED, порядок секций модель видит целиком.
+  let market_block = OSPMarketDataBlock(query)
   let fred_data = ""
   if domain == "monetary" or domain == "financial" then {
     let mut fred_lines = ""
@@ -602,7 +721,11 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
       if r.ok == true then {
         let fred_lines = fred_lines + series + ": " + r.body + "\n"
       } else {
-        let fred_lines = fred_lines + series + ": недоступно (" + r.note + ")\n"
+        // #467 A.2: настоящая причина — текст ошибки сервера (r.body, уже
+        // под redact в McpMarketsCall); общий r.note — только если тела нет.
+        let fred_cause = r.body
+        if trim(fred_cause) == "" then { let fred_cause = r.note }
+        let fred_lines = fred_lines + series + ": недоступно (" + fred_cause + ")\n"
       }
     }
     let fred_data = "\n\n=== FRED (макроданные) ===\n" + fred_lines
@@ -619,7 +742,7 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   if s_now == "()" then { let s_now = "" }
   let s_sk = to_string(skills)
   if s_sk == "()" then { let s_sk = "" }
-  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + live_block + fred_data + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg
+  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + live_block + fred_data + market_block + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg
   let context = context + "\n\n=== ПОВТОР: ДАТА ===\n" + s_now
   return context
 }
@@ -1102,4 +1225,41 @@ test "n468 подвал: нет FRED-блока — нет FRED-строки, ne
   let footer = OSPSourcesFooter("=== News ===\nзаголовок новости про индикатор FRED\n\n=== Corrections ===\n-")
   if contains(footer, "FRED") then { error("FRED-строка не должна появляться без FRED-блока") }
   assert_contains(footer, "Новостной поиск (RSS)")
+}
+
+test "n467 актив: цена золота — forex XAU/USD" {
+  assert_eq(OSPMarketAsset("цена золота в 2027"), "forex|xau|usd|Золото (XAU/USD)")
+}
+
+test "n467 актив: биткоин — crypto bitcoin (CoinGecko)" {
+  assert_eq(OSPMarketAsset("сколько стоит биткоин сейчас"), "crypto|bitcoin|usd|Биткоин (BTC/USD)")
+}
+
+test "n467 актив: курс доллара к рублю" {
+  assert_eq(OSPMarketAsset("курс доллара к рублю"), "forex|usd|rub|Доллар/рубль (USD/RUB)")
+}
+
+test "n467 актив: доллар без пары — USD/BYN (домашняя)" {
+  assert_eq(OSPMarketAsset("цена доллара"), "forex|usd|byn|Доллар/белорусский рубль (USD/BYN)")
+}
+
+test "n467 актив: структурный вопрос — не рыночный" {
+  assert_eq(OSPMarketAsset("архитектура многополярного мира"), "")
+}
+
+test "n467 актив: «Европа» не ловится на «евро»" {
+  assert_eq(OSPMarketAsset("интеграция Европы"), "")
+}
+
+test "n467 дата: OSPNowDate формат YYYY-MM-DD" {
+  let d = OSPNowDate()
+  assert_eq(length(d), 10.0)
+  assert_eq(substring(d, 4.0, 5.0), "-")
+  assert_eq(substring(d, 7.0, 8.0), "-")
+}
+
+test "n467 источник: по kind" {
+  assert_eq(OSPMarketSource("crypto"), "CoinGecko")
+  assert_eq(OSPMarketSource("forex"), "Alpha Vantage")
+  assert_eq(OSPMarketSource("stock"), "Alpha Vantage")
 }
