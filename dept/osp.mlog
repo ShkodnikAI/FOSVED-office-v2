@@ -91,6 +91,158 @@ pattern OSPValidateProbability(text: String) -> String {
   return "FAIL: uncalibrated probability"
 }
 
+// ── Сценарный гейт качества (наряд #469) ────────────────────────────────
+// Вероятности сценариев ИЗМЕНЕНИЯ ОДНОЙ ВЕЛИЧИНЫ (цена, курс, индекс) —
+// взаимоисключающие исходы: они обязаны образовывать исчерпывающее
+// непересекающееся покрытие и в сумме давать 100% (±2%). Реальный
+// инцидент: отчёт OSP-2026-10-03-GOLD-01 — сумма середин ≈172%, отчёт
+// «норма» — это не норма, Brier по таким вероятностям не определён.
+//
+// Формат строки сценария в таблице (library/osp.md §«Сценарии одной
+// величины»): | Метка | Диапазон изменения: +10…+25% / ±10% / +30% и выше | P=65% или P=55–70% |
+// Гейт проверяет:
+//   1) разметка P=<число>% в каждой строке сценария (без неё — FAIL);
+//   2) узкость вероятностного диапазона ≤15 п.п.;
+//   3) сумма середин 98–102%;
+//   4) попарное непересечение диапазонов изменения (где парсятся).
+// Диапазоны «X% и выше/ниже» — точкой отсечения (консервативно).
+// Чистая функция (env/db не читает) — реальные кейсы в test-блоках
+// внизу файла, исполняются CI/pytest через bin/mlog test dept/osp.mlog.
+
+// Проверка формата числа (только цифры, максимум одна точка, ведущий минус).
+// Самодостаточна (не зовёт utils-TryVal — test-блоки исполняются изолированно
+// через bin/mlog test). to_float на мусоре молча отдаёт 0.0, поэтому явный
+// фильтр обязателен перед каждым числовым разбором гейта.
+pattern OSPStrIsNumber(s: String) -> Bool {
+  let t = trim(s)
+  if length(t) == 0.0 then { return false }
+  let mut body = t
+  if starts_with(t, "-") or starts_with(t, "−") then { let body = substring(t, 1.0, length(t)) }
+  if length(body) == 0.0 then { return false }
+  let n_dots = length(body) - length(replace(body, ".", ""))
+  if n_dots > 1.0 then { return false }
+  let mut c = replace(body, ".", "")
+  let c = replace(c, "0", "")
+  let c = replace(c, "1", "")
+  let c = replace(c, "2", "")
+  let c = replace(c, "3", "")
+  let c = replace(c, "4", "")
+  let c = replace(c, "5", "")
+  let c = replace(c, "6", "")
+  let c = replace(c, "7", "")
+  let c = replace(c, "8", "")
+  let c = replace(c, "9", "")
+  return c == ""
+}
+
+pattern OSPScenarioGateCheck(output: String) -> String {
+  let lines = split(output, "\n")
+  let mut p_mids = ""    // середины вероятностей, CSV через ";"
+  let mut ch_ranges = "" // диапазоны изменения "lo|hi|n;" — для парной проверки
+  let mut rows = 0.0
+  each line in lines {
+    if contains(line, "|") and contains(line, "P=") then {
+      let pstart = index_of(line, "P=") + 2.0
+      let after_p = substring(line, pstart, length(line))
+      let pend = index_of(after_p, "%")
+      if pend < 0.0 then { return "FAIL: вероятность сценария без % после P= (формат P=65%)" }
+      let p_str = trim(substring(after_p, 0.0, pend))
+      let p_norm = replace(replace(replace(p_str, "–", "-"), "—", "-"), "−", "-")
+      let mut lo = 0.0
+      let mut hi = 0.0
+      if contains(p_norm, "-") then {
+        let parts = split(p_norm, "-")
+        if length(parts) != 2.0 then { return "FAIL: неверный формат вероятности P=" + p_str }
+        if OSPStrIsNumber(get(parts, 0.0)) == false or OSPStrIsNumber(get(parts, 1.0)) == false then { return "FAIL: неверный формат вероятности P=" + p_str }
+        let lo = to_float(get(parts, 0.0))
+        let hi = to_float(get(parts, 1.0))
+        if hi - lo > 15.0 then { return "FAIL: диапазон вероятности не узкий (>15 п.п.): P=" + p_str }
+      } else {
+        if OSPStrIsNumber(p_norm) == false then { return "FAIL: неверный формат вероятности P=" + p_str }
+        let lo = to_float(p_norm)
+        let hi = to_float(p_norm)
+      }
+      let p_mids = p_mids + to_string((lo + hi) / 2.0) + ";"
+      let rows = rows + 1.0
+      // диапазон изменения — колонка таблицы перед колонкой с P=
+      let cols = split(line, "|")
+      let mut p_col = -1.0
+      let mut ci = 0.0
+      each c in cols {
+        if contains(c, "P=") then { let p_col = ci }
+        let ci = ci + 1.0
+      }
+      if p_col >= 1.0 then {
+        let parsed = OSPParseChangeRange(trim(get(cols, p_col - 1.0)))
+        if parsed != "" then {
+          let pc = split(parsed, "|")
+          let ch_ranges = ch_ranges + get(pc, 0.0) + "|" + get(pc, 1.0) + "|" + to_string(rows) + ";"
+        }
+      }
+    }
+  }
+  if rows < 2.0 then { return "PASS" }
+  let mut sum = 0.0
+  each m in split(p_mids, ";") {
+    if trim(m) != "" then { let sum = sum + to_float(trim(m)) }
+  }
+  if sum < 98.0 or sum > 102.0 then {
+    return "FAIL: сумма вероятностей сценариев " + to_string(sum) + "% вне 98–102% — сценарии одной величины взаимоисключающие, распределение не согласовано"
+  }
+  // попарное непересечение диапазонов изменения (n — уникальный номер строки)
+  let all = split(ch_ranges, ";")
+  each a in all {
+    if trim(a) != "" then {
+      let pa = split(a, "|")
+      let alo = to_float(get(pa, 0.0))
+      let ahi = to_float(get(pa, 1.0))
+      let an = get(pa, 2.0)
+      each b in all {
+        if trim(b) != "" then {
+          let pb = split(b, "|")
+          if get(pb, 2.0) != an then {
+            let blo = to_float(get(pb, 0.0))
+            let bhi = to_float(get(pb, 1.0))
+            if alo < bhi and blo < ahi then {
+              return "FAIL: диапазоны изменения сценариев пересекаются: [" + to_string(alo) + ";" + to_string(ahi) + "] и [" + to_string(blo) + ";" + to_string(bhi) + "]"
+            }
+          }
+        }
+      }
+    }
+  }
+  return "PASS"
+}
+
+// Разбор колонки «Диапазон изменения» в нормализованную пару "lo|hi".
+// Формат методологии: +10…+25%, −10…−25%, ±10%, +30% и выше, −25% и ниже.
+// Возвращает "" если колонка не распарсена — такие строки не участвуют
+// в проверке пересечений (сумма вероятностей всё равно гейтится).
+pattern OSPParseChangeRange(ch: String) -> String {
+  let s = trim(ch)
+  if s == "" then { return "" }
+  let s2 = replace(replace(s, " и выше", ""), " и ниже", "")
+  let s2 = replace(replace(replace(replace(s2, "%", ""), "…", "~"), "–", "~"), "—", "~")
+  let s2 = replace(replace(s2, "−", "-"), "±", "-")
+  if contains(s, "±") then {
+    // ±X → [-X;+X]
+    let v_str = trim(replace(replace(s2, "-", ""), "~", ""))
+    if OSPStrIsNumber(v_str) == false then { return "" }
+    let v = to_float(v_str)
+    return to_string(-1.0 * v) + "|" + to_string(v)
+  }
+  let tokens = split(s2, "~")
+  if OSPStrIsNumber(replace(trim(get(tokens, 0.0)), "+", "")) == false then { return "" }
+  let lo = to_float(replace(trim(get(tokens, 0.0)), "+", ""))
+  let mut hi = lo
+  if length(tokens) >= 2.0 then {
+    let hi_str = replace(trim(get(tokens, 1.0)), "+", "")
+    if OSPStrIsNumber(hi_str) then { let hi = to_float(hi_str) }
+  }
+  if lo > hi then { return to_string(hi) + "|" + to_string(lo) }
+  return to_string(lo) + "|" + to_string(hi)
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // FORCES & POTENTIALS — native formula P = A × R × S × L × E × E_modifier
 // ═══════════════════════════════════════════════════════════════════════
@@ -538,36 +690,65 @@ pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
 pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
-  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней."
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней. Если строишь сценарии изменения одной величины (цена, курс, индекс) — диапазоны взаимоисключающие без пересечений, вероятность в таблице сценариев форматом P=<число>% (точечная или узкая ≤15 п.п.), сумма середин = 100%. Шкала Кента — словесная метка К числу, не вместо числа. ACH и прогноз согласованы: выжила null-гипотеза — распределение широкое, без «likely» для одного направления."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
+  // #469 A.2: сценарный гейт — сумма вероятностей 98–102%, непересекающиеся
+  // диапазоны. Один повтор с указанием ошибки; повторный провал — отчёт
+  // выходит с пометкой, прогноз НЕ записывается в верификацию (Brier).
+  let gate1 = OSPScenarioGateCheck(reply)
+  if starts_with(gate1, "FAIL") then {
+    let prompt_fix = prompt + "\n\nОТВЕТ ОТВЕРГНУТ ГЕЙТОМ КАЧЕСТВА: " + gate1 + "\nИсправь: сценарии одной величины — взаимоисключающие диапазоны без пересечений; вероятности форматом P=<число>% (точечные или узкие ≤15 п.п.); сумма середин = 100% ±2. Сгенерируй отчёт заново целиком."
+    let llm_fix = redact(to_string(TryVal(try call_llm(prompt_fix, query))), "all")
+    if to_string(llm_fix) != "()" then { let reply = to_string(llm_fix) }
+  }
+  let gate = OSPScenarioGateCheck(reply)
+  let mut not_accepted = ""
+  if starts_with(gate, "FAIL") then { let not_accepted = "\n\n[ПРОГНОЗ НЕ ПРИНЯТ К ВЕРИФИКАЦИИ: " + gate + " — вероятности не согласованы, запись в Brier не выполняется (наряд #469)]" }
   let gates = OSPCheckQualityGates(reply, 3)
   let safety = OSPFinalSafetyCheck(reply)
   if safety != "PASS" then { let reply = reply + "\n\n[SAFETY: " + safety + "]" }
-  let reply = reply + "\n\n" + OSPDisclaimerBottom()
-  let aid = OSPDraftAnalysis(query, "deep", domain, 3)
+  let reply = reply + "\n\n" + OSPDisclaimerBottom() + not_accepted
+  // #469 A.3: в верификацию (Brier) попадает только согласованное
+  // распределение — при повторном провале гейта запись прогноза не создаётся.
+  let mut aid = -1.0
+  if not_accepted == "" then { let aid = OSPDraftAnalysis(query, "deep", domain, 3) }
   let _ = RecordAssistantMessage(chat_id, "osp", reply)
-  let _ = AuditLog("osp_deep", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates)
+  let _ = AuditLog("osp_deep", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates + " scenario_gate=" + gate)
   return reply
 }
 
 pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id)
-  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез."
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез. Сценарии одной величины — взаимоисключающие непересекающиеся диапазоны; вероятности в таблице форматом P=<число>% (точечные или узкие ≤15 п.п.), сумма середин = 100% ±2. Шкала Кента — метка К числу. ACH согласован с прогнозом."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
+  // #469 A.2: сценарный гейт — как в OSPDeepAnalyze: один повтор,
+  // повторный провал — пометка и отказ от записи прогноза.
+  let gate1 = OSPScenarioGateCheck(reply)
+  if starts_with(gate1, "FAIL") then {
+    let prompt_fix = prompt + "\n\nОТВЕТ ОТВЕРГНУТ ГЕЙТОМ КАЧЕСТВА: " + gate1 + "\nИсправь: сценарии одной величины — взаимоисключающие диапазоны без пересечений; вероятности форматом P=<число>% (точечные или узкие ≤15 п.п.); сумма середин = 100% ±2. Сгенерируй отчёт заново целиком."
+    let llm_fix = redact(to_string(TryVal(try call_llm(prompt_fix, query))), "all")
+    if to_string(llm_fix) != "()" then { let reply = to_string(llm_fix) }
+  }
+  let gate = OSPScenarioGateCheck(reply)
+  let mut not_accepted = ""
+  if starts_with(gate, "FAIL") then { let not_accepted = "\n\n[ПРОГНОЗ НЕ ПРИНЯТ К ВЕРИФИКАЦИИ: " + gate + " — вероятности не согласованы, запись в Brier не выполняется (наряд #469)]" }
   let gates = OSPCheckQualityGates(reply, 4)
   let safety = OSPFinalSafetyCheck(reply)
   if safety != "PASS" then { let reply = reply + "\n\n[SAFETY: " + safety + "]" }
-  let reply = reply + "\n\n" + OSPDisclaimerBottom()
-  let aid = OSPDraftAnalysis(query, "full", domain, 4)
+  let reply = reply + "\n\n" + OSPDisclaimerBottom() + not_accepted
+  // #469 A.3: в верификацию (Brier) попадает только согласованное
+  // распределение — при повторном провале гейта запись прогноза не создаётся.
+  let mut aid = -1.0
+  if not_accepted == "" then { let aid = OSPDraftAnalysis(query, "full", domain, 4) }
   let _ = RecordAssistantMessage(chat_id, "osp", reply)
-  let _ = AuditLog("osp_full", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates)
+  let _ = AuditLog("osp_full", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates + " scenario_gate=" + gate)
   return reply
 }
 
@@ -789,3 +970,73 @@ pattern OSPUpdateBetStatus(bet_id: Int, new_status: String, note: String) -> Str
 // | skills:23(T1:10 T2:10 T3:3) | models:15 | lifecycle:7 states
 // | brier_targets: Y1≤0.25 Y2≤0.20 Y3≤0.18
 // Source: Fosved_v4_1_Transition_Pack (SPD), library/osp.md v3.0, schema-v4.1.prisma
+
+// ═══════════════════════════════════════════════════════════════════════
+// TESTS — наряд #469: сценарный гейт (реальное исполнение чистых функций).
+// Прогон: ./bin/mlog test dept/osp.mlog — интегрирован в
+// tests/test_n469_osp_scenario_gate.py (pytest вызывает subprocess).
+// ═══════════════════════════════════════════════════════════════════════
+
+test "n469 гейт: согласованные сценарии (сумма 100, смежные диапазоны) — PASS" {
+  let out = "| A | Рост +10…+25% | P=65% |\n| B | Боковик −10…+10% | P=30% |\n| C | Обвал −25…−10% | P=5% |"
+  assert_eq(OSPScenarioGateCheck(out), "PASS")
+}
+
+test "n469 гейт: узкие вероятностные диапазоны, сумма 100 — PASS" {
+  let out = "| A | Рост +10…+25% | P=55–65% |\n| B | Боковик −10…+10% | P=25–35% |\n| C | Обвал −25…−10% | P=5–15% |"
+  assert_eq(OSPScenarioGateCheck(out), "PASS")
+}
+
+test "n469 гейт: инцидент OSP-GOLD-01, сумма ~172% — FAIL" {
+  let out = "| A | Рост +10–25% | P=72.5% |\n| B | Боковик ±10% | P=50% |\n| C | Коррекция −10–20% | P=27.5% |\n| D | Шок +30% и выше | P=12.5% |\n| E | Обвал −25% и ниже | P=12.5% |"
+  assert_contains(OSPScenarioGateCheck(out), "FAIL: сумма вероятностей")
+}
+
+test "n469 гейт: пересечение диапазонов изменения — FAIL" {
+  let out = "| A | +10…+30% | P=60% |\n| B | +25…+50% | P=40% |"
+  assert_contains(OSPScenarioGateCheck(out), "FAIL: диапазоны изменения")
+}
+
+test "n469 гейт: широкий вероятностный диапазон (>15 п.п.) — FAIL" {
+  let out = "| A | Рост +10…+25% | P=40–80% |\n| B | Боковик −10…+10% | P=60% |"
+  assert_contains(OSPScenarioGateCheck(out), "FAIL: диапазон вероятности не узкий")
+}
+
+test "n469 гейт: вероятность без % после P= — FAIL" {
+  let out = "| A | Рост +10…+25% | P=65 |\n| B | Боковик −10…+10% | P=35% |"
+  assert_contains(OSPScenarioGateCheck(out), "FAIL: вероятность сценария без %")
+}
+
+test "n469 гейт: нечисловая вероятность после P= — FAIL" {
+  let out = "| A | +10…+25% | P=abc% |\n| B | −10…+10% | P=100% |"
+  assert_contains(OSPScenarioGateCheck(out), "FAIL: неверный формат вероятности")
+}
+
+test "n469 гейт: одна строка сценария (сумма неприменима) — PASS" {
+  assert_eq(OSPScenarioGateCheck("| A | Рост +10…+25% | P=65% |"), "PASS")
+}
+
+test "n469 гейт: нет сценарной таблицы — PASS" {
+  assert_eq(OSPScenarioGateCheck("Просто текст отчёта без таблиц и разметки P=."), "PASS")
+}
+
+test "n469 разбор: OSPParseChangeRange — нормализованные пары" {
+  assert_eq(OSPParseChangeRange("+10…+25%"), "10|25")
+  assert_eq(OSPParseChangeRange("−10…−25%"), "-25|-10")
+  assert_eq(OSPParseChangeRange("±10%"), "-10|10")
+  assert_eq(OSPParseChangeRange("+30% и выше"), "30|30")
+  assert_eq(OSPParseChangeRange("−25% и ниже"), "-25|-25")
+  assert_eq(OSPParseChangeRange("Рост +10…+25%"), "")
+}
+
+test "n469 разбор: OSPStrIsNumber — фильтр формата числа" {
+  assert_eq(OSPStrIsNumber("65"), true)
+  assert_eq(OSPStrIsNumber("12.5"), true)
+  assert_eq(OSPStrIsNumber("-25"), true)
+  assert_eq(OSPStrIsNumber("−10.5"), true)
+  assert_eq(OSPStrIsNumber(""), false)
+  assert_eq(OSPStrIsNumber("abc"), false)
+  assert_eq(OSPStrIsNumber("12x"), false)
+  assert_eq(OSPStrIsNumber("1.2.3"), false)
+  assert_eq(OSPStrIsNumber("1-2"), false)
+}
