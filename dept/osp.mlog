@@ -469,8 +469,45 @@ pattern OSPSourcesFooter(context: String) -> String {
       }
     }
   }
-  if contains(context, "=== FRED (макроданные) ===") then {
-    let lines = lines + "\n· FRED (макроданные: доходность облигаций, ставка ФРС, инфляция)"
+  // #468 A.1: FRED в подвале — только если реально получен хотя бы один
+  // ряд; при полном отказе — точная причина (из первой отказной строки
+  // FRED-блока), а не имя источника при нулевых данных (дефект отчёта
+  // OSP-GOLD-01: подвал «Источники: FRED» при всех рядах «недоступно»).
+  let fred_start = index_of(context, "=== FRED (макроданные) ===")
+  if fred_start >= 0.0 then {
+    let after = substring(context, fred_start + 26.0, length(context))
+    let fred_end = index_of(after, "\n\n===")
+    let mut fred_body = after
+    if fred_end >= 0.0 then { let fred_body = substring(after, 0.0, fred_end) }
+    let mut has_data = false
+    let mut first_cause = ""
+    each ln in split(trim(fred_body), "\n") {
+      let l = trim(ln)
+      if length(l) > 0.0 then {
+        if contains(l, "недоступно") then {
+          if first_cause == "" then {
+            let cidx = index_of(l, "недоступно (")
+            if cidx >= 0.0 then {
+              let rest = substring(l, cidx + 12.0, length(l))
+              let cend = index_of(rest, ")")
+              let first_cause = trim(rest)
+              if cend > 0.0 then { let first_cause = trim(substring(rest, 0.0, cend)) }
+            }
+          }
+        } else {
+          let has_data = true
+        }
+      }
+    }
+    if has_data then {
+      let lines = lines + "\n· FRED (макроданные: доходность облигаций, ставка ФРС, инфляция)"
+    } else {
+      if first_cause == "" then {
+        let lines = lines + "\n· FRED недоступен (данные не получены)"
+      } else {
+        let lines = lines + "\n· FRED недоступен: " + first_cause
+      }
+    }
   }
   if length(lines) == 0.0 then { return "" }
   return "\n\n---\n**Источники:**" + lines
@@ -1039,4 +1076,30 @@ test "n469 разбор: OSPStrIsNumber — фильтр формата числ
   assert_eq(OSPStrIsNumber("12x"), false)
   assert_eq(OSPStrIsNumber("1.2.3"), false)
   assert_eq(OSPStrIsNumber("1-2"), false)
+}
+
+test "n468 подвал: FRED с полученным рядом — источник показан" {
+  let ctx = "=== News ===\nзаголовок новости\n\n=== FRED (макроданные) ===\nDGS10: {\"ok\":true,\"value\":\"4.28\"}\nFEDFUNDS: недоступно (FRED_API_KEY не установлен)\n\n=== Corrections ===\n-"
+  let footer = OSPSourcesFooter(ctx)
+  assert_contains(footer, "· FRED (макроданные: доходность облигаций, ставка ФРС, инфляция)")
+}
+
+test "n468 подвал: FRED все ряды отказали — точная причина вместо источника" {
+  let ctx = "=== News ===\nзаголовок новости\n\n=== FRED (макроданные) ===\nDGS10: недоступно (FRED_API_KEY не установлен)\nFEDFUNDS: недоступно (FRED_API_KEY не установлен)\nCPIAUCSL: недоступно (FRED_API_KEY не установлен)\n\n=== Corrections ===\n-"
+  let footer = OSPSourcesFooter(ctx)
+  assert_contains(footer, "FRED недоступен: FRED_API_KEY не установлен")
+  if contains(footer, "· FRED (макроданные") then { error("источник не должен показываться при нулевых данных") }
+}
+
+test "n468 подвал: FRED отказ без скобки-причины — общая честная строка" {
+  let ctx = "=== News ===\nзаголовок новости\n\n=== FRED (макроданные) ===\nDGS10: недоступно\n\n=== Corrections ===\n-"
+  let footer = OSPSourcesFooter(ctx)
+  assert_contains(footer, "FRED недоступен (данные не получены)")
+  if contains(footer, "· FRED (макроданные") then { error("источник не должен показываться при нулевых данных") }
+}
+
+test "n468 подвал: нет FRED-блока — нет FRED-строки, news остаётся" {
+  let footer = OSPSourcesFooter("=== News ===\nзаголовок новости про индикатор FRED\n\n=== Corrections ===\n-")
+  if contains(footer, "FRED") then { error("FRED-строка не должна появляться без FRED-блока") }
+  assert_contains(footer, "Новостной поиск (RSS)")
 }
