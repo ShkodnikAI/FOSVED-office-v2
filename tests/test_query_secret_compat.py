@@ -131,7 +131,8 @@ if __name__ == "__main__":
 
 # ── #443: hash-form (mlog redact hash_only) принимается cron_secret_ok ──────
 # mlog-слоты шлют секрет по сети ТОЛЬКО hash-form (private-egress гвард
-# №391/№312). Формат верифицирован эмпирической пробой bin/mlog 0.27.1
+# №391/№312). Формат верифицирован эмпирической пробой bin/mlog (0.27.1 при
+# внедрении; пере-пробован /repos-гвардом на 0.28.0 — ADR-0015)
 # (scripts/…hashprobe): [HASH:<sha256(secret)[:16]>] hex.
 
 def test_mlog_hash_form_matches(monkeypatch):

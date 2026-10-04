@@ -223,11 +223,12 @@ else
 fi
 # ── #399 A.2: фолбэк-патч фичи Metalogos-#757 ────────────────────────────────
 # app.mlog несёт llm { max_tokens: 8192 } и SendReport вызывает
-# llm_last_finish_reason() — обе фичи понимает ТОЛЬКО бинарь 0.27.1
-# (проверено пробами: 0.20/0.25/0.27.0 дают parse-ошибку "expected
-# llm_providers, COMMA, or RBRACE" / "undefined: function"). Фолбэк-ветка
-# (кандидат не прошёл пробу — редкий crash-сценарий) служит 0.20, поэтому
-# вырезает фичу из serve-копии; граница — до вывода 0.20 из ротации (ADR-0009).
+# llm_last_finish_reason() — обе фичи понимает линия 0.27.1+ (вкл. боевой
+# 0.28.0, ADR-0015; исторические пробы: 0.20/0.25/0.27.0 дают parse-ошибку
+# "expected llm_providers, COMMA, or RBRACE" / "undefined: function").
+# Фолбэк-ветка (кандидат не прошёл пробу — редкий crash-сценарий) служит
+# 0.20, поэтому вырезает фичу из serve-копии; граница — до вывода 0.20
+# из ротации (ADR-0009).
 if [ "$MLOG_BIN" = "$MLOG_LEGACY" ]; then
   sed -i '/max_tokens: 8192,/d' "$MLOG_SERVE_FILE"
   sed -i 's/llm_last_finish_reason()/""/g' "$MLOG_SERVE_FILE"

@@ -7,17 +7,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PATTERN_DEF_RE = re.compile(r"^(\s*)pattern\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
-DUPES = ["ApplyDisclaimer", "DISCLAIMER_BOTTOM", "DISCLAIMER_TOP", "EnforceHardRules",
+DUPES = ["ApplyDisclaimer", "DISCLAIMER_BOTTOM", "DISCLAIMER_TOP",
          "QuarterlyMethodologyReview", "RunQuarterlyMethodologyReview", "SearchArchive",
          "WrapWithDisclaimer"]
 DEFS = {
     "ApplyDisclaimer": [("dept/legal.mlog", 1034), ("dept/qa.mlog", 1685)],
     "DISCLAIMER_BOTTOM": [("dept/design.mlog", 48), ("dept/engineering.mlog", 78), ("dept/legal.mlog", 79)],
     "DISCLAIMER_TOP": [("dept/design.mlog", 46), ("dept/engineering.mlog", 76), ("dept/legal.mlog", 77)],
-    "EnforceHardRules": [("dept/legal.mlog", 228), ("dept/qa.mlog", 324)],
     "QuarterlyMethodologyReview": [("dept/engineering.mlog", 1074), ("dept/qa.mlog", 1642)],
     "RunQuarterlyMethodologyReview": [("dept/design.mlog", 1410), ("dept/legal.mlog", 854)],
-    "SearchArchive": [("dept/engineering.mlog", 980), ("dept/legal.mlog", 992), ("dept/utils.mlog", 312)],
+    "SearchArchive": [("dept/legal.mlog", 931), ("dept/utils.mlog", 268)],
     "WrapWithDisclaimer": [("dept/design.mlog", 1643), ("dept/engineering.mlog", 191)],
 }
 

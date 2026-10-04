@@ -77,12 +77,15 @@ def test_dept_md_documents_moved_to_docs():
 
 
 def test_duplicates_baseline_matches_adr():
-    """Дубли определений — ровно 8, каждый упомянут в ADR-0014.
+    """Дубли определений — ровно 7 (было 8; EnforceHardRules ушёл из дублей
+    при переходе 0.28.0: QA-вариант переименован в QaEnforceHardRules —
+    гейт №523 запрещает дубли с РАЗНОЙ арностью; ADR-0014, дополнение).
+    Каждый дубликат упомянут в ADR-0014.
     Появление нового дубликата — сигнал к дедуп-решению (ADR-0014, следствие 2)."""
     adr = (REPO_ROOT / "docs" / "adr" / "0014-duplicate-patterns-departmental-voice.md").read_text(encoding="utf-8")
     data = registry()
     dupes = sorted(name for name, info in data["patterns"].items() if info["duplicate"])
-    assert len(dupes) == 8, f"список дублей изменился: {dupes} — обнови ADR-0014"
+    assert len(dupes) == 7, f"список дублей изменился: {dupes} — обнови ADR-0014"
     for name in dupes:
         assert name in adr, f"{name} не зафиксирован в ADR-0014"
 
