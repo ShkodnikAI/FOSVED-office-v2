@@ -1,4 +1,4 @@
-"""Наряд №383: гварды скилл-слоя — каждый read_file("skills/…") в dept/*.mlog
+"""Наряд №383: гварды скилл-слоя — каждое skills-чтение в dept/*.mlog
 адресует СУЩЕСТВУЮЩИЙ скилл: либо в манифесте (снапшот прода), либо имеет
 честный инлайн-фолбэк (SkillNote) в том же модуле.
 
@@ -6,6 +6,10 @@
 восстанавливаются bootstrap'ом на проде; в песочнице отсутствуют — скиллы вне
 git, FO-012), 20 — фантомы skills/fosved/{finance ×9, marketing ×11} — их нет
 даже в снапшоте: чтения были молча пустыми на проде.
+
+№563 (0.28.0, ADR-0015): легальная форма чтения — `read_file_or(path, "")`
+(контракт №254 завершён); гвард следит, чтобы чтения оставались ЛИТЕРАЛЬНЫМИ
+в новой форме — это вход manifest-сверки.
 """
 import json
 import re
@@ -35,7 +39,7 @@ PHANTOMS = {
 
 def _claimed_skills(src: str) -> list:
     return [
-        m.group(1) for m in re.finditer(r'read_file\("(skills/[^"]+)"\)', src)
+        m.group(1) for m in re.finditer(r'read_file_or\("(skills/[^"]+)", ""\)', src)
         if m.group(1) != "skills/" + m.group(1)  # защита от пустых
     ]
 
@@ -79,20 +83,21 @@ def test_marketing_accumulation_bug_fixed():
 
 
 def test_manifest_backed_reads_untouched():
-    """36 чтений из манифеста не тронуты (контент не дублируется в код)."""
+    """36 чтений из манифеста не тронуты (контент не дублируется в код).
+    Форма — read_file_or (№563, ADR-0015)."""
     ctx = DEPT.get("context.mlog", "")
-    assert 'read_file("skills/deconstruct/SKILL.md")' in ctx
+    assert 'read_file_or("skills/deconstruct/SKILL.md", "")' in ctx
     assert "deconstruct" in MANIFEST_KEYS
     # в манифесте по-прежнему 248 скиллов (манифест не расширялся — граница наряда)
     assert MANIFEST["skills_count"] == 248
 
 
 def test_snapshot_path_primary():
-    """read_file остаётся ПЕРВИЧНЫМ источником: фолбэк только при пустом чтении."""
+    """read_file_or остаётся ПЕРВИЧНЫМ источником: фолбэк только при пустом чтении."""
     fin = DEPT["finance.mlog"]
     seg = fin[fin.index("pattern LoadFinanceSkills"):]
     seg = seg[:seg.index("\npattern ", 10)]
-    # порядок: read_file → if s == "" → SkillNote → if s != ""
-    i_read = seg.index('read_file("skills/fosved/finance/cashflow-forecasting')
+    # порядок: read_file_or → if s == "" → SkillNote → if s != ""
+    i_read = seg.index('read_file_or("skills/fosved/finance/cashflow-forecasting')
     i_fb = seg.index('FinanceSkillNote("cashflow-forecasting")')
     assert i_read < i_fb
