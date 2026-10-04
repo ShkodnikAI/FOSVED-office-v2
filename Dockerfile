@@ -16,17 +16,20 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.27.1 — прод-бинарь (линия 0.25.0→0.27.0→0.27.1, ADR-0009;
-# бинарь из официального CI-артефакта тегового коммита 0d1cce9 —
-# unfreeze-релиз: В17-фиксы памяти + security-волна 0.26.0 №454-№459)
+# Metalogos v0.28.0 — прод-бинарь (линия 0.25.0→0.27.0→0.27.1→0.28.0,
+# ADR-0009/0012/0015; бинарь из официального релиз-артефакта тега v0.28.0,
+# source commit 3576887 — security-релиз: семантический гейт №523 (run/serve
+# блокируются семантическими находками), respond_html №565 (регрессия 0.27.x
+# /repos закрыта), честный read_file №563; office-ремедиация — ADR-0015)
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
-# грузит сырой app.mlog). bin/mlog-027 (0.27.0) вендорен как прошлый-хороший
-# тест-гвард (ADR-0012; было mlog-025 — выведен #399, а COPY здесь забыли →
-# сборка падала 30.09–01.10, хотфикс 2026-10-01).
+# грузит сырой app.mlog). bin/mlog-0271 (0.27.1) вендорен как прошлый-хороший
+# тест-гвард (ADR-0015; было mlog-027 = 0.27.0 — выведен; было mlog-025 —
+# выведен #399, а COPY здесь забыли → сборка падала 30.09–01.10, хотфикс
+# 2026-10-01).
 COPY bin/mlog /usr/local/bin/mlog
 COPY bin/mlog-020 /usr/local/bin/mlog-020
-COPY bin/mlog-027 /usr/local/bin/mlog-027
-RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 /usr/local/bin/mlog-027 && /usr/local/bin/mlog --version
+COPY bin/mlog-0271 /usr/local/bin/mlog-0271
+RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 /usr/local/bin/mlog-0271 && /usr/local/bin/mlog --version
 
 COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
@@ -41,7 +44,7 @@ COPY . .
 # стали 100644, а эта строка по-прежнему chmod'ила УДАЛЁННЫЙ mlog-023 →
 # docker build падал, деплой не проходил. Страховка теперь гоняет ВСЕ
 # вендоренные бинари (защита от регресса exec-бит) и верифицирует кандидата.
-RUN chmod +x /office/bin/mlog /office/bin/mlog-020 /office/bin/mlog-027 \
+RUN chmod +x /office/bin/mlog /office/bin/mlog-020 /office/bin/mlog-0271 \
     && /office/bin/mlog --version
 
 # Node.js deps (Prisma client for PostgreSQL)

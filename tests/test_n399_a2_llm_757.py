@@ -5,7 +5,9 @@
 Диспатч #403 Wave 3: гейт выполнен — Metalogos- #757 выпущен (тег v0.27.1,
 мерж 260a33a — предок тега) И #401 закрыт.
 
-A.2.1 — bin/mlog = 0.27.1 (CI-артефакт тега, sha256 зафиксирован в ADR-0012).
+A.2.1 — bin/mlog = 0.28.0 (релиз-артефакт тега, sha256 зафиксирован в ADR-0015;
+       прошлый-хороший 0.27.1 вендорен как bin/mlog-0271), фича #757 живёт
+       в линии 0.27.1+ — проверено на 0.28.0.
 A.2.2 — app.mlog: llm { max_tokens: 8192 } сразу после providers (грамматика
         0.27.1: хвост — упорядоченная цепочка; поле до providers = parse).
 A.2.3 — SendReport (dept/miniapp.mlog): пометка «ОТВЕТ ОБРЕЗАН» через
@@ -25,7 +27,7 @@ MINIAPP = (REPO_ROOT / "dept" / "miniapp.mlog").read_text(encoding="utf-8")
 ENTRYPOINT = (REPO_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
 
 
-# ── A.2.1: бинарь 0.27.1 ──────────────────────────────────────────────────
+# ── A.2.1: бинарь 0.28.0 ──────────────────────────────────────────────────
 
 
 def _version(binary: str) -> str:
@@ -34,26 +36,35 @@ def _version(binary: str) -> str:
     return out.stdout.strip().splitlines()[0]
 
 
-def test_battle_binary_is_0271():
+def test_battle_binary_is_0280():
     v = _version("bin/mlog")
-    assert "0.27.1" in v, f"боевой бинарь должен быть 0.27.1 (ADR-0012), получено: {v}"
+    assert "0.28.0" in v, f"боевой бинарь должен быть 0.28.0 (ADR-0015), получено: {v}"
 
 
-def test_prev_good_binary_is_0270():
-    v = _version("bin/mlog-027")
-    assert "0.27.0" in v, f"прошлый-хороший должен быть 0.27.0, получено: {v}"
+def test_prev_good_binary_is_0271():
+    v = _version("bin/mlog-0271")
+    assert "0.27.1" in v, f"прошлый-хороший должен быть 0.27.1, получено: {v}"
 
 
-def test_mlog025_is_out():
+def test_old_binaries_are_out():
     assert not (REPO_ROOT / "bin" / "mlog-025").exists(), \
         "mlog-025 выведен из репо (ADR-0012), восстанавливается из git-истории"
+    assert not (REPO_ROOT / "bin" / "mlog-027").exists(), \
+        "mlog-027 выведен из репо (ADR-0015), восстанавливается из git-истории"
 
 
 def test_battle_binary_sha256_matches_artifact():
-    # целостность CI-артефакта тега v0.27.1 (sha256 зафиксирован в ADR-0012)
-    expected_prefix = "43fb5c7ad21f8dd9630cf26c548446f29a139209df9d4ba95bd0d4736dbba9b2"
+    # целостность релиз-артефакта тега v0.28.0 (sha256 зафиксирован в ADR-0015)
+    expected_prefix = "58eb1ebd0d326f071cf923acba869c4fec6c732b9458b676f158a4d743ec2260"
     h = hashlib.sha256((REPO_ROOT / "bin" / "mlog").read_bytes()).hexdigest()
-    assert h == expected_prefix, f"bin/mlog sha256={h}, ожидание ADR-0012: {expected_prefix}"
+    assert h == expected_prefix, f"bin/mlog sha256={h}, ожидание ADR-0015: {expected_prefix}"
+
+
+def test_prev_good_binary_sha256_matches():
+    # bin/mlog-0271 — тот самый бинарь 0.27.1, что был боевым (ADR-0012/0015)
+    expected_prefix = "43fb5c7ad21f8dd9630cf26c548446f29a139209df9d4ba95bd0d4736dbba9b2"
+    h = hashlib.sha256((REPO_ROOT / "bin" / "mlog-0271").read_bytes()).hexdigest()
+    assert h == expected_prefix, f"bin/mlog-0271 sha256={h}, ожидание ADR-0012: {expected_prefix}"
 
 
 # ── A.2.2: max_tokens в llm{} ─────────────────────────────────────────────
@@ -120,9 +131,9 @@ def test_fallback_patched_file_parses_on_020():
             f"фолбэк-копия с патчем не должна давать parse error:\n{out.stdout[-600:]}"
 
 
-def test_feature_file_parses_on_0271():
-    """Боевая копия (с фичей) на 0.27.1 — 0 parse error."""
+def test_feature_file_parses_on_battle_binary():
+    """Боевая копия (с фичей) на боевом бинаре 0.28.0 — 0 parse error."""
     out = subprocess.run([str(REPO_ROOT / "bin" / "mlog"), "check", "app.mlog"],
                          capture_output=True, text=True, timeout=120, cwd=REPO_ROOT)
     assert "parse error" not in out.stdout + out.stderr, \
-        f"app.mlog с фичей #757 должен парситься 0.27.1:\n{out.stdout[-600:]}"
+        f"app.mlog с фичей #757 должен парситься боевым бинарем:\n{out.stdout[-600:]}"

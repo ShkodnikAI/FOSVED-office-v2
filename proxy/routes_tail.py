@@ -349,7 +349,8 @@ def cron_secret_ok() -> bool:
     #443 (зелёный main): mlog-слоты шлют секрет по сети ТОЛЬКО hash-form
     (redact(..., "hash_only"), конвенция №327/№318) — raw env-значение в URL
     это private-egress (Category-A, гвард №391/№312). Формат верифицирован
-    пробой bin/mlog 0.27.1: `[HASH:<sha256(secret)[:16]>] hex`. Принимаем
+    пробой bin/mlog (0.27.1 при внедрении; пере-пробован живым /repos-гитом
+    на 0.28.0 — ADR-0015): `[HASH:<sha256(secret)[:16]>] hex`. Принимаем
     hash-form встречно; raw остаётся для внешних кронов (cron-job.org).
     """
 
