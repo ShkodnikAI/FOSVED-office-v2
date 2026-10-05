@@ -2,15 +2,18 @@
 # -*- coding: utf-8 -*-
 """Наряд #423 (P0): живой Tavily-поиск в обычном пути ОСП.
 
-Статические гварды по dept/osp.mlog — по конвенции тестов этого репо.
-Проверяют: паттерны существуют; вызов в BuildOSPContext обёрнут в условие
-событийности + пустоты news-кэша; честная деградация называет точные
-причины; BY-тематика дополняет запрос; подвал источников отражает Live
-Search. Двенадцать гейтов ОСП не затрагиваются (см. test_gates_untouched).
+ОБНОВЛЕНО нарядом #474 (инцидент OSP-2026-10-05-PLAGUE-01): белый список
+событийности (#423/#467) заменён перевёрнутым правилом — живой поиск
+выполняется для КАЖДОГО анализа ОСП, пропуск — только для явно
+вневременных вопросов (OSPSkipLiveSearch, короткий список исключений);
+условие пустого кэша новостей снято. Гварды #423, пережившие переворот:
+честная деградация с точными причинами, BY-дополнение запроса, подвал
+источников, 12 гейтов ОСП не затронуты, один транспорт Tavily.
+Специфичные гварды #474 — в tests/test_n474_osp_live_default.py.
 
-Мутационные проверки (команды в отчёте PR): снятие условия событийности,
-снятие TavilyKey-гварда, снятие BY-дополнения и снятие Live-блока из
-подвала — каждая валит минимум один тест этого файла.
+Мутационные проверки (команды в отчёте PR): снятие условия OSPSkipLiveSearch
+с вызова поиска, снятие TavilyKey-гварда, снятие BY-дополнения и снятие
+Live-блока из подвала — каждая валит минимум один тест этого файла.
 """
 import os
 import sys
@@ -33,18 +36,22 @@ def _pattern_body(source: str, name: str) -> str:
 
 
 def test_patterns_exist():
-    assert "pattern OSPNeedsLiveSearch" in OSP_MLOG
+    assert "pattern OSPSkipLiveSearch" in OSP_MLOG
     assert "pattern OSPLiveSearchBlock" in OSP_MLOG
-    assert "-> Bool" in _pattern_body(OSP_MLOG, "OSPNeedsLiveSearch")
+    # #474: старый белый список удалён — не осталось ни паттерна, ни вызова
+    assert "OSPNeedsLiveSearch" not in OSP_MLOG
 
 
-def test_live_search_gated_in_build_context():
+def test_live_search_default_on_in_build_context():
     body = _pattern_body(OSP_MLOG, "BuildOSPContext")
-    # условие событийности + пустоты news-кэша — против лишних трат Tavily
-    assert "if OSPNeedsLiveSearch(query, domain) and length(trim(news)) == 0.0 then" in body
+    # #474: поиск по умолчанию — единственное условие вызова, инвертированный список
+    assert "if OSPSkipLiveSearch(query) == false then" in body
+    # условие пустого кэша новостей СНЯТО (глушило поиск при живом фолбэке)
+    assert "length(trim(news)) == 0.0" not in body, (
+        "условие пустого кэша новостей обязано быть снято (#474 A.1)")
     # секция контекста добавляется только внутри условия
     assert "=== Live Search ===" in body
-    idx_if = body.index("if OSPNeedsLiveSearch")
+    idx_if = body.index("if OSPSkipLiveSearch")
     idx_section = body.index("\\n\\n=== Live Search ===")
     idx_fred_comment = body.index("FRED (McpMarketsCall)")
     assert idx_if < idx_section < idx_fred_comment, "Live Search должен стоять между news-блоком и FRED"
@@ -83,12 +90,16 @@ def test_by_query_enrichment():
         assert f'contains(t, "{marker}")' in body
 
 
-def test_needs_live_search_covers_naryad_triggers():
-    body = _pattern_body(OSP_MLOG, "OSPNeedsLiveSearch")
-    for domain in ("political", "geopolitical", "military"):
-        assert f'"{domain}"' in body
-    for marker in ("что происходит", "сейчас", "последние", "новости", "сегодня", "вчера"):
-        assert f'contains(t, "{marker}")' in body, f"маркер событийности: {marker}"
+def test_skip_list_is_short_and_inverted():
+    """#474 A.1: пропуск — короткий список явно вневременных классов;
+    якорь текущего момента перебивает вневременной маркер."""
+    body = _pattern_body(OSP_MLOG, "OSPSkipLiveSearch")
+    for marker in ("теория", "методолог", "история", "концепц"):
+        assert f'contains(t, "{marker}")' in body, f"вневременной маркер: {marker}"
+    # якорь-перебивка: событийное слово возвращает false ДО списка исключений
+    idx_anchor = body.index('contains(t, "сейчас")')
+    idx_list = body.index('contains(t, "теория")')
+    assert idx_anchor < idx_list, "якорь текущего момента обязан перебивать исключения"
 
 
 def test_footer_reflects_live_search():
@@ -101,7 +112,7 @@ def test_footer_reflects_live_search():
 
 
 def test_gates_untouched():
-    # 12 гейтов ОСП и финальный safety не трогаются нарядом #423
+    # 12 гейтов ОСП и финальный safety не трогаются ни #423, ни #474
     gates = _pattern_body(OSP_MLOG, "OSPCheckQualityGates")
     safety = _pattern_body(OSP_MLOG, "OSPFinalSafetyCheck")
     assert "g1_" in gates and "g12_noUncalib" in gates, "12 гейтов должны остаться в исходном объёме"

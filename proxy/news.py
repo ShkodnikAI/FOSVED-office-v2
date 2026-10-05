@@ -86,6 +86,14 @@ def collect_tavily():
     tavily_key = os.environ.get("TAVILY_API_KEY", "")
     if not tavily_key:
         return 0
+    # #474: физическая уборка протухшего ответного кэша живого поиска
+    # (таблицу создаёт mlog-шов TavilySearch в dept/utils.mlog; DELETE из
+    # mlog — irreversible-sink с одноразовым грантом, поэтому уборка здесь,
+    # в trusted-слое сборщика). Таблицы может ещё не быть — молча пропускаем.
+    try:
+        _query("DELETE FROM tavily_cache WHERE created_at < datetime('now', '-1 day')")
+    except Exception as e:
+        log.debug(f"[tavily] cache cleanup skipped: {e}")
     collected = 0
     for dept, query in DEPT_QUERIES.items():
         try:

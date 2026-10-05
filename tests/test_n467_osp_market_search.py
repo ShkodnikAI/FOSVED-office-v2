@@ -8,7 +8,9 @@
    Мутации (вывод в отчёте PR): снять домен financial/monetary из
    OSPNeedsLiveSearch → инцидент-гвард валится; убрать «золот» из
    OSPMarketAsset → тест актива валится.
-2. Статические гварды: ценовые маркеры в OSPNeedsLiveSearch; рыночная
+2. Статические гварды: рыночные вопросы получают живой поиск ПО УМОЛЧАНИЮ
+   (перевёрнутое правило #474 — OSPSkipLiveSearch не содержит рыночных
+   слов, OSPNeedsLiveSearch больше не существует); рыночная
    секция в BuildOSPContext между live и FRED; причина отказа FRED —
    r.body (текст сервера) с фолбэком на r.note; Tavily-фолбэк
    «<актив> price today»; шов AvKey() в utils.mlog (env только там).
@@ -59,21 +61,21 @@ def test_mlog_test_blocks_pass():
         assert name in combined, f"test-блок #467 не найден: {name}"
 
 
-# ── 2. OSPNeedsLiveSearch: рыночные вопросы получают live search ────────
+# ── 2. Рыночные вопросы получают live search по умолчанию (#474) ─────────
 
-def test_needs_live_search_market_domains():
-    body = _pattern_body(OSP_MLOG, "OSPNeedsLiveSearch")
-    # инцидент #467: financial/monetary — рыночные домены обязаны триггерить
-    assert 'if domain == "financial" or domain == "monetary" then { return true }' in body
+# Инцидент-гварды #467 обновлены нарядом #474: белый список удалён,
+# рыночные домены/слова больше не нужны — поиск выполняется для КАЖДОГО
+# анализа ОСП, пропуск только для вневременных (OSPSkipLiveSearch).
 
-
-def test_needs_live_search_price_markers():
-    body = _pattern_body(OSP_MLOG, "OSPNeedsLiveSearch")
-    for marker in ("цена", "стоит", "курс", "котировк", "золот", "биткоин", "доллар", "на 20"):
-        assert f'contains(t, "{marker}")' in body, f"ценовой маркер обязателен: {marker}"
-    # гварды #423 не потеряны
-    for marker in ("что происходит", "сейчас", "последние", "новости"):
-        assert f'contains(t, "{marker}")' in body
+def test_needs_live_search_whitelist_removed():
+    # перевёрнутое правило #474: старого паттерна нет нигде
+    assert "OSPNeedsLiveSearch" not in OSP_MLOG
+    # исключения вневременные — рыночных слов в списке пропуска нет:
+    # «цена золота» не может быть пропущена
+    body = _pattern_body(OSP_MLOG, "OSPSkipLiveSearch")
+    for market_marker in ("цена", "курс", "котировк", "золот", "биткоин", "доллар"):
+        assert f'contains(t, "{market_marker}")' not in body, (
+            f"рыночное слово в списке пропуска запрещено: {market_marker}")
 
 
 # ── 3. Рыночная секция в контексте ───────────────────────────────────────

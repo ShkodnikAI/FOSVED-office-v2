@@ -390,15 +390,71 @@ pattern AvKey() -> String {
   return env("ALPHAVANTAGE_API_KEY")
 }
 
+// #474 A.1: бюджет вместо словаря — форма бюджетной защиты Tavily.
+// Дневной бюджет (env OSP_TAVILY_DAILY_BUDGET, по умолчанию 30 — фритариф
+// Tavily ~1000 кредитов/мес) + кэш ответа по запросу (env
+// OSP_TAVILY_CACHE_MIN, по умолчанию 30 минут). Белый список слов снят
+// (наряд #474: он слеп к каждому новому классу вопросов — инцидент
+// OSP-2026-10-05-PLAGUE-01), эконом-гвард теперь тут, в единственном шве.
+// Счётчик и кэш — в общей БД офиса (tavily_usage / tavily_cache). Шов
+// один — этот паттерн: его зовут ОСП, Эксперт и ЛЗ, механизм покрывает
+// всех (#474 A.3). Любой отказ БД — fail-open (TryVal): эконом-гвард не
+// имеет права ломать честную деградацию. Исчерпан бюджет → маркер
+// "(budget)": вызывающий ОБЯЗАН назвать причину честно (гварды тестов
+// наряда #474 проверяют все четыре вызова).
+pattern TavilyDailyBudget() -> Float {
+  // env_or, не env: env бросает ENV_NOT_FOUND на незаданной переменной
+  // (подсказка самого рантайма 0.28.0); дефолт обрабатывается ниже
+  let b = trim(env_or("OSP_TAVILY_DAILY_BUDGET", ""))
+  let f = TryVal(try to_float(b))
+  if to_string(f) == "()" then { return 30.0 }
+  if f <= 0.0 then { return 30.0 }
+  return f
+}
+
+pattern TavilyCacheTtlMin() -> Float {
+  let m = trim(env_or("OSP_TAVILY_CACHE_MIN", ""))
+  let f = TryVal(try to_float(m))
+  if to_string(f) == "()" then { return 30.0 }
+  if f <= 0.0 then { return 30.0 }
+  return f
+}
+
 // office#354: единый транспорт живого веб-поиска. Один путь к Tavily —
 // прямой http_post api.tavily.com (рабочий образец — ЛЗ, lz.mlog:569).
 // Наряд запретил второй путь через внутренний Flask-прокси на :4000 —
 // такого роута никогда не существовало, OSP/Эксперт из-за него не видели
 // живых данных.
-// Возвращает СЫРОЙ ответ Tavily (JSON-строку) или "()" при недоступности
-// сети/ключа — вызывающий сам решает, как честно деградировать.
+// Возвращает СЫРОЙ ответ Tavily (JSON-строку), "()" при недоступности
+// сети/ключа или "(budget)" при исчерпанном дневном бюджете (#474) —
+// вызывающий сам решает, как честно деградировать, но молчать о бюджете
+// не может: строка-маркер обязательна к отображению в отчёте.
 pattern TavilySearch(query: String, dept: String) -> String {
+  let _ = TryVal(try db_execute("CREATE TABLE IF NOT EXISTS tavily_usage (day TEXT, dept TEXT, hits INTEGER DEFAULT 0, PRIMARY KEY (day, dept))", []))
+  let _ = TryVal(try db_execute("CREATE TABLE IF NOT EXISTS tavily_cache (key TEXT PRIMARY KEY, response TEXT, created_at TEXT)", []))
+  // 1) кэш ответа по запросу: повтор того же вопроса не тратит кредит
+  let ckey = dept + "|" + query
+  let ttl = TavilyCacheTtlMin()
+  let cached = TryVal(try query("SELECT response FROM tavily_cache WHERE key = ?1 AND created_at > datetime('now', '-' || ?2 || ' minutes')", [ckey, to_string(to_int(ttl))]))
+  if to_string(cached) != "()" and length(cached) > 0.0 then {
+    let hit = to_string(json_get(cached[0], "response", ""))
+    if hit != "" then { return hit }
+  }
+  // 2) дневной бюджет: сумма по всем департаментам за UTC-день
+  let budget = TavilyDailyBudget()
+  let used = TryVal(try query("SELECT COALESCE(SUM(hits), 0) as c FROM tavily_usage WHERE day = date('now')", []))
+  if to_string(used) != "()" and length(used) > 0.0 then {
+    if to_float(json_get(used[0], "c", "0")) >= budget then { return "(budget)" }
+  }
   let response = TryVal(try http_post("https://api.tavily.com/search", json_encode({api_key: TavilyKey(), query: query, search_depth: "advanced", max_results: 5}), "application/json"))
+  if to_string(response) == "()" then { return "()" }
+  // 3) реальный вызов состоялся: заряд счётчика + кэш ответа
+  // (физическую уборку протухшего кэша делает питоновский слой —
+  // collect_tavily в proxy/news.py, каждый сбор; DELETE из mlog —
+  // irreversible-sink и требует одноразовый грант, на каждый поиск
+  // недопустимо: шум аудита)
+  let _ = TryVal(try db_execute("INSERT INTO tavily_usage (day, dept, hits) VALUES (date('now'), ?1, 1) ON CONFLICT (day, dept) DO UPDATE SET hits = hits + 1", [dept]))
+  let _ = TryVal(try db_execute("INSERT INTO tavily_cache (key, response, created_at) VALUES (?1, ?2, datetime('now')) ON CONFLICT (key) DO UPDATE SET response = ?2, created_at = datetime('now')", [ckey, to_string(response)]))
   return to_string(response)
 }
 
@@ -440,4 +496,16 @@ pattern RenderUrl() -> String {
 
 pattern OwnerTelegramId() -> String {
   return env("OWNER_TELEGRAM_ID")
+}
+
+// ── Наряд #474: форма бюджетной защиты Tavily (дефолты) ────────────────
+// env в тестовом стенде не задан → оба дефолта детерминированы.
+// Если в окружении ОСП переменные заданы — тесты не имеют смысла и
+// честно упадут (это сигнал, что стенд загрязнён прод-конфигом).
+test "n474 бюджет: env не задан — дефолт 30 вызовов/день" {
+  assert_eq(TavilyDailyBudget(), 30.0)
+}
+
+test "n474 кэш: env не задан — дефолт 30 минут" {
+  assert_eq(TavilyCacheTtlMin(), 30.0)
 }

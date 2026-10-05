@@ -528,22 +528,27 @@ pattern OSPClassifyDomain(query: String) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// LIVE SEARCH — наряд #423: событийность + честная деградация
+// LIVE SEARCH — наряд #474: поиск по умолчанию, исключения — списком
 // ═══════════════════════════════════════════════════════════════════════
-// Событийность запроса: домены, где события решают, плюс явные
-// событийные маркеры. Точная проверка «даты текущего месяца» в mlog-
-// паттерне ненадёжна — date-функций нет, now() только Unix-секунды,
-// поэтому год/месяц в запросе НЕ является триггером. Расширение списка
-// маркеров — правкой этого паттерна, гварды — в тестах наряда #423.
-// #467 A.1: финансовые домены (monetary/financial) и ценовые маркеры
-// (цена, стоит, курс, котировк, активы, «на 20xx») — рыночный вопрос
-// обязан получать текущие данные, иначе прогноз неверифицируем
-// (инцидент: «цена золота в 2027» без текущей цены).
-pattern OSPNeedsLiveSearch(query: String, domain: String) -> Bool {
-  if domain == "political" or domain == "geopolitical" or domain == "military" then { return true }
-  if domain == "financial" or domain == "monetary" then { return true }
+// Инцидент OSP-2026-10-05-PLAGUE-01 (#474): белый список доменов и слов
+// (#423/#467) слеп к каждому новому классу вопросов — эпидемиология,
+// ЧС, техногенные аварии, природные бедствия в списке отсутствовали,
+// и ОСП выдал успокаивающий прогноз по уже случившемуся событию
+// (P=92% сценарию «ноль случаев», опровергнутому за 3 дня до выдачи).
+// Правило перевёрнуто: живой поиск — для КАЖДОГО анализа ОСП; пропуск —
+// только для явно вневременных вопросов, коротким списком исключений.
+// Неуверенность → поиск (default ON): ложный пропуск стоит отчёта,
+// ложный вызов — только кредита. Форма бюджетной защиты — дневной
+// бюджет Tavily + кэш ответов (utils.mlog), не словарь: новый класс
+// вопросов больше не требует правки списка.
+pattern OSPSkipLiveSearch(query: String) -> Bool {
   let t = lower(query)
-  return contains(t, "что происходит") or contains(t, "сейчас") or contains(t, "последние") or contains(t, "новости") or contains(t, "сегодня") or contains(t, "вчера") or contains(t, "на этой неделе") or contains(t, "кадров") or contains(t, "назнач") or contains(t, "перестанов") or contains(t, "цена") or contains(t, "стоит") or contains(t, "стоимость") or contains(t, "курс") or contains(t, "котировк") or contains(t, "золот") or contains(t, "нефт") or contains(t, "биткоин") or contains(t, "доллар") or contains(t, "индекс") or contains(t, "на 20")
+  // Якорь текущего момента перебивает вневременной маркер:
+  // «история и текущее состояние нефти сегодня» — событийный вопрос.
+  if contains(t, "сейчас") or contains(t, "сегодня") or contains(t, "вчера") or contains(t, "последние") or contains(t, "новости") or contains(t, "на этой неделе") or contains(t, "на 20") then { return false }
+  // Явно вневременные классы: теория, методология, история, определения,
+  // принципы устройств/концепций. Список СОЗНАТЕЛЬНО короткий (#474 A.1).
+  return contains(t, "теория") or contains(t, "теорет") or contains(t, "методолог") or contains(t, "история") or contains(t, "концепц") or contains(t, "определен") or contains(t, "принцип работ") or contains(t, "как устроен")
 }
 
 // Живой поиск в обычном пути. Транспорт — общий TavilySearch (utils.mlog,
@@ -561,12 +566,43 @@ pattern OSPLiveSearchBlock(query: String) -> String {
   }
   if trim(TavilyKey()) == "" then { return "(живой поиск не выполнен: ключ Tavily не задан)" }
   let response = TavilySearch(q, "osp")
+  // #474: бюджетная форма — исчерпание дневного бюджета называется
+  // честно, как и остальные отказы (не «сеть недоступна»).
+  if response == "(budget)" then { return "(живой поиск не выполнен: дневной бюджет Tavily исчерпан — OSP_TAVILY_DAILY_BUDGET)" }
   if response == "()" then { return "(живой поиск не выполнен: сеть Tavily недоступна)" }
   let parsed = TryVal(try parse_json(response))
   if to_string(parsed) == "()" then { return "(живой поиск не выполнен: ответ Tavily не распознан)" }
   let block = TavilyFormatBlock(response)
   if block == "" then { return "(живой поиск вернул 0 результатов)" }
   return block
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// #474 A.2: гейт актуальности — риск-вопрос без свежих данных не даёт
+// вероятностей; со свежими данными отчёт открывается «Что произошло сейчас»
+// ═══════════════════════════════════════════════════════════════════════
+// Риск-вопрос? Маркеры текущих рисков и событий: эпидемиология, ЧС,
+// техногенные аварии, природные бедствия, конфликт — классы, на которых
+// белый список #423 ослеп (инцидент OSP-2026-10-05-PLAGUE-01: вопрос
+// «вероятность эпидемии чумы» не содержал ни одного маркера старого
+// списка). Расширение — правкой этого списка, гварды — тесты #474.
+pattern OSPIsCurrentRiskQuestion(query: String) -> Bool {
+  let t = lower(query)
+  return contains(t, "вероятност") or contains(t, "риск") or contains(t, "опасно") or contains(t, "угроз") or contains(t, "прогноз") or contains(t, "что будет") or contains(t, "есть ли") or contains(t, "случил") or contains(t, "произош") or contains(t, "вспышк") or contains(t, "эпидем") or contains(t, "пандем") or contains(t, "карантин") or contains(t, "зараж") or contains(t, "катастроф") or contains(t, "авари") or contains(t, "наводнен") or contains(t, "землетрясен") or contains(t, "цунами") or contains(t, "пожар") or contains(t, "конфликт") or contains(t, "войн") or contains(t, "вторжен") or contains(t, "атак") or contains(t, "обстрел") or contains(t, "ракет") or contains(t, "ядерн")
+}
+
+// Гейт актуальности. Свежесть — ТОЛЬКО по живому поиску: кэш новостей
+// не показатель (фолбэк /news/fresh отдаёт generic-новости по категории,
+// не по вопросу — вторая половина инцидента #474). attempted=false —
+// вопрос признан вневременным и поиск не звался: гейт не судит.
+pattern OSPFreshnessGate(query: String, live_raw: String, attempted: Bool) -> String {
+  if OSPIsCurrentRiskQuestion(query) == false then { return "" }
+  if attempted == false then { return "" }
+  let live_ok = length(trim(live_raw)) > 0.0 and starts_with(live_raw, "(") == false
+  if live_ok then {
+    return "\n\n=== ГЕЙТ АКТУАЛЬНОСТИ ===\nСвежие данные есть — в Live Search выше. Требования к отчёту: (1) открой отчёт разделом «Что произошло сейчас» — факты с датами и URL из Live Search; (2) калибруй вероятности с их учётом; (3) противоречие с базовой моделью назови в начале отчёта явно, не в дисклеймере."
+  }
+  return "\n\n=== ГЕЙТ АКТУАЛЬНОСТИ: СВЕЖИХ ДАННЫХ НЕТ ===\nЖивой поиск не выполнен, вернул 0 или отказал (точная причина — в секции Live Search выше). ЗАПРЕЩЕНО: таблицы вероятностей, сценарные P=, выводы уровня «экспозиция минимальна», «прямая угроза отсутствует», «нарратив тревоги опережает поток». ВЫДАЙ вместо прогноза: «нужна проверка свежих событий» + конкретный список, что именно проверить (источники, запросы, окно времени). Собственные оценки — только [ИНТЕРПРЕТАЦИЯ], без вероятностных таблиц."
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -668,6 +704,8 @@ pattern OSPMarketDataBlock(query: String) -> String {
   if trim(cause) == "" then { let cause = r_note }
   if need_key and trim(AvKey()) == "" then { let cause = "ALPHAVANTAGE_API_KEY не установлен" }
   let response = TavilySearch(label + " price today", "osp")
+  // #474: исчерпание бюджета — честная причина, не «MCP недоступен»
+  if response == "(budget)" then { let cause = cause + "; дневной бюджет Tavily исчерпан" }
   if response != "()" then {
     let block = TavilyFormatBlock(response)
     if block != "" then {
@@ -693,16 +731,27 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   let news = ""
   let news_result = TryVal(try http_post("http://127.0.0.1:4000/news/fresh", json_encode({query: query, dept: "osp", limit: 5}), "application/json"))
   if to_string(news_result) != "()" then { let news = json_get(parse_json(news_result), "news", "") }
-  // Наряд #423: живой поиск — только на событийных запросах при пустом
-  // кэше новостей. Двухчастное условие: не жечь кредиты Tavily на
-  // структурных темах (smoke-пункт 2 наряда) и не дублировать свежие
-  // RSS, когда кэш жив (наряд #424). Буквальное чтение «news пуст ИЛИ
-  // событийный» звало бы Tavily на каждый вопрос при пустом кэше —
-  // противоречит smoke-кейсу 2 того же наряда.
-  let live_block = ""
-  if OSPNeedsLiveSearch(query, domain) and length(trim(news)) == 0.0 then {
-    let live_block = "\n\n=== Live Search ===\n" + OSPLiveSearchBlock(query)
+  // #474 A.1: живой поиск — по умолчанию для КАЖДОГО анализа ОСП;
+  // кэш новостей и живой поиск дополняют друг друга, условие пустого
+  // кэша СНЯТО (generic-фолбэк /news/fresh глушил поиск: кэш непуст →
+  // поиск пропущен → успокаивающий прогноз по случившемуся событию —
+  // инцидент OSP-2026-10-05-PLAGUE-01). Пропуск — только вневременные
+  // вопросы (OSPSkipLiveSearch). Эконом-защита — бюджет+кэш Tavily в
+  // utils.mlog, не белый список и не условие на кэш.
+  let mut live_raw = ""
+  let mut live_attempted = false
+  if OSPSkipLiveSearch(query) == false then {
+    let live_attempted = true
+    let live_raw = OSPLiveSearchBlock(query)
   }
+  let live_block = ""
+  if live_raw != "" then {
+    let live_block = "\n\n=== Live Search ===\n" + live_raw
+  }
+  // #474 A.2: гейт актуальности — риск-вопрос без свежих данных не
+  // даёт вероятностей; со свежими — отчёт открывается разделом
+  // «Что произошло сейчас».
+  let fresh_gate = OSPFreshnessGate(query, live_raw, live_attempted)
   // FRED (McpMarketsCall) — для monetary/financial: общие RSS-ленты
   // /news/fresh не дают числовых макро-рядов (доходность облигаций,
   // ставка ФРС, инфляция) — это и была реальная причина отчёта-каркаса
@@ -742,7 +791,7 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   if s_now == "()" then { let s_now = "" }
   let s_sk = to_string(skills)
   if s_sk == "()" then { let s_sk = "" }
-  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + live_block + fred_data + market_block + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg
+  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + live_block + fred_data + market_block + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg + fresh_gate
   let context = context + "\n\n=== ПОВТОР: ДАТА ===\n" + s_now
   return context
 }
@@ -1262,4 +1311,68 @@ test "n467 источник: по kind" {
   assert_eq(OSPMarketSource("crypto"), "CoinGecko")
   assert_eq(OSPMarketSource("forex"), "Alpha Vantage")
   assert_eq(OSPMarketSource("stock"), "Alpha Vantage")
+}
+
+// ── Наряд #474: поиск по умолчанию + гейт актуальности ─────────────────
+test "n474 пропуск: теория циклов — вневременная, поиск не нужен" {
+  assert_eq(OSPSkipLiveSearch("теория циклов Кондратьева"), true)
+}
+
+test "n474 пропуск: методология ОСП — вневременная" {
+  assert_eq(OSPSkipLiveSearch("методология деконструкции ситуации"), true)
+}
+
+test "n474 пропуск: принцип работы устройства" {
+  assert_eq(OSPSkipLiveSearch("как устроен реактор РБМК"), true)
+}
+
+test "n474 якорь текущего момента перебивает вневременной маркер" {
+  assert_eq(OSPSkipLiveSearch("история нефти и её цена сегодня"), false)
+}
+
+test "n474 default ON: чума в Иркутске — поиск обязателен" {
+  assert_eq(OSPSkipLiveSearch("вероятность эпидемии лёгочной чумы в Иркутске"), false)
+}
+
+test "n474 default ON: обычный структурный вопрос — поиск идёт" {
+  assert_eq(OSPSkipLiveSearch("оценка устойчивости режима в Венесуэле"), false)
+}
+
+test "n474 риск-вопрос: эпидемия распознана" {
+  assert_eq(OSPIsCurrentRiskQuestion("вероятность эпидемии лёгочной чумы в Иркутске"), true)
+}
+
+test "n474 риск-вопрос: авария/ЧС распознаны" {
+  assert_eq(OSPIsCurrentRiskQuestion("есть ли риск аварии на ЗАЭС"), true)
+  assert_eq(OSPIsCurrentRiskQuestion("что будет с конфликтом в Судане"), true)
+}
+
+test "n474 не риск: структурный вопрос — гейт молчит" {
+  assert_eq(OSPIsCurrentRiskQuestion("оценка устойчивости режима в Венесуэле"), false)
+}
+
+test "n474 гейт: не риск-вопрос — пусто" {
+  assert_eq(OSPFreshnessGate("оценка рынка нефти", "", false), "")
+}
+
+test "n474 гейт: вневременной вопрос — гейт не судит" {
+  assert_eq(OSPFreshnessGate("теория вероятности", "", false), "")
+}
+
+test "n474 гейт: риск-вопрос со свежими данными — «Что произошло сейчас»" {
+  let g = OSPFreshnessGate("вероятность эпидемии чумы в Иркутске", "\n• Чума в Иркутске\n  https://example.com/a\n  подтверждён случай\n", true)
+  assert_eq(contains(g, "Что произошло сейчас"), true)
+  assert_eq(contains(g, "СВЕЖИХ ДАННЫХ НЕТ"), false)
+}
+
+test "n474 гейт: риск-вопрос, поиск отказал — вероятностей нет" {
+  let g = OSPFreshnessGate("вероятность эпидемии чумы в Иркутске", "(живой поиск не выполнен: дневной бюджет Tavily исчерпан — OSP_TAVILY_DAILY_BUDGET)", true)
+  assert_eq(contains(g, "СВЕЖИХ ДАННЫХ НЕТ"), true)
+  assert_eq(contains(g, "нужна проверка свежих событий"), true)
+  assert_eq(contains(g, "экспозиция минимальна"), true)
+}
+
+test "n474 гейт: поиск вернул 0 — тоже нет свежих данных" {
+  let g = OSPFreshnessGate("вероятность эпидемии чумы в Иркутске", "(живой поиск вернул 0 результатов)", true)
+  assert_eq(contains(g, "СВЕЖИХ ДАННЫХ НЕТ"), true)
 }
