@@ -865,6 +865,28 @@ pattern AdminLogDigest(hours_text: String) -> String {
     }
   }
 
+  // #475 A.3: свежесть кэша новостей — админ видит, когда сбор новостей
+  // не запускался > 3 ч или кэш пуст. Проверка на момент просмотра,
+  // отдельный крон не нужен. Слот collect-news: 0 */6 * * * (schedules.mlog),
+  // поэтому пауза > 3 ч = половина интервала сбора — уже аномалия.
+  let news_stat = query("SELECT COUNT(*) as c, COALESCE(MAX(collected), '') as last FROM news_cache", [hs])
+  if to_string(news_stat) != "()" and length(news_stat) > 0.0 then {
+    let nf_all = to_float(json_get(news_stat[0], "c", "0"))
+    let nf_last = to_string(json_get(news_stat[0], "last", ""))
+    if nf_all == 0.0 then {
+      let out = out + "\nНОВОСТИ: кэш пуст — сбор новостей не записывает (слот collect-news, /schedules/list)."
+      let found = found + 1.0
+    } else {
+      let nf_fresh = query("SELECT COUNT(*) as c FROM news_cache WHERE collected > datetime('now', '-3 hours')", [hs])
+      if to_string(nf_fresh) != "()" and length(nf_fresh) > 0.0 then {
+        if to_float(json_get(nf_fresh[0], "c", "0")) == 0.0 then {
+          let out = out + "\nНОВОСТИ: свежих записей (>3 ч) нет — последний сбор: " + substring(nf_last, 0.0, 16.0) + " (слот collect-news не запускался)."
+          let found = found + 1.0
+        }
+      }
+    }
+  }
+
   if found == 0.0 then { return "Журналы офиса за " + hs + " ч: записей нет (ошибок, сбоев и нестатусных действий не зафиксировано)." }
   return out
 }

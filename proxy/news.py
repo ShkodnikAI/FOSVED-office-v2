@@ -304,27 +304,67 @@ def _extract_keywords(text):
     return [w for w in words if w not in stop][:10]
 
 
+# #475 A.2: нормализованные основы слов. SQLite LIKE регистрозависим для
+# кириллицы и lower() там ASCII-only ('Иркутске' LIKE '%иркутске%' = 0),
+# словоформы не матчатся ('чумы' ≠ 'чума') — вопрос про чуму в Иркутске
+# не находил в кэше записи о чуме (инцидент OSP-2026-10-05-PLAGUE-01).
+# Поэтому ключи запроса сравниваются с текстом документов в Python,
+# по основам, а не LIKE-ом по точной словоформе.
+_RU_STRIP = "аеёиоуыэюяьйъ"
+
+
+def _stem(word):
+    """Лёгкий стем для поиска по кэшу: нижний регистр + срез хвостовых
+    гласных/ь/й при длине > 3 (чума/чумы/чумой → чум; иркутске → иркутск;
+    эпидемии → эпидем; вероятность/вероятности → вероятност). Для
+    английского дополнительно срезается хвостовая 's' (news → new).
+    Сознательно грубый: цель — вспомогательный поиск по кэшу, не лингвистика."""
+    w = (word or "").lower().strip()
+    while len(w) > 3 and w[-1] in _RU_STRIP:
+        w = w[:-1]
+    if len(w) > 3 and w.endswith("s"):
+        w = w[:-1]
+    return w
+
+
+def _doc_stems(text):
+    """Множество основ всех слов документа (title + summary)."""
+    return {_stem(m) for m in re.findall(r"[а-яёa-z]{3,}", (text or "").lower())}
+
+
 def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
-    """Get recent news relevant to query. Used by BuildContext in mlog."""
+    """Get recent news relevant to query. Used by BuildContext in mlog.
+
+    #475 A.2: релевантность — по нормализованным основам слов (Python,
+    регистронезависимо для кириллицы, устойчиво к словоформам), не по
+    точному LIKE. Документ релевантен, если в нём есть хотя бы одна основа
+    запроса; сортировка — по числу совпавших основ, затем по дате.
+    Фолбэк прежний: если по основам ничего — общие свежие записи по
+    категориям департамента (за 24 ч)."""
     keywords = _extract_keywords(query)
-    conditions, params = [], []
-    for kw in keywords[:5]:
-        conditions.append("(title LIKE ? OR summary LIKE ?)")
-        params.extend([f"%{kw}%", f"%{kw}%"])
-    where = " OR ".join(conditions) if conditions else "1=1"
+    stems = {_stem(k) for k in keywords if len(k) >= 3}
 
     cats = DEPT_CATEGORIES.get(dept, ("news_ru", "tech", "geopolitics"))
     cat_filter = " OR ".join(["category = ?" for _ in cats])
-    params.extend(cats)
 
-    sql = f"""SELECT source, title, summary, url, published, relevance_score
-             FROM news_cache WHERE ({where}) AND ({cat_filter})
-             AND collected > datetime('now', '-48 hours')
-             ORDER BY published DESC LIMIT ?"""
-    params.append(limit)
-    rows = _query(sql, params, fetch=True)
+    rows = _query(f"""SELECT source, title, summary, url, published, relevance_score
+                      FROM news_cache WHERE ({cat_filter})
+                      AND collected > datetime('now', '-48 hours')
+                      ORDER BY published DESC LIMIT 500""", list(cats), fetch=True) or []
 
-    if not rows:
+    scored = []
+    for r in rows:
+        doc = _doc_stems(f"{r[1] or ''} {r[2] or ''}")
+        score = 0
+        for st in stems:
+            if st in doc or (len(st) >= 5 and any(d.startswith(st) for d in doc)):
+                score += 1
+        if score > 0:
+            scored.append((score, r))
+    if scored:
+        scored.sort(key=lambda t: (t[0], t[1][4] or ""), reverse=True)
+        rows = [r for _, r in scored][:limit]
+    else:
         sql2 = f"""SELECT source, title, summary, url, published, relevance_score
                   FROM news_cache WHERE ({cat_filter})
                   AND collected > datetime('now', '-24 hours')
