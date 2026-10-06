@@ -94,13 +94,15 @@ Fosved brand (sync с Visual): navy/cream/gold/burgundy/forest/grey, Inter Tight
 
 ---
 
-## Скиллы (12)
+## Скиллы (13)
 
 **Core (5):** user-task-analysis, design-system-thinking, accessibility-first, design-tokens-discipline, cognitive-laws-application
 
 **Production (5):** wireframe-production, interaction-states, responsive-design, component-library-development, dev-handoff-specs
 
 **Special (2):** user-research-methods, conversational-ui-design
+
+**Media (1):** animated-report — анимированные narrated-отчёты из документов (паттерны Papermorph, MIT): биты 5–40 с, поссловная синхронизация, факт-таблица до производства, QA-гейты с exit-кодом. Тип артефакта «анимированный отчёт» — по четырём критериям отбора скилла (все обязательны); остальное — инфографика и PDF. NLnet-дайджест отменён владельцем 2026-10-06.
 
 ---
 

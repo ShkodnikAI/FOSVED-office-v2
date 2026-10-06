@@ -88,8 +88,11 @@ def test_manifest_backed_reads_untouched():
     ctx = DEPT.get("context.mlog", "")
     assert 'read_file_or("skills/deconstruct/SKILL.md", "")' in ctx
     assert "deconstruct" in MANIFEST_KEYS
-    # в манифесте по-прежнему 248 скиллов (манифест не расширялся — граница наряда)
-    assert MANIFEST["skills_count"] == 248
+    # Счётчик манифеста меняется ТОЛЬКО нарядом (n383: 248, граница «не расширять»;
+    # n478: +animated-report (отдел дизайна, паттерны Papermorph) = 249 — снапшот
+    # skills-snapshot-2026-10-05). Следующее расширение — новый наряд + новый снапшот.
+    assert MANIFEST["skills_count"] == 249
+    assert "animated-report" in MANIFEST_KEYS
 
 
 def test_snapshot_path_primary():
