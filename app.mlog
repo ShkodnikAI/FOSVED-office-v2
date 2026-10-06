@@ -104,6 +104,9 @@ pattern InitDB() -> String {
   // Reports
   db_execute("CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, title TEXT, query TEXT, raw_text TEXT, html TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS miniapp_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, note_text TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // #485 A.3: итог ночного цикла (NightSlot пишет с маркером scan_data='night-slot';
+  // DDL зеркалит proxy/core.py — таблица должна существовать и до старта Flask)
+  db_execute("CREATE TABLE IF NOT EXISTS admin_night_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_data TEXT, review_data TEXT, health_score INTEGER, findings_count INTEGER, created_at TEXT DEFAULT (datetime('now')))")
 
   // Metrics
   db_execute("CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, period TEXT, created_at TEXT DEFAULT (datetime('now')))")
@@ -1637,10 +1640,13 @@ pattern NightSlot() -> String {
   }
 
   // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
+  // #485 A.3: счётчик недоступных фаз — основа честного статуса в итоге
+  let mut phase_fail = 0.0
   let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
   let ua_body = "{}"
   let mut ua_result = TryVal(try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json"))
   if to_string(ua_result) == "()" then { ua_result = "{}" }
+  if to_string(ua_result) == "{}" then { phase_fail = phase_fail + 1.0 }
   let ua_summary = redact(to_string(json_get(parse_json(ua_result), "summary", "UA cycle failed")), "all")
 
   // Phase 1: LZ Daily Report (GitHub scan → Admin)
@@ -1648,21 +1654,56 @@ pattern NightSlot() -> String {
   let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
   let mut lz_result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0))
   if to_string(lz_result) == "()" then { lz_result = "{}" }
+  if to_string(lz_result) == "{}" then { phase_fail = phase_fail + 1.0 }
   let lz_summary = redact(to_string(json_get(parse_json(lz_result), "report", "LZ daily failed")), "all")
 
   // Phase 2: Memory Maintenance
   let mem_body = "{}"
   let mut mem_result = TryVal(try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json"))
   if to_string(mem_result) == "()" then { mem_result = "{}" }
+  if to_string(mem_result) == "{}" then { phase_fail = phase_fail + 1.0 }
   let mem_summary = redact(to_string(json_get(parse_json(mem_result), "result", "Memory maintenance failed")), "all")
 
   // Phase 3: Original AdminNightCycle
-  let result = AdminNightCycle()
+  // #485 A.2: фаза под try — сбой AdminNightCycle (call_llm-фазы 3-5 внутри него
+  // остаются незащищёнными по составу наряда) не убивает весь NightSlot
+  let mut result = TryVal(try AdminNightCycle())
+  if to_string(result) == "()" then {
+    phase_fail = phase_fail + 1.0
+    result = "Phase 3: недоступна (AdminNightCycle упал — детали в audit_log)"
+  }
   // Phase 4: Устаревшие отделы (hermes-agent lifecycle, адаптировано под use-based сигнал)
   let stale_result = TryVal(try AdminCheckStaleDepts())
+  if to_string(stale_result) == "()" then { phase_fail = phase_fail + 1.0 }
   if to_string(stale_result) == "()" then { let stale_result = "проверка не выполнена" }
   let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result
+
+  // ── #485 A.3: итог ночного цикла — сохранение, аудит и Telegram ──
+  // Статус честный: "ok" только если все фазы ответили; иначе partial с числом.
+  let mut night_status = "ok"
+  if phase_fail > 0.0 then {
+    night_status = "partial (недоступно фаз: " + to_string(to_int(phase_fail)) + ")"
+  }
   kv_set("admin_night_summary", result)
+
+  let frows = TryVal(try query("SELECT COUNT(*) as cnt FROM admin_findings WHERE status='open'", []))
+  let mut findings_open = 0.0
+  if to_string(frows) != "()" and length(frows) > 0.0 then {
+    findings_open = to_float(TryVal(try json_get(get(frows, 0.0), "cnt", "0")))
+  }
+  let mut health_last = redact(kv_get("admin_last_health"), "all")
+  if health_last == "" then {
+    health_last = "?"
+  }
+  let mut health_num = 0.0
+  let htry = TryVal(try to_int(health_last))
+  if to_string(htry) != "()" then {
+    health_num = to_float(htry)
+  }
+  let review_json = json_encode({status: night_status, summary: substring(result, 0, 400), health: health_last, findings_open: findings_open})
+  let save_res = TryVal(try db_execute("INSERT INTO admin_night_reports (scan_data, review_data, health_score, findings_count) VALUES (?1, ?2, ?3, ?4)", ["night-slot", review_json, health_num, findings_open]))
+  let _ = AuditLog("night_slot_done", "admin", "status=" + night_status + " health=" + health_last + " findings=" + to_string(to_int(findings_open)) + " saved=" + to_string(save_res))
+  let _ = TryVal(try SendTelegramReply(env("OWNER_TELEGRAM_ID"), "🌙 Ночная проверка: " + night_status + ", здоровье " + health_last + "/10, открытых находок: " + to_string(to_int(findings_open)) + "\n\n" + substring(result, 0, 2800)))
   return result
 }
 
@@ -4730,23 +4771,11 @@ return respond("200 ok") }
 }
 
 pattern NightTickCore(cron_secret: String) -> String {
-    let _ = InitDB()
-    let base = "http://127.0.0.1:4000/cron/"
-    let qs = "?secret=" + cron_secret
-
-    let mut report = "night-tick:"
-    // №422: redact(Struct) из try-неудачи ронял весь роут (500, репрод. см. отчёт №422)
-    let r_backup = redact(to_string(TryVal(try http_get(base + "backup" + qs, 300.0))), "all")
-    if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else { report = report + " backup=ok" }
-    let r_ind = redact(to_string(TryVal(try http_get(base + "indicator-reminders" + qs, 300.0))), "all")
-    if to_string(r_ind) == "()" then { report = report + " indicators=FAIL" } else { report = report + " indicators=ok" }
-    let r_shop = redact(to_string(TryVal(try http_get(base + "shop-tick" + qs, 300.0))), "all")
-    if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
-    let r_evals = redact(to_string(TryVal(try http_get(base + "golden-evals" + qs, 300.0))), "all")
-    if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
-    let r_night = redact(to_string(TryVal(try http_get(base + "night" + qs, 600.0))), "all")
-    if to_string(r_night) == "()" then { report = report + " night=запущен(фоном)" } else { report = report + " night=ok" }
-     let _ = AuditLog("cron_night_tick", "system", report)
-    let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)
-    return respond("200 ok")
+    // #485: тело диспетчера теперь одно на оба триггера — нативный слот 05:00
+    // (dept/schedules.mlog, NightTickSlot) и внешний cron-job.org на /cron/night-tick.
+    // Раньше близнецы дублировали логику, и ОБА били по несуществующему Flask
+    // /cron/night. Секрет роут уже проверил (гвард выше); слот читает env сам.
+    // Один формат отчёта, одна запись audit_log, одно сообщение в Telegram.
+    let rep = NightTickSlot()
+    return respond("200 " + rep)
 }

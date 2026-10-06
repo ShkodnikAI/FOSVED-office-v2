@@ -388,24 +388,43 @@ pattern AdminNightCycle() -> String {
   let report = "NIGHT CYCLE REPORT\n\n"
 
   // Phase 1a: Scanner (Python UA — file inventory)
-  let scan_result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan"), "all")
-  let scan_summary = redact(to_string(json_get(parse_json(scan_result), "summary", "Scanner failed")), "all")
+  // #485 A.2: каждый http_get фазы — под try; сбой фазы даёт честную строку
+  // «Phase N: недоступна (причина)» и НЕ роняет весь ночной цикл.
+  let tr_scan = try http_get("http://127.0.0.1:4000/admin-ua/scan")
+  let mut scan_summary = "Phase 1a: недоступна (" + redact(substring(TryVal(try to_string(tr_scan.error.message)), 0.0, 120.0), "all") + ")"
+  let scan_ok = to_string(TryVal(tr_scan))
+  if scan_ok != "()" then {
+    scan_summary = redact(to_string(json_get(parse_json(scan_ok), "summary", "Scanner failed")), "all")
+  }
   let report = report + "Phase 1a/7: Scanner\n" + scan_summary + "\n\n"
 
-  // Phase 1b: Analyzer (Python UA — patterns, routes, imports)
-  let analyze_result = redact(http_get("http://127.0.0.1:4000/admin-ua/analyze"), "all")
-  let analyze_summary = redact(to_string(json_get(parse_json(analyze_result), "summary", "Analyzer failed")), "all")
+  // Phase 1b: Analyzer (Python UA — patterns, routes, imports) — #485 A.2
+  let tr_analyze = try http_get("http://127.0.0.1:4000/admin-ua/analyze")
+  let mut analyze_summary = "Phase 1b: недоступна (" + redact(substring(TryVal(try to_string(tr_analyze.error.message)), 0.0, 120.0), "all") + ")"
+  let analyze_ok = to_string(TryVal(tr_analyze))
+  if analyze_ok != "()" then {
+    analyze_summary = redact(to_string(json_get(parse_json(analyze_ok), "summary", "Analyzer failed")), "all")
+  }
   let report = report + "Phase 1b/7: Analyzer\n" + analyze_summary + "\n\n"
 
-  // Phase 1c: Grapher (Python UA — knowledge graph → SQLite)
-  let graph_result = redact(http_get("http://127.0.0.1:4000/admin-ua/graph"), "all")
-  let graph_summary = redact(to_string(json_get(parse_json(graph_result), "summary", "Grapher failed")), "all")
+  // Phase 1c: Grapher (Python UA — knowledge graph → SQLite) — #485 A.2
+  let tr_graph = try http_get("http://127.0.0.1:4000/admin-ua/graph")
+  let mut graph_summary = "Phase 1c: недоступна (" + redact(substring(TryVal(try to_string(tr_graph.error.message)), 0.0, 120.0), "all") + ")"
+  let graph_ok = to_string(TryVal(tr_graph))
+  if graph_ok != "()" then {
+    graph_summary = redact(to_string(json_get(parse_json(graph_ok), "summary", "Grapher failed")), "all")
+  }
   let report = report + "Phase 1c/7: Grapher\n" + graph_summary + "\n\n"
 
-  // Phase 2: Reviewer (Python UA — orphans, security, bugs, architecture)
-  let review_result = redact(http_get("http://127.0.0.1:4000/admin-ua/review"), "all")
-  let review_summary = redact(to_string(json_get(parse_json(review_result), "summary", "Reviewer failed")), "all")
-  let health = redact(to_string(json_get(parse_json(review_result), "health_score", "?")), "all")
+  // Phase 2: Reviewer (Python UA — orphans, security, bugs, architecture) — #485 A.2
+  let tr_review = try http_get("http://127.0.0.1:4000/admin-ua/review")
+  let mut review_summary = "Phase 2: недоступна (" + redact(substring(TryVal(try to_string(tr_review.error.message)), 0.0, 120.0), "all") + ")"
+  let mut health = "?"
+  let review_ok = to_string(TryVal(tr_review))
+  if review_ok != "()" then {
+    review_summary = redact(to_string(json_get(parse_json(review_ok), "summary", "Reviewer failed")), "all")
+    health = redact(to_string(json_get(parse_json(review_ok), "health_score", "?")), "all")
+  }
   let report = report + "Phase 2/7: Reviewer\n" + review_summary + "\n\n"
 
   // Phase 3: Metrics Analysis (native call_llm)
@@ -420,14 +439,21 @@ pattern AdminNightCycle() -> String {
   let proposals = AdminProposals()
   let report = report + "Phase 5/7: Proposals\n" + substring(proposals, 0, 500) + "\n\n"
 
-  // Phase 6: Documenter (Python UA)
-  let docs_result = redact(http_get("http://127.0.0.1:4000/admin-ua/docs"), "all")
-  let docs_count = redact(to_string(json_get(parse_json(docs_result), "structure", "")), "all")
+  // Phase 6: Documenter (Python UA) — #485 A.2
+  let tr_docs = try http_get("http://127.0.0.1:4000/admin-ua/docs")
+  let mut docs_count = "Phase 6: недоступна (" + redact(substring(TryVal(try to_string(tr_docs.error.message)), 0.0, 120.0), "all") + ")"
+  let docs_ok = to_string(TryVal(tr_docs))
+  if docs_ok != "()" then {
+    docs_count = redact(to_string(json_get(parse_json(docs_ok), "structure", "")), "all")
+  }
   let report = report + "Phase 6/7: Documenter\n" + substring(docs_count, 0, 300) + "\n\n"
 
   // Phase 7: Health summary + disclaimer
   let disclaimer = AdminDisclaimer()
   let report = report + "Phase 7/7: Health\nCode health: " + to_string(health) + "/10\n\n" + disclaimer
+  // #485 A.3: последнее известное здоровье кода — в KV для итога NightSlot
+  // (если Reviewer был недоступен, здесь честный "?")
+  kv_set("admin_last_health", health)
 
   // Save report
   let duration = to_string(to_int(now() - start_time))
