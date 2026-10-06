@@ -59,6 +59,9 @@ def test_night_tick_chains_all_nightly_jobs():
     # №422: тело роута перенесено в pattern NightTickCore (route-исполнитель
     # 0.21 теряет mut-контекст в ветвлениях) — цепочка проверяется в паттерне,
     # а роут обязан её вызывать.
+    # #485: тело цепочки — единственное, в NightTickSlot (dept/scheduler.mlog):
+    # близнецы больше не дублируют логику, NightTickCore делегирует слоту,
+    # ночная фаза вызывается в процессе (не HTTP в несуществующий Flask /cron/night).
     idx = APP.find('route "/cron/night-tick"')
     assert idx > 0
     route_body = APP[idx:idx + 700]
@@ -66,10 +69,16 @@ def test_night_tick_chains_all_nightly_jobs():
     assert "NightTickCore(" in route_body             # делегирование ядру цепочки
     pat = APP.find("pattern NightTickCore(")
     assert pat > 0
-    body = APP[pat:pat + 1600]
-    assert '"backup"' in body
-    assert '"indicator-reminders"' in body
-    assert '"shop-tick"' in body
-    assert '"golden-evals"' in body
-    assert '"night"' in body
-    assert "SendTelegramReply" in body                # итог цепочки — в TG
+    body = APP[pat:pat + 800]
+    assert "NightTickSlot()" in body                  # #485: единственное тело цепочки — в слоте
+    assert "http_get" not in body                     # у роута нет своей копии диспетчера
+    sched = (REPO_ROOT / "dept" / "scheduler.mlog").read_text(encoding="utf-8")
+    slot_idx = sched.find("pattern NightTickSlot()")
+    assert slot_idx > 0
+    slot_body = sched[slot_idx:slot_idx + 2000]
+    assert '"backup"' in slot_body
+    assert '"indicator-reminders"' in slot_body
+    assert '"shop-tick"' in slot_body
+    assert '"golden-evals"' in slot_body
+    assert "try NightSlot()" in slot_body             # #485: ночь — в процессе, с TryVal
+    assert "SendTelegramReply" in slot_body           # итог цепочки — в TG
