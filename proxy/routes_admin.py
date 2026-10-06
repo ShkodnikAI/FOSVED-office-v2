@@ -2127,6 +2127,45 @@ def api_telemetry():
     return jsonify(data)
 
 
+@app.get("/admin/keys/run")
+def admin_keys_run():
+    """#486 A.5: проверка валидности всех ключей манифеста по запросу.
+
+    Возвращает Telegram-готовый текст (без значений ключей). Результат
+    сохраняется в key_health_status (его читают утренний отчёт и Mini App).
+    Вызывается командой `/admin keys` (mlog) и вручную с внутреннего контура.
+    """
+    try:
+        from proxy.key_health import check_all, save_results, format_report
+        summary = check_all()
+        save_results(summary)
+        _log_audit("admin_keys_run", {"ok": summary["ok_count"], "total": summary["total"], "problems": len(summary["problems"])})
+        return format_report(summary)
+    except Exception as e:
+        log.error(f"admin keys run error: {e}")
+        _log_error(f"admin keys run failed: {e}", source="admin_keys", dept="admin", kind="check")
+        return "Проверка ключей упала: " + str(e)[:200], 500
+
+
+@app.post("/admin/keys/night-check")
+def admin_keys_night_check():
+    """#486 A.3: фаза ночного цикла «Ключи и провайдеры» (вызывает mlog NightSlot).
+
+    Запускает полную проверку манифеста, сохраняет результат и возвращает
+    компактный JSON (status/problems_line/ok_count/total) для ночного отчёта.
+    """
+    try:
+        from proxy.key_health import check_all, save_results, night_summary
+        summary = check_all()
+        save_results(summary)
+        _log_audit("admin_keys_night_check", {"ok": summary["ok_count"], "total": summary["total"], "problems": len(summary["problems"])})
+        return jsonify(night_summary(summary))
+    except Exception as e:
+        log.error(f"admin keys night-check error: {e}")
+        _log_error(f"admin keys night-check failed: {e}", source="admin_keys", dept="admin", kind="check")
+        return jsonify({"status": "unreachable", "problems_line": "проверка ключей упала", "ok_count": 0, "total": 0, "checked_at": ""}), 500
+
+
 @app.get("/miniapp")
 @require_telegram
 def miniapp_redirect():
@@ -2136,10 +2175,21 @@ def miniapp_redirect():
 
 @app.get("/api/integrations")
 def api_integrations_list():
-    """Список известных интеграций со статусом. Значение ключа никогда не отдаётся целиком."""
+    """Список известных интеграций со статусом. Значение ключа никогда не отдаётся целиком.
+
+    #486 A.5: поле health — статус валидности из последней проверки ключей
+    (key_health_status), вместо «доступен по наличию». Пусто — ещё не проверялся.
+    """
+    health_by_key = {}
+    try:
+        hrows = _query("SELECT env_key, status, http_code, checked_at FROM key_health_status", fetch=True)
+        health_by_key = {r["env_key"]: r for r in hrows}
+    except Exception as e:
+        _log_error(f"key_health read failed: {e}", source="integrations", dept="admin", kind="db_read")
     out = []
     for item in INTEGRATIONS_REGISTRY:
         current = get_secret(item["env_key"])
+        h = health_by_key.get(item["env_key"])
         out.append({
             "id": item["env_key"],
             "label": item["label"],
@@ -2147,6 +2197,9 @@ def api_integrations_list():
             "connected": bool(current),
             "masked": secrets_crypto.mask_value(current) if current else None,
             "source": "db" if _has_db_override(item["env_key"]) else ("env" if current else "none"),
+            "health": (h["status"] if h else None),
+            "health_code": (h["http_code"] if h else None),
+            "checked_at": (h["checked_at"] if h else None),
         })
     return jsonify({"status": "ok", "integrations": out, "master_key_configured": secrets_crypto.is_configured()})
 
