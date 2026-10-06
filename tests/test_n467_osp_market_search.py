@@ -128,11 +128,12 @@ def test_fred_failure_reason_is_server_text():
 def test_avkey_seam_in_utils():
     # №312/№419: env-чтения — только в utils.mlog
     assert "pattern AvKey() -> String {" in UTILS_MLOG
-    assert 'return env("ALPHAVANTAGE_API_KEY")' in UTILS_MLOG
+    # хотфикс 2026-10-06 (0.28.0 №563): незаданный ключ -> "", не исключение
+    assert 'return env_or("ALPHAVANTAGE_API_KEY", "")' in UTILS_MLOG
     body = _pattern_body(OSP_MLOG, "OSPMarketDataBlock")
     assert "AvKey()" in body
     # прямой env("ALPHAVANTAGE...") в osp.mlog запрещён
-    assert 'env("ALPHAVANTAGE' not in OSP_MLOG
+    assert 'env("ALPHAVANTAGE' not in OSP_MLOG and 'env_or("ALPHAVANTAGE' not in OSP_MLOG
 
 
 def test_market_asset_conventions():
