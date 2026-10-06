@@ -472,6 +472,9 @@ def scheduler_admin_morning_reply():
     """
     Админ делает свой ответ на утренний отчёт Яны (7:25).
     Анализирует отчёт Яны, добавляет своё видение, приоритеты, замечания.
+    #485 A.4: сообщение открывается детерминированным разделом «Ночная проверка» —
+    итогом последнего ночного цикла из admin_night_reports (старше 26 ч —
+    честное «не выполнялась с <дата>»), затем комментарий к брифу Яны.
     """
     d = request.get_json(force=True)
     owner_id = d.get("owner_id", "")
@@ -514,6 +517,54 @@ def scheduler_admin_morning_reply():
         except Exception as e:
             _log_error(f"narads count query failed: {e}", source="admin_brief", dept="admin", kind="db_read")
 
+        # ── 4.5 #485 A.4: итог последнего ночного цикла ──
+        # Ночная проверка пишется NightSlot'ом в admin_night_reports с маркером
+        # scan_data='night-slot'. Порог 26 ч: слот 05:00 МСК + запас на сбой/пробуждение.
+        night_line = ""
+        night_ctx = ""
+        try:
+            night_rows = _query(
+                "SELECT created_at, review_data, health_score, findings_count FROM admin_night_reports "
+                "WHERE scan_data = 'night-slot' ORDER BY id DESC LIMIT 1",
+                fetch=True,
+            )
+            if night_rows:
+                nr = night_rows[0]
+                created_at = str(nr["created_at"] or "")[:16]
+                try:
+                    info = json.loads(nr["review_data"] or "{}")
+                    if not isinstance(info, dict):
+                        info = {}
+                except (ValueError, TypeError):
+                    info = {}
+                age_h = None
+                try:
+                    dt = datetime.strptime(str(nr["created_at"]), "%Y-%m-%d %H:%M:%S")
+                    age_h = (datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)).total_seconds() / 3600.0
+                except (ValueError, TypeError):
+                    age_h = None
+                if age_h is None:
+                    night_line = "🌙 Ночная проверка: итог без даты (" + created_at + ")"
+                elif age_h > 26.0:
+                    night_line = "🌙 Ночная проверка: НЕ выполнялась с " + created_at + " UTC (>26 ч) ⚠️"
+                else:
+                    status = str(info.get("status") or "?")
+                    health = str(info.get("health") or "?")
+                    findings = nr["findings_count"] if nr["findings_count"] is not None else "?"
+                    summary = str(info.get("summary") or "").strip()
+                    night_line = (
+                        f"🌙 Ночная проверка ({created_at} UTC): {status}; "
+                        f"здоровье: {health}/10; открытых находок: {findings}"
+                    )
+                    if summary:
+                        night_line += "\n" + summary[:400]
+                night_ctx = night_line
+            else:
+                night_line = "🌙 Ночная проверка: ещё не выполнялась (первый ночной цикл после деплоя)"
+                night_ctx = night_line
+        except Exception as e:
+            _log_error(f"night report read failed: {e}", source="admin_brief", dept="admin", kind="db_read")
+
         # ── 5. Build admin prompt ──
         messages = [
             {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и должен дать свой ответ. Твой ответ — это директива на день. Упомяни находки Лаборатории Знаний, если они релевантны. Форматирование: *жирный* для приоритетов и ключевых слов, __подчёркнуто__ для указаний, эмодзи только как маркеры секций. НЕ используй кавычки."},
@@ -523,6 +574,7 @@ def scheduler_admin_morning_reply():
 
 {f"=== НАХОДКИ ЛЗ ===\n{lz_context}" if lz_context else ""}
 {f"=== СТАТУС ===\n{issues_context}" if issues_context else ""}
+{f"=== НОЧНАЯ ПРОВЕРКА (уже в сообщении первым разделом, не дублируй) ===\n{night_ctx}" if night_ctx else ""}
 
 Твоя задача: напиши краткий ответ на отчёт Яны на русском. Структура:
 1. 📌 Приоритеты на сегодня — 2-3 главных задачи
@@ -543,10 +595,14 @@ def scheduler_admin_morning_reply():
         result = call_llm("admin", messages)
         reply = result["reply"]
 
-        msg_id = _tg_send_formatted(owner_id, reply, dept="admin")
+        # #485 A.4: раздел «Ночная проверка» — детерминированно ПЕРЕД комментарием
+        # (дата/цифры не искажаются пересказом LLM — принцип FO-042/FO-043)
+        final_reply = (night_line + "\n\n" + reply) if night_line else reply
+
+        msg_id = _tg_send_formatted(owner_id, final_reply, dept="admin")
         _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
-        return jsonify({"status": "ok", "reply": reply, "msg_id": msg_id})
+        return jsonify({"status": "ok", "reply": final_reply, "msg_id": msg_id})
 
     except Exception as e:
         log.error(f"admin_morning_reply error: {e}")
