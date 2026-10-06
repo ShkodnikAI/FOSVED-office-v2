@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>От прогноза к Brier</title>
+<link rel="stylesheet" href="../lib/engine.css">
+<link rel="expect" href="#bar" blocking="render"><!-- hold the first frame until the player exists, so the page transition can run -->
+</head>
+<body>
+<script src="../lib/engine.js"></script>
+<script src="audio/ru/timings.js"></script>
+<script>
+'use strict';
+// Отчёт «От прогноза к Brier» — прецедент №2 скилла animated-report (наряд FOSVED-office-v2 #478).
+// Сториборд: REPORT.md (факт-таблица сверена до производства). Бит = одна идея, 5–40 с.
+// Цветовая семантика: good — сбылось/правильно, bad — промах/ошибка, task — число в фокусе,
+// faint-штрих — зачёркнутая ошибка. Один цвет = одно значение во всём отчёте.
+const CHAPTER = { number: 1, title: 'От прогноза к Brier', minutes: 4, language: 'ru' };
+
+/* ---------- report drawing helpers ---------- */
+const text = (p, str, x, y, t0, { size = 30, fill = COL.chalk, anchor = 'start', weight = 500, font = UI } = {}) => { const e = T(p, str, { x, y, size, fill, anchor, weight, font, o: 0 }); show(e, t0); return e; };
+const chipBox = (p, x, y, w, h, color, t0) => { const r = mk('rect', { x, y, width: w, height: h, rx: 16, fill: 'none', stroke: color, 'stroke-width': 2.5, opacity: 0 }, p); show(r, t0, .45); return r; };
+
+// Общая шкала 0…1: X1(v) = 200 + 1200·v  (локальные оси, движковые AXIS не трогаем)
+const X1 = v => 200 + 1200 * v;
+
+/* ---------- beats: [id, title, run(m, D), { ask }?] ---------- */
+const BEATS = [
+  ['intro', 'Начало', (m, D) => {
+    const g = G(scene, { o: 0, y: 24 });
+    T(g, 'FOSVED · ОСП', { x: 800, y: 300, size: 28, fill: COL.dim, anchor: 'middle', weight: 600 });
+    T(g, 'От прогноза к Brier', { x: 800, y: 420, size: 92, weight: 600, anchor: 'middle' });
+    const rule = path(g, 'M610 480H990', { stroke: COL.task, 'stroke-width': 3 }, { d: 0 });
+    draw(rule, .9, .7);
+    tw(g, { o: 1, y: 0 }, .2, 1.1, out);
+    const r = text(scene, 'Как ОСП превращает каждую ошибку прогноза в число', 800, 580, m('sub'), { size: 32, fill: COL.dim, anchor: 'middle' });
+    tw(g, { o: 0, y: -24 }, D - .9, .8); hide(r, D - .9, .8);
+  }],
+
+  ['forecast', 'Прогноз', (m) => {
+    const p = panel(0);
+    text(p, 'Прогноз — вероятность', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    // ось вероятностей 0…100 %
+    const axis = path(p, 'M200 520H1400', { stroke: COL.dim, 'stroke-width': 3 }, { d: 0 });
+    draw(axis, .3, .9);
+    const head = path(p, 'M1386 511L1400 520L1386 529', { stroke: COL.dim, 'stroke-width': 3, fill: 'none' }, { d: 0 });
+    draw(head, 1.1, .25);
+    for (let v = 0; v <= 1.001; v += .25) {
+      const t = path(p, `M${X1(v)} 512V528`, { stroke: COL.dim, 'stroke-width': 2.5 }, { o: 0 });
+      show(t, .5 + v);
+    }
+    const l0 = text(p, '0 %', X1(0), 580, .6, { size: 28, fill: COL.dim, anchor: 'middle' });
+    const l5 = text(p, '50 %', X1(.5), 580, 1.0, { size: 28, fill: COL.dim, anchor: 'middle' });
+    const l100 = text(p, '100 %', X1(1), 580, 1.4, { size: 28, fill: COL.dim, anchor: 'middle' });
+    // полоса Кента «вероятно» 65–80 %
+    const kb = mk('rect', { x: X1(.65), y: 502, width: X1(.8) - X1(.65), height: 36, fill: COL.good, opacity: 0 }, p);
+    tw(kb, { o: .28 }, m('kent'), .5);
+    const kl = text(p, '«вероятно» — 65–80 %', X1(.725), 470, m('kent') + .2, { size: 27, fill: COL.good, anchor: 'middle' });
+    // точка прогноза 80 %
+    const dot = G(p, { x: X1(.8), y: 520, s: 0, o: 0 });
+    mk('circle', { r: 14, fill: COL.task, stroke: COL.board, 'stroke-width': 2.5 }, dot);
+    pop(dot, m('eighty'));
+    const dl = text(p, '80 %', X1(.8), 560, m('eighty') + .1, { size: 46, fill: COL.task, anchor: 'middle', weight: 700 });
+    const note = text(p, 'в ≈ 8 случаях из 10 такой прогноз сбывается', 800, 660, m('eighty') + .5, { size: 32, anchor: 'middle' });
+  }],
+
+  ['outcome', 'Исход', (m) => {
+    const p = panel(0);
+    text(p, 'Дата проверки наступила — событие разрешилось', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    // карточка «да» — рамка видна сразу, текст со словами
+    const yes = G(p, { o: 0, y: 18 });
+    mk('rect', { x: 300, y: 250, width: 420, height: 300, rx: 22, fill: 'none', stroke: COL.good, 'stroke-width': 3 }, yes);
+    tw(yes, { o: 1, y: 0 }, .3, .5);
+    const yw = T(yes, 'да', { x: 510, y: 380, size: 64, anchor: 'middle', weight: 600, o: 0 });
+    const yv = T(yes, 'o = 1', { x: 510, y: 480, size: 54, fill: COL.good, anchor: 'middle', font: MATH, weight: 600, o: 0 });
+    show(yw, m('one'), .5); show(yv, m('one'), .5);
+    // карточка «нет»
+    const no = G(p, { o: 0, y: 18 });
+    mk('rect', { x: 880, y: 250, width: 420, height: 300, rx: 22, fill: 'none', stroke: COL.bad, 'stroke-width': 3 }, no);
+    tw(no, { o: 1, y: 0 }, .45, .5);
+    const nw = T(no, 'нет', { x: 1090, y: 380, size: 64, anchor: 'middle', weight: 600, o: 0 });
+    const nv = T(no, 'o = 0', { x: 1090, y: 480, size: 54, fill: COL.bad, anchor: 'middle', font: MATH, weight: 600, o: 0 });
+    show(nw, m('zero'), .5); show(nv, m('zero'), .5);
+  }],
+
+  ['brier', 'Ошибка', (m) => {
+    const p = panel(0);
+    text(p, 'Ошибка одного прогноза', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    const ghost = text(p, 'B = ?', 800, 330, .5, { size: 66, fill: COL.faint, anchor: 'middle', weight: 600 });
+    const f = M(p, ['B = (', 'p', ' − ', 'o', ')', E(2)], { x: 800, y: 330, size: 78, anchor: 'middle', o: 0, s: .7 });
+    tw(f, { o: 1, s: 1 }, m('formula'), .6, back); hide(ghost, m('formula'), .25);
+    // пример 1: сбылось
+    const r1g = G(p, { o: 0, x: -20 });
+    T(r1g, 'сбылось', { x: 560, y: 470, size: 28, fill: COL.good, anchor: 'end', weight: 600 });
+    M(r1g, ['(0.8 − 1)', E(2), ' = 0.04'], { x: 600, y: 470, size: 46, anchor: 'start', fill: COL.good });
+    tw(r1g, { o: 1, x: 0 }, m('good'), .5);
+    // пример 2: мимо
+    const r2b = G(p, { o: 0, x: -20 });
+    T(r2b, 'мимо', { x: 560, y: 580, size: 28, fill: COL.bad, anchor: 'end', weight: 600 });
+    M(r2b, ['(0.8 − 0)', E(2), ' = 0.64'], { x: 600, y: 580, size: 46, anchor: 'start', fill: COL.bad });
+    tw(r2b, { o: 1, x: 0 }, m('badc'), .5);
+  }],
+
+  ['scale', 'Шкала', (m) => {
+    const p = panel(0);
+    text(p, 'Средний Brier — одна цифра честности', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    const track = rect(p, 200, 430, 1200, 24, '#2f4640');
+    show(track, .2, .4);
+    for (const v of [0, .25, .5, .75, 1]) {
+      const tk = path(p, `M${X1(v)} 454V468`, { stroke: COL.dim, 'stroke-width': 2 }, { o: 0 });
+      show(tk, .4);
+      text(p, String(v).replace('.', ','), X1(v), 505, .4, { size: 26, fill: COL.faint, anchor: 'middle', font: MATH });
+    }
+    const better = path(p, 'M1380 545H234', { stroke: COL.faint, 'stroke-width': 2.5 }, { d: 0 });
+    draw(better, .6, 1.1);
+    const bh = path(p, 'M248 536L234 545L248 554', { stroke: COL.faint, 'stroke-width': 2.5, fill: 'none' }, { d: 0 });
+    draw(bh, 1.6, .2);
+    text(p, 'меньше — лучше', 800, 590, 1.0, { size: 28, fill: COL.faint, anchor: 'middle' });
+    // 0 — идеал
+    const c0 = G(p, { x: X1(0), y: 442, s: 0, o: 0 });
+    mk('circle', { r: 15, fill: COL.good, stroke: COL.board, 'stroke-width': 2.5 }, c0);
+    pop(c0, m('zero'));
+    text(p, 'идеал', X1(0) + 30, 398, m('zero') + .2, { size: 32, fill: COL.good, weight: 600 });
+    // 0.25 — монетка
+    const coin = G(p, { x: X1(.25), y: 320, s: 0, o: 0 });
+    mk('circle', { r: 30, fill: 'none', stroke: COL.task, 'stroke-width': 3.5 }, coin);
+    T(coin, '½', { x: 0, y: 12, size: 36, fill: COL.task, anchor: 'middle', font: MATH, weight: 600 });
+    pop(coin, m('coin'));
+    const cd = path(p, `M${X1(.25)} 352V428`, { stroke: COL.task, 'stroke-width': 2.5 }, { o: 0 });
+    show(cd, m('coin') + .2, .3);
+    text(p, 'уровень монетки: всегда 50 на 50', X1(.25) + 44, 330, m('coin') + .2, { size: 30, fill: COL.task, weight: 600 });
+    // 1 — максимум
+    const c1 = G(p, { x: X1(1), y: 442, s: 0, o: 0 });
+    mk('circle', { r: 15, fill: COL.bad, stroke: COL.board, 'stroke-width': 2.5 }, c1);
+    pop(c1, m('one'));
+    text(p, 'максимум ошибки', X1(1) - 30, 398, m('one') + .2, { size: 32, fill: COL.bad, anchor: 'end', weight: 600 });
+  }],
+
+  ['q1', 'Проверка', (m) => {
+    const p = panel(0);
+    text(p, 'Быстрая проверка', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    const pl = M(p, ['p', ' = 0.9,   ', 'o', ' = 0'], { x: 800, y: 300, size: 46, anchor: 'middle', o: 0 });
+    show(pl, .4);
+    const q = M(p, ['(0.9 − 0)', E(2), ' = ?'], { x: 800, y: 430, size: 70, anchor: 'middle', fill: COL.task, o: 0, s: .8 });
+    tw(q, { o: 1, s: 1 }, .7, .6, back);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-brier-q1', prompt: ['ОСП дало 90 %, событие не произошло. Что этот прогноз добавит в средний Brier?'],
+    build: choice([['0.01'], ['0.81'], ['0.90']], 1,
+      '(0.9 − 0)² = 0.81 — столько этот прогноз добавит в средний Brier.',
+      ['Это ошибка, если бы событие произошло: (0.9 − 1)² = 0.01.', null,
+       '0.90 — сама вероятность, а не квадрат расстояния до исхода.']),
+  }], done) }],
+
+  ['mistake', 'Ошибка толкования', (m) => {
+    const p = panel(0);
+    text(p, 'Как не судить о прогнозе', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    // ходовая ошибка — зачёркивается
+    const wrong = text(p, '«Прогноз 80 % не сбылся — прогнозист плох»', 800, 300, .3, { size: 40, anchor: 'middle' });
+    const strike = path(p, 'M330 300H1270', { stroke: COL.faint, 'stroke-width': 5 }, { d: 0 });
+    draw(strike, m('wrong'), .5);
+    const wl = text(p, 'не так', 1270, 355, m('wrong') + .4, { size: 28, fill: COL.faint, anchor: 'end', weight: 600 });
+    // правильное толкование
+    const right = G(p, { o: 0, y: 16 });
+    T(right, 'судят по сотне прогнозов:', { x: 800, y: 470, size: 34, fill: COL.dim, anchor: 'middle' });
+    T(right, '80 %-е сбываются в ≈ 8 из 10', { x: 800, y: 545, size: 44, fill: COL.good, anchor: 'middle', weight: 600 });
+    tw(right, { o: 1, y: 0 }, m('right'), .55);
+    text(p, 'так', 330, 545, m('right') + .3, { size: 28, fill: COL.good, anchor: 'start', weight: 600 });
+  }],
+
+  ['q2', 'Проверка 2', (m) => {
+    const p = panel(0);
+    text(p, 'Ещё одна проверка', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    const gm = M(p, ['800 × 80 %'], { x: 800, y: 320, size: 62, anchor: 'middle', o: 0, s: .85 });
+    tw(gm, { o: 1, s: 1 }, .4, .55, back);
+    const qm = T(p, '?', { x: 800, y: 470, size: 96, fill: COL.task, anchor: 'middle', weight: 700, o: 0 });
+    pop(qm, .9);
+  }, { ask: done => quiz(BAND, [{
+    id: 'c-brier-q2', prompt: ['Восемьсот прогнозов по 80 %. Сколько из них должно сбыться?'],
+    build: choice([['примерно 640'], ['все 800'], ['около 80']], 0,
+      '80 % от 800 — примерно 640. Промахи неизбежны: их приносит сама вероятность.',
+      ['Так означали бы прогнозы по 100 %.', 'Это 10 %, а не 80 %.']),
+  }], done) }],
+
+  ['calibration', 'Корзины', (m) => {
+    const p = panel(0);
+    text(p, 'Корзины шкалы Кента', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    // оси: x — прогноз, y — доля сбывшихся; X2(v)=300+1040v, Y2(v)=560−360v
+    const X2 = v => 300 + 1040 * v, Y2 = v => 560 - 360 * v;
+    const yx = path(p, 'M300 560H1340', { stroke: COL.dim, 'stroke-width': 3 }, { d: 0 });
+    draw(yx, .3, .6);
+    const yy = path(p, 'M300 560V200', { stroke: COL.dim, 'stroke-width': 3 }, { d: 0 });
+    draw(yy, .6, .5);
+    text(p, 'прогноз →', 820, 610, .8, { size: 27, fill: COL.faint, anchor: 'middle' });
+    text(p, 'доля сбывшихся ↑', 320, 185, .8, { size: 27, fill: COL.faint });
+    // диагональ «идеал»
+    const diag = path(p, `M300 560L1340 200`, { stroke: COL.faint, 'stroke-width': 2.5, 'stroke-dasharray': '10 12', fill: 'none' }, { d: 0 });
+    draw(diag, 1.2, 1.2);
+    text(p, 'идеал — диагональ', 1000, 420, 1.8, { size: 27, fill: COL.faint, anchor: 'end' });
+    // корзина «вероятно» 65–80 %
+    const b1 = mk('rect', { x: X2(.65), y: Y2(.8), width: X2(.8) - X2(.65), height: Y2(.65) - Y2(.8), fill: 'none', stroke: COL.dim, 'stroke-width': 2, opacity: 0 }, p);
+    tw(b1, { o: 1 }, 2.1, .4);
+    text(p, '«вероятно» 65–80 %', X2(.725), Y2(.65) + 36, 2.1, { size: 24, fill: COL.dim, anchor: 'middle' });
+    // корзина «весьма вероятно» 80–95 % — в фокусе
+    const b2 = mk('rect', { x: X2(.8), y: Y2(.95), width: X2(.95) - X2(.8), height: Y2(.8) - Y2(.95), fill: COL.task, opacity: 0 }, p);
+    tw(b2, { o: .3 }, m('band'), .5);
+    const b2s = mk('rect', { x: X2(.8), y: Y2(.95), width: X2(.95) - X2(.8), height: Y2(.8) - Y2(.95), fill: 'none', stroke: COL.task, 'stroke-width': 3, opacity: 0 }, p);
+    tw(b2s, { o: 1 }, m('band'), .5);
+    text(p, '«весьма вероятно» 80–95 %', X2(.875), Y2(.95) - 16, m('band') + .2, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+    text(p, 'сбывается внутри своей полосы', X2(.875), 460, m('band') + .5, { size: 27, anchor: 'middle' });
+  }],
+
+  ['verdicts', 'Вердикты', (m) => {
+    const p = panel(0);
+    text(p, 'Что число говорит о прогнозисте', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    const rows = [
+      ['WELL_CALIBRATED', 'Brier ≤ 0.05', COL.good, m('well')],
+      ['TAIL_MISS', 'p > 0.8 и исход — мимо', COL.bad, m('tail')],
+      ['OVERCONFIDENT', 'p − o > 0.3', COL.task, m('over')],
+    ];
+    rows.forEach(([code, cond, colr, t0], i) => {
+      const g = G(p, { o: 0, x: -24 });
+      mk('rect', { x: 260, y: 225 + i * 130, width: 1080, height: 96, rx: 18, fill: 'none', stroke: colr, 'stroke-width': 3 }, g);
+      tw(g, { o: 1, x: 0 }, .3 + i * .14, .45);
+      const codeT = T(g, code, { x: 320, y: 285 + i * 130, size: 34, fill: colr, weight: 700, o: 0 });
+      const condT = T(g, cond, { x: 1280, y: 285 + i * 130, size: 34, anchor: 'end', font: MATH, o: 0 });
+      show(codeT, t0, .4); show(condT, t0 + .1, .4);
+    });
+  }],
+
+  ['loop', 'Петля', (m) => {
+    const p = panel(0);
+    text(p, 'Петля верификации ОСП', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    const cx = 720, cy = 420, R = 170;
+    const names = ['предсказали', 'произошло', 'Brier', 'ошибка', 'корригендум'];
+    const pos = names.map((_, i) => {
+      const a = -Math.PI / 2 + i * 2 * Math.PI / 5;
+      return [cx + R * Math.cos(a), cy + R * Math.sin(a)];
+    });
+    // дуги между соседними узлами
+    for (let i = 0; i < 5; i++) {
+      const [x1, y1] = pos[i], [x2, y2] = pos[(i + 1) % 5];
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      const k = 1.22;
+      const qx = cx + (mx - cx) * k, qy = cy + (my - cy) * k;
+      const arc = path(p, `M${x1} ${y1}Q${qx} ${qy} ${x2} ${y2}`, { stroke: COL.dim, 'stroke-width': 2.5, fill: 'none' }, { d: 0 });
+      draw(arc, .4 + i * .55, .5);
+      const ang = Math.atan2(y2 - qy, x2 - qx);
+      const ah = path(p, `M${x2 - 12 * Math.cos(ang - .45)} ${y2 - 12 * Math.sin(ang - .45)}L${x2} ${y2}L${x2 - 12 * Math.cos(ang + .45)} ${y2 - 12 * Math.sin(ang + .45)}`,
+        { stroke: COL.dim, 'stroke-width': 2.5, fill: 'none' }, { o: 0 });
+      show(ah, .8 + i * .55, .15);
+    }
+    pos.forEach(([x, y], i) => {
+      const [dx, dy] = [Math.cos(-Math.PI / 2 + i * 2 * Math.PI / 5), Math.sin(-Math.PI / 2 + i * 2 * Math.PI / 5)];
+      const lx = cx + (R + 70) * dx, ly = cy + (R + 70) * dy;
+      const nd = G(p, { x, y, s: 0, o: 0 });
+      mk('circle', { r: 7, fill: COL.chalk, stroke: COL.board, 'stroke-width': 2 }, nd);
+      pop(nd, .3 + i * .55);
+      const lab = T(p, names[i], { x: lx, y: ly + 10, size: 29, fill: COL.chalk, anchor: 'middle', weight: 600, o: 0 });
+      show(lab, .35 + i * .55, .4);
+    });
+    // корригендум подсвечивается со словом
+    const fx = G(p, { o: 0 });
+    mk('circle', { cx: pos[4][0], cy: pos[4][1], r: 22, fill: 'none', stroke: COL.task, 'stroke-width': 3 }, fx);
+    tw(fx, { o: 1 }, m('fix'), .4);
+    // цели калибровки
+    const tg = G(p, { o: 0 });
+    T(tg, 'цели офиса', 1255, 300, m('y1') - .2, { size: 27, fill: COL.dim, anchor: 'middle' });
+    const bars = [['0.25', 110, 'Y1'], ['0.20', 88, 'Y2'], ['0.18', 79, 'Y3']];
+    bars.forEach(([v, h, yr], i) => {
+      const b = G(tg, { o: 0, y: 14 });
+      mk('rect', { x: 1095 + i * 108, y: 640 - h, width: 92, height: h, rx: 8, fill: COL.task, opacity: .85 }, b);
+      T(b, v, { x: 1141 + i * 108, y: 652 - h, size: 28, fill: COL.task, anchor: 'middle', font: MATH, weight: 600 });
+      T(b, yr, { x: 1141 + i * 108, y: 668, size: 24, fill: COL.dim, anchor: 'middle' });
+      tw(b, { o: 1, y: 0 }, i === 0 ? m('y1') : m('y3') + .25 + i * .18, .45);
+    });
+  }],
+
+  ['bandit', 'Камертон', (m) => {
+    const p = panel(0);
+    text(p, 'Та же петля в железе: Камертон', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    text(p, 'бандит Томпсона — гауссовы апостериоры на каждом источнике', 800, 205, .4, { size: 29, fill: COL.faint, anchor: 'middle' });
+    const bell = (x, y, s, colr, dash) => {
+      const d = `M${x - 120 * s} ${y}C${x - 70 * s} ${y} ${x - 45 * s} ${y - 110 * s} ${x} ${y - 110 * s}C${x + 45 * s} ${y - 110 * s} ${x + 70 * s} ${y} ${x + 120 * s} ${y}`;
+      return path(p, d, { stroke: colr, 'stroke-width': 3.5, fill: 'none', ...(dash ? { 'stroke-dasharray': '9 10' } : {}) }, { d: 0 });
+    };
+    // источник 1: априор → апостериор сдвинулся исходом
+    const ax = 480, ay = 460;
+    text(p, 'источник 1', ax, 530, .5, { size: 28, fill: COL.dim, anchor: 'middle' });
+    const b1 = bell(ax, ay, 1, COL.chalk);
+    draw(b1, .7, .9);
+    const b2 = bell(ax + 55, ay - 6, .82, COL.task, true);
+    draw(b2, m('upd'), .8);
+    const pt = G(p, { x: ax + 92, y: ay - 14, s: 0, o: 0 });
+    mk('circle', { r: 9, fill: COL.good, stroke: COL.board, 'stroke-width': 2 }, pt);
+    pop(pt, m('upd') + .5);
+    const upl = text(p, 'апостериор сдвинулся исходом', ax + 60, 250, m('upd') + .3, { size: 28, fill: COL.task, anchor: 'middle', weight: 600 });
+    // источник 2: без исходов — априор шире
+    const bx = 1120;
+    text(p, 'источник 2', bx, 530, .9, { size: 28, fill: COL.dim, anchor: 'middle' });
+    const b3 = bell(bx, ay, 1.15, COL.chalk);
+    draw(b3, 1.1, .9);
+    text(p, 'нет исходов — распределение шире', bx, 590, 1.8, { size: 25, fill: COL.faint, anchor: 'middle' });
+    // бейджи параметров
+    const g1 = G(p, { o: 0, y: 14 });
+    mk('rect', { x: 430, y: 620, width: 340, height: 64, rx: 32, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, g1);
+    T(g1, 'разведка — 20 %', { x: 600, y: 660, size: 29, anchor: 'middle' });
+    tw(g1, { o: 1, y: 0 }, m('expl'), .45);
+    const g2 = G(p, { o: 0, y: 14 });
+    mk('rect', { x: 850, y: 620, width: 340, height: 64, rx: 32, fill: 'none', stroke: COL.dim, 'stroke-width': 2 }, g2);
+    T(g2, 'распад — 60 дней', { x: 1020, y: 660, size: 29, anchor: 'middle' });
+    tw(g2, { o: 1, y: 0 }, m('decay'), .45);
+  }],
+
+  ['wrap', 'Итоги', (m) => {
+    const p = panel(0);
+    text(p, 'Итоги', 800, 150, .2, { size: 34, fill: COL.dim, anchor: 'middle', weight: 600 });
+    [['Прогноз — это число с датой проверки.', 'w1'],
+     ['Brier — квадрат расстояния до правды.', 'w2'],
+     ['Учиться — обновлять число после каждого исхода.', 'w3']].forEach(([str, mark], i) => {
+      const g = G(p, { x: -16, y: 280 + i * 120, o: 0 });
+      mk('circle', { cx: 330, cy: -12, r: 26, fill: COL.good }, g);
+      T(g, String(i + 1), { x: 330, y: -1, size: 30, fill: COL.board, weight: 700, anchor: 'middle' });
+      T(g, str, { x: 390, y: 0, size: 36, weight: 600 });
+      tw(g, { o: 1, x: 0 }, m(mark), .6);
+    });
+  }],
+
+  ['finish', 'Конец', () => { panel(0); }, { ask: finishCard }],
+].map(([id, title, run, extra]) => ({ id, title, run, ...extra }));
+
+/* ---------- constants used inside BEATS must be defined above it ---------- */
+boot();
+</script>
+</body>
+</html>
