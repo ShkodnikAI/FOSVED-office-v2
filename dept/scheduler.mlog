@@ -499,8 +499,19 @@ pattern NightTickSlot() -> String {
   if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
   let r_evals = redact(to_string(TryVal(try http_get(base + "golden-evals" + qs, 300.0))), "all")
   if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
-  let r_night = redact(to_string(TryVal(try http_get(base + "night" + qs, 600.0))), "all")
-  if to_string(r_night) == "()" then { report = report + " night=запущен(фоном)" } else { report = report + " night=ok" }
+  // #485 A.1: ночной цикл вызывается В ПРОЦЕССЕ (оба — паттерны одной программы),
+  // а не http_get в несуществующий Flask /cron/night — тот 404-ил, а слот трактовал
+  // отсутствие ответа как «запущен(фоном)». Семантика try-присваивания и полей
+  // TryResult.error.code/.message подтверждена живой пробой на bin/mlog 0.28.0
+  // (404 → Err "http_get() returned status 404: …", успех → значение, ошибка → Unit).
+  let tr_night = try NightSlot()
+  let r_night = redact(to_string(TryVal(tr_night)), "all")
+  if r_night == "()" then {
+    let night_reason = redact(substring(TryVal(try to_string(tr_night.error.message)), 0.0, 120.0), "all")
+    report = report + " night=FAIL(" + night_reason + ")"
+  } else {
+    report = report + " night=ok"
+  }
   let _ = AuditLog("cron_night_tick", "system", report)
   let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)
   return report
