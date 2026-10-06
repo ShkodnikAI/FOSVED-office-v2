@@ -1,0 +1,412 @@
+// Fosved Office v2 — Team Core (наряд #480 TEAM-1, ADR-0016)
+//
+// Ядро взаимодействия отделов: реестр навыков, бриф коллег, тихий режим,
+// примитив консультации TeamConsult, ограничители (глубина, бюджет,
+// кэш, аудит). Идеи: A2A AgentSkill (реестр), CrewAI ask/delegate +
+// OpenAI Agents SDK agent-as-tool (консультация). Код не копировался.
+//
+// Принципы:
+// - Источник объявлений навыков — один, этот файл (ADR-0013 в части
+//   «один источник правды»): запись в реестре без реализации даёт
+//   честный отказ, реализация без записи не вызовется.
+// - Тихий режим: на время вызова в KV держится флаг team_quiet;
+//   навык-функция тихий по построению, полный обработчик (TEAM-2)
+//   обязан проверять TeamIsQuiet перед RecordAssistantMessage и
+//   SendTelegramReply. Консультация пишет audit_log team_consult.
+// - Ограничители: глубина 1 (стек в KV, окно 300 с), бюджет на запрос
+//   владельца - TEAM_MAX_CONSULTS дефолт 3 и TEAM_MAX_LLM_CALLS дефолт 6
+//   (счётчики KV, окно 600 с), кэш ответа на 30 мин, каждый вызов - в
+//   audit_log. Сброс всего - TeamBudgetReset в начале обработчика.
+// - Отказы - честная строка «коллега X недоступен: причина», не пустота;
+//   отказы не кэшируются.
+// - Cross-file вызовы (AuditLog, LZFactpack) - через bare try (штатный
+//   приём dept/admin.mlog и dept/scheduler.mlog): честный отказ работает
+//   и в автономном нативном прогоне без db и прокси.
+
+// ── A.2: Реестр навыков ──────────────────────────────────────────────
+// Формат записи: dept, skill, description, input, output, freshness,
+// cost_llm (заявленная стоимость в вызовах LLM), enabled.
+// enabled=false — навык объявлен, подключение в TEAM-2 (#481).
+pattern TeamSkills() -> String {
+  return json_encode([
+    {dept: "lz", skill: "factpack", description: "Разведсводка по вопросу: живой поиск Tavily, кэш новостей, темы Telegram-мониторов — без гейтов и дисклеймеров полного ответа ЛЗ", input: "тема вопроса", output: "блок фактов с URL и датами, честные отказы", freshness: "живой поиск на момент запроса", cost_llm: 0.0, enabled: true},
+    {dept: "lz", skill: "tech_scan", description: "Тех-скан: arXiv, HN, GitHub по технологии", input: "технология", output: "сводка сигналов", freshness: "на момент запроса", cost_llm: 0.0, enabled: false},
+    {dept: "osp", skill: "forecast", description: "Калиброванная оценка вероятности по вопросу", input: "формулировка прогноза", output: "вероятности с обоснованием", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "osp", skill: "cross_country", description: "Кросс-страновая проекция решения", input: "решение и страны", output: "таблица различий", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "expert", skill: "brief", description: "Погружение в тему: сильные и слабые места позиции", input: "тема", output: "бриф с слабыми местами", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "finance", skill: "calc", description: "Юнит-экономика и налоги по юрисдикции", input: "модель и юрисдикция", output: "расчёт с допущениями", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "legal", skill: "legal_check", description: "Правовые риски и регуляторика по юрисдикции", input: "действие и юрисдикция", output: "список рисков", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "marketing", skill: "audience", description: "Разбор аудитории и каналов", input: "продукт и рынок", output: "сегменты и каналы", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "design", skill: "ux_review", description: "Разбор UX и интерфейса", input: "описание экрана или поток", output: "список замечаний", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "dev", skill: "tech_estimate", description: "Оценка сложности и стека", input: "задача", output: "оценка с диапазоном", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "qa", skill: "risk_review", description: "Риск-обзор плана или фичи", input: "план", output: "реестр рисков", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "engineering", skill: "feasibility", description: "Оценка реализуемости", input: "идея", output: "вердикт и границы", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "visual", skill: "visualize", description: "Визуальный артефакт по данным", input: "данные и формат", output: "ссылка на артефакт", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "kavalnya", skill: "methodology_review", description: "Проверка методологии", input: "методика", output: "замечания по стандарту", freshness: "на момент запроса", cost_llm: 1.0, enabled: false},
+    {dept: "admin", skill: "system_status", description: "Статус системы и ключей", input: "подсистема", output: "статус с фактами", freshness: "живые данные", cost_llm: 0.0, enabled: false},
+    {dept: "yana", skill: "", description: "Оркестратор: не поставщик навыков — запускает совместную работу отделов", input: "мультиобластной запрос", output: "координация", freshness: "не применимо", cost_llm: 0.0, enabled: false}
+  ])
+}
+
+// ── A.2: Бриф коллег для промпта отдела (как в CrewAI) ───────────────
+// В перечне только включённые навыки — обещать то, что отклонится
+// честной строкой, промпту нельзя. Собственный отдел исключён.
+pattern TeamCoworkersBrief(dept: String) -> String {
+  let arr = parse_json(TeamSkills())
+  if to_string(arr) == "()" then { return "" }
+  let count = length(arr)
+  let mut out = "=== Коллеги и их навыки (командная работа, ADR-0016) ==="
+  let mut i = 0.0
+  while i < count {
+    let row = get(arr, i)
+    let d = to_string(json_get(row, "dept", ""))
+    let en = json_get(row, "enabled", false)
+    if d != dept and en == true then {
+      let out = out + "\n- " + d + " / " + to_string(json_get(row, "skill", "")) + " — " + to_string(json_get(row, "description", "")) + ". Вход: " + to_string(json_get(row, "input", "")) + ". Выход: " + to_string(json_get(row, "output", "")) + "."
+    }
+    let i = i + 1.0
+  }
+  return out
+}
+
+// ── Реестровые вспомогательные ───────────────────────────────────────
+pattern TeamIsRegistered(dept: String) -> Bool {
+  let arr = parse_json(TeamSkills())
+  if to_string(arr) == "()" then { return false }
+  let count = length(arr)
+  let mut i = 0.0
+  while i < count {
+    let row = get(arr, i)
+    if to_string(json_get(row, "dept", "")) == dept then { return true }
+    let i = i + 1.0
+  }
+  return false
+}
+
+pattern TeamSkillCost(to_dept: String, skill: String) -> Float {
+  let arr = parse_json(TeamSkills())
+  if to_string(arr) == "()" then { return 0.0 }
+  let count = length(arr)
+  let mut i = 0.0
+  while i < count {
+    let row = get(arr, i)
+    if to_string(json_get(row, "dept", "")) == to_dept and to_string(json_get(row, "skill", "")) == skill then {
+      return to_float(json_get(row, "cost_llm", 0.0))
+    }
+    let i = i + 1.0
+  }
+  return 0.0
+}
+
+// ── Бюджет консультаций (KV, окно 600 с против залипания) ────────────
+pattern TeamBudgetReset() -> String {
+  let _ = kv_set("team_budget_consults", json_encode({ts: now(), used: 0.0}))
+  let _ = kv_set("team_budget_llm", json_encode({ts: now(), used: 0.0}))
+  let _ = kv_set("team_consult_stack", "")
+  let _ = kv_set("team_quiet", "")
+  return "ok"
+}
+
+pattern TeamBudgetUsed() -> Float {
+  let v = kv_get("team_budget_consults")
+  if v == "" then { return 0.0 }
+  let j = parse_json(v)
+  if to_string(j) == "()" then { return 0.0 }
+  let ts = to_float(json_get(j, "ts", 0.0))
+  if to_float(now()) - ts > 600.0 then { return 0.0 }
+  return to_float(json_get(j, "used", 0.0))
+}
+
+pattern TeamBudgetCharge() -> Float {
+  let used = TeamBudgetUsed() + 1.0
+  let _ = kv_set("team_budget_consults", json_encode({ts: now(), used: used}))
+  return used
+}
+
+// ── Бюджет вызовов LLM (начисление по стоимости навыка из реестра) ───
+pattern TeamLLMUsed() -> Float {
+  let v = kv_get("team_budget_llm")
+  if v == "" then { return 0.0 }
+  let j = parse_json(v)
+  if to_string(j) == "()" then { return 0.0 }
+  let ts = to_float(json_get(j, "ts", 0.0))
+  if to_float(now()) - ts > 600.0 then { return 0.0 }
+  return to_float(json_get(j, "used", 0.0))
+}
+
+pattern TeamLLMCharge(n: Float) -> String {
+  let used = TeamLLMUsed() + n
+  let _ = kv_set("team_budget_llm", json_encode({ts: now(), used: used}))
+  return "ok"
+}
+
+// ── Стек глубины (глубина 1: консультируемый не консультирует) ───────
+pattern TeamStackBegin(from_dept: String, to_dept: String, skill: String) -> String {
+  let _ = kv_set("team_consult_stack", json_encode({ts: now(), src: from_dept, tgt: to_dept, skill: skill}))
+  return "ok"
+}
+
+pattern TeamStackEnd() -> String {
+  let _ = kv_set("team_consult_stack", "")
+  return "ok"
+}
+
+pattern TeamStackActive() -> Bool {
+  let v = kv_get("team_consult_stack")
+  if v == "" then { return false }
+  let j = parse_json(v)
+  if to_string(j) == "()" then { return false }
+  let ts = to_float(json_get(j, "ts", 0.0))
+  return to_float(now()) - ts <= 300.0
+}
+
+// ── A.3: Тихий режим ─────────────────────────────────────────────────
+// Флаг живёт только на время вызова навыка. Полный обработчик (TEAM-2)
+// перед RecordAssistantMessage и SendTelegramReply обязан проверять
+// TeamIsQuiet и пропускать побочные эффекты. Окно 300 с — защита от
+// залипания при падении процесса; сброс — TeamBudgetReset.
+pattern TeamQuietBegin(from_dept: String, to_dept: String, skill: String) -> String {
+  let _ = kv_set("team_quiet", json_encode({ts: now(), src: from_dept, tgt: to_dept, skill: skill}))
+  return "ok"
+}
+
+pattern TeamQuietEnd() -> String {
+  let _ = kv_set("team_quiet", "")
+  return "ok"
+}
+
+pattern TeamIsQuiet() -> Bool {
+  let v = kv_get("team_quiet")
+  if v == "" then { return false }
+  let j = parse_json(v)
+  if to_string(j) == "()" then { return false }
+  let ts = to_float(json_get(j, "ts", 0.0))
+  return to_float(now()) - ts <= 300.0
+}
+
+// ── A.5: Кэш консультаций (KV, TTL 30 мин) ───────────────────────────
+// Ключ — to_dept, skill и нормализованный вопрос. Отказы не кэшируются:
+// отказ — состояние запроса или коллеги, кэш отказов блокировал бы
+// повторную попытку после устранимой причины.
+pattern TeamNormQuestion(question: String) -> String {
+  let q = lower(trim(question))
+  if length(q) > 200.0 then { return substring(q, 0.0, 200.0) }
+  return q
+}
+
+pattern TeamCacheStore(to_dept: String, skill: String, question: String, answer: String, at: Float) -> String {
+  let key = "team_consult_cache|" + to_dept + "|" + skill + "|" + TeamNormQuestion(question)
+  let _ = kv_set(key, json_encode({ts: at, answer: answer}))
+  return "ok"
+}
+
+pattern TeamCacheLookup(to_dept: String, skill: String, question: String) -> String {
+  let key = "team_consult_cache|" + to_dept + "|" + skill + "|" + TeamNormQuestion(question)
+  let v = kv_get(key)
+  if v == "" then { return "" }
+  let j = parse_json(v)
+  if to_string(j) == "()" then { return "" }
+  let ts = to_float(json_get(j, "ts", 0.0))
+  if to_float(now()) - ts > 1800.0 then { return "" }
+  return to_string(json_get(j, "answer", ""))
+}
+
+// ── Извлечение секции из ответа навыка по маркерам ───────────────────
+// Детерминированные маркеры [LIVE]/[NEWS]/[TG] выписывает сам навык;
+// ОСП извлекает live-часть для гейта актуальности #474 A.2.
+pattern TeamExtractSection(text: String, start_marker: String, end_marker: String) -> String {
+  let s = index_of(text, start_marker)
+  if s < 0.0 then { return "" }
+  let rest = substring(text, s + length(start_marker), length(text))
+  let e = index_of(rest, end_marker)
+  if e < 0.0 then { return "" }
+  return substring(rest, 0.0, e)
+}
+
+// ── Числовые env-параметры ограничителей ─────────────────────────────
+// Чистый фильтр без try (TryVal вне неймспейса автономного прогона):
+// только простые неотрицательные числа; мусор/пустота — дефолт.
+// По образцу OSPStrIsNumber (n469).
+pattern TeamIsNumberish(s: String) -> Bool {
+  if length(s) == 0.0 then { return false }
+  let mut dots = 0.0
+  let mut i = 0.0
+  while i < length(s) {
+    let ch = substring(s, i, i + 1.0)
+    if ch == "." then {
+      let dots = dots + 1.0
+    } else {
+      if ch != "0" and ch != "1" and ch != "2" and ch != "3" and ch != "4" and ch != "5" and ch != "6" and ch != "7" and ch != "8" and ch != "9" then { return false }
+    }
+    let i = i + 1.0
+  }
+  return dots <= 1.0
+}
+
+pattern TeamEnvCount(name: String, default: Float) -> Float {
+  let raw = trim(env_or(name, ""))
+  if raw == "" then { return default }
+  if TeamIsNumberish(raw) == false then { return default }
+  return to_float(raw)
+}
+
+// ── A.4: Примитив консультации ───────────────────────────────────────
+// Порядок проверок: глубина - кэш - бюджет консультаций - бюджет LLM -
+// реестр - диспетчеризация. Кэш до бюджета: попадание не тратит квоту.
+// Диспетчеризация — bare try: падение навыка даёт честный отказ, а не
+// пустоту; стек и тихий флаг снимаются на обоих путях.
+pattern TeamConsult(from_dept: String, to_dept: String, skill: String, question: String, context: String) -> String {
+  if TeamStackActive() then {
+    let _ = try AuditLog("team_consult", from_dept, "status=refused reason=depth to=" + to_dept + " skill=" + skill)
+    return "(консультация отклонена: глубина 1 исчерпана — консультируемый не консультирует дальше)"
+  }
+  let cached = TeamCacheLookup(to_dept, skill, question)
+  if cached != "" then {
+    let _ = try AuditLog("team_consult", from_dept, "status=cache_hit to=" + to_dept + " skill=" + skill)
+    return cached
+  }
+  let max_c = TeamEnvCount("TEAM_MAX_CONSULTS", 3.0)
+  if TeamBudgetUsed() >= max_c then {
+    let _ = try AuditLog("team_consult", from_dept, "status=refused reason=budget_consults to=" + to_dept + " skill=" + skill)
+    return "(консультация отклонена: бюджет консультаций на запрос исчерпан — TEAM_MAX_CONSULTS)"
+  }
+  let max_l = TeamEnvCount("TEAM_MAX_LLM_CALLS", 6.0)
+  if TeamLLMUsed() >= max_l then {
+    let _ = try AuditLog("team_consult", from_dept, "status=refused reason=budget_llm to=" + to_dept + " skill=" + skill)
+    return "(консультация отклонена: бюджет вызовов LLM на запрос исчерпан — TEAM_MAX_LLM_CALLS)"
+  }
+  if TeamIsRegistered(to_dept) == false then {
+    let _ = try AuditLog("team_consult", from_dept, "status=refused reason=unknown_dept to=" + to_dept + " skill=" + skill)
+    return "(коллега " + to_dept + " недоступен: отдел не в реестре командной работы)"
+  }
+  let mut body = ""
+  if to_dept == "lz" and skill == "factpack" then {
+    let _ = TeamQuietBegin(from_dept, to_dept, skill)
+    let _ = TeamStackBegin(from_dept, to_dept, skill)
+    let raw = try LZFactpack(question)
+    let _ = TeamStackEnd()
+    let _ = TeamQuietEnd()
+    if to_string(raw) != "()" then { let body = to_string(raw) }
+  } else {
+    let _ = try AuditLog("team_consult", from_dept, "status=refused reason=skill_not_wired to=" + to_dept + " skill=" + skill)
+    return "(коллега " + to_dept + " недоступен: навык '" + skill + "' ещё не подключён — TEAM-2)"
+  }
+  if body == "" then {
+    let _ = try AuditLog("team_consult", from_dept, "status=refused reason=skill_error to=" + to_dept + " skill=" + skill)
+    return "(коллега " + to_dept + " недоступен: навык вернул ошибку исполнения)"
+  }
+  let answer = "=== Консультация: " + to_dept + "/" + skill + " ===\n" + body
+  let _ = TeamCacheStore(to_dept, skill, question, answer, now())
+  let cost = TeamSkillCost(to_dept, skill)
+  if cost > 0.0 then { let _ = TeamLLMCharge(cost) }
+  let _ = TeamBudgetCharge()
+  let _ = try AuditLog("team_consult", from_dept, "status=ok to=" + to_dept + " skill=" + skill + " cost_llm=" + to_string(cost))
+  return answer
+}
+
+// ── Нативные тесты (mlog test dept/team.mlog) ────────────────────────
+// Отказные пути — до сетевой диспетчеризации: автономный прогон без db
+// и прокси детерминирован. Путь диспетчеризации — контракт «никогда не
+// пусто»: в автономном прогоне навык недоступен и верен отказ.
+
+test "team-480: реестр — 16 записей, 14 отделов, lz/factpack включён" {
+  let arr = parse_json(TeamSkills())
+  assert_eq(length(arr), 16.0)
+  let first = get(arr, 0.0)
+  assert_eq(json_get(first, "dept", ""), "lz")
+  assert_eq(json_get(first, "skill", ""), "factpack")
+  assert_eq(json_get(first, "enabled", false), true)
+  assert_eq(json_get(first, "cost_llm", 1.0), 0.0)
+  assert_eq(TeamIsRegistered("lz"), true)
+  assert_eq(TeamIsRegistered("osp"), true)
+  assert_eq(TeamIsRegistered("yana"), true)
+  assert_eq(TeamIsRegistered("admin"), true)
+  assert_eq(TeamIsRegistered("kavalnya"), true)
+  assert_eq(TeamIsRegistered("jupiter"), false)
+}
+
+test "team-480: бриф коллег — ОСП видит ЛЗ factpack, себя и выключенные не видит" {
+  let brief = TeamCoworkersBrief("osp")
+  assert_contains(brief, "lz / factpack")
+  if contains(brief, "finance") then { error("выключенный навык не должен попадать в бриф") }
+  let brief_lz = TeamCoworkersBrief("lz")
+  if contains(brief_lz, "lz / factpack") then { error("собственный навык не должен попадать в бриф отдела") }
+}
+
+test "team-480: неизвестный навык — честный отказ" {
+  let _ = TeamBudgetReset()
+  let ans = TeamConsult("osp", "finance", "calc", "unit-экономика", "")
+  assert_contains(ans, "недоступен")
+  assert_contains(ans, "не подключён")
+}
+
+test "team-480: отдел вне реестра — честный отказ" {
+  let _ = TeamBudgetReset()
+  let ans = TeamConsult("osp", "jupiter", "scan", "что-то", "")
+  assert_contains(ans, "недоступен")
+  assert_contains(ans, "не в реестре")
+}
+
+test "team-480: глубина 1 — вложенная консультация отклонена" {
+  let _ = TeamBudgetReset()
+  let _ = TeamStackBegin("lz", "osp", "forecast")
+  let ans = TeamConsult("lz", "osp", "forecast", "вложенный вопрос", "")
+  assert_contains(ans, "глубина 1 исчерпана")
+  let _ = TeamStackEnd()
+}
+
+test "team-480: бюджет консультаций — исчерпание даёт честный отказ" {
+  let _ = TeamBudgetReset()
+  let _ = TeamBudgetCharge()
+  let _ = TeamBudgetCharge()
+  let _ = TeamBudgetCharge()
+  assert_eq(TeamBudgetUsed(), 3.0)
+  let ans = TeamConsult("osp", "lz", "factpack", "q-budget", "")
+  assert_contains(ans, "бюджет консультаций")
+}
+
+test "team-480: бюджет LLM — исчерпание даёт честный отказ" {
+  let _ = TeamBudgetReset()
+  let _ = TeamLLMCharge(6.0)
+  let ans = TeamConsult("osp", "lz", "factpack", "q-llm", "")
+  assert_contains(ans, "бюджет вызовов LLM")
+}
+
+test "team-480: кэш — запись, чтение, протухание" {
+  let _ = TeamCacheStore("lz", "factpack", "Cache Probe", "answer-x", now())
+  assert_eq(TeamCacheLookup("lz", "factpack", "cache probe"), "answer-x")
+  let _ = TeamCacheStore("lz", "factpack", "cache-old", "answer-y", now() - 3600.0)
+  assert_eq(TeamCacheLookup("lz", "factpack", "cache-old"), "")
+}
+
+test "team-480: тихий режим — begin, check, end" {
+  assert_eq(TeamIsQuiet(), false)
+  let _ = TeamQuietBegin("osp", "lz", "factpack")
+  assert_eq(TeamIsQuiet(), true)
+  let _ = TeamQuietEnd()
+  assert_eq(TeamIsQuiet(), false)
+}
+
+test "team-480: env-параметры — дефолты на пустоту и мусор" {
+  assert_eq(TeamIsNumberish("3"), true)
+  assert_eq(TeamIsNumberish("2.5"), true)
+  assert_eq(TeamIsNumberish("2.5.1"), false)
+  assert_eq(TeamIsNumberish("abc"), false)
+  assert_eq(TeamIsNumberish(""), false)
+  assert_eq(TeamEnvCount("TEAM_UNSET_VAR_FOR_TEST", 7.0), 7.0)
+}
+
+test "team-480: извлечение live-секции по маркерам" {
+  let ans = "hdr\n[LIVE]\n• источник\n  https://example.com\n[NEWS]\nновости\n[TG]\nканалы"
+  assert_eq(trim(TeamExtractSection(ans, "[LIVE]", "[NEWS]")), "• источник\n  https://example.com")
+  assert_eq(TeamExtractSection("без маркеров", "[LIVE]", "[NEWS]"), "")
+}
+
+test "team-480: контракт — ответ консультации никогда не пуст" {
+  let _ = TeamBudgetReset()
+  let ans = TeamConsult("osp", "lz", "factpack", "контракт-тест", "")
+  if length(ans) < 10.0 then { error("пустой ответ консультации запрещён") }
+  if contains(ans, "Консультация: lz/factpack") == false and contains(ans, "недоступен") == false then {
+    error("ответ — либо консультация, либо честный отказ")
+  }
+}
