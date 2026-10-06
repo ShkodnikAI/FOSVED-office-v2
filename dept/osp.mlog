@@ -375,6 +375,9 @@ pattern OSPAutoEscalate(topic: String, base_depth: Int) -> Int {
 pattern HandleOSP(query: String, chat_id: String) -> String {
   let dept = "osp"
   let t = lower(query)
+  // TEAM-1 #480: сброс бюджетов командной работы на новый запрос
+  // владельца (консультации, LLM-вызовы, стек глубины, тихий флаг)
+  let _ = TeamBudgetReset()
 
   // ── Depth routing ──
   if starts_with(t, "/osp quick") or starts_with(t, "/osp fast") then { return OSPQuickAnalyze(substring(query, 10, 300), chat_id) }
@@ -452,20 +455,21 @@ pattern OSPSourcesFooter(context: String) -> String {
       let lines = lines + "\n· Новостной поиск (RSS)"
     }
   }
-  // Наряд #423 A.2: секция Live Search — только когда реально была.
-  // С результатами — имя источника; при отказе — точная причина из
-  // блока, владельцу видно, почему живого поиска в ответе нет.
-  let live_start = index_of(context, "=== Live Search ===")
-  if live_start >= 0.0 then {
-    let after = substring(context, live_start + 19.0, length(context))
-    let live_end = index_of(after, "\n\n===")
-    let mut live_body = after
-    if live_end >= 0.0 then { let live_body = substring(after, 0.0, live_end) }
-    if contains(live_body, "•") then {
-      let lines = lines + "\n· Живой поиск (Tavily)"
+  // Наряд #423 A.2 → TEAM-1 #480 A.6: секция разведсводки ЛЗ — только
+  // когда консультация реально вошла в контекст. С результатами — имя
+  // источника; при отказе — точная причина (преемственность честного
+  // правила #423 A.3), владельцу видно, почему разведсводки в ответе нет.
+  let fact_start = index_of(context, "=== Консультация: lz/factpack ===")
+  if fact_start >= 0.0 then {
+    let after = substring(context, fact_start + 33.0, length(context))
+    let fact_end = index_of(after, "\n\n===")
+    let mut fact_body = after
+    if fact_end >= 0.0 then { let fact_body = substring(after, 0.0, fact_end) }
+    if contains(fact_body, "•") then {
+      let lines = lines + "\n· ЛЗ (разведсводка)"
     } else {
-      if length(trim(live_body)) > 0.0 then {
-        let lines = lines + "\n· Живой поиск (Tavily): " + trim(live_body)
+      if length(trim(fact_body)) > 0.0 then {
+        let lines = lines + "\n· ЛЗ (разведсводка): " + trim(fact_body)
       }
     }
   }
@@ -600,9 +604,9 @@ pattern OSPFreshnessGate(query: String, live_raw: String, attempted: Bool) -> St
   if attempted == false then { return "" }
   let live_ok = length(trim(live_raw)) > 0.0 and starts_with(live_raw, "(") == false
   if live_ok then {
-    return "\n\n=== ГЕЙТ АКТУАЛЬНОСТИ ===\nСвежие данные есть — в Live Search выше. Требования к отчёту: (1) открой отчёт разделом «Что произошло сейчас» — факты с датами и URL из Live Search; (2) калибруй вероятности с их учётом; (3) противоречие с базовой моделью назови в начале отчёта явно, не в дисклеймере."
+    return "\n\n=== ГЕЙТ АКТУАЛЬНОСТИ ===\nСвежие данные есть — в разведсводке ЛЗ выше. Требования к отчёту: (1) открой отчёт разделом «Что произошло сейчас» — факты с датами и URL из секции LIVE разведсводки; (2) калибруй вероятности с их учётом; (3) противоречие с базовой моделью назови в начале отчёта явно, не в дисклеймере."
   }
-  return "\n\n=== ГЕЙТ АКТУАЛЬНОСТИ: СВЕЖИХ ДАННЫХ НЕТ ===\nЖивой поиск не выполнен, вернул 0 или отказал (точная причина — в секции Live Search выше). ЗАПРЕЩЕНО: таблицы вероятностей, сценарные P=, выводы уровня «экспозиция минимальна», «прямая угроза отсутствует», «нарратив тревоги опережает поток». ВЫДАЙ вместо прогноза: «нужна проверка свежих событий» + конкретный список, что именно проверить (источники, запросы, окно времени). Собственные оценки — только [ИНТЕРПРЕТАЦИЯ], без вероятностных таблиц."
+  return "\n\n=== ГЕЙТ АКТУАЛЬНОСТИ: СВЕЖИХ ДАННЫХ НЕТ ===\nЖивой поиск не выполнен, вернул 0 или отказал (точная причина — в секции LIVE разведсводки выше). ЗАПРЕЩЕНО: таблицы вероятностей, сценарные P=, выводы уровня «экспозиция минимальна», «прямая угроза отсутствует», «нарратив тревоги опережает поток». ВЫДАЙ вместо прогноза: «нужна проверка свежих событий» + конкретный список, что именно проверить (источники, запросы, окно времени). Собственные оценки — только [ИНТЕРПРЕТАЦИЯ], без вероятностных таблиц."
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -731,23 +735,22 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   let news = ""
   let news_result = TryVal(try http_post("http://127.0.0.1:4000/news/fresh", json_encode({query: query, dept: "osp", limit: 5}), "application/json"))
   if to_string(news_result) != "()" then { let news = json_get(parse_json(news_result), "news", "") }
-  // #474 A.1: живой поиск — по умолчанию для КАЖДОГО анализа ОСП;
-  // кэш новостей и живой поиск дополняют друг друга, условие пустого
-  // кэша СНЯТО (generic-фолбэк /news/fresh глушил поиск: кэш непуст →
-  // поиск пропущен → успокаивающий прогноз по случившемуся событию —
-  // инцидент OSP-2026-10-05-PLAGUE-01). Пропуск — только вневременные
-  // вопросы (OSPSkipLiveSearch). Эконом-защита — бюджет+кэш Tavily в
-  // utils.mlog, не белый список и не условие на кэш.
+  // #474 A.1 → TEAM-1 #480 A.6: живой поиск — для КАЖДОГО анализа ОСП,
+  // но через командную работу с ЛЗ (разведсводка factpack, ADR-0016)
+  // вместо собственного Tavily-вызова. Пропуск — только вневременные
+  // вопросы (OSPSkipLiveSearch); кэш и бюджет Tavily — общий шов
+  // utils.mlog; сам /osp tavily остаётся прямым (OSPLiveSearchBlock).
   let mut live_raw = ""
   let mut live_attempted = false
+  let mut factpack_block = ""
   if OSPSkipLiveSearch(query) == false then {
     let live_attempted = true
-    let live_raw = OSPLiveSearchBlock(query)
+    let consult = TeamConsult("osp", "lz", "factpack", query, "")
+    let factpack_block = "\n\n" + consult
+    let live_raw = TeamExtractSection(consult, "[LIVE]", "[NEWS]")
   }
-  let live_block = ""
-  if live_raw != "" then {
-    let live_block = "\n\n=== Live Search ===\n" + live_raw
-  }
+  // #474 A.2: гейт актуальности судит live-часть разведсводки ЛЗ
+  // (та же скобка-причина — отказ, тот же "•" — свежие данные).
   // #474 A.2: гейт актуальности — риск-вопрос без свежих данных не
   // даёт вероятностей; со свежими — отчёт открывается разделом
   // «Что произошло сейчас».
@@ -791,7 +794,7 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   if s_now == "()" then { let s_now = "" }
   let s_sk = to_string(skills)
   if s_sk == "()" then { let s_sk = "" }
-  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + live_block + fred_data + market_block + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg + fresh_gate
+  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + factpack_block + fred_data + market_block + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg + fresh_gate
   let context = context + "\n\n=== ПОВТОР: ДАТА ===\n" + s_now
   return context
 }
@@ -1140,12 +1143,11 @@ pattern OSPProfile(query: String, chat_id: String) -> String {
 // SEARCH & RECORDING
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPTavilySearch(query: String, chat_id: String) -> String {
-  // office#354: транспорт через общий паттерн TavilySearch (utils.mlog)
-  // вместо несуществующего внутреннего роута на :4000. Транспорт — прямой
-  // вызов api.tavily.com, один путь к Tavily на весь проект.
-  let response = TavilySearch(query, "osp")
-  if response == "()" then { return "Tavily недоступен." }
-  let reply = TavilyFormatBlock(response)
+  // office#354: транспорт — общий паттерн TavilySearch (utils.mlog).
+  // TEAM-1 #480: честные причины и гео-дополнение — OSPLiveSearchBlock;
+  // это единственный прямой путь ОСП к Tavily — команда владельца.
+  // Автоматический анализ ходит через командную работу с ЛЗ (ADR-0016).
+  let reply = OSPLiveSearchBlock(query)
   if reply == "" then { return "Tavily недоступен: пустой ответ." }
   let _ = RecordAssistantMessage(chat_id, "osp", reply)
   return reply

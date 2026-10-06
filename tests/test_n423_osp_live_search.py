@@ -42,25 +42,32 @@ def test_patterns_exist():
     assert "OSPNeedsLiveSearch" not in OSP_MLOG
 
 
-def test_live_search_default_on_in_build_context():
+def test_factpack_default_on_in_build_context():
+    """#480 A.6: живой поиск ОСП — через командную работу с ЛЗ; условие
+    OSPSkipLiveSearch и позиция секции (между news-блоком и FRED)
+    сохранены — поменялся только поставщик данных."""
     body = _pattern_body(OSP_MLOG, "BuildOSPContext")
     # #474: поиск по умолчанию — единственное условие вызова, инвертированный список
     assert "if OSPSkipLiveSearch(query) == false then" in body
     # условие пустого кэша новостей СНЯТО (глушило поиск при живом фолбэке)
     assert "length(trim(news)) == 0.0" not in body, (
         "условие пустого кэша новостей обязано быть снято (#474 A.1)")
-    # секция контекста добавляется только внутри условия
-    assert "=== Live Search ===" in body
+    # TEAM-1 #480: секция — консультация с ЛЗ, не собственный Tavily
+    assert 'TeamConsult("osp", "lz", "factpack"' in body
+    # собственный live-вызов из автоматического пути УБРАН (остался /osp tavily)
+    assert "OSPLiveSearchBlock(query)" not in body
+    # live-часть для гейта извлекается по маркерам разведсводки
+    assert 'TeamExtractSection(consult, "[LIVE]", "[NEWS]")' in body
     idx_if = body.index("if OSPSkipLiveSearch")
-    idx_section = body.index("\\n\\n=== Live Search ===")
+    idx_section = body.index('TeamConsult("osp", "lz", "factpack"')
     idx_fred_comment = body.index("FRED (McpMarketsCall)")
-    assert idx_if < idx_section < idx_fred_comment, "Live Search должен стоять между news-блоком и FRED"
+    assert idx_if < idx_section < idx_fred_comment, "Разведсводка ЛЗ должна стоять между news-блоком и FRED"
     # секция вплетается в строку сборки контекста между News и FRED
-    ctx_line = [l for l in body.splitlines() if "=== News ===" in l and "live_block" in l]
-    assert ctx_line, "live_block должен вплетаться в строку сборки контекста"
+    ctx_line = [l for l in body.splitlines() if "=== News ===" in l and "factpack_block" in l]
+    assert ctx_line, "factpack_block должен вплетаться в строку сборки контекста"
     line = ctx_line[0]
-    assert line.index("+ news + live_block + fred_data") > line.index("=== News ===")
-    assert line.index("+ news + live_block + fred_data") < line.index("=== Corrections ===")
+    assert line.index("+ news + factpack_block + fred_data") > line.index("=== News ===")
+    assert line.index("+ news + factpack_block + fred_data") < line.index("=== Corrections ===")
 
 
 def test_honest_degradation_exact_causes():
@@ -102,13 +109,15 @@ def test_skip_list_is_short_and_inverted():
     assert idx_anchor < idx_list, "якорь текущего момента обязан перебивать исключения"
 
 
-def test_footer_reflects_live_search():
+def test_footer_reflects_factpack():
+    """#480 A.6: подвал показывает ЛЗ как источник разведсводки —
+    с результатами имя, при отказе точная причина (правило #423 A.3)."""
     body = _pattern_body(OSP_MLOG, "OSPSourcesFooter")
-    assert '"=== Live Search ==="' in body
-    assert "Живой поиск (Tavily)" in body
+    assert '"=== Консультация: lz/factpack ==="' in body
+    assert "ЛЗ (разведсводка)" in body
     # с результатами — имя; при отказе — точная причина (не глушим)
-    assert "Живой поиск (Tavily): " in body
-    assert 'contains(live_body, "•")' in body
+    assert "ЛЗ (разведсводка): " in body
+    assert 'contains(fact_body, "•")' in body
 
 
 def test_gates_untouched():

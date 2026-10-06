@@ -84,11 +84,11 @@ def test_market_block_wired_in_context():
     body = _pattern_body(OSP_MLOG, "BuildOSPContext")
     assert "let market_block = OSPMarketDataBlock(query)" in body
     # секция вплетается в строку сборки после fred_data
-    # (гварды #423 требуют Live Search между News и FRED — не нарушаем)
-    line = [l for l in body.splitlines() if "=== News ===" in l and "live_block" in l]
+    # (#480 A.6: разведсводка ЛЗ между News и FRED — не нарушаем)
+    line = [l for l in body.splitlines() if "=== News ===" in l and "factpack_block" in l]
     assert line, "market_block обязан вплетаться в строку сборки контекста"
     l = line[0]
-    assert "+ live_block + fred_data + market_block" in l
+    assert "+ factpack_block + fred_data + market_block" in l
     assert l.index("+ fred_data + market_block") < l.index("=== Corrections ===")
 
 
