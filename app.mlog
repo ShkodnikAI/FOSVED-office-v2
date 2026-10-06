@@ -1498,6 +1498,11 @@ pattern ResolveSubAgent(dept: String, query: String) -> String {
 
 pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String {
   let context = BuildContext(dept, query, chat_id)
+  // TEAM-2 #481: бриф коллег и правило ASK (A.3) + карта потребностей (A.2)
+  let team_block = TeamAskBlock(dept)
+  if team_block != "" then { let context = context + "\n\n" + team_block }
+  let auto_block = TeamAutoConsult(dept, query)
+  if auto_block != "" then { let context = context + "\n\n" + auto_block }
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   // FOIP-003.1: Log user message to session
   let _ = LogSessionEvent(chat_id, "user_message", dept, substring(query, 0.0, 2000.0), "", "0", "0")
@@ -1513,6 +1518,10 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
     return ""
   }
   let reply = redact(to_string(json_get(parsed, "reply", "Error: empty reply")), "all")
+  // TEAM-2 #481 A.3: маркеры ASK — консультации коллег и второй проход;
+  // маркеры не доходят владельцу, не более одного доп. прохода
+  let enhanced = TeamSecondPass(dept, query, context, reply)
+  if enhanced != "" then { let reply = enhanced }
   let used_model = redact(to_string(json_get(parsed, "model", "")), "all")
   let tokens_in = redact(to_string(json_get(parsed, "tokens_in", "0")), "all")
   let tokens_out = redact(to_string(json_get(parsed, "tokens_out", "0")), "all")
@@ -1534,6 +1543,8 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
     let footer = "\n\n. " + used_model + " | " + tokens_in + "+" + tokens_out + " tokens"
   }
   let final_reply = reply + footer
+  // TEAM-2 #481 A.5: источники — консультации по карте потребностей
+  if auto_block != "" then { let final_reply = final_reply + TeamFooterFromBlock(auto_block) }
   let _ = RecordAssistantMessage(chat_id, dept, final_reply)
   let _ = YanaAutoMemorize(query, reply, chat_id)
   // IDEA-1: Update consensus with this interaction

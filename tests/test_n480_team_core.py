@@ -109,17 +109,22 @@ def test_registry_declares_all_14_depts():
     assert set(dept_ids) == expected, f"реестр обязан покрывать 14 отделов, различие: {set(dept_ids) ^ expected}"
 
 
-def test_only_factpack_enabled_in_team1():
-    # TEAM-1 — только ядро и одно сквозное подключение; остальные навыки
-    # объявлены, но выключены (подключение — TEAM-2, #481)
+def test_all_skills_enabled_since_team2():
+    # TEAM-2 (#481): все навыки отделов включены; Яна — оркестратор, не поставщик
     enabled = re.findall(r'\{dept: "([a-z]+)", skill: "([a-z_]+)".*enabled: true\}', TEAM_MLOG)
-    assert enabled == [("lz", "factpack")], f"в TEAM-1 включён только lz/factpack, найдено: {enabled}"
+    disabled = re.findall(r'\{dept: "([a-z]+)", skill: "([a-z_]*)".*enabled: false\}', TEAM_MLOG)
+    assert len(enabled) == 15, f"15 навыков включены (TEAM-2), найдено: {len(enabled)}"
+    assert disabled == [("yana", "")], f"выключен только yana-оркестратор, найдено: {disabled}"
 
 
-def test_dispatch_wired_only_to_factpack():
+def test_dispatch_via_runskill_since_team2():
+    # TEAM-2 (#481): диспетчеризация — через TeamSkillWired/TeamRunSkill;
+    # factpack по-прежнему в диспетчере (TEAM-1 сквозное подключение)
     body = _pattern_body(TEAM_MLOG, "TeamConsult")
-    assert 'if to_dept == "lz" and skill == "factpack" then' in body
-    assert "LZFactpack(question)" in body
+    assert "TeamSkillWired(to_dept, skill) == false" in body
+    assert "TeamRunSkill(to_dept, skill, question)" in body
+    run_body = _pattern_body(TEAM_MLOG, "TeamRunSkill")
+    assert "LZFactpack(question)" in run_body
 
 
 # ── 3. Тихий режим и factpack ────────────────────────────────────────────
@@ -172,8 +177,8 @@ def test_tavily_command_remains_direct():
 
 def test_quiet_flag_contract_documented():
     # контракт тихого режима обязан быть выписан в team.mlog — иначе TEAM-2
-    # не узнает, что обработчик проверяет TeamIsQuiet
-    assert "TeamIsQuiet" in _pattern_body(TEAM_MLOG, "TeamConsult")
+    # не узнает, что обработчик проверяет TeamIsQuiet перед побочными эффектами
+    assert "pattern TeamIsQuiet" in TEAM_MLOG
     assert "обязан проверять TeamIsQuiet" in TEAM_MLOG
 
 
