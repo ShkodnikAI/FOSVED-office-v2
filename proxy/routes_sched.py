@@ -245,6 +245,17 @@ def scheduler_morning_brief():
     except Exception as e:
         log.warning(f"[morning_brief] forge edit stats failed (non-fatal): {e}")
 
+    # #486 A.4: раздел «Ключи» — детерминированно (дата/цифры не искажаются
+    # пересказом LLM): только проблемы + строка «остальные N — ok»;
+    # при всех ok — одна строка; старше 26 ч — честное «не выполнялась»
+    keys_line = ""
+    try:
+        from proxy.key_health import build_morning_line
+        keys_line = build_morning_line()
+    except Exception as e:
+        log.warning(f"[morning_brief] keys line failed (non-fatal): {e}")
+        keys_line = ""
+
     # FO-049 (диспатч #161): недельная метрика нарядной дисциплины — по понедельникам
     narad_stats_line = ""
     try:
@@ -456,6 +467,9 @@ def scheduler_morning_brief():
         # FO-043: недельный срез first-try — тоже дословно (по понедельникам)
         if forge_edit_line:
             brief = brief + "\n🛠 Правки FORGE: " + forge_edit_line
+        # #486 A.4: раздел «Ключи» — дословно из последней проверки
+        if keys_line:
+            brief = brief + "\n\n" + keys_line
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})

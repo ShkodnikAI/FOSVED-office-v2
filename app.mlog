@@ -1676,7 +1676,25 @@ pattern NightSlot() -> String {
   let stale_result = TryVal(try AdminCheckStaleDepts())
   if to_string(stale_result) == "()" then { phase_fail = phase_fail + 1.0 }
   if to_string(stale_result) == "()" then { let stale_result = "проверка не выполнена" }
-  let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result
+  // Phase 5: Ключи и провайдеры (#486 A.3): валидность всех ключей манифеста
+  // (proxy/key_health.py, дешёвые вызовы без расхода токенов); итог — в ночной отчёт
+  let keys_body = "{}"
+  let mut keys_result = TryVal(try http_post("http://127.0.0.1:4000/admin/keys/night-check", keys_body, "application/json", 120.0))
+  let mut keys_summary = "недоступна (нет ответа от admin/keys/night-check)"
+  if to_string(keys_result) == "()" then {
+    phase_fail = phase_fail + 1.0
+  } else {
+    let keys_status = redact(to_string(json_get(parse_json(keys_result), "status", "?")), "all")
+    let keys_line = redact(to_string(json_get(parse_json(keys_result), "problems_line", "")), "all")
+    let keys_ok = to_string(json_get(parse_json(keys_result), "ok_count", "0"))
+    let keys_total = to_string(json_get(parse_json(keys_result), "total", "0"))
+    if keys_status == "ok" then {
+      keys_summary = "ok (" + keys_ok + "/" + keys_total + ")"
+    } else {
+      keys_summary = keys_line + " — ok " + keys_ok + "/" + keys_total
+    }
+  }
+  let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result + "\n\nPhase 5: Ключи и провайдеры\n" + keys_summary
 
   // ── #485 A.3: итог ночного цикла — сохранение, аудит и Telegram ──
   // Статус честный: "ok" только если все фазы ответили; иначе partial с числом.
@@ -4069,7 +4087,17 @@ pattern WebhookBody() -> String {
       let _ = AuditLog("admin_cmd", "admin", text)
 
       if query == "" or query == " " then {
-        let _ = SendTelegramReply(chat_id, "Admin commands:\n/status /build <task> /fix <bug>\n/analyze /scan /tour /docs\n/graph /impact <file>\n/proposals /narads /rollback <id>\n/report /health /errors [часы]")
+        let _ = SendTelegramReply(chat_id, "Admin commands:\n/status /build <task> /fix <bug>\n/analyze /scan /tour /docs\n/graph /impact <file>\n/proposals /narads /rollback <id>\n/report /health /errors [часы] /keys")
+        return respond("200 ok")
+      }
+      // #486 A.5: проверка валидности ключей и провайдеров по запросу
+      if query == "keys" then {
+        let kr = TryVal(try http_get("http://127.0.0.1:4000/admin/keys/run", 90.0))
+        if to_string(kr) == "()" then {
+          let _ = SendTelegramReply(chat_id, "Проверка ключей недоступна (admin/keys/run не ответил — см. audit_log)")
+        } else {
+          let _ = SendTelegramReply(chat_id, redact(to_string(kr), "all"))
+        }
         return respond("200 ok")
       }
       if query == "status" then {
