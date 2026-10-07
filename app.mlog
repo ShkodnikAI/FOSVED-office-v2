@@ -112,6 +112,10 @@ pattern InitDB() -> String {
   // Metrics
   db_execute("CREATE TABLE IF NOT EXISTS dept_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, metric_name TEXT, metric_value TEXT, period TEXT, created_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS token_usage (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, provider TEXT, model TEXT, input_tokens TEXT, output_tokens TEXT, cost_usd TEXT, request_type TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // TEAM-3 #482 A.1: доска находок команды (публикация/подписка вместо затираемой ячейки inject:<dept>).
+  // ttl хранится как вычисленный expires_at (datetime('now','+N hours') при вставке);
+  // delivered — механизм one-shot чтения инъекций владельца (перевод InjectContext).
+  db_execute("CREATE TABLE IF NOT EXISTS team_board (id INTEGER PRIMARY KEY AUTOINCREMENT, from_dept TEXT NOT NULL, kind TEXT NOT NULL, topic TEXT NOT NULL, tags TEXT DEFAULT '[]', payload TEXT DEFAULT '', sources TEXT DEFAULT '', severity TEXT DEFAULT '', delivered INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), expires_at TEXT)")
 
   // Security
   db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
@@ -1054,21 +1058,24 @@ pattern GetCompactedHistory(chat_id: String, limit: String, dept: String) -> Str
 
 // ── FOIP-003.6: Three input channels (followup/steer/inject) ──
 pattern InjectContext(target_dept: String, context_text: String) -> String {
-  let existing = kv_get("inject:" + target_dept)
-  if existing != "" then {
-    let _ = kv_set("inject:" + target_dept, existing + "\n---\n" + context_text)
-  } else {
-    let _ = kv_set("inject:" + target_dept, context_text)
-  }
+  // TEAM-3 #482 A.4: /inject переведён на доску находок. Было: ячейка KV
+  // "inject:<dept>" — конкатенация без источника, затирание следующей записью.
+  // Стало: публикация от from_dept="owner" (delivered=0, тег = отдел, ttl 24 ч).
+  // Дедуп TeamPublish НЕ применяется — повторный /inject в тот же день не
+  // теряется; one-shot чтение сохранено в GetInjectedContext.
+  let _ = TeamBoardInsert("owner", "fact", substring(context_text, 0.0, 60.0), "[\"" + target_dept + "\"]", context_text, "", 24.0, 0.0)
   return "ok"
 }
 
 pattern GetInjectedContext(dept: String) -> String {
-  let ctx = kv_get("inject:" + dept)
-  if ctx != "" then {
-    let _ = kv_set("inject:" + dept, "")
-  }
-  return ctx
+  // TEAM-3 #482 A.4: чтение инъекций владельца с доски (from_dept='owner',
+  // delivered=0, тег отдела), one-shot: прочитанное помечается delivered=1.
+  let rows = TryVal(try query("SELECT GROUP_CONCAT(payload, '\n---\n') AS merged FROM team_board WHERE from_dept = 'owner' AND delivered = 0 AND tags LIKE ?1", ["%\"" + dept + "\"%"]))
+  if to_string(rows) == "()" then { return "" }
+  let merged = to_string(json_get(parse_json(to_string(rows)), "[0].merged", ""))
+  if merged == "" then { return "" }
+  let _ = TryVal(try db_execute("UPDATE team_board SET delivered = 1 WHERE from_dept = 'owner' AND delivered = 0 AND tags LIKE ?1", ["%\"" + dept + "\"%"]))
+  return merged
 }
 
 pattern SteerDept(dept: String, correction: String) -> String {
@@ -4099,7 +4106,12 @@ pattern WebhookBody() -> String {
       let _ = AuditLog("admin_cmd", "admin", text)
 
       if query == "" or query == " " then {
-        let _ = SendTelegramReply(chat_id, "Admin commands:\n/status /build <task> /fix <bug>\n/analyze /scan /tour /docs\n/graph /impact <file>\n/proposals /narads /rollback <id>\n/report /health /errors [часы] /keys")
+        let _ = SendTelegramReply(chat_id, "Admin commands:\n/status /build <task> /fix <bug>\n/analyze /scan /tour /docs\n/graph /impact <file>\n/proposals /narads /rollback <id>\n/report /health /errors [часы] /keys /board")
+        return respond("200 ok")
+      }
+      // TEAM-3 #482 A.6: видимость доски находок — публикации за сутки + подписки
+      if query == "board" then {
+        let _ = SendTelegramReply(chat_id, TeamBoardAdminLine())
         return respond("200 ok")
       }
       // #486 A.5: проверка валидности ключей и провайдеров по запросу

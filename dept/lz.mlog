@@ -123,6 +123,8 @@ pattern LZGateOSPReferral(query: String) -> String {
     // даже в логах. Таймаут 5с — fire-and-forget: анализ продолжается на
     // сервере, результат приходит владельцу в TG независимо от этого вызова.
     TryVal(try http_post("http://127.0.0.1:10001/osp/analyze?secret=" + redact(env("CRON_SECRET"), "hash_only"), json_encode({source: "lz", query: query, type: "investment_implication"}), "application/json", 5.0))
+    // TEAM-3 #482 A.4: алерт ЛЗ дополнительно на доску (видят Эксперт/Финансы/ОСП — не только прямой путь /osp/analyze)
+    let _ = TeamPublish("lz", "alert", query, "[]", "ЛЗ: инвестиционная направленность запроса — передан в ОСП на анализ (гейт 5, №318 fire-and-forget)", "", 48.0)
     return "REFERRED: investment query sent to OSP"
   }
   return "PASS: no investment implication"
@@ -297,6 +299,8 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
     let q = trim(substring(query, 10.0, length(query)))
     if q == "" then { return disclaimer + "\nИспользование: /lz invest <тема> — явная пересылка запроса в ОСП для инвестиционного анализа." }
     TryVal(try http_post("http://127.0.0.1:10001/osp/analyze?secret=" + redact(env("CRON_SECRET"), "hash_only"), json_encode({source: "lz", query: q, type: "explicit_invest"}), "application/json", 5.0))
+    // TEAM-3 #482 A.4: явная пересылка владельцем — тоже на доску
+    let _ = TeamPublish("lz", "alert", q, "[]", "ЛЗ: запрос владельца передан в ОСП для инвестиционного анализа (/lz invest)", "", 48.0)
     return disclaimer + "\n🔄 Передано в ОСП для инвестиционного анализа: «" + q + "»"
   }
 
@@ -410,7 +414,7 @@ pattern BuildLZContext(query: String, domain: String, chat_id: String) -> String
   let recent = LZRecentArtifacts(domain, 5.0)
   let scan = LZApiScanContext(query, domain, chat_id)
   // #402 A.2: данные LZ Daily по GitHub — только при GitHub-теме запроса
-  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan + LZGithubContextIfRelevant(query) + TeamAskBlock("lz")
+  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan + LZGithubContextIfRelevant(query) + TeamAskBlock("lz") + TeamBoardBlock("lz")
 }
 
 // ── FORGE (#221): детерминированные API-источники в общем пути /lz ──────
