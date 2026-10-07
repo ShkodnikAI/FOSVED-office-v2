@@ -5,9 +5,9 @@
 Диспатч #403 Wave 3: гейт выполнен — Metalogos- #757 выпущен (тег v0.27.1,
 мерж 260a33a — предок тега) И #401 закрыт.
 
-A.2.1 — bin/mlog = 0.28.0 (релиз-артефакт тега, sha256 зафиксирован в ADR-0015;
+A.2.1 — bin/mlog = 0.29.0 (релиз-артефакт тега, sha256 зафиксирован в ADR-0017;
        прошлый-хороший 0.27.1 вендорен как bin/mlog-0271), фича #757 живёт
-       в линии 0.27.1+ — проверено на 0.28.0.
+       в линии 0.27.1+ — проверено на 0.29.0.
 A.2.2 — app.mlog: llm { max_tokens: 8192 } сразу после providers (грамматика
         0.27.1: хвост — упорядоченная цепочка; поле до providers = parse).
 A.2.3 — SendReport (dept/miniapp.mlog): пометка «ОТВЕТ ОБРЕЗАН» через
@@ -27,7 +27,7 @@ MINIAPP = (REPO_ROOT / "dept" / "miniapp.mlog").read_text(encoding="utf-8")
 ENTRYPOINT = (REPO_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
 
 
-# ── A.2.1: бинарь 0.28.0 ──────────────────────────────────────────────────
+# ── A.2.1: бинарь 0.29.0 ──────────────────────────────────────────────────
 
 
 def _version(binary: str) -> str:
@@ -36,9 +36,9 @@ def _version(binary: str) -> str:
     return out.stdout.strip().splitlines()[0]
 
 
-def test_battle_binary_is_0280():
+def test_battle_binary_is_0290():
     v = _version("bin/mlog")
-    assert "0.28.0" in v, f"боевой бинарь должен быть 0.28.0 (ADR-0015), получено: {v}"
+    assert "0.29.0" in v, f"боевой бинарь должен быть 0.29.0 (ADR-0017), получено: {v}"
 
 
 def test_prev_good_binary_is_0271():
@@ -54,10 +54,10 @@ def test_old_binaries_are_out():
 
 
 def test_battle_binary_sha256_matches_artifact():
-    # целостность релиз-артефакта тега v0.28.0 (sha256 зафиксирован в ADR-0015)
-    expected_prefix = "58eb1ebd0d326f071cf923acba869c4fec6c732b9458b676f158a4d743ec2260"
+    # целостность релиз-артефакта тега v0.29.0 (sha256 зафиксирован в ADR-0017)
+    expected_prefix = "256bed0dd4a7ae08fe913b6da11cd20d7b52c5fd43adcd98dcb18144076a99f5"
     h = hashlib.sha256((REPO_ROOT / "bin" / "mlog").read_bytes()).hexdigest()
-    assert h == expected_prefix, f"bin/mlog sha256={h}, ожидание ADR-0015: {expected_prefix}"
+    assert h == expected_prefix, f"bin/mlog sha256={h}, ожидание ADR-0017: {expected_prefix}"
 
 
 def test_prev_good_binary_sha256_matches():
