@@ -8,6 +8,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -222,10 +223,16 @@ def test_save_results_upsert():
 
 
 def test_morning_line_formats(monkeypatch):
-    """A.4: детерминированные форматы строки «Ключи»."""
+    """A.4: детерминированные форматы строки «Ключи».
+
+    Фикс мины замедленного действия (2026-10-07): дата была захардкожена
+    ("2026-10-06 02:00:00") и через >26 ч после мержа стала «протухшей» —
+    build_morning_line честно уходил в stale-ветку, тест падал в CI на main
+    (6811903, до перехода 0.29.0). Свежесть теперь динамическая.
+    """
     import proxy.core as core
 
-    fresh = "2026-10-06 02:00:00"
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     rows = [
         {"env_key": "ZAI_API_KEY", "status": "ok", "http_code": 200, "checked_at": fresh},
         {"env_key": "FRED_API_KEY", "status": "invalid", "http_code": 400, "checked_at": fresh},
