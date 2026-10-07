@@ -419,6 +419,10 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
+  // TEAM-2 #481 A.3: маркеры ASK — консультации коллег и второй проход
+  // до гейтов качества; маркеры не доходят владельцу
+  let enhanced = TeamSecondPass(dept, query, context, reply)
+  if enhanced != "" then { let reply = enhanced }
   let gates = OSPCheckQualityGates(reply, depth)
   let safety = OSPFinalSafetyCheck(reply)
   if safety != "PASS" then { let reply = reply + "\n\n[SAFETY: " + safety + "]" }
@@ -795,6 +799,7 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> Strin
   let s_sk = to_string(skills)
   if s_sk == "()" then { let s_sk = "" }
   let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + factpack_block + fred_data + market_block + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg + fresh_gate
+  let context = context + "\n\n" + TeamAskBlock("osp")
   let context = context + "\n\n=== ПОВТОР: ДАТА ===\n" + s_now
   return context
 }
@@ -1187,6 +1192,25 @@ pattern OSPUpdateBetStatus(bet_id: Int, new_status: String, note: String) -> Str
 // Прогон: ./bin/mlog test dept/osp.mlog — интегрирован в
 // tests/test_n469_osp_scenario_gate.py (pytest вызывает subprocess).
 // ═══════════════════════════════════════════════════════════════════════
+
+// ── TEAM-2 #481 A.1: навык osp/forecast (реестр dept/team.mlog) ──────
+// Тихая облегчённая функция: калиброванная оценка без 12 гейтов полного
+// ответа ОСП (глубина для коллег, не для владельца). Не пишет в диалог.
+pattern OSPForecast(question: String) -> String {
+  let prompt = "Ты ОСП (отдел стратегического прогнозирования), коллега запрашивает навык forecast: калиброванная оценка вероятности. Вопрос: " + question + "\nФормат: (1) уточнённая формулировка прогноза и горизонт; (2) оценка вероятности с обоснованием по фактам из вопроса; (3) что изменило бы оценку; (4) метка уверенности. Без приветствий и подписи."
+  let r = redact(to_string(TryVal(try call_llm(prompt, question))), "all")
+  if r == "()" then { return "(коллега osp/forecast недоступен: модель не ответила)" }
+  return r
+}
+
+// ── TEAM-2 #481 A.1: навык osp/cross_country ─────────────────────────
+pattern OSPCrossCountry(question: String) -> String {
+  let prompt = "Ты ОСП, коллега запрашивает навык cross_country: кросс-страновая проекция. Вопрос: " + question + "\nФормат: различия между странами/юрисдикциями по существу вопроса, таблицей или списком; где различия принципиальны. Без приветствий и подписи."
+  let r = redact(to_string(TryVal(try call_llm(prompt, question))), "all")
+  if r == "()" then { return "(коллега osp/cross_country недоступен: модель не ответила)" }
+  return r
+}
+
 
 test "n469 гейт: согласованные сценарии (сумма 100, смежные диапазоны) — PASS" {
   let out = "| A | Рост +10…+25% | P=65% |\n| B | Боковик −10…+10% | P=30% |\n| C | Обвал −25…−10% | P=5% |"

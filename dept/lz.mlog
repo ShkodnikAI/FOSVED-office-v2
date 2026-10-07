@@ -338,6 +338,10 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
 
   let result = redact(to_string(TryVal(try call_llm("ЛЗ (" + domain + "): работай как разведотдел, не как консультант. Не задавай уточняющих вопросов и не предлагай варианты на выбор — сразу дай оценку на основе того, что реально есть в контексте ниже. Если после этого данных всё равно недостаточно — одной фразой констатируй факт отсутствия данных, без извинений, без эмодзи, без списка вариантов «что я могу сделать».", topic_query + "\nContext: " + context + live))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
+  // TEAM-2 #481 A.3: маркеры ASK — консультации коллег и второй проход;
+  // маркеры не доходят владельцу
+  let enhanced = TeamSecondPass(dept, topic_query, context, result)
+  if enhanced != "" then { let result = enhanced }
   // ── #400 A.1: пересылка — ДОПОЛНЕНИЕ, не замена ──────────────────────
   // Ответ ЛЗ отдаётся владельцу ВСЕГДА; при срабатывании гейта (единственный
   // триггер) — строка-пометка о фоновой пересылке. Ветка «выбросить ответ,
@@ -406,7 +410,7 @@ pattern BuildLZContext(query: String, domain: String, chat_id: String) -> String
   let recent = LZRecentArtifacts(domain, 5.0)
   let scan = LZApiScanContext(query, domain, chat_id)
   // #402 A.2: данные LZ Daily по GitHub — только при GitHub-теме запроса
-  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan + LZGithubContextIfRelevant(query)
+  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan + LZGithubContextIfRelevant(query) + TeamAskBlock("lz")
 }
 
 // ── FORGE (#221): детерминированные API-источники в общем пути /lz ──────
@@ -1110,3 +1114,16 @@ pattern LZChannelDigest(channel_ids_json: String, since_hours: String, chat_id: 
   let _ = SendReport(reply, "lz", "lz digest " + hours + "ч", "3", chat_id)
   return reply
 }
+
+// ── TEAM-2 #481 A.1: навык lz/tech_scan (реестр dept/team.mlog) ──────
+// Тихая облегчённая функция: тех-скан (живой поиск + GitHub-контекст).
+// Транспорт Tavily — общий шов utils.mlog (office#354), бюджет честный.
+pattern LZTechScan(question: String) -> String {
+  let response = TavilySearch(question + " technology", "lz")
+  if response == "(budget)" then { return "(тех-скан не выполнен: дневной бюджет Tavily исчерпан)" }
+  if response == "()" then { return "(тех-скан не выполнен: сеть Tavily недоступна)" }
+  let block = TavilyFormatBlock(response)
+  if block == "" then { return "(тех-скан: 0 результатов)" }
+  return block + LZGithubContextIfRelevant(question)
+}
+
