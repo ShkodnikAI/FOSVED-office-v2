@@ -743,3 +743,148 @@ test "team-480: контракт — ответ консультации ник�
   assert_eq(length(ans) > 10.0, true)
   assert_eq(contains(ans, "Консультация: lz/factpack") or contains(ans, "недоступен"), true)
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// TEAM-3 #482: доска находок (публикация и подписка вместо InjectContext)
+// A.1 DDL team_board — в InitDB (app.mlog). A.2 TeamPublish — ниже.
+// A.3 подписки — TeamBoardSubscriptions (реестр навыков, этот файл),
+//     подмес в контексты — TeamBoardBlock (context/expert/osp/lz).
+// A.4 перевод InjectContext/GetInjectedContext — app.mlog (from_dept="owner").
+// ═════════════════════════════════════════════════════════════════════════
+
+pattern TeamBoardKinds() -> String {
+  // A.1: разрешённые типы находок — единственный источник истины
+  return json_encode(["fact", "alert", "forecast", "decision", "risk"])
+}
+
+pattern TeamBoardSubscriptions() -> String {
+  // A.3: реестр подписок (отдел → kinds). Теги не используются подписчиками
+  // (все темы источника); расширяется осознанно, не автоматически.
+  return json_encode([
+    {dept: "osp", kinds: ["alert", "fact", "risk"]},
+    {dept: "expert", kinds: ["alert", "forecast", "fact"]},
+    {dept: "finance", kinds: ["alert", "forecast"]},
+    {dept: "lz", kinds: ["forecast", "decision"]},
+    {dept: "legal", kinds: ["risk", "decision"]},
+    {dept: "dev", kinds: ["decision", "risk"]},
+    {dept: "qa", kinds: ["decision", "risk"]},
+    {dept: "engineering", kinds: ["decision", "risk"]},
+    {dept: "marketing", kinds: ["alert", "forecast"]},
+    {dept: "design", kinds: ["decision"]},
+    {dept: "visual", kinds: ["decision"]},
+    {dept: "kavalnya", kinds: ["decision", "risk"]},
+    {dept: "admin", kinds: ["alert", "risk"]},
+    {dept: "yana", kinds: ["alert", "forecast", "decision"]}
+  ])
+}
+
+pattern TeamBoardInsert(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float, dedupe: Float) -> String {
+  // Низкоуровневая вставка (без redact — доверяет вызывающему: TeamPublish
+  // redact'ит входы, InjectContext кладёт текст владельца как есть, на том
+  // же уровне доверия, что и старая ячейка KV). ttl-чистка — при каждой
+  // вставке; дедуп по (from_dept, topic, день) — только для dept-публикаций.
+  let _ = TryVal(try db_execute_with_grant(grant_issue("db:delete:team_board", 3600.0, "once"), "DELETE FROM team_board WHERE expires_at IS NOT NULL AND expires_at < datetime('now')", []))
+  if dedupe == 1.0 then {
+    let dup = TryVal(try query("SELECT id FROM team_board WHERE from_dept = ?1 AND topic = ?2 AND date(created_at) = date('now') LIMIT 1", [from_dept, topic]))
+    if to_string(dup) != "()" then {
+      if length(parse_json(to_string(dup))) > 0.0 then {
+        let dup_head = substring(topic, 0.0, 60.0)
+        let dup_msg = "duplicate: уже опубликовано сегодня (from=" + from_dept + ", topic=" + dup_head + ") — вторая запись за день не создаётся"
+        return dup_msg
+      }
+    }
+  }
+  let ttl_s = "+" + to_string(ttl_hours) + " hours"
+  let _ = TryVal(try db_execute("INSERT INTO team_board (from_dept, kind, topic, tags, payload, sources, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now', ?7))", [from_dept, kind, topic, tags, payload, src_urls, ttl_s]))
+  let audit_head = substring(topic, 0.0, 80.0)
+  let audit_details = kind + " topic=" + audit_head
+  let _ = AuditLog("team_board_publish", from_dept, audit_details)
+  return "published"
+}
+
+pattern TeamPublish(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float) -> String {
+  // A.2 #482: публикация находки отделом. Валидация kind — честный отказ;
+  // все входные строки redact "all" (правило инцидента 2026-10-06: ввод —
+  // недоверенные данные). Дедупликация по (from_dept, topic, день).
+  // ADR-0164: производные значения — только через связывающий let.
+  let kinds_json = TeamBoardKinds()
+  let kind_probe = "\"" + kind + "\""
+  if index_of(kinds_json, kind_probe) < 0.0 then {
+    let refused = "refused: unknown kind '" + kind + "' (разрешены " + kinds_json + ")"
+    return refused
+  }
+  let fd = to_string(from_dept)
+  let tp = to_string(topic)
+  if fd == "" or tp == "" then { return "refused: from_dept и topic обязательны" }
+  let t = redact(to_string(topic), "all")
+  let p = redact(to_string(payload), "all")
+  let tg = redact(to_string(tags), "all")
+  let sr = redact(to_string(src_urls), "all")
+  return TeamBoardInsert(fd, kind, t, tg, p, sr, ttl_hours, 1.0)
+}
+
+pattern TeamBoardBlock(dept: String) -> String {
+  // A.3 #482: свежие записи доски по подписке отдела → секция контекста
+  // «=== Доска команды ===» с подписью источника в каждой строке.
+  // Инъекции владельца (from_dept='owner') сюда НЕ попадают — их доставляет
+  // GetInjectedContext (one-shot). Лимит: 8 записей, строка ≤ 200 знаков.
+  let subs = parse_json(TeamBoardSubscriptions())
+  let kinds_json = "[]"
+  let si = 0.0
+  let scount = length(subs)
+  while si < scount {
+    let srow = get(subs, si)
+    if to_string(json_get(srow, "dept", "")) == dept then {
+      let kinds_json = to_string(json_get(srow, "kinds", "[]"))
+    }
+    let si = si + 1.0
+  }
+  if kinds_json == "[]" then { return "" }
+  let rows = TryVal(try query("SELECT from_dept, kind, topic, payload, sources FROM team_board WHERE from_dept != 'owner' AND kind IN (SELECT value FROM json_each(?1)) AND (expires_at IS NULL OR expires_at >= datetime('now')) AND created_at >= datetime('now', '-2 days') ORDER BY id DESC LIMIT 8", [kinds_json]))
+  if to_string(rows) == "()" then { return "" }
+  let arr = parse_json(to_string(rows))
+  let count = length(arr)
+  if count == 0.0 then { return "" }
+  let out = ""
+  let i = 0.0
+  while i < count {
+    let row = get(arr, i)
+    let src = to_string(json_get(row, "sources", ""))
+    let line = "[" + to_string(json_get(row, "from_dept", "")) + " / " + to_string(json_get(row, "kind", "")) + "] " + to_string(json_get(row, "topic", "")) + ": " + substring(to_string(json_get(row, "payload", "")), 0.0, 160.0)
+    if src != "" then { let line = line + " (источники: " + src + ")" }
+    if out == "" then { let out = substring(line, 0.0, 200.0) } else { let out = out + "\n" + substring(line, 0.0, 200.0) }
+    let i = i + 1.0
+  }
+  return "=== Доска команды ===\n" + out
+}
+
+pattern TeamBoardAdminLine() -> String {
+  // A.6 #482: видимость в /admin board — публикации за сутки + подписки.
+  let pubs = TryVal(try query("SELECT COUNT(*) AS c FROM team_board WHERE created_at >= datetime('now', '-1 day')", []))
+  let n_pub = "0"
+  if to_string(pubs) != "()" then { let n_pub = to_string(json_get(parse_json(to_string(pubs)), "[0].c", "0")) }
+  let subs = parse_json(TeamBoardSubscriptions())
+  return "Доска команды: публикаций за сутки " + n_pub + ", подписчиков " + to_string(length(subs)) + "; истёкший ttl чистится при каждой публикации; инъекции владельца идут через доску (one-shot)."
+}
+
+test "team-482: реестр kinds — ровно 5 типов наряда" {
+  assert_eq(TeamBoardKinds(), "[\"fact\",\"alert\",\"forecast\",\"decision\",\"risk\"]")
+}
+
+test "team-482: подписки детерминированы и покрывают отделы" {
+  let subs = parse_json(TeamBoardSubscriptions())
+  assert_eq(length(subs) >= 10.0, true)
+  let first = get(subs, 0.0)
+  assert_eq(to_string(json_get(first, "dept", "")), "osp")
+  assert_eq(contains(to_string(json_get(first, "kinds", "")), "alert"), true)
+}
+
+test "team-482: TeamPublish отказывает чужой kind честной строкой" {
+  let r = TeamPublish("osp", "gossip", "тема", "[]", "тело", "", 24.0)
+  assert_eq(contains(r, "refused: unknown kind"), true)
+}
+
+test "team-482: TeamPublish отказывает пустым from_dept/topic" {
+  assert_eq(contains(TeamPublish("", "fact", "т", "[]", "п", "", 24.0), "refused"), true)
+  assert_eq(contains(TeamPublish("osp", "fact", "", "[]", "п", "", 24.0), "refused"), true)
+}
