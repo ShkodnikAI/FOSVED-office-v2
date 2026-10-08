@@ -250,7 +250,7 @@ Reverse Proxy (Flask)
 ```
 .
 ├── app.mlog                  # Главный роутер (~4500 строк)
-├── bin/mlog                  # Metalogos v0.29.0 бинарник (x86-64, Rust, боевой, ADR-0017; 0.29.0 — релиз-гейт 0.29 GREEN (X-3 ≥ 3000 bp): loop-семантика №608, HTTP-taxonomy №592, вкл. security-фикс Y-1 из 0.28.2, фактическая версия bin/mlog)
+├── bin/mlog                  # Metalogos v0.30.0 бинарник (x86-64, Rust, боевой, ADR-0018; 0.30.0 — релиз-гейт 0.30 GREEN (parameterized share ≥ 5000 bp, 6043): VM-паритет сравнений №629 fail-closed, return-in-expression №622, compile-time отказы №617, фактическая версия bin/mlog)
 ├── bin/mlog-020              # Metalogos 0.20.0 wave-3 (main 29de25a) — стейджинг-догфуд (FO-050)
 ├── bin/mlog-0271             # Metalogos 0.27.1 (260a33a) — прошлый-хороший, тест-гвард (ADR-0015)
 ├── VERSION                   # runtime-генерируется при буте из RENDER_GIT_COMMIT; коммит в git — снимок последнего деплоя
@@ -411,7 +411,7 @@ docs/render-dashboard.md, §№424.
 
 | Компонент | Технология |
 |---|---|
-| Ядро | Metalogos 0.29.0 (Rust DSL, ~500 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory + recall + forget/retain-ttl, label-lattice + гранты, timeseries-домен, full statement-kind taint-инференс, security-by-default: семантический гейт run/serve №523, file-ingest gate/env-гейты/serve-контекст, HTTP-outcome taxonomy №592, UTC-календарь №595; прошлый-хороший 0.27.1 вендорен, аварийный фолбэк 0.20.0, см. entrypoint guard-переход, ADR-0005/0006/0007/0008/0009/0012/0015/0017) |
+| Ядро | Metalogos 0.30.0 (Rust DSL, ~500 встроенных функций: файлы, exec с песочницей, MCP-клиент, нативная графика — chart/diagram, PDF, typed memory + recall + forget/retain-ttl, label-lattice + гранты, timeseries-домен, full statement-kind taint-инференс, security-by-default: семантический гейт run/serve №523, file-ingest gate/env-гейты/serve-контекст, VM-паритет операторов сравнения №629 fail-closed, compile-time отказы №617; прошлый-хороший 0.27.1 вендорен, аварийный фолбэк 0.20.0, см. entrypoint guard-переход, ADR-0005/0006/0007/0008/0009/0012/0015/0017/0018) |
 | Прокси-слой | Python 3.12 + Flask, разбит на пакет `proxy/` (37 модулей) |
 | База данных | SQLite, ≈140 таблиц (живая база data/fosved.db) |
 | Голос STT | Whisper |

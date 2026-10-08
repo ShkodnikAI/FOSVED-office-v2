@@ -16,14 +16,16 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.29.0 — прод-бинарь (линия
-# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0, ADR-0009/0012/0015/0017; бинарь из
-# официального релиз-артефакта тега v0.29.0, source commit 4be0f72 — релиз-
-# гейт 0.29 GREEN (X-3 precise-share 3042bp ≥ 3000): loop-семантика №608,
-# HTTP-outcome taxonomy №592, UTC-календарь №595, schema-as-code №611,
-# VM respond-terminality №584; вкл. security-фикс Y-1 RESPOND_SWALLOWED
-# (0.28.2, release-block) — офисный корпус пробит на 0.29.0: 0 parse errors,
-# audit-паритет байт-в-байт с 0.28.0 (ADR-0017)
+# Metalogos v0.30.0 — прод-бинарь (линия
+# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0, ADR-0009/0012/0015/0017/0018;
+# бинарь из официального релиз-артефакта тега v0.30.0, source commit 6eafee1c —
+# релиз-гейт 0.30 GREEN (parameterized share 6043bp ≥ 5000, OWNER-FIXED,
+# ADR-0186 §5): VM-паритет операторов сравнения №629 (fail-closed,
+# [TYPE_MISMATCH] на обоих бэкендах), return-in-expression №622, три
+# compile-time отказа №617 (undefined-variable) — офисная ремедиация:
+# qa statusFilter (реальный баг)/fp_rate (false-префикс лексера), разрыв
+# t-токена /visual-templ+ate (ADR-0018); корпус пробит на 0.30.0:
+# 0 parse errors, 0 undefined, audit-паритет байт-в-байт с 0.29.0 (ADR-0018)
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
 # грузит сырой app.mlog). bin/mlog-0271 (0.27.1) вендорен как прошлый-хороший
 # тест-гвард (ADR-0015; было mlog-027 = 0.27.0 — выведен; было mlog-025 —
