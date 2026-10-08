@@ -19,7 +19,11 @@ COMMANDS = [
     'starts_with(t, "/visual-card")',
     'starts_with(t, "/visual-archive")',
     'starts_with(t, "/visual-show")',
-    'starts_with(t, "/visual-template")',
+    # /visual-templ + "ate": латинский t-токен разорван конкатенацией — слово
+    # "template" в сыром тексте триггерит template-препроцессор mlog 0.23 и
+    # рождает undefined __TEMPLATE_BODY_N (№617, ADR-0018); runtime-значение
+    # префикса байт-идентично "/visual-template"
+    'starts_with(t, "/visual-templ" + "ate")',
     't == "/visual-style"',
     'starts_with(t, "/visual-spec")',
     'starts_with(t, "/visual-recall")',
