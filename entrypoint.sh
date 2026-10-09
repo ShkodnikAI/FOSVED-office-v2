@@ -99,7 +99,7 @@ echo "--- FORGE: repos dir=${FORGE_REPOS_DIR}/forge/repos, scratch swept ---"
 # 2. Metalogos
 # FO-014: песочница документов filesystem-MCP + каталог subprocess-аудита ядра
 # Наряд №395 (PR #191): бинарь и входной файл env-изированы для стейджинга.
-# Стейджинг VM-пилота (FO-050): MLOG_BIN=./bin/mlog-020, MLOG_ENTRY=dogfood_staging.mlog
+# Стейджинг VM-пилота (FO-050): MLOG_BIN=./bin/mlog (0.30.0, наряд FO-050-R #503 — пин mlog-020 снят: dept/team.mlog не парсится 0.20.0), MLOG_ENTRY=dogfood_staging.mlog
 #
 # Наряд №349 (2026-09-24): переход 0.19→0.22 (ADR-0005). Наряд N023 (2026-09-24):
 # 0.23.0 (ADR-0006). Наряд N024 (2026-09-25, прямое указание владельца):
