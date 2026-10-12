@@ -72,6 +72,159 @@ pattern SendVisualDocument(chat_id: String, fpath: String, caption: String) -> S
   return redact(to_string(json_get(parsed, "status", "")), "all")
 }
 
+// ── #499 A.1/A.2: выборка и вёрстка содержимого отчёта в теле карточки ──
+// Прежде область 96–474 SVG-карточки не заполнялась ничем — содержимое
+// отчёта (miniapp_responses.raw_text по doc_id) в карточку не передавалось.
+
+// Первая строка текста, содержащая marker (маркер вырезается), обрезанная
+// до max_len; пустая строка, если раздела нет. Для «Вердикт: …» и даты
+// проверки прогноза.
+pattern CardSectionLine(body_text: String, marker: String, max_len: Float) -> String {
+  let lines = split(body_text, "\n")
+  let mut found = ""
+  each ln in lines {
+    let s = trim(to_string(ln))
+    if found != "" then { }
+    else {
+      if contains(s, marker) then {
+        let cut = index_of(s, marker)
+        let rest = trim(substring(s, cut + length(marker), length(s)))
+        if starts_with(rest, ":") or starts_with(rest, " — ") or starts_with(rest, "— ") then {
+          let rest = trim(substring(rest, 1.0, length(rest)))
+        }
+        let found = substring(rest, 0.0, max_len)
+      }
+    }
+  }
+  return found
+}
+
+// Ключевые тезисы: строки с бейджами доказательности или маркерами списка,
+// до max_theses штук, каждая обрезана до max_len. Разделитель \n.
+pattern CardCollectTheses(body_text: String, max_theses: Float, max_len: Float) -> String {
+  let lines = split(body_text, "\n")
+  let mut out = ""
+  let mut n = 0.0
+  each ln in lines {
+    let s = trim(to_string(ln))
+    if n >= max_theses then { }
+    else {
+      if starts_with(s, "[ИНТЕРПРЕТАЦИЯ]") or starts_with(s, "[ФАКТ]") or starts_with(s, "[СПЕКУЛЯЦИЯ]") or starts_with(s, "[INTERPRETATION]") or starts_with(s, "[FACT]") or starts_with(s, "•") or starts_with(s, "- ") then {
+        let mut clean = s
+        let clean = replace(replace(replace(clean, "[ИНТЕРПРЕТАЦИЯ]", ""), "[ФАКТ]", ""), "[СПЕКУЛЯЦИЯ]", "")
+        let clean = replace(replace(clean, "[INTERPRETATION]", ""), "[FACT]", "")
+        if starts_with(clean, "•") then { let clean = trim(substring(clean, 1.0, length(clean))) }
+        if starts_with(clean, "- ") then { let clean = trim(substring(clean, 2.0, length(clean))) }
+        let clean = trim(clean)
+        if length(clean) > 3.0 then {
+          let n = n + 1.0
+          let out = out + substring(clean, 0.0, max_len) + "\n"
+        }
+      }
+    }
+  }
+  return out
+}
+
+// Строки вероятностей сценариев (проценты или слово «вероятност»),
+// до max_lines штук, каждая до max_len. Разделитель \n.
+pattern CardCollectProbs(body_text: String, max_lines: Float, max_len: Float) -> String {
+  let lines = split(body_text, "\n")
+  let mut out = ""
+  let mut n = 0.0
+  each ln in lines {
+    let s = trim(to_string(ln))
+    if n >= max_lines then { }
+    else {
+      if s == "" then { }
+      else {
+        if contains(s, "%") or contains(s, "ероятност") then {
+          let n = n + 1.0
+          let out = out + substring(s, 0.0, max_len) + "\n"
+        }
+      }
+    }
+  }
+  return out
+}
+
+// Домены источников: из строк с http вырезается домен (:// до следующего /),
+// до max_domains штук. Разделитель « · ».
+pattern CardCollectDomains(body_text: String, max_domains: Float) -> String {
+  let lines = split(body_text, "\n")
+  let mut out = ""
+  let mut n = 0.0
+  each ln in lines {
+    let s = trim(to_string(ln))
+    if n >= max_domains then { }
+    else {
+      if contains(s, "://") then {
+        let u = index_of(s, "://")
+        let dom = substring(s, u + 3.0, length(s))
+        let sp = index_of(dom, " ")
+        if sp > 0.0 then { let dom = substring(dom, 0.0, sp) }
+        let slash = index_of(dom, "/")
+        if slash > 0.0 then { let dom = substring(dom, 0.0, slash) }
+        let dom = trim(dom)
+        if length(dom) > 3.0 and index_of(out, dom) < 0.0 then {
+          let n = n + 1.0
+          if out == "" then { let out = dom }
+          else { let out = out + " · " + dom }
+        }
+      }
+    }
+  }
+  return out
+}
+
+// Перенос строки по ширине: svg_text не переносит — жадная сборка слов
+// в строки до max_chars, не более max_rows; при переполнении хвост
+// отбрасывается, к результату добавляется многоточие. Разделитель \n.
+pattern CardWrapText(text: String, max_chars: Float, max_rows: Float) -> String {
+  let words = split(text, " ")
+  let mut rows = ""
+  let mut n_rows = 0.0
+  let mut line = ""
+  let mut dropped = false
+  each w in words {
+    let word = trim(to_string(w))
+    if word == "" then { }
+    else {
+      if n_rows >= max_rows then {
+        let dropped = true
+      } else {
+        if line == "" then {
+          let line = word
+        } else {
+          if (length(line) + 1.0 + length(word)) <= max_chars then {
+            let line = line + " " + word
+          } else {
+            let rows = rows + line + "\n"
+            let n_rows = n_rows + 1.0
+            let line = word
+            if n_rows >= max_rows then {
+              let dropped = true
+            }
+          }
+        }
+      }
+    }
+  }
+  if line != "" and n_rows < max_rows then {
+    let rows = rows + line
+    let n_rows = n_rows + 1.0
+  } else {
+    if line != "" then {
+      let dropped = true
+    }
+  }
+  let rows = trim(rows)
+  if dropped then {
+    return rows + "…"
+  }
+  return rows
+}
+
 // Генерирует SVG-карточку для OSP/Expert/LZ анализа
 // src_type: "analysis" | "expert" | "lz"
 // src_id: ID записи в БД
@@ -94,8 +247,10 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   }
   // naryad #379: источник — завершённый отчёт аналитика (SendReport → miniapp_responses);
   // авто-hook Type 3 вызывает GenerateAnalysisCard("report", doc_id, chat_id)
+  // #499 A.1: выбирается и raw_text — содержимое отчёта, из которого
+  // собирается тело карточки (прежде тело 96–474 оставалось пустым).
   if src_type == "report" then {
-    let rows = query("SELECT title AS topic, confidence, 'sent' AS status, created_at FROM miniapp_responses WHERE id = ?", [src_id])
+    let rows = query("SELECT title AS topic, confidence, 'sent' AS status, created_at, raw_text FROM miniapp_responses WHERE id = ?", [src_id])
     let data = json_encode(rows)
   }
 
@@ -111,6 +266,31 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   let status = redact(to_string(json_get(first, "status", "drafted")), "all")
   let created_at = redact(to_string(json_get(first, "created_at", "")), "all")
 
+  // #499 A.1: содержимое для тела карточки — текст отчёта/анализа
+  let mut body_text = ""
+  if src_type == "analysis" or src_type == "expert" or src_type == "lz" then {
+    let body_text = to_string(json_get(first, "full_result", ""))
+  }
+  if src_type == "report" then {
+    let body_text = to_string(json_get(first, "raw_text", ""))
+  }
+  let body_text = redact(body_text, "all")
+
+  // #499 A.1: выборка разделов — вердикт/вывод, ключевые тезисы,
+  // вероятности сценариев (если есть), источники-домены, дата проверки
+  let verdict = CardSectionLine(body_text, "ердикт", 90.0)
+  let theses = CardCollectTheses(body_text, 4.0, 96.0)
+  let probs = CardCollectProbs(body_text, 3.0, 46.0)
+  let domains = CardCollectDomains(body_text, 3.0)
+  let check_date = CardSectionLine(body_text, "роверка прогноза", 70.0)
+
+  // #499 A.3: нет содержимого — короткий ответ без структуры — карточка
+  // не отправляется вовсе (а не слалась пустая)
+  if verdict == "" and theses == "" and probs == "" then {
+    let _ = AuditLog("card_skipped_empty", "visual", src_id)
+    return ""
+  }
+
   // ── Dept badge ──
   let badge = "ОСП"
   if src_type == "expert" then { let badge = "ЭКСПЕРТ" }
@@ -118,12 +298,14 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   if src_type == "report" then { let badge = "ОТЧЁТ" }
 
   // ── Build card using SVG primitives ──
-  let style = color_palette("authority", "light")
-  let ink = redact(to_string(json_get(style, "ink", "#1a1a2e")), "all")
-  let accent = redact(to_string(json_get(style, "accent", "#c9a961")), "all")
-  let paper = redact(to_string(json_get(style, "paper", "#ffffff")), "all")
-  let dim_c = redact(to_string(json_get(style, "muted", "#5a5a5a")), "all")
-  let rule = redact(to_string(json_get(style, "rule", "#e0ddd5")), "all")
+  // #499 A.2: тёмная тема FOSVED (прежде — light). Золотой #c9a961 —
+  // бренд Fosved; контраст на тёмном проверен infographic_qa (probe499qa).
+  let style = color_palette("authority", "dark")
+  let ink = redact(to_string(json_get(style, "ink", "#ebeaec")), "all")
+  let accent = "#c9a961"
+  let paper = redact(to_string(json_get(style, "paper", "#100e11")), "all")
+  let dim_c = redact(to_string(json_get(style, "muted", "#908198")), "all")
+  let rule = redact(to_string(json_get(style, "rule", "#312537")), "all")
 
   // Card canvas 360×504
   let header = svg_group([svg_rect(0.0, 0.0, 360.0, 72.0, accent, accent) +
@@ -134,11 +316,76 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   let footer = svg_group([svg_rect(0.0, 0.0, 360.0, 30.0, accent, accent) +
     svg_text(18.0, 18.0, "FOSVED OFFICE | " + created_at, 7.0, paper)], "translate(0.0,474.0)")
 
-  // Compose full card
-  let svg = svg_canvas(360.0, 504.0, "0 0 360 504", [header, status_bar, footer])
+  // ── #499 A.1/A.2: тело карточки (область 96–474) ──
+  // Вёрстка с переносом по ширине (CardWrapText — svg_text не переносит),
+  // курсор y с потолком 356 (в координатах группы; абс. 452 < 474-подвала).
+  let mut frag = ""
+  let mut y = 18.0
+  if verdict != "" then {
+    let vrows = split(CardWrapText("Вердикт: " + verdict, 46.0, 2.0), "\n")
+    each row in vrows {
+      let rr = trim(to_string(row))
+      if rr != "" and y < 356.0 then {
+        let frag = frag + svg_text(18.0, y, rr, 10.0, accent)
+        let y = y + 14.0
+      }
+    }
+    let y = y + 5.0
+  }
+  if theses != "" then {
+    if y < 356.0 then {
+      let frag = frag + svg_text(18.0, y, "ТЕЗИСЫ", 8.0, dim_c)
+      let y = y + 13.0
+    }
+    each t in split(theses, "\n") {
+      let tt = trim(to_string(t))
+      if tt != "" and y < 356.0 then {
+        let trows = split(CardWrapText("• " + tt, 50.0, 2.0), "\n")
+        each row in trows {
+          let rr = trim(to_string(row))
+          if rr != "" and y < 356.0 then {
+            let frag = frag + svg_text(18.0, y, rr, 9.0, ink)
+            let y = y + 12.0
+          }
+        }
+      }
+    }
+    let y = y + 5.0
+  }
+  if probs != "" then {
+    if y < 356.0 then {
+      let frag = frag + svg_text(18.0, y, "ВЕРОЯТНОСТИ СЦЕНАРИЕВ", 8.0, dim_c)
+      let y = y + 13.0
+    }
+    each p in split(probs, "\n") {
+      let pp = trim(to_string(p))
+      if pp != "" and y < 356.0 then {
+        let frag = frag + svg_text(18.0, y, substring(pp, 0.0, 50.0), 9.0, ink)
+        let y = y + 12.0
+      }
+    }
+    let y = y + 5.0
+  }
+  if domains != "" and y < 356.0 then {
+    let frag = frag + svg_text(18.0, y, "ИСТОЧНИКИ: " + domains, 8.0, dim_c)
+    let y = y + 12.0
+  }
+  if check_date != "" and y < 356.0 then {
+    let frag = frag + svg_text(18.0, y, substring(check_date, 0.0, 50.0), 8.0, dim_c)
+    let y = y + 12.0
+  }
+  let body_group = svg_group([frag], "translate(0.0,96.0)")
 
-  // QA check
+  // Compose full card
+  let svg = svg_canvas(360.0, 504.0, "0 0 360 504", [header, status_bar, body_group, footer])
+
+  // #499 A.4: гейт QA — заполненность/контраст проверяются до отправки;
+  // непрошедшая карточка не рендерится и не уходит в чат
   let qa = infographic_qa(svg)
+  if contains(to_string(qa), "passed: false") then {
+    let _ = AuditLog("card_qa_reject", "visual", src_id + ": " + substring(to_string(qa), 0.0, 140.0))
+    return ""
+  }
 
   // Convert to PDF via html_to_pdf
   let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + svg + "</body></html>"
