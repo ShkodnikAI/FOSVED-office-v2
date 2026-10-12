@@ -1,0 +1,43 @@
+// probe #499: живой прогон GenerateAnalysisCard на бинаре 0.30.0.
+// (1) полный отчёт с структурой → PDF-карточка создаётся, тело заполнено;
+// (2) короткий ответ без структуры → пустая строка, карточка не создаётся (A.3).
+// Запуск:
+//   rm -rf /tmp/n499card && mkdir -p /tmp/n499card/visuals && ./bin/mlog run scripts/probe499card.mlog
+
+db { url: "sqlite:/tmp/n499card/test.db" }
+
+import dept/utils
+import dept/visual
+
+pattern InitDB() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS miniapp_responses (id TEXT PRIMARY KEY, dept TEXT, title TEXT, query TEXT, raw_text TEXT DEFAULT '', html TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS visual_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, source_type TEXT, source_id TEXT, path TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
+  return "ok"
+}
+
+pattern BuildContext(q: String, c: String, d: String) -> String {
+  return ""
+}
+
+pattern RecordAssistantMessage(chat_id: String, role: String, content: String) -> String {
+  return ""
+}
+
+pattern SeedAndRun() -> String {
+  let _ = InitDB()
+  let full = "Вердикт: наблюдать за рынком — риски сбалансированы.\n\n[ФАКТ] Запасы дизтоплива в ARA упали на 8 процентов за неделю.\n[ИНТЕРПРЕТАЦИЯ] Снижение запасов указывает на устойчивый спрос в Европе.\n[ФАКТ] Российский экспорт дизеля в США вырос в октябре.\n[ИНТЕРПРЕТАЦИЯ] Переток грузов в США смягчает дефицит на восточном побережье.\n[СПЕКУЛЯЦИЯ] Дефицит в США может сохраниться до конца отопительного сезона.\n\nВероятности сценариев: база 60 процентов, риск дефицита 30 процентов, хвост 10 процентов.\n\nИсточники: https://reuters.com/markets и https://eia.gov/petroleum, данные за неделю.\nПроверка прогноза: 2026-11-12 по фактическим запасам EIA.\n"
+  let _ = db_execute("INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES ('doc-full', 'osp', 'Дизель США', 'дизель США', ?, '', '3.0', datetime('now'))", [full])
+  let _ = db_execute("INSERT INTO miniapp_responses (id, dept, title, query, raw_text, html, confidence, created_at) VALUES ('doc-short', 'osp', 'Короткий', 'вопрос', 'Да.', '', '1.0', datetime('now'))", [])
+  let r1 = GenerateAnalysisCard("report", "doc-full", "555")
+  let r2 = GenerateAnalysisCard("report", "doc-short", "555")
+  return "R1=" + r1 + " | R2=" + r2
+}
+
+pattern Main1(input: String) -> String {
+  return SeedAndRun()
+}
+
+flow Main {
+  input: String = "" -> Main1 -> output
+}
