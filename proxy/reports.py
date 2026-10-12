@@ -167,6 +167,19 @@ def _build_action_bar(dept, doc_id, existing_notes_html=""):
     # все кнопки ловили 401. Мастер-ключ в страницу не подставлять
     # («Поделиться» и история браузера).
     doc_token = doc_action_token(doc_id)
+    # #498 A.2: на странице исходного отчёта — ссылки на уточнённые версии
+    # (miniapp_responses.parent_doc_id = doc_id, колонка создаётся init_db).
+    versions_rows = _query(
+        "SELECT id, title FROM miniapp_responses WHERE parent_doc_id=? "
+        "ORDER BY created_at DESC, id DESC LIMIT 5", (doc_id,), fetch=True) or []
+    if versions_rows:
+        links = "".join(
+            f'<div class="note-item"><span>→ <a href="/miniapp/{html_lib_escape(v["id"])}">'
+            f'{html_lib_escape(v["title"] or v["id"])}</a></span></div>'
+            for v in versions_rows)
+        versions_html = f'<div class="notes-title">Уточнённые версии</div>{links}'
+    else:
+        versions_html = ""
     osp_buttons = ""
     osp_menus = ""
     if dept == "osp":
@@ -204,6 +217,11 @@ def _build_action_bar(dept, doc_id, existing_notes_html=""):
 <input type="text" id="noteInput" placeholder="Добавить замечание..." onkeydown="if(event.key==='Enter')addNote()"/>
 <button onclick="addNote()">+</button>
 </div>
+<div class="notes-input">
+<input type="text" id="refineInput" placeholder="Уточнение — отдел пересчитает отчёт..." onkeydown="if(event.key==='Enter')addRefine()"/>
+<button onclick="addRefine()">↻</button>
+</div>
+{versions_html}
 </div>
 <script>
 var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
@@ -229,6 +247,24 @@ function addNote(){{
   list.innerHTML+='<div class="note-item"><span>'+text+'</span><span class="note-time">'+now+'</span></div>';
   input.value='';
   fetch('/miniapp/note',{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer '+_docToken}},body:JSON.stringify({{doc_id:docId,note_text:text}})}});
+}}
+// #498 A.3: «Уточнить и пересчитать» — отдел перезапускается через
+// ChainDispatchDept, страница откроет новую версию отчёта. «Сохранить
+// заметку» (+) — по-прежнему заметка без перезапуска.
+function addRefine(){{
+  var input=document.getElementById('refineInput');
+  var text=input.value.trim();
+  if(!text)return;
+  var btn=event && event.target ? event.target : null;
+  if(btn){{ btn.disabled=true; btn.textContent='…'; }}
+  fetch('/miniapp/note',{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer '+_docToken}},body:JSON.stringify({{doc_id:docId,note_text:text,refine:true}})}})
+    .then(function(r){{ return r.json().then(function(data){{ return {{ok:r.status,data:data}}; }}); }})
+    .then(function(res){{
+      if(btn){{ btn.disabled=false; btn.textContent='↻'; }}
+      if(res.ok!==200){{ alert('Ошибка: '+(res.data.msg||res.ok)); return; }}
+      location.href='/miniapp/'+res.data.doc_id;
+    }})
+    .catch(function(){{ if(btn){{ btn.disabled=false; btn.textContent='↻'; }} alert('Сетевая ошибка — отдел мог не ответить'); }});
 }}
 function doAction(action){{
   var btn = event && event.target ? event.target.closest('.action-btn') : null;

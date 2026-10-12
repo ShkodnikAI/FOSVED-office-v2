@@ -21,7 +21,7 @@ from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting,
     get_secret, set_secret, delete_secret, _has_db_override, INTEGRATIONS_REGISTRY,
-    DB_PATH, DB_FILE, BASE_DIR, LIB_DIR, CFG_DIR, API_SECRET,
+    DB_PATH, DB_FILE, BASE_DIR, LIB_DIR, CFG_DIR, API_SECRET, RENDER_URL,
     TELEGRAM_BOT_TOKEN, TELEGRAM_ARCHIVE_CHANNEL_ID,
     memory, require_telegram, _TG_BOOTSTRAP_PAGE, _verify_init_data, _verify_webhook_secret,
     auto_enrich, _has_enricher, _auto_enrich_fn,
@@ -418,9 +418,92 @@ def miniapp_note():
     denied = _miniapp_doc_authorized(d.get("doc_id", ""))
     if denied is not None:
         return jsonify({"error": "unauthorized"}), denied
+    # #498 A.3/A.1: у строки уточнений два действия — «Сохранить заметку»
+    # (refine отсутствует/ложь: поведение без изменений) и «Уточнить и
+    # пересчитать» (refine: true — отдел перезапускается через существующий
+    # диспетчер ChainDispatchDept, новая версия отчёта доставляется владельцу).
+    if d.get("refine"):
+        return _miniapp_refine(d.get("doc_id", ""), d.get("note_text", ""))
     _query("INSERT INTO miniapp_notes (doc_id,note_text,created_at) VALUES (?,?,?)",
            (d.get("doc_id", ""), d.get("note_text", ""), datetime.utcnow().isoformat()))
     return jsonify({"status": "ok"})
+
+
+# #498 A.1: перезапуск отдела по уточнению. Путь диспетчеризации —
+# существующий mlog-роут /chain/step (127.0.0.1:10001 → ChainDispatchDept
+# из dept/chain.mlog), НЕ новый обработчик отдела; тот же путь использует
+# fan-out/debate (proxy/chain_parallel.py). Ответ отдела доставляется
+# владельцу обычной доставкой (аналог SendReport: документ в
+# miniapp_responses + Telegram-сообщение с кнопкой Mini App).
+MLOGSERVE_URL = os.environ.get("MLOGSERVE_URL", "http://127.0.0.1:10001")
+REFINE_TIMEOUT_SECS = float(os.environ.get("REFINE_TIMEOUT_SECS", "240"))
+REFINE_SNIPPET_CHARS = 1500  # «текст исходного отчёта (сжато)»
+
+
+def _refine_condense(raw_text):
+    """Сжатие исходного отчёта для контекста: до REFINE_SNIPPET_CHARS,
+    по границе абзаца, без обрыва слова."""
+    text = (raw_text or "").strip()
+    if len(text) <= REFINE_SNIPPET_CHARS:
+        return text
+    cut = text.rfind("\n", 0, REFINE_SNIPPET_CHARS)
+    if cut < REFINE_SNIPPET_CHARS // 2:
+        cut = text.rfind(" ", 0, REFINE_SNIPPET_CHARS)
+        if cut < REFINE_SNIPPET_CHARS // 2:
+            cut = REFINE_SNIPPET_CHARS
+    return text[:cut] + "\n…"
+
+
+def _miniapp_refine(doc_id, note_text):
+    owner = os.environ.get("OWNER_TELEGRAM_ID", "")
+    note_text = (note_text or "").strip()
+    if not note_text:
+        return jsonify({"status": "error", "msg": "empty refine text"}), 400
+    rows = _query("SELECT dept, title, query, raw_text FROM miniapp_responses WHERE id=?",
+                  (doc_id,), fetch=True)
+    if not rows:
+        return jsonify({"status": "error", "msg": "doc not found"}), 404
+    orig = rows[0]
+    dept = orig["dept"] or "osp"
+    orig_title = orig["title"] or doc_id
+    orig_query = (orig["query"] or "")[:500]
+    refined_query = (
+        f"Уточнение к отчёту {doc_id}.\n\n"
+        f"Исходный вопрос: {orig_query}\n\n"
+        f"Ключевое из исходного отчёта:\n{_refine_condense(orig['raw_text'])}\n\n"
+        f"Уточнение владельца: {note_text}\n\n"
+        "Пересчитай отчёт с учётом уточнения — новая версия целиком."
+    )
+    try:
+        resp = http_requests.post(
+            f"{MLOGSERVE_URL}/chain/step",
+            json={"dept": dept, "query": refined_query, "chat_id": owner or "0"},
+            timeout=REFINE_TIMEOUT_SECS)
+        resp.raise_for_status()
+        reply = str(resp.json().get("result", ""))
+    except Exception as e:  # noqa: BLE001 — mlog недоступен/таймаут: честный сбой
+        _log_error(f"miniapp refine dispatch failed for {doc_id}: {e}",
+                   source="miniapp_refine", dept=dept, kind="refine_dispatch")
+        # заметка владельца не теряется — сохраняем как обычную
+        _query("INSERT INTO miniapp_notes (doc_id,note_text,created_at) VALUES (?,?,?)",
+               (doc_id, note_text, datetime.utcnow().isoformat()))
+        return jsonify({"status": "error", "msg": "dispatch failed, note saved"}), 503
+    if not reply.strip():
+        return jsonify({"status": "error", "msg": "empty reply"}), 502
+    new_id = _save_generated_report(
+        dept, f"Уточнение к {doc_id}: {orig_title}", f"Уточнение: {note_text}", reply)
+    _query("UPDATE miniapp_responses SET parent_doc_id=? WHERE id=?", (doc_id, new_id))
+    # A.2: владельцу — обычная доставка (Telegram-сообщение с кнопкой Mini App)
+    short = reply[:400] + ("…" if len(reply) > 400 else "")
+    owner_chat = owner or "0"
+    if owner_chat != "0":
+        _tg_send_report_with_button(
+            owner_chat, f"Уточнение учтено — новая версия отчёта:\n\n{short}",
+            button_text="Открыть уточнённую версию",
+            button_url=f"{RENDER_URL}/miniapp/{new_id}")
+    _log_audit("miniapp_refine", {"doc_id": doc_id, "new_doc_id": new_id,
+                                  "dept": dept}, dept=dept)
+    return jsonify({"status": "ok", "doc_id": new_id})
 
 
 def _miniapp_doc_authorized(doc_id):
