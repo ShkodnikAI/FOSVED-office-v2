@@ -114,7 +114,10 @@ def test_page_has_no_master_key_and_no_placeholder(client, doc_id):
 def test_page_token_is_doc_bound(client, doc_id):
     _, token = _page_token(client, doc_id)
     assert doc_token_verify(token, "doc-чужой") == "mismatch"
-    assert doc_token_verify(token.replace("a", "b"), doc_id) == "mismatch"
+    corrupted = token[:-1] + ("0" if token[-1] != "0" else "1")
+    assert doc_token_verify(corrupted, doc_id) == "mismatch", (
+        "изменённая сигнатура обязана отвергаться"
+    )
     assert doc_token_verify("garbage", doc_id) == "bad"
     assert doc_token_verify("", doc_id) == "bad"
     expired = doc_action_token(doc_id, now=0)
