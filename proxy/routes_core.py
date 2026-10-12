@@ -43,7 +43,7 @@ from proxy.telegram import (
 from proxy.reports import (
     html_lib_escape, strip_html_for_archive, _html_base, _dept_header,
     _status_icon, _dept_kpis, _build_action_bar, ARCHIVE_MONTHS_RU,
-    _browse_page, _evidence_badges_css,
+    _browse_page, _evidence_badges_css, doc_action_token, doc_token_verify,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -330,7 +330,9 @@ body {{ font-family:var(--b,'IBM Plex Sans',system-ui,sans-serif); color:var(--i
 {disclaimer}
 {action_bar}
 </div></body></html>'''
-            html = html.replace('{{API_SECRET}}', API_SECRET)
+            # #497 A.2: старая подстановка '{{API_SECRET}}' здесь никогда не
+            # срабатывала (в f-строке шаблона оставались одинарные скобки) —
+            # а после #497 в страницу идёт токен документа, НЕ мастер-ключ.
             return Response(html, mimetype="text/html")
     # Fallback: return stored HTML with action bar injected
     stored_html = r["html"] or ""
@@ -345,7 +347,8 @@ body {{ font-family:var(--b,'IBM Plex Sans',system-ui,sans-serif); color:var(--i
     stored_html = stored_html.replace('[[CHART]]', '<div class="report-chart">').replace('[[/CHART]]', '</div>')
     if "</body>" in stored_html:
         stored_html = stored_html.replace("</body>", f"{action_bar}</body>")
-    stored_html = stored_html.replace('{{API_SECRET}}', API_SECRET)
+    # #497 A.2: мастер-ключ в страницу не подставлять (см. комментарий выше) —
+    # токен документа уже в action_bar.
     return Response(stored_html, mimetype="text/html")
 
 
@@ -410,9 +413,30 @@ def archive_browse():
 @app.post("/miniapp/note")
 def miniapp_note():
     d = request.get_json(force=True)
+    # #497 A.3: путь был без проверки доступа — теперь токен документа
+    # (та же схема, что у кнопок action-bar) либо мастер-ключ (внутренние).
+    denied = _miniapp_doc_authorized(d.get("doc_id", ""))
+    if denied is not None:
+        return jsonify({"error": "unauthorized"}), denied
     _query("INSERT INTO miniapp_notes (doc_id,note_text,created_at) VALUES (?,?,?)",
            (d.get("doc_id", ""), d.get("note_text", ""), datetime.utcnow().isoformat()))
     return jsonify({"status": "ok"})
+
+
+def _miniapp_doc_authorized(doc_id):
+    """#497 A.1: Bearer мастер-ключ (внутренние вызовы) ИЛИ токен документа,
+    действующий только на этот doc_id. Возврат: None — доступ разрешён,
+    иначе код ошибки (401/403) для jsonify."""
+    auth = request.headers.get("Authorization", "")
+    if API_SECRET and auth == f"Bearer {API_SECRET}":
+        return None
+    token = auth[7:] if auth.startswith("Bearer ") else ""
+    verdict = doc_token_verify(token, doc_id)
+    if verdict == "mismatch":
+        return 403
+    if verdict != "ok":
+        return 401
+    return None
 
 def _save_generated_report(dept, title, query, raw_text):
     """Создаёт новую запись miniapp_responses для результата кнопки action-bar
@@ -433,6 +457,13 @@ def miniapp_action():
     d = request.get_json(force=True)
     action = d.get("action", "")
     doc_id = d.get("doc_id", "")
+    # #497 A.1: собственная проверка (путь выведен из-под blanket-защиты
+    # auth_middleware): либо Bearer мастер-ключ (внутренние вызовы), либо
+    # токен документа, действующий ТОЛЬКО на этот doc_id (чужой doc_id — 403).
+    # Проверка ДО doc_id-валидации: тело без токена и без doc_id — 401.
+    denied = _miniapp_doc_authorized(doc_id)
+    if denied is not None:
+        return jsonify({"status": "error", "msg": "unauthorized"}), denied
     if not doc_id:
         return jsonify({"status": "error", "msg": "no doc_id"}), 400
     

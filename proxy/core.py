@@ -85,6 +85,13 @@ app.url_map.strict_slashes = False
 @app.before_request
 def auth_middleware():
     path = request.path
+    # #497 A.1: /webhook/miniapp-action — исключение с собственной проверкой:
+    # обработчик (routes_core._miniapp_doc_authorized) принимает либо Bearer
+    # мастер-ключ (внутренние вызовы), либо токен документа, действующий
+    # только на doc_id из тела запроса (чужой doc_id — 403, мусор — 401).
+    # Проверяется ДО blanket-ветки ниже.
+    if path.startswith("/webhook/miniapp-action"):
+        return None
     # Protect API, admin, memory, miniapp-action endpoints
     if any(path.startswith(p) for p in PROTECTED_PREFIXES):
         # Internal requests from mlog (localhost) are allowed to /memory/
@@ -119,7 +126,7 @@ API_SECRET = os.environ.get("API_SECRET", "")  # Bearer token for protected endp
 WEBHOOK_SECRET = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")  # X-Telegram-Bot-Api-Secret-Token
 
 # ── Auth helpers ──────────────────────────────────────────────
-PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/dialog/', '/profile/', '/webhook/miniapp-action', '/traces', '/repos/', '/preview', '/preview-live/')  # FO-035 D.5, FO-037 C.2, FO-039 B.1
+PROTECTED_PREFIXES = ('/api/', '/admin-ua/', '/memory/', '/dialog/', '/profile/', '/traces', '/repos/', '/preview', '/preview-live/')  # FO-035 D.5, FO-037 C.2, FO-039 B.1; #497: /webhook/miniapp-action — собственная проверка в обработчике (токен документа)
 
 def _check_bearer():
     """Return True if request bears valid API_SECRET, or if API_SECRET is empty (open mode)."""
