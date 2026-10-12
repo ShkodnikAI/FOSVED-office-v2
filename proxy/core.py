@@ -428,6 +428,8 @@ def init_db():
             ("ALTER TABLE token_usage ADD COLUMN compression_saved INTEGER DEFAULT 0", "compression_saved"),
             ("ALTER TABLE token_usage ADD COLUMN combo TEXT DEFAULT ''", "combo"),
             ("ALTER TABLE miniapp_responses ADD COLUMN archived INTEGER DEFAULT 0", "archived"),
+            # #498 A.2: связь версий уточнений — новый отчёт ссылается на исходный
+            ("ALTER TABLE miniapp_responses ADD COLUMN parent_doc_id TEXT DEFAULT ''", "parent_doc_id"),
         ]:
             try:
                 c.execute(col_sql)
