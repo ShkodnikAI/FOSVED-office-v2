@@ -3,6 +3,10 @@
 Вырезано из llm_proxy.py вербатим (стренглер, шаг 3; наряд #68, стоп-гейт SG-F2).
 """
 import re
+import os
+import time
+import hmac
+import hashlib
 import html as html_lib
 from datetime import datetime, timedelta
 
@@ -19,6 +23,45 @@ from proxy.core import (
 def html_lib_escape(s):
     """Safe HTML escape for report templates."""
     return html_lib.escape(str(s)) if s else ''
+
+# ── #497 A.1: токен документа для action-bar и заметок ──────────────────────
+# HMAC от doc_id (+ срок) ключом сервера — по образцу ссылок досье
+# /shop/dossier/<id>?t= (proxy/shop_dossier.dossier_token). Кладётся в
+# страницу вместо мастер-ключа API_SECRET: страница уходит наружу кнопкой
+# «Поделиться» и остаётся в истории браузера — мастер-ключ в ней означал бы
+# доступ ко всему защищённому API офиса. Токен действует ТОЛЬКО на свой
+# doc_id и только до срока; внутренние вызовы по-прежнему шлют мастер-ключ.
+DOC_TOKEN_TTL_SECS = 30 * 24 * 3600  # 30 дней: страница живёт в истории браузера
+
+
+def doc_action_token(doc_id, now=None):
+    """Токен документа: '<exp>.<hmac>' — валиден только для doc_id до exp."""
+    exp = int(now if now is not None else time.time()) + DOC_TOKEN_TTL_SECS
+    secret = os.environ.get("API_SECRET", "") or "dev-secret"
+    sig = hmac.new(secret.encode(), f"miniapp-doc:{doc_id}:{exp}".encode(),
+                   hashlib.sha256).hexdigest()[:32]
+    return f"{exp}.{sig}"
+
+
+def doc_token_verify(token, doc_id, now=None):
+    """Проверка токена документа для doc_id.
+
+    Возвращает 'ok' | 'mismatch' (токен другого документа) |
+    'stale' (срок вышел) | 'bad' (мусор/пусто)."""
+    if not token or token.count(".") != 1:
+        return "bad"
+    exp_s, sig = token.split(".", 1)
+    if not (exp_s.isdigit() and re.fullmatch(r"[0-9a-f]{32}", sig)):
+        return "bad"
+    exp = int(exp_s)
+    secret = os.environ.get("API_SECRET", "") or "dev-secret"
+    expected = hmac.new(secret.encode(), f"miniapp-doc:{doc_id}:{exp}".encode(),
+                        hashlib.sha256).hexdigest()[:32]
+    if not hmac.compare_digest(expected, sig):
+        return "mismatch"
+    if (now if now is not None else time.time()) > exp:
+        return "stale"
+    return "ok"
 
 # ──────────────────────────── HTML STRIP FOR ARCHIVE ────────────────────────────
 def strip_html_for_archive(html_content):
@@ -117,6 +160,13 @@ def _dept_kpis(dept):
 
 def _build_action_bar(dept, doc_id, existing_notes_html=""):
     """Build action bar HTML + JS for Mini App reports."""
+    # #497 A.1: в страницу кладётся токен документа (валиден ТОЛЬКО для
+    # этого doc_id, doc_action_token), а НЕ мастер-ключ API_SECRET:
+    # старый плейсхолдер '{{API_SECRET}}' после f-строки становился
+    # литералом '{API_SECRET}' и на подстановку routes_core не отвечал —
+    # все кнопки ловили 401. Мастер-ключ в страницу не подставлять
+    # («Поделиться» и история браузера).
+    doc_token = doc_action_token(doc_id)
     osp_buttons = ""
     osp_menus = ""
     if dept == "osp":
@@ -158,7 +208,7 @@ def _build_action_bar(dept, doc_id, existing_notes_html=""):
 <script>
 var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 var docId = "{doc_id}";
-var _apiSecret = '{{API_SECRET}}';
+var _docToken = '{doc_token}';
 if(tg) tg.ready();
 
 function copyText(){{
@@ -178,12 +228,12 @@ function addNote(){{
   var now=new Date().toLocaleTimeString('ru-RU',{{hour:'2-digit',minute:'2-digit'}});
   list.innerHTML+='<div class="note-item"><span>'+text+'</span><span class="note-time">'+now+'</span></div>';
   input.value='';
-  fetch('/miniapp/note',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{doc_id:docId,note_text:text}})}});
+  fetch('/miniapp/note',{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer '+_docToken}},body:JSON.stringify({{doc_id:docId,note_text:text}})}});
 }}
 function doAction(action){{
   var btn = event && event.target ? event.target.closest('.action-btn') : null;
   if(btn){{ btn.disabled = true; btn.style.opacity = '0.5'; }}
-  fetch('/webhook/miniapp-action',{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer '+_apiSecret}},body:JSON.stringify({{action:action,doc_id:docId}})}})
+  fetch('/webhook/miniapp-action',{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer '+_docToken}},body:JSON.stringify({{action:action,doc_id:docId}})}})
     .then(function(r){{ return r.json().then(function(data){{ return {{ok:r.status, data:data}}; }}); }})
     .then(function(res){{
       if(btn){{ btn.disabled = false; btn.style.opacity = ''; }}
