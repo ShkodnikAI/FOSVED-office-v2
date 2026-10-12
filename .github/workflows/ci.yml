@@ -338,3 +338,74 @@ jobs:
       - name: Facade log (on failure)
         if: failure()
         run: tail -60 /tmp/facade.log
+
+  # ── #500 A.1: гейт деплоя — прод только по зелёному CI ──────────────
+  # Render перестаёт авто-деплоить main ТОЛЬКО после того, как владелец
+  # задаст секрет RENDER_DEPLOY_HOOK и проверит A.4 (действия владельца,
+  # не исполнителя). Пока секрета нет — джоба честно предупреждает и
+  # пропускает деплой-триггер (main остаётся зелёным, авто-деплой работает
+  # как раньше); после A.3/A.4 владельца деплой идёт строго через этот
+  # гейт: curl на Deploy Hook выполняется только если ВСЕ блокирующие
+  # джобы выше зелёные.
+  deploy:
+    name: Deploy gate (Render, green only)
+    runs-on: ubuntu-latest
+    needs: [pytest, error-hygiene, mlog-check, version-check, docker-build, smoke]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Trigger Render deploy hook
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "::warning::Секрет RENDER_DEPLOY_HOOK не задан (#500 A.3 — действие владельца: Render → Settings → Deploy Hook → GitHub Secrets). Гейт не активен, работает прежний авто-деплой; Auto-Deploy выключается владельцем ПОСЛЕ проверки A.4."
+            exit 0
+          fi
+          echo "Все блокирующие джобы зелёные — деплой коммита $COMMIT_SHA по хуку"
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo "OK: Render deploy hook принят"
+
+  # ── #500 A.2: уведомление владельца о красном коммите в main ─────────
+  # Джоба стартует, если ХОТЯ БЫ одна блокирующая джоба упала (needs + if:
+  # failure()); секреты TELEGRAM_BOT_TOKEN / OWNER_TELEGRAM_ID — в Actions.
+  notify-red:
+    name: Notify owner (red commit)
+    runs-on: ubuntu-latest
+    needs: [pytest, error-hygiene, mlog-check, version-check, docker-build, smoke]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && failure()
+    steps:
+      - name: Telegram message to owner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OWNER_TELEGRAM_ID: ${{ secrets.OWNER_TELEGRAM_ID }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          R_PYTEST: ${{ needs.pytest.result }}
+          R_HYGIENE: ${{ needs.error-hygiene.result }}
+          R_MLOG: ${{ needs.mlog-check.result }}
+          R_VERSION: ${{ needs.version-check.result }}
+          R_DOCKER: ${{ needs.docker-build.result }}
+          R_SMOKE: ${{ needs.smoke.result }}
+        run: |
+          FAILED=""
+          for pair in "Python tests:$R_PYTEST" "Error hygiene:$R_HYGIENE" "Metalogos check:$R_MLOG" "Version check:$R_VERSION" "Docker build:$R_DOCKER" "Smoke:$R_SMOKE"; do
+            name="${pair%%:*}"
+            res="${pair#*:}"
+            if [ "$res" != "success" ] && [ "$res" != "skipped" ]; then
+              if [ -n "$FAILED" ]; then FAILED="$FAILED, "; fi
+              FAILED="$FAILED$name ($res)"
+            fi
+          done
+          [ -z "$FAILED" ] && FAILED="unknown"
+          SHORT="${COMMIT_SHA:0:7}"
+          MSG="🔴 Красный коммит ${SHORT} в main. Упали: ${FAILED}. Лог: ${RUN_URL}"
+          echo "$MSG"
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$OWNER_TELEGRAM_ID" ]; then
+            echo "::warning::Секреты TELEGRAM_BOT_TOKEN / OWNER_TELEGRAM_ID не заданы в Actions — уведомление некуда слать (#500 A.3-смежное, действие владельца)."
+            exit 0
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${OWNER_TELEGRAM_ID}" \
+            --data-urlencode "text=${MSG}" > /dev/null
+          echo "OK: уведомление отправлено"
