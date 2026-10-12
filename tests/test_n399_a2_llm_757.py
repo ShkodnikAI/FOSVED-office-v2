@@ -14,6 +14,9 @@ A.2.3 — SendReport (dept/miniapp.mlog): пометка «ОТВЕТ ОБРЕЗ
         llm_last_finish_reason() на общем пути доставки владельцу.
 A.2.4 — entrypoint.sh: фолбэк-патч (0.20 не знает фичу — sed-вырезание из
         serve-копии; проверено: до патча 0.20 даёт parse-ошибку, после — 0).
+#505 A.3 — фолбэк-конвейер пополнен вырезанием llm { timeout: 150 } (0.20
+        поле не понимает): живая проба ниже воспроизводит фактический
+        конвейер entrypoint целиком (оба sed + вырезание timeout).
 Запуск: python -m pytest tests/test_n399_a2_llm_757.py -v
 """
 import hashlib
@@ -124,6 +127,8 @@ def test_fallback_patched_file_parses_on_020():
         srv = os.path.join(td, "serve.mlog")
         subprocess.run(["bash", "-c", f"{aug} > {srv}"], cwd=REPO_ROOT, check=True)
         subprocess.run(["sed", "-i", "/max_tokens: 8192,/d", srv], check=True)
+        # #505 A.3: фактический конвейер фолбэка entrypoint вырезает и timeout
+        subprocess.run(["sed", "-i", "/^  timeout: 150,$/d", srv], check=True)
         subprocess.run(["sed", "-i", "s/llm_last_finish_reason()/\"\"/g", srv], check=True)
         out = subprocess.run([str(REPO_ROOT / "bin" / "mlog-020"), "check", srv],
                              capture_output=True, text=True, timeout=120)
