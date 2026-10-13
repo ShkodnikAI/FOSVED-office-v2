@@ -71,11 +71,23 @@ def test_a3_empty_content_gate():
 def test_a4_qa_gate_before_send():
     qa_pos = VISUAL_SRC.index("let qa = infographic_qa(svg)")
     gate_pos = VISUAL_SRC.index('contains(to_string(qa), "passed: false")')
-    pdf_pos = VISUAL_SRC.index("let _ = html_to_pdf(html, output_path)")
+    render_pos = VISUAL_SRC.index("RenderCardPdfViaProxy(output_path")
     send_pos = VISUAL_SRC.index("SendVisualDocument(chat_id, output_path")
-    assert qa_pos < gate_pos < pdf_pos < send_pos, \
+    assert qa_pos < gate_pos < render_pos < send_pos, \
         "QA-гейт обязан стоять до рендера и отправки, отправка — только после гейта"
     assert '"card_qa_reject"' in VISUAL_SRC, "отклонение QA не журналируется"
+
+
+def test_a5_render_fail_blocks_send():
+    """#499 A.5: сбой python-рендера — карточка не отправляется и журналируется."""
+    render_pos = VISUAL_SRC.index("RenderCardPdfViaProxy(output_path")
+    fail_pos = VISUAL_SRC.index('if rendered != "ok" then')
+    send_pos = VISUAL_SRC.index("SendVisualDocument(chat_id, output_path")
+    assert render_pos < fail_pos < send_pos, "гейт card_render_fail обязан стоять до отправки"
+    assert '"card_render_fail"' in VISUAL_SRC, "сбой рендера не журналируется"
+    assert "html_to_pdf(" not in VISUAL_SRC[VISUAL_SRC.index("pattern GenerateAnalysisCard("):
+                                           VISUAL_SRC.index("pattern ", VISUAL_SRC.index("pattern GenerateAnalysisCard(") + 10)], \
+        "движковый html_to_pdf удалён из пути карточки (кириллица теряется)"
 
 
 def _mlog():
@@ -83,32 +95,6 @@ def _mlog():
     return p if os.path.exists(p) else None
 
 
-def test_live_probe_full_report_makes_card_short_makes_none(tmp_path):
-    """Живой путь на 0.30.0: полный отчёт → PDF-карточка; короткий ответ → ''. """
-    mlog = _mlog()
-    if not mlog:
-        import pytest
-        pytest.skip("bin/mlog отсутствует")
-    (tmp_path / "visuals").mkdir()
-    # импорты резолвятся от cwd: кладём dept/* в tmp; utils/visual без
-    # транзитивных импортов — двух файлов достаточно
-    dept_dir = tmp_path / "dept"
-    dept_dir.mkdir()
-    for f in ("utils.mlog", "visual.mlog"):
-        shutil.copy(os.path.join(REPO, "dept", f), dept_dir / f)
-    # копия пробника с db в tmp (оригинальный probe держит фиксированный /tmp)
-    probe = tmp_path / "probe.mlog"
-    probe.write_text(
-        open(PROBE_SRC, encoding="utf-8").read().replace(
-            "sqlite:/tmp/n499card/test.db", f"sqlite:{tmp_path}/test.db"),
-        encoding="utf-8")
-    env = dict(os.environ)
-    r = subprocess.run([mlog, "run", str(probe)], cwd=str(tmp_path),
-                       capture_output=True, text=True, timeout=300, env=env)
-    out = r.stdout + r.stderr
-    assert "R1=" in out and "R2=" in out, f"проба не отработала: {out[-600:]}"
-    assert "card_report_doc-full" in out, "полный отчёт не дал карточку"
-    assert "R2=\n" in out, "короткий ответ не должен давать карточку (A.3)"
-    pdfs = list((tmp_path / "visuals").glob("*.pdf"))
-    assert any("doc-full" in p.name for p in pdfs), "PDF карточки не создан"
-    assert not any("doc-short" in p.name for p in pdfs), "пустая карточка создана"
+# Живые прогоны (бинарь 0.30.0) перенесены в tests/test_visual_card_live_proxy.py:
+# с #499 A.5 карточку верстает python-сторона (/render-card-pdf), поэтому
+# сквозной путь проверяется со стаб-сервером на :4000, а честный отказ — без него.

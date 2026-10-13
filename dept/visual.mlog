@@ -387,10 +387,17 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
     return ""
   }
 
-  // Convert to PDF via html_to_pdf
-  let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + svg + "</body></html>"
+  // #499 A.5: PDF верстает python-сторона (/render-card-pdf, pymupdf +
+  // DejaVu Sans) — движковый html_to_pdf физически теряет кириллицу и
+  // срезает вёрстку (см. докстринг RenderCardPdfViaProxy). SVG выше —
+  // источник QA-гейта (заполненность/контраст до отправки).
   let output_path = "visuals/card_" + src_type + "_" + src_id + ".pdf"
-  let _ = html_to_pdf(html, output_path)
+  let rendered = RenderCardPdfViaProxy(output_path, badge, substring(topic, 0.0, 40.0), status, confidence, created_at, verdict, theses, probs, domains, check_date, accent, ink, paper, dim_c, rule)
+  if rendered != "ok" then {
+    // честный отказ: файл не создан — пустой/битый PDF в чат не уходит
+    let _ = AuditLog("card_render_fail", "visual", src_id)
+    return ""
+  }
 
   // Record in visual_artifacts table
   let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["card", src_type, src_id, output_path]))
@@ -753,6 +760,29 @@ pattern GetVisualPath(visual_id: String) -> String {
 // ═════════════════════════════════════════════════════════════════════
 // SLASH COMMANDS — 8 команд из промпта отдела (naryad #379: были keyword-only)
 // ═════════════════════════════════════════════════════════════════════
+
+// ── #499 A.5: рендер PDF-карточки через python-сторону ──────────────
+// Корень прод-дефекта «карточка анализа пустая» (репродукция 13.10 на
+// 0.30.0): движковый html_to_pdf срезает все теги — SVG-примитивы карточки
+// исчезают — и пишет текст сырыми UTF-8-байтами операндом (...) Tj при
+// шрифте /Type1 /Helvetica без /Encoding и без встраивания: кириллица не
+// имеет глифов (извлечение из PDF даёт 0 кириллических символов, рендер —
+// mojibake). Финальную вёрстку делает python: /render-card-pdf (pymupdf +
+// DejaVu Sans из fonts-dejavu-core прод-образа), полный Unicode и тёмная
+// тема FOSVED 360×504. QA-гейт выше остаётся на SVG — он проверяет
+// заполненность/контраст содержания до отправки.
+// Возврат "ok" | "" — при сбое карточка НЕ отправляется (честный отказ
+// вместо пустого/битого файла), сбой журналируется card_render_fail.
+pattern RenderCardPdfViaProxy(fpath: String, badge: String, topic: String, status: String, confidence: String, created_at: String, verdict: String, theses: String, probs: String, domains: String, check_date: String, accent: String, ink: String, paper: String, dim: String, rule: String) -> String {
+  if fpath == "" then { return "" }
+  let body = json_encode({path: fpath, card: {badge: badge, topic: topic, status: status, confidence: confidence, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, accent: accent, ink: ink, paper: paper, dim: dim, rule: rule}})
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/render-card-pdf", body, "application/json", 90.0))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "" }
+  if redact(to_string(json_get(parsed, "status", "")), "all") == "ok" then { return "ok" }
+  return ""
+}
 
 // ── naryad #379: авто-hook Type 3 — карточка завершённого отчёта ──
 // Вызывается из SendReport (dept/miniapp.mlog) для аналитических отделов.

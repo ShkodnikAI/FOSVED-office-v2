@@ -322,6 +322,252 @@ def send_document_endpoint():
     return jsonify({'status': 'ok', 'tg_msg_id': msg_id})
 
 
+# ── #499 A.5: серверная вёрстка PDF-карточки Визуала с кириллицей ────────────
+# Корень прод-дефекта «карточка анализа пустая» (репродукция 13.10 на
+# бинаре 0.30.0, visuals/card_report_doc-full.pdf): движковый html_to_pdf
+# (Rust-first, src/builtins/pdf.rs) срезает ВСЕ теги — SVG-примитивы
+# карточки (плашки, координаты, цвета) исчезают, а текст уходит в content
+# stream сырыми UTF-8-байтами операндом (...) Tj при шрифте /Type1
+# /Helvetica без /Encoding и без встраивания — кириллица не имеет глифов,
+# извлекается и отображается как mojibake (0 кириллических символов).
+# Поэтому финальную вёрстку выполняет python-сторона: pymupdf + DejaVu Sans
+# (fonts-dejavu-core есть в прод-образе, Dockerfile apt-строка 6) — полный
+# Unicode, тёмная тема FOSVED 360×504. mlog присылает структурированные
+# поля карточки (dept/visual.mlog RenderCardPdfViaProxy).
+
+_DEJAVU_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # не годится для body, но лучше, чем ничего
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+)
+
+
+def _find_cyrillic_fontfile() -> str:
+    """Первый доступный TTF с кириллицей; честная ошибка, если в системе нет ни одного."""
+    import glob as _glob
+    for cand in _DEJAVU_CANDIDATES:
+        if os.path.isfile(cand):
+            return cand
+    hits = sorted(_glob.glob("/usr/share/fonts/**/*ejaVuSans*.ttf", recursive=True)) or \
+        sorted(_glob.glob("/usr/share/fonts/**/*iberationSans-Regular*.ttf", recursive=True))
+    if hits:
+        return hits[0]
+    raise RuntimeError("no Cyrillic-capable TTF found (expected fonts-dejavu-core in image)")
+
+
+def _hex_to_rgb01(hex_color: str):
+    """'#rrggbb' → (r, g, b) в 0..1 для pymupdf; мусор → тёмная тема FOSVED."""
+    m = re.fullmatch(r"#([0-9a-fA-F]{6})", str(hex_color or "").strip())
+    if not m:
+        return (0.063, 0.055, 0.067)  # #100e11
+    h = m.group(1)
+    return tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _wrap_pdf_text(text: str, font, size: float, max_width: float, max_lines: int):
+    """Жадный перенос по словам под измеренную ширину глифов; ≤ max_lines строк.
+
+    Перенос независим по абзацам (\n сохраняет разрыв), хвост усечения
+    помечается '…' в последней строке — как CardWrapText в dept/visual.mlog.
+    """
+    lines = []
+    dropped = False
+    for raw_line in str(text or "").split("\n"):
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        cur = ""
+        for word in raw_line.split(" "):
+            word = word.strip()
+            if not word:
+                continue
+            if len(lines) >= max_lines:
+                dropped = True
+                break
+            candidate = word if not cur else cur + " " + word
+            if font.text_length(candidate, fontsize=size) <= max_width:
+                cur = candidate
+                continue
+            if cur:
+                lines.append(cur)
+                cur = ""
+                if len(lines) >= max_lines:
+                    dropped = True
+                    break
+            # одиночное слово шире строки — жёсткая обрезка по глифам
+            while word and font.text_length(word, fontsize=size) > max_width:
+                cut = len(word)
+                while cut > 1 and font.text_length(word[:cut] + "…", fontsize=size) > max_width:
+                    cut -= 1
+                if len(lines) >= max_lines:
+                    dropped = True
+                    break
+                lines.append(word[:cut] + "…")
+                word = word[cut:]
+                dropped = True
+            cur = word
+        if cur and len(lines) < max_lines:
+            lines.append(cur)
+        elif cur:
+            dropped = True
+    lines = lines[:max_lines]
+    if dropped and lines:
+        last = lines[-1]
+        if not last.endswith("…"):
+            while last and font.text_length(last + "…", fontsize=size) > max_width:
+                last = last[:-1]
+            lines[-1] = last + "…"
+    return lines
+
+
+def _render_card_pdf_fitz(card: dict, out_path: str) -> int:
+    """Верстает тёмную карточку 360×504 pt и пишет PDF; возвращает размер файла в байтах.
+
+    Раскладка повторяет SVG-карточку dept/visual.mlog (шапка 72 pt, статус-бар
+    24 pt, тело 96–474, подвал 30 pt), но с настоящим Unicode-шрифтом и
+    переносом по измеренной ширине. Все тексты приходят из mlog уже после
+    redact — здесь повторная цензура не выполняется (один проход, §7 #408).
+    """
+    import fitz  # pymupdf — лениво: нужен только Визуалу
+
+    W, H = 360.0, 504.0
+    accent = _hex_to_rgb01(card.get("accent") or "#c9a961")
+    paper = _hex_to_rgb01(card.get("paper") or "#100e11")
+    ink = _hex_to_rgb01(card.get("ink") or "#ebeaec")
+    dim = _hex_to_rgb01(card.get("dim") or "#908198")
+    rule = _hex_to_rgb01(card.get("rule") or "#312537")
+
+    fontfile = _find_cyrillic_fontfile()
+    font = fitz.Font(fontfile=fontfile)
+    bold_path = str(fontfile).replace("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
+    font_bold = fitz.Font(fontfile=bold_path) if os.path.isfile(bold_path) else font
+
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=W, height=H)
+        # фон — тёмная бумага FOSVED
+        page.draw_rect(fitz.Rect(0, 0, W, H), fill=paper, color=None)
+
+        def put(y_top: float, text: str, size: float, color, bold: bool = False,
+                x: float = 18.0, max_w: float = W - 36.0):
+            """Рисует строку с базовой линией y_top (top-left origin pymupdf, как y в svg_text)."""
+            f = font_bold if bold else font
+            tw = fitz.TextWriter(page.rect)
+            tw.append(fitz.Point(x, y_top), text, font=f, fontsize=size)
+            tw.write_text(page, color=color)
+            return f.text_length(text, fontsize=size)
+
+        # ── шапка 0–72: золотая плашка, бейдж + тема ──
+        page.draw_rect(fitz.Rect(0, 0, W, 72), fill=accent, color=None)
+        badge = str(card.get("badge") or "ОТЧЁТ")[:20]
+        topic = str(card.get("topic") or "")[:80]
+        put(26, badge, 10.0, paper, bold=True)
+        put(52, topic, 13.0, paper, bold=True, max_w=W - 36.0)
+
+        # ── статус-бар 72–96 ──
+        page.draw_rect(fitz.Rect(0, 72, W, 96), fill=rule, color=None)
+        status_line = "Статус: " + str(card.get("status") or "—") + "  |  Уверенность: " + str(card.get("confidence") or "—")
+        put(88, status_line[:120], 8.5, dim)
+
+        # ── тело 96–474 (потолок курсора 452 — не залезаем на подвал) ──
+        y = 114.0
+        verdict = str(card.get("verdict") or "").strip()
+        if verdict and y < 452.0:
+            for row in _wrap_pdf_text("Вердикт: " + verdict, font, 10.0, W - 36.0, 3):
+                put(y, row, 10.0, accent, bold=True)
+                y += 14.0
+            y += 5.0
+        theses = str(card.get("theses") or "").strip()
+        if theses and y < 452.0:
+            put(y, "ТЕЗИСЫ", 8.0, dim, bold=True)
+            y += 13.0
+            for t in theses.split("\n"):
+                t = t.strip()
+                if not t:
+                    continue
+                if y >= 452.0:
+                    break
+                for row in _wrap_pdf_text("• " + t, font, 9.0, W - 36.0, 2):
+                    if y >= 452.0:
+                        break
+                    put(y, row, 9.0, ink)
+                    y += 12.0
+            y += 5.0
+        probs = str(card.get("probs") or "").strip()
+        if probs and y < 452.0:
+            put(y, "ВЕРОЯТНОСТИ СЦЕНАРИЕВ", 8.0, dim, bold=True)
+            y += 13.0
+            for p in probs.split("\n"):
+                p = p.strip()
+                if not p:
+                    continue
+                if y >= 452.0:
+                    break
+                put(y, p[:110], 9.0, ink)
+                y += 12.0
+            y += 5.0
+        domains = str(card.get("domains") or "").strip()
+        if domains and y < 452.0:
+            put(y, "ИСТОЧНИКИ: " + domains, 8.0, dim)
+            y += 12.0
+        check_date = str(card.get("check_date") or "").strip()
+        if check_date and y < 452.0:
+            put(y, check_date[:110], 8.0, dim)
+            y += 12.0
+
+        # ── подвал 474–504 ──
+        page.draw_rect(fitz.Rect(0, H - 30, W, H), fill=accent, color=None)
+        footer = "FOSVED OFFICE | " + str(card.get("created_at") or "")
+        put(H - 12.0, footer[:80], 7.0, paper, bold=True)
+
+        doc.save(out_path, deflate=True)
+    finally:
+        doc.close()
+    return os.path.getsize(out_path)
+
+
+@app.route('/render-card-pdf', methods=['POST'])
+def render_card_pdf_endpoint():
+    """#499 A.5: вёрстка PDF-карточки Визуала с кириллицей (pymupdf + DejaVu).
+
+    Request: {path, card: {badge, topic, status, confidence, created_at,
+    verdict, theses, probs, domains, check_date, accent, ink, paper, dim, rule}}
+    path — относительный (от CWD офиса) или абсолютный, как в /send-document.
+    Returns: {status: 'ok', path, size} | {status: 'error', error}
+    Пустое тело (нет verdict/theses/probs) → 422: пустую карточку не рендерим
+    (A.3) — mlog-гейт дублируется здесь, чтобы «пустой» файл не рождался даже
+    при прямом вызове.
+    """
+    d = request.get_json(force=True) or {}
+    fpath = str(d.get('path', ''))
+    card = d.get('card')
+    if not fpath or not isinstance(card, dict):
+        return jsonify({'status': 'error', 'error': 'path and card are required'}), 400
+    base = Path.cwd().resolve()
+    target = Path(fpath)
+    if not target.is_absolute():
+        target = base / target
+    target = target.resolve()
+    allowed_roots = [base, Path('/tmp')]
+    if not any(str(target).startswith(str(r)) for r in allowed_roots):
+        return jsonify({'status': 'error', 'error': 'path outside allowed roots'}), 403
+    if not any(str(card.get(k) or '').strip() for k in ('verdict', 'theses', 'probs')):
+        return jsonify({'status': 'error', 'error': 'card body is empty (A.3)'}), 422
+    parent = target.parent
+    if not parent.is_dir():
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return jsonify({'status': 'error', 'error': 'cannot create visuals dir: ' + str(e)[:200]}), 500
+    try:
+        size = _render_card_pdf_fitz(card, str(target))
+    except Exception as e:  # noqa: BLE001 — честный 500 с причиной, mlog решает дальнейшее
+        log.error(f"render-card-pdf failed: {e}")
+        return jsonify({'status': 'error', 'error': str(e)[:300]}), 500
+    _log_audit('card_pdf_rendered', {'path': str(target)[:200], 'size': size}, dept='visual')
+    return jsonify({'status': 'ok', 'path': str(target), 'size': size})
+
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  MAIN
