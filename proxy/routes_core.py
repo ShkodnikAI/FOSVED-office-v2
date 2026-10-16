@@ -22,6 +22,7 @@ from proxy.core import (
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting,
     get_secret, set_secret, delete_secret, _has_db_override, INTEGRATIONS_REGISTRY,
     DB_PATH, DB_FILE, BASE_DIR, LIB_DIR, CFG_DIR, API_SECRET, RENDER_URL,
+    _internal_auth_qs,
     TELEGRAM_BOT_TOKEN, TELEGRAM_ARCHIVE_CHANNEL_ID,
     memory, require_telegram, _TG_BOOTSTRAP_PAGE, _verify_init_data, _verify_webhook_secret,
     auto_enrich, _has_enricher, _auto_enrich_fn,
@@ -475,8 +476,9 @@ def _miniapp_refine(doc_id, note_text):
         "Пересчитай отчёт с учётом уточнения — новая версия целиком."
     )
     try:
+        # #517 (FOIP-003.14): токен в query — RequireInternalAuth на /chain/step
         resp = http_requests.post(
-            f"{MLOGSERVE_URL}/chain/step",
+            f"{MLOGSERVE_URL}/chain/step{_internal_auth_qs()}",
             json={"dept": dept, "query": refined_query, "chat_id": owner or "0"},
             timeout=REFINE_TIMEOUT_SECS)
         resp.raise_for_status()

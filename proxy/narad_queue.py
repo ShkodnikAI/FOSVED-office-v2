@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 import requests as http_requests
 
-from proxy.core import _log_audit, _query, log
+from proxy.core import _log_audit, _query, log, _internal_auth_qs
 
 MLOGSERVE_URL = os.environ.get("MLOGSERVE_URL", "http://127.0.0.1:10001")
 STEP_TIMEOUT_SECS = float(os.environ.get("CHAIN_STEP_TIMEOUT_SECS", "90"))
@@ -116,7 +116,8 @@ def build_query(row):
 def _invoke_step(dept, query, chat_id):
     """Мост в mlogserve /chain/step (monkeypatch-friendly, как chain_parallel)."""
     payload = {"dept": dept, "query": query, "chat_id": chat_id, "group_id": f"narad-{chat_id}"}
-    resp = http_requests.post(f"{MLOGSERVE_URL}/chain/step", json=payload, timeout=STEP_TIMEOUT_SECS)
+    # #517 (FOIP-003.14): токен в query — RequireInternalAuth на /chain/step
+    resp = http_requests.post(f"{MLOGSERVE_URL}/chain/step{_internal_auth_qs()}", json=payload, timeout=STEP_TIMEOUT_SECS)
     resp.raise_for_status()
     return str(resp.json().get("result", ""))
 
