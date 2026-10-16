@@ -28,7 +28,7 @@ pattern LegalGateJurisdiction(jx: String) -> String {
 //       → cmd=review    → RedFlagAnalysis
 //       → cmd=riskmap   → RiskMapping
 //       → cmd=verify    → VerifyResult
-//       → cmd=archive   → SearchArchive
+//       → cmd=archive   → LegalSearchArchive
 //       → cmd=score     → LegalScore
 //       → cmd=templates → ListTemplates
 //       → cmd=help      → ShowHelp
@@ -42,7 +42,7 @@ pattern LegalGateJurisdiction(jx: String) -> String {
 //       → [Route by document type]:
 //         → own draft  → ContractDraftingDiscipline  ← Tier 1: drafting
 //         → their draft → RedFlagDetection            ← Tier 1: analysis
-//       → ApplyDisclaimer                ← mandatory: draft + risk map
+//       → LegalApplyDisclaimer                ← mandatory: draft + risk map
 //       → SaveToArchive                  ← db + long docs as files
 //     → RecordAssistantMessage
 //
@@ -68,9 +68,9 @@ pattern LegalGateJurisdiction(jx: String) -> String {
 // SECTION 0: CONSTANTS & DISCLAIMER
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern DISCLAIMER_TOP() -> String { return "DRAFT + RISK MAP. Не финальный юридический документ. Перед подписанием договора на критичные суммы обязательна проверка лицензированным юристом. Knowledge packs могут устареть — для критичных сделок сверяйтесь с актуальной нормативной базой." }
+pattern LegalDisclaimerTop() -> String { return "DRAFT + RISK MAP. Не финальный юридический документ. Перед подписанием договора на критичные суммы обязательна проверка лицензированным юристом. Knowledge packs могут устареть — для критичных сделок сверяйтесь с актуальной нормативной базой." }
 
-pattern DISCLAIMER_BOTTOM() -> String { return "⚠ Данный документ — draft + risk map, подготовленный вспомогательным инструментом, не заменяющим юриста. Все результаты должны быть: 1) проверены лицензированным юристом перед подписанием; 2) сверены с актуальной нормативной базой; 3) использованы как draft + risk map, не финальный документ." }
+pattern LegalDisclaimerBottom() -> String { return "⚠ Данный документ — draft + risk map, подготовленный вспомогательным инструментом, не заменяющим юриста. Все результаты должны быть: 1) проверены лицензированным юристом перед подписанием; 2) сверены с актуальной нормативной базой; 3) использованы как draft + risk map, не финальный документ." }
 
 pattern DEPT() -> String { return "legal" }
 pattern METRIC() -> String { return "pct-clean-signings" }
@@ -790,7 +790,7 @@ pattern RunMonthlyReview() -> String {
 }
 
 // Task 3: Quarterly methodology review
-pattern RunQuarterlyMethodologyReview() -> String {
+pattern LegalQuarterlyMethodologyReview() -> String {
   let rows = db_execute(
     "SELECT SUM(predictable_rewrites_count) as total_predictable, SUM(total_assessments) as total FROM legal_monthly_reviews WHERE created_at >= datetime('now') - INTERVAL '90 days'",
     []
@@ -848,7 +848,7 @@ pattern QuickNDA(query: String, chat_id: String) -> String {
 
   let result = NdaMslaSlaTemplates(DT_NDA(), jx, bf, chat_id)
   let final = EnforceRule6_DraftOnlyMarker(result)
-  let withDisclaimer = ApplyDisclaimer(final)
+  let withDisclaimer = LegalApplyDisclaimer(final)
   return withDisclaimer
 }
 
@@ -865,7 +865,7 @@ pattern QuickMSA(query: String, chat_id: String) -> String {
   let riskMap = RiskMappingProtocol("MSA для " + jx + "/" + bf, jx, bf, "", chat_id)
   let draft = ContractDraftingDiscipline(riskMap, jx, bf, "", "", DT_MSA(), chat_id)
   let final = EnforceRule6_DraftOnlyMarker(draft)
-  let withDisclaimer = ApplyDisclaimer(final)
+  let withDisclaimer = LegalApplyDisclaimer(final)
   return withDisclaimer
 }
 
@@ -883,7 +883,7 @@ pattern RedFlagAnalysis(query: String, chat_id: String) -> String {
 
   let result = RedFlagDetection(query, jx, bf, position, chat_id)
   let final = EnforceRule6_DraftOnlyMarker(result)
-  let withDisclaimer = ApplyDisclaimer(final)
+  let withDisclaimer = LegalApplyDisclaimer(final)
   return withDisclaimer
 }
 
@@ -899,7 +899,7 @@ pattern RiskMapping(query: String, chat_id: String) -> String {
 
   let result = RiskMappingProtocol(query, jx, bf, cpJx, chat_id)
   let final = EnforceRule7_CrossJurisdictionCheck(jx, cpJx, result)
-  let withDisclaimer = ApplyDisclaimer(final)
+  let withDisclaimer = LegalApplyDisclaimer(final)
   return withDisclaimer
 }
 
@@ -928,7 +928,7 @@ pattern VerifyResult(query: String) -> String {
   return result
 }
 
-pattern SearchArchive(filter: String) -> String {
+pattern LegalSearchArchive(filter: String) -> String {
   let rows = db_execute(
     "SELECT id, short_title, document_type, status, jurisdiction, risk_level, created_at FROM legal_assessments WHERE short_title ILIKE '%' || ? || '%' ORDER BY created_at DESC LIMIT 10",
     [filter]
@@ -970,12 +970,12 @@ pattern ListTemplates() -> String {
 // SECTION 14: DISCLAIMER WRAPPER & ARCHIVE
 // ═══════════════════════════════════════════════════════════════════════
 
-pattern ApplyDisclaimer(text: String) -> String {
-  return text + "\n\n" + DISCLAIMER_BOTTOM()
+pattern LegalApplyDisclaimer(text: String) -> String {
+  return text + "\n\n" + LegalDisclaimerBottom()
 }
 
 pattern SaveToLegalArchive(shortTitle: String, fullResult: String, docType: String, jx: String, bf: String, cpJx: String, cpBf: String, riskLevel: String, confidence: String, chat_id: String) -> String {
-  let resultWithDisclaimer = ApplyDisclaimer(fullResult)
+  let resultWithDisclaimer = LegalApplyDisclaimer(fullResult)
 
   let _ = db_execute(
     "INSERT INTO legal_assessments (short_title, full_result, document_type, status, jurisdiction, business_form, counterparty_jurisdiction, counterparty_form, risk_level, confidence, created_at, updated_at) VALUES (?, ?, ?, 'published', ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
@@ -1106,7 +1106,7 @@ pattern FullLegalPipeline(query: String, chat_id: String, intent: String) -> Str
   let final = EnforceRule7_CrossJurisdictionCheck(jx, cpJx, final)
 
   // Step 4: Disclaimer
-  let withDisclaimer = ApplyDisclaimer(final)
+  let withDisclaimer = LegalApplyDisclaimer(final)
 
   // Step 5: Save to archive
   let shortTitle = substring(query, 0.0, 80.0)
@@ -1182,7 +1182,7 @@ pattern HandleLegal(query: String, chat_id: String) -> String {
     let filter = ""
     let parts = split(query, " ")
     if length(parts) >= 2 then { let filter = join(slice(parts, 1, length(parts)), " ") }
-    let reply = SearchArchive(filter)
+    let reply = LegalSearchArchive(filter)
     let _ = RecordAssistantMessage(chat_id, dept, reply)
     return reply
   }
