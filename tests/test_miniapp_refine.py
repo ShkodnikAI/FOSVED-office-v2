@@ -126,7 +126,7 @@ def test_refine_calls_existing_chain_step(client, doc_id, fake_dispatch):
     assert r.status_code == 200, r.get_data(as_text=True)
     assert len(fake_dispatch["chain"]) == 1
     call = fake_dispatch["chain"][0]
-    assert call["url"].endswith("/chain/step"), "диспетчеризация только через существующий /chain/step"
+    assert call["url"].split("?", 1)[0].endswith("/chain/step"), "диспетчеризация только через существующий /chain/step"
     body = call["json"]
     assert body["dept"] == "osp" and body["chat_id"] == "12345"
     q = body["query"]

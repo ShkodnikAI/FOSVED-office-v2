@@ -494,6 +494,22 @@ def _log_audit(action, details_dict, dept="system"):
     _query("INSERT INTO audit_log (action,actor,dept,details,status) VALUES (?,'proxy',?,?,'ok')",
            (action, dept, json.dumps(details_dict, ensure_ascii=False)))
 
+
+def _internal_auth_qs():
+    """#517 (FOIP-003.14): query-string токена для внутренних вызовов
+    mlogserve (/chain/step — chain_parallel, narad_queue, miniapp refine).
+
+    RequireInternalAuth (app.mlog:754) ждёт токен в query_param("token")
+    и сравнивает hash_only. env читается НА ВЫЗОВ (тестируемо через
+    monkeypatch.setenv). Пустой env → "" — auth-off по замыслу
+    FOIP-003.14 (expected == "" → "ok"), совместимо с dev-стендами.
+    """
+    token = os.environ.get("INTERNAL_API_TOKEN", "")
+    if not token:
+        return ""
+    import urllib.parse
+    return "?token=" + urllib.parse.quote(token, safe="")
+
 # ── FO-007: error_log и гигиена журналов (issue #67) ────────────────────
 # Политика: молчаливый except запрещён (CI-проверка: scripts/check_silent_excepts.py).
 # Ошибки внешних вызовов и потери данных → error_log (через _log_error);
