@@ -274,11 +274,31 @@ MLOG_PID=$!
 echo "Metalogos started (PID: $MLOG_PID, bin: $MLOG_BIN, entry: $MLOG_SERVE_FILE)"
 sleep 3
 
-for i in {1..10}; do
-  curl -sf http://127.0.0.1:10001/ && break
-  echo "Waiting for Metalogos... ($i)"
-  sleep 2
+# ── Наряд #520: ожидание готовности mlog serve до /health (200) ────────────
+# На 0.32.0 старт занимает ~57 с (прод-лог 16.10: первый запрос 02:59:24,
+# «listening» 03:00:21), прежнее окно 10×2 с = 20 с гарантированно рвало
+# бут: bootstrap расписаний получал conn-fail ×3 («native schedules NOT
+# registered»), стартовые проверки печатали FAIL без причины. Ждём до
+# готовности /health; попытки/интервал/граница — в переменных; таймаут —
+# громкий выход (§445 A.2): полумёртвый бут без расписаний хуже рестарта.
+MLOG_BOOT_WAIT_SECS="${MLOG_BOOT_WAIT_SECS:-180}"
+MLOG_BOOT_POLL_SECS="${MLOG_BOOT_POLL_SECS:-2}"
+MLOG_BOOT_DEADLINE=$(( $(date +%s) + MLOG_BOOT_WAIT_SECS ))
+MLOG_BOOT_READY=0
+while [ "$(date +%s)" -lt "$MLOG_BOOT_DEADLINE" ]; do
+  if curl -sf --max-time 5 "http://127.0.0.1:10001/health" >/dev/null 2>&1; then
+    MLOG_BOOT_READY=1
+    break
+  fi
+  echo "Waiting for Metalogos /health... (deadline ${MLOG_BOOT_WAIT_SECS}s)"
+  sleep "$MLOG_BOOT_POLL_SECS"
 done
+if [ "$MLOG_BOOT_READY" != "1" ]; then
+  echo "!!! Metalogos did not become healthy within ${MLOG_BOOT_WAIT_SECS}s (naryad #520) — aborting boot (§445 A.2), Render restarts the container"
+  kill "$MLOG_PID" 2>/dev/null || true
+  exit 1
+fi
+echo "Metalogos healthy — /health 200 (naryad #520 wait loop done)"
 
 # ── Наряд №419: бутстрап реестра заданий (только на пути кандидата) ────────
 # Реестр dept/schedules.mlog → нативный стор cron (идемпотентно по target).
