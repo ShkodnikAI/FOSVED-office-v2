@@ -353,18 +353,32 @@ jobs:
     needs: [pytest, error-hygiene, mlog-check, version-check, docker-build, smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - name: Trigger Render deploy hook
+      - name: Trigger Render deploy hook (pinned to github.sha — #524 A.2/A.3)
         env:
           RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
           if [ -z "$RENDER_DEPLOY_HOOK" ]; then
-            echo "::warning::Секрет RENDER_DEPLOY_HOOK не задан (#500 A.3 — действие владельца: Render → Settings → Deploy Hook → GitHub Secrets). Гейт не активен, работает прежний авто-деплой; Auto-Deploy выключается владельцем ПОСЛЕ проверки A.4."
-            exit 0
+            echo "::error::Секрет RENDER_DEPLOY_HOOK не задан (#500 A.3 — действие владельца: Render → Settings → Deploy Hook → GitHub Secrets). Деплой НЕ выполнен. Наряд #524 A.1: зелёного статуса без деплоя больше нет — джоба падает, notify-red уведомит владельца."
+            exit 1
           fi
           echo "Все блокирующие джобы зелёные — деплой коммита $COMMIT_SHA по хуку"
-          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
-          echo "OK: Render deploy hook принят"
+          # #524 A.2: Render деплоит по умолчанию HEAD ветки, а не проверенный
+          # коммит. Параметр ref хука задаёт коммит — сверено с документацией:
+          # docs.render.com/deploy-hooks, раздел «Deploying a specific Git commit»:
+          # "You can specify a commit SHA to deploy by appending the ref query
+          # parameter to your deploy hook URL" (404-кейс подтверждает: SHA ищется
+          # в связанном репозитории). Хук-URL всегда содержит ?key=, дописываем &ref=.
+          RESP=$(curl -fsS -X POST "${RENDER_DEPLOY_HOOK}&ref=${COMMIT_SHA}")
+          echo "$RESP"
+          # #524 A.3: ответ хука содержит id деплоя — логируем и проверяем,
+          # что Render принял деплой проверенного коммита
+          DEPLOY_ID=$(printf '%s' "$RESP" | python3 -c "import json,sys;\nprint(json.load(sys.stdin).get('deploy',{}).get('id',''))" 2>/dev/null || true)
+          if [ -z "$DEPLOY_ID" ]; then
+            echo "::error::Ответ хука без deploy.id — Render мог не принять деплой (#524 A.3). Ответ выше."
+            exit 1
+          fi
+          echo "OK: Render принял деплой ${DEPLOY_ID} коммита ${COMMIT_SHA} (#524 A.3)"
 
   # ── #500 A.2: уведомление владельца о красном коммите в main ─────────
   # Джоба стартует, если ХОТЯ БЫ одна блокирующая джоба упала (needs + if:
@@ -372,7 +386,7 @@ jobs:
   notify-red:
     name: Notify owner (red commit)
     runs-on: ubuntu-latest
-    needs: [pytest, error-hygiene, mlog-check, version-check, docker-build, smoke]
+    needs: [pytest, error-hygiene, mlog-check, version-check, docker-build, smoke, deploy]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && failure()
     steps:
       - name: Telegram message to owner
