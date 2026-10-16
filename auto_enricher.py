@@ -66,7 +66,6 @@ def render_metrics_html(metrics):
     if len(metrics) < 2:
         return ''
 
-    cols = min(len(metrics), 3)
     cards = ''
     for m in metrics:
         cards += f'''<div class="metric-card">
@@ -74,7 +73,10 @@ def render_metrics_html(metrics):
   <div class="metric-label">{html_lib.escape(m['label'])}</div>
 </div>\n'''
 
-    return f'<div class="metrics-grid" style="grid-template-columns:repeat({cols},1fr)">{cards}</div>\n'
+    # #512: авто-колонки вместо жёсткого repeat(N,1fr) — inline-грид с min-content
+    # шире вьюпорта выталкивал страницу за габариты в Telegram (репродукция:
+    # doc.scrollWidth=438 при 320–390px). auto-fit minmax сжимается до 1 колонки.
+    return f'<div class="metrics-grid">{cards}</div>\n'
 
 
 # ═══════════════════════════════════════════
@@ -463,7 +465,8 @@ def render_osint_results(osint_data):
     total = osint_data.get('total_scanned', 0)
 
     # Metrics
-    metrics_html = f'''<div class="metrics-grid" style="grid-template-columns:1fr 1fr 1fr">
+    # #512: авто-колонки — как в render_metrics_html (см. комментарий там)
+    metrics_html = f'''<div class="metrics-grid">
   <div class="metric-card"><div class="metric-value" style="color:#3D6B2C">{found}</div><div class="metric-label">Найдено</div></div>
   <div class="metric-card"><div class="metric-value" style="color:#9C6B0B">{maybe}</div><div class="metric-label">Под вопросом</div></div>
   <div class="metric-card"><div class="metric-value" style="color:#6B6558">{total}</div><div class="metric-label">Просканировано</div></div>
