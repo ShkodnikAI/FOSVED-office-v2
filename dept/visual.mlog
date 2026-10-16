@@ -341,11 +341,12 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
 
   // #499 A.1: выборка разделов — вердикт/вывод, ключевые тезисы,
   // вероятности сценариев (если есть), источники-домены, дата проверки
-  let verdict = CardSectionLine(body_text, "ердикт", 90.0)
-  let theses = CardCollectTheses(body_text, 4.0, 96.0)
-  let probs = CardCollectProbs(body_text, 3.0, 46.0)
+  let mut verdict = CardSectionLine(body_text, "ердикт", 90.0)
+  let mut theses = CardCollectTheses(body_text, 4.0, 96.0)
+  let mut probs = CardCollectProbs(body_text, 3.0, 46.0)
   let domains = CardCollectDomains(body_text, 3.0)
   let check_date = CardSectionLine(body_text, "роверка прогноза", 70.0)
+  let mut terms = ""
 
   // #521 A.2: строка вероятности не должна дублировать уже выбранный тезис —
   // фильтр по 30-символьной голове строки
@@ -359,6 +360,57 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
     }
   }
   let probs = trim(probs_f)
+
+  // ── #522 A.3: карточка простым языком — решение владельца 16.10 ──
+  // Python /card-summary делает один дешёвый вызов LLM и валидирует ответ
+  // (числа только из отчёта, жаргон стоп-листа отброшен). raw_text —
+  // недоверенные данные: запрет исполнять инструкции из текста — в промпте.
+  // Сбой/таймаут/невалидный JSON — честный фолбэк: детерминированный
+  // разбор выше остаётся рабочим путём #521. Источник текста — в audit.
+  let mut plain_ok = false
+  let cs_raw = TryVal(try http_post("http://127.0.0.1:4000/card-summary", json_encode({raw_text: body_text}), "application/json", 120.0))
+  if to_string(cs_raw) != "()" then {
+    let cs = TryVal(try parse_json(to_string(cs_raw)))
+    if to_string(cs) != "()" then {
+      if redact(to_string(json_get(cs, "status", "")), "all") == "ok" then {
+        // дефолт cs: ключа нет → доступ к полям даст дефолты, фолбэк честный
+        let sum = json_get(cs, "summary", cs)
+        let pv = redact(to_string(json_get(sum, "verdict", "")), "all")
+        let th_arr = json_get(sum, "theses", [])
+        let mut pt = ""
+        each t in th_arr {
+          let tt = redact(to_string(t), "all")
+          if tt != "" then { let pt = pt + tt + "\n" }
+        }
+        let pt = trim(pt)
+        let sc_arr = json_get(sum, "scenarios", [])
+        let mut ps = ""
+        each s in sc_arr {
+          let sn = redact(to_string(json_get(s, "name", "")), "all")
+          let sp = redact(to_string(json_get(s, "prob", "")), "all")
+          if sn != "" and sp != "" then { let ps = ps + sn + " — " + sp + "\n" }
+        }
+        let ps = trim(ps)
+        let te_arr = json_get(sum, "terms_explained", [])
+        let mut pte = ""
+        each te in te_arr {
+          let tee = redact(to_string(te), "all")
+          if tee != "" then { let pte = pte + tee + "\n" }
+        }
+        let pte = trim(pte)
+        if pv != "" or pt != "" or ps != "" then {
+          let plain_ok = true
+          let verdict = pv
+          let theses = pt
+          let probs = ps
+          let terms = pte
+        }
+      }
+    }
+  }
+  let mut src_label = "parsed"
+  if plain_ok then { let src_label = "plain" }
+  let _ = AuditLog("card_text_source", "visual", src_id + ": " + src_label)
 
   // #499 A.3: нет содержимого — короткий ответ без структуры — карточка
   // не отправляется вовсе (а не слалась пустая)
@@ -458,6 +510,19 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
     }
     let y = y + 5.0
   }
+  // #522 A.1: термины простым языком — раньше доменов и даты (важнее)
+  if terms != "" and y < 356.0 then {
+    let frag = frag + svg_text(18.0, y, "ПРОСТЫМ ЯЗЫКОМ", 8.0, dim_c)
+    let y = y + 13.0
+    each te in split(terms, "\n") {
+      let tee = trim(to_string(te))
+      if tee != "" and y < 356.0 then {
+        let frag = frag + svg_text(18.0, y, substring(tee, 0.0, 50.0), 9.0, ink)
+        let y = y + 12.0
+      }
+    }
+    let y = y + 5.0
+  }
   if domains != "" and y < 356.0 then {
     let frag = frag + svg_text(18.0, y, "ИСТОЧНИКИ: " + domains, 8.0, dim_c)
     let y = y + 12.0
@@ -484,7 +549,7 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   // срезает вёрстку (см. докстринг RenderCardPdfViaProxy). SVG выше —
   // источник QA-гейта (заполненность/контраст до отправки).
   let output_path = "visuals/card_" + src_type + "_" + src_id + ".pdf"
-  let rendered = RenderCardPdfViaProxy(output_path, badge, CardCleanLine(topic), status, conf_label, created_at, verdict, theses, probs, domains, check_date, accent, ink, paper, dim_c, rule)
+  let rendered = RenderCardPdfViaProxy(output_path, badge, CardCleanLine(topic), status, conf_label, created_at, verdict, theses, probs, domains, check_date, terms, accent, ink, paper, dim_c, rule)
   if rendered != "ok" then {
     // честный отказ: файл не создан — пустой/битый PDF в чат не уходит
     let _ = AuditLog("card_render_fail", "visual", src_id)
@@ -865,9 +930,9 @@ pattern GetVisualPath(visual_id: String) -> String {
 // заполненность/контраст содержания до отправки.
 // Возврат "ok" | "" — при сбое карточка НЕ отправляется (честный отказ
 // вместо пустого/битого файла), сбой журналируется card_render_fail.
-pattern RenderCardPdfViaProxy(fpath: String, badge: String, topic: String, status: String, confidence: String, created_at: String, verdict: String, theses: String, probs: String, domains: String, check_date: String, accent: String, ink: String, paper: String, dim: String, rule: String) -> String {
+pattern RenderCardPdfViaProxy(fpath: String, badge: String, topic: String, status: String, confidence: String, created_at: String, verdict: String, theses: String, probs: String, domains: String, check_date: String, terms: String, accent: String, ink: String, paper: String, dim: String, rule: String) -> String {
   if fpath == "" then { return "" }
-  let body = json_encode({path: fpath, card: {badge: badge, topic: topic, status: status, confidence: confidence, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, accent: accent, ink: ink, paper: paper, dim: dim, rule: rule}})
+  let body = json_encode({path: fpath, card: {badge: badge, topic: topic, status: status, confidence: confidence, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, terms: terms, accent: accent, ink: ink, paper: paper, dim: dim, rule: rule}})
   let resp = TryVal(try http_post("http://127.0.0.1:4000/render-card-pdf", body, "application/json", 90.0))
   if to_string(resp) == "()" then { return "" }
   let parsed = TryVal(try parse_json(to_string(resp)))
