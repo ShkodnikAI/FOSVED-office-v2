@@ -79,20 +79,70 @@ pattern SendVisualDocument(chat_id: String, fpath: String, caption: String) -> S
 // Первая строка текста, содержащая marker (маркер вырезается), обрезанная
 // до max_len; пустая строка, если раздела нет. Для «Вердикт: …» и даты
 // проверки прогноза.
+// #521 A.1: общая чистка строки карточки — сырая разметка markdown и
+// ведущие маркеры списков/цитат/заголовков не должны попадать в SVG/PDF.
+// Применяется ко всем текстовым полям: вердикт, тезисы, вероятности,
+// дата проверки, заголовок.
+pattern CardCleanLine(raw: String) -> String {
+  let s = trim(to_string(raw))
+  let s = replace(replace(replace(s, "**", ""), "__", ""), "`", "")
+  let s = trim(s)
+  if starts_with(s, "#") then { let s = trim(substring(s, 1.0, length(s))) }
+  if starts_with(s, ">") then { let s = trim(substring(s, 1.0, length(s))) }
+  if starts_with(s, "- ") then { let s = trim(substring(s, 2.0, length(s))) }
+  if starts_with(s, "• ") then { let s = trim(substring(s, 2.0, length(s))) }
+  if starts_with(s, "•") then { let s = trim(substring(s, 1.0, length(s))) }
+  if starts_with(s, "#") then { let s = trim(substring(s, 1.0, length(s))) }
+  return s
+}
+
+// #521 A.5: понятный вид уверенности. Семантика поля:
+// mlog-нативные записи — шкала 0..4 (dept/miniapp.mlog:152 — "Confidence: X/4"),
+// python-записи _save_generated_report — low/medium/high.
+// Число переводится в слово; строка low/medium/high — тоже; пустое — пусто.
+pattern CardConfLabel(raw: String) -> String {
+  let s = trim(to_string(raw))
+  if s == "" then { return "" }
+  let ls = lower(s)
+  if ls == "low" then { return "низкая" }
+  if ls == "medium" then { return "средняя" }
+  if ls == "high" then { return "высокая" }
+  if contains("0123456789.", substring(s, 0.0, 1.0)) then {
+    let f = to_float(s)
+    if f >= 3.0 then { return "высокая" }
+    if f >= 1.5 then { return "средняя" }
+    return "низкая"
+  }
+  return s
+}
+
 pattern CardSectionLine(body_text: String, marker: String, max_len: Float) -> String {
   let lines = split(body_text, "\n")
   let mut found = ""
+  let mut take_next = false
   each ln in lines {
     let s = trim(to_string(ln))
     if found != "" then { }
     else {
-      if contains(s, marker) then {
-        let cut = index_of(s, marker)
-        let rest = trim(substring(s, cut + length(marker), length(s)))
-        if starts_with(rest, ":") or starts_with(rest, " — ") or starts_with(rest, "— ") then {
-          let rest = trim(substring(rest, 1.0, length(rest)))
+      if take_next then {
+        // #521 A.3: маркер в заголовке — текст на следующей непустой строке
+        if s != "" then {
+          if starts_with(s, "#") then { }
+          else { let found = substring(CardCleanLine(s), 0.0, max_len) }
         }
-        let found = substring(rest, 0.0, max_len)
+      } else {
+        if contains(s, marker) then {
+          let cut = index_of(s, marker)
+          let rest = trim(substring(s, cut + length(marker), length(s)))
+          if starts_with(rest, ":") or starts_with(rest, " — ") or starts_with(rest, "— ") then {
+            let rest = trim(substring(rest, 1.0, length(rest)))
+          }
+          if rest == "" then {
+            let take_next = true
+          } else {
+            let found = substring(CardCleanLine(rest), 0.0, max_len)
+          }
+        }
       }
     }
   }
@@ -113,9 +163,8 @@ pattern CardCollectTheses(body_text: String, max_theses: Float, max_len: Float) 
         let mut clean = s
         let clean = replace(replace(replace(clean, "[ИНТЕРПРЕТАЦИЯ]", ""), "[ФАКТ]", ""), "[СПЕКУЛЯЦИЯ]", "")
         let clean = replace(replace(clean, "[INTERPRETATION]", ""), "[FACT]", "")
-        if starts_with(clean, "•") then { let clean = trim(substring(clean, 1.0, length(clean))) }
-        if starts_with(clean, "- ") then { let clean = trim(substring(clean, 2.0, length(clean))) }
-        let clean = trim(clean)
+        // #521 A.1: сырая разметка и ведущие маркеры — через общую чистку
+        let clean = CardCleanLine(clean)
         if length(clean) > 3.0 then {
           let n = n + 1.0
           let out = out + substring(clean, 0.0, max_len) + "\n"
@@ -126,21 +175,35 @@ pattern CardCollectTheses(body_text: String, max_theses: Float, max_len: Float) 
   return out
 }
 
-// Строки вероятностей сценариев (проценты или слово «вероятност»),
-// до max_lines штук, каждая до max_len. Разделитель \n.
+// Строки вероятностей сценариев: ТОЛЬКО внутри раздела сценариев —
+// от заголовка со словами «сценари»/«вероятност» до следующего заголовка
+// #521 A.2 — и только строки с процентом; без раздела — пусто, тезисы
+// и обрывки дисклеймеров больше не подставляются.
 pattern CardCollectProbs(body_text: String, max_lines: Float, max_len: Float) -> String {
   let lines = split(body_text, "\n")
   let mut out = ""
   let mut n = 0.0
+  let mut in_section = false
   each ln in lines {
     let s = trim(to_string(ln))
-    if n >= max_lines then { }
-    else {
+    if starts_with(s, "#") then {
+      let ls = lower(s)
+      if contains(ls, "ценари") or contains(ls, "ероятност") then {
+        let in_section = true
+      } else {
+        let in_section = false
+      }
+    } else {
       if s == "" then { }
       else {
-        if contains(s, "%") or contains(s, "ероятност") then {
-          let n = n + 1.0
-          let out = out + substring(s, 0.0, max_len) + "\n"
+        if in_section and n < max_lines then {
+          if contains(s, "%") then {
+            let clean = CardCleanLine(s)
+            if length(clean) > 3.0 then {
+              let n = n + 1.0
+              let out = out + substring(clean, 0.0, max_len) + "\n"
+            }
+          }
         }
       }
     }
@@ -284,6 +347,19 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   let domains = CardCollectDomains(body_text, 3.0)
   let check_date = CardSectionLine(body_text, "роверка прогноза", 70.0)
 
+  // #521 A.2: строка вероятности не должна дублировать уже выбранный тезис —
+  // фильтр по 30-символьной голове строки
+  let mut probs_f = ""
+  each p in split(probs, "\n") {
+    let pp = trim(to_string(p))
+    if pp != "" then {
+      let head = substring(pp, 0.0, 30.0)
+      if length(pp) >= 30.0 and contains(theses, head) then { }
+      else { let probs_f = probs_f + pp + "\n" }
+    }
+  }
+  let probs = trim(probs_f)
+
   // #499 A.3: нет содержимого — короткий ответ без структуры — карточка
   // не отправляется вовсе (а не слалась пустая)
   if verdict == "" and theses == "" and probs == "" then {
@@ -307,12 +383,28 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   let dim_c = redact(to_string(json_get(style, "muted", "#908198")), "all")
   let rule = redact(to_string(json_get(style, "rule", "#312537")), "all")
 
-  // Card canvas 360×504
-  let header = svg_group([svg_rect(0.0, 0.0, 360.0, 72.0, accent, accent) +
-    svg_text(18.0, 24.0, badge, 10.0, paper) +
-    svg_text(18.0, 48.0, substring(topic, 0.0, 40.0), 14.0, paper)], "translate(0.0,0.0)")
+  // ── шапка 0–72: бейдж + тема в две строки ──
+  // #521 A.4: заголовок чистится и переносится по ширине с многоточием
+  // на границе слова, а не обрезается посреди слова substring(topic, 0, 40)
+  let title_rows = split(CardWrapText(CardCleanLine(topic), 26.0, 2.0), "\n")
+  let mut title_frag = svg_text(18.0, 24.0, badge, 10.0, paper)
+  let mut ty = 44.0
+  each trow in title_rows {
+    let tr = trim(to_string(trow))
+    if tr != "" then {
+      let title_frag = title_frag + svg_text(18.0, ty, tr, 14.0, paper)
+      let ty = ty + 16.0
+    }
+  }
+  let header = svg_group([svg_rect(0.0, 0.0, 360.0, 72.0, accent, accent) + title_frag], "translate(0.0,0.0)")
+
+  // ── статус-бар 72–96 ──
+  // #521 A.5: служебный «Статус: sent» убран; уверенность — понятным словом
+  let conf_label = CardConfLabel(confidence)
+  let mut status_text = "Уверенность: " + conf_label
+  if conf_label == "" then { let status_text = "" }
   let status_bar = svg_group([svg_rect(0.0, 0.0, 360.0, 24.0, rule, rule) +
-    svg_text(18.0, 16.0, "Статус: " + status + "  |  Уверенность: " + confidence, 9.0, dim_c)], "translate(0.0,72.0)")
+    svg_text(18.0, 16.0, status_text, 9.0, dim_c)], "translate(0.0,72.0)")
   let footer = svg_group([svg_rect(0.0, 0.0, 360.0, 30.0, accent, accent) +
     svg_text(18.0, 18.0, "FOSVED OFFICE | " + created_at, 7.0, paper)], "translate(0.0,474.0)")
 
@@ -392,7 +484,7 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   // срезает вёрстку (см. докстринг RenderCardPdfViaProxy). SVG выше —
   // источник QA-гейта (заполненность/контраст до отправки).
   let output_path = "visuals/card_" + src_type + "_" + src_id + ".pdf"
-  let rendered = RenderCardPdfViaProxy(output_path, badge, substring(topic, 0.0, 40.0), status, confidence, created_at, verdict, theses, probs, domains, check_date, accent, ink, paper, dim_c, rule)
+  let rendered = RenderCardPdfViaProxy(output_path, badge, CardCleanLine(topic), status, conf_label, created_at, verdict, theses, probs, domains, check_date, accent, ink, paper, dim_c, rule)
   if rendered != "ok" then {
     // честный отказ: файл не создан — пустой/битый PDF в чат не уходит
     let _ = AuditLog("card_render_fail", "visual", src_id)

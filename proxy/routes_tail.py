@@ -457,17 +457,24 @@ def _render_card_pdf_fitz(card: dict, out_path: str) -> int:
             tw.write_text(page, color=color)
             return f.text_length(text, fontsize=size)
 
-        # ── шапка 0–72: золотая плашка, бейдж + тема ──
+        # ── шапка 0–72: золотая плашка, бейдж + тема в две строки ──
+        # #521 A.4: перенос по ширине с «…» на границе слова, не обрезка посреди слова
         page.draw_rect(fitz.Rect(0, 0, W, 72), fill=accent, color=None)
         badge = str(card.get("badge") or "ОТЧЁТ")[:20]
-        topic = str(card.get("topic") or "")[:80]
+        topic = str(card.get("topic") or "")
         put(26, badge, 10.0, paper, bold=True)
-        put(52, topic, 13.0, paper, bold=True, max_w=W - 36.0)
+        ty = 44.0
+        for row in _wrap_pdf_text(topic, font_bold, 13.0, W - 36.0, 2):
+            put(ty, row, 13.0, paper, bold=True)
+            ty += 16.0
 
         # ── статус-бар 72–96 ──
+        # #521 A.5: служебный статус убран; уверенность приходит словом из mlog
+        # (CardConfLabel: числовая шкала 0..4 и low/medium/high — низкая/средняя/высокая)
         page.draw_rect(fitz.Rect(0, 72, W, 96), fill=rule, color=None)
-        status_line = "Статус: " + str(card.get("status") or "—") + "  |  Уверенность: " + str(card.get("confidence") or "—")
-        put(88, status_line[:120], 8.5, dim)
+        conf_label = str(card.get("confidence") or "").strip()
+        if conf_label:
+            put(88, "Уверенность: " + conf_label, 8.5, dim)
 
         # ── тело 96–474 (потолок курсора 452 — не залезаем на подвал) ──
         y = 114.0
