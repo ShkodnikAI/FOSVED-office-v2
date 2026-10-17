@@ -495,20 +495,23 @@ def _log_audit(action, details_dict, dept="system"):
            (action, dept, json.dumps(details_dict, ensure_ascii=False)))
 
 
-def _internal_auth_qs():
-    """#517 (FOIP-003.14): query-string токена для внутренних вызовов
-    mlogserve (/chain/step — chain_parallel, narad_queue, miniapp refine).
+def _internal_auth_headers():
+    """#536 A.2 (эволюция #517 FOIP-003.14): заголовок X-Internal-Token для
+    внутренних вызовов mlogserve (/chain/step — chain_parallel, narad_queue,
+    miniapp refine).
 
-    RequireInternalAuth (app.mlog:754) ждёт токен в query_param("token")
-    и сравнивает hash_only. env читается НА ВЫЗОВ (тестируемо через
-    monkeypatch.setenv). Пустой env → "" — auth-off по замыслу
-    FOIP-003.14 (expected == "" → "ok"), совместимо с dev-стендами.
+    Токен больше не ходит в URL: исключение requests содержит URL целиком,
+    и _log_error писал значение токена в журнал открытым текстом (401-лог
+    Render 02:46:55 UTC, утечка #536). RequireInternalAuth (app.mlog:754)
+    читает request_header("X-Internal-Token") и сравнивает ct_eq.
+    env читается НА ВЫЗОВ (тестируемо через monkeypatch.setenv). Пустой env →
+    {} — auth-off по замыслу FOIP-003.14 (expected == "" → "ok"),
+    совместимо с dev-стендами.
     """
     token = os.environ.get("INTERNAL_API_TOKEN", "")
     if not token:
-        return ""
-    import urllib.parse
-    return "?token=" + urllib.parse.quote(token, safe="")
+        return {}
+    return {"X-Internal-Token": token}
 
 # ── FO-007: error_log и гигиена журналов (issue #67) ────────────────────
 # Политика: молчаливый except запрещён (CI-проверка: scripts/check_silent_excepts.py).

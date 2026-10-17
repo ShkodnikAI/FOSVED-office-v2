@@ -37,7 +37,7 @@ import requests as http_requests
 
 from flask import request, jsonify
 
-from proxy.core import app, _log_audit, _log_error, log, _internal_auth_qs
+from proxy.core import app, _log_audit, _log_error, log, _internal_auth_headers
 
 MLOGSERVE_URL = "http://127.0.0.1:10001"
 STEP_TIMEOUT_SECS = float(os.environ.get("CHAIN_STEP_TIMEOUT_SECS", "90"))
@@ -56,8 +56,9 @@ def _invoke_step(dept, query, chat_id, group_id, round_no=1, peer_context=None):
                "group_id": group_id, "round": round_no}
     if peer_context:
         payload["peer_context"] = peer_context
-    # #517 (FOIP-003.14): токен в query — RequireInternalAuth на /chain/step
-    resp = http_requests.post(f"{MLOGSERVE_URL}/chain/step{_internal_auth_qs()}", json=payload, timeout=STEP_TIMEOUT_SECS)
+    # #536 A.2 (эволюция #517): токен — в заголовке X-Internal-Token, не в URL
+    # (query-токен утекал в журнал через текст исключений requests)
+    resp = http_requests.post(f"{MLOGSERVE_URL}/chain/step", json=payload, headers=_internal_auth_headers(), timeout=STEP_TIMEOUT_SECS)
     resp.raise_for_status()
     data = resp.json()
     return str(data.get("result", ""))
