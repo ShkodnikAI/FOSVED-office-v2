@@ -439,8 +439,13 @@ jobs:
           RESP=$(curl -fsS -X POST "${RENDER_DEPLOY_HOOK}&ref=${COMMIT_SHA}")
           echo "$RESP"
           # #524 A.3: ответ хука содержит id деплоя — логируем и проверяем,
-          # что Render принял деплой проверенного коммита
-          DEPLOY_ID=$(printf '%s' "$RESP" | python3 -c "import json,sys;\nprint(json.load(sys.stdin).get('deploy',{}).get('id',''))" 2>/dev/null || true)
+          # что Render принял деплой проверенного коммита.
+          # Фикс гейта (#535, прогон 38998001915): в sh-двойных кавычках \n —
+          # литерал (обратный слеш + n), python3 -c получал ";\nprint" как
+          # одну строку → SyntaxError → || true → DEPLOY_ID пуст → гейт
+          # красный при УСПЕШНОМ деплое (hook принят dep-db9ehutg1s2s738do2n0,
+          # ref=0f7a93b). \n убран: "; print" в одну строку shell-строки.
+          DEPLOY_ID=$(printf '%s' "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('deploy',{}).get('id',''))" 2>/dev/null || true)
           if [ -z "$DEPLOY_ID" ]; then
             echo "::error::Ответ хука без deploy.id — Render мог не принять деплой (#524 A.3). Ответ выше."
             exit 1
