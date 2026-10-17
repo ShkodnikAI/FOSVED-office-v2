@@ -6,7 +6,7 @@
 02:46:55 UTC) показала, что исключение requests содержит URL целиком, и
 _log_error писал значение токена в журнал открытым текстом; кроме того
 внутренние вызовы получали 401. #536 A.1/A.2: RequireInternalAuth читает
-заголовок X-Internal-Token (request_header + ct_eq), вызыватели шлют
+заголовок X-Internal-Token (request_header + SecretMatches, #546), вызыватели шлют
 headers=_internal_auth_headers(); токен в URL запрещён.
 
 Гварды:

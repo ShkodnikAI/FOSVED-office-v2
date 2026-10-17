@@ -751,15 +751,42 @@ pattern ClearModelFails(model: String) -> String {
 // ============================================================
 // FOIP-003.14: Internal Endpoint Auth
 // ============================================================
+// ============================================================
+// #546 A.1: единое сравнение секретов — рецепт Metalogos-#1317.
+// redact(x, "all") прогоняет значение через энтропийную сеть (ADR-0136)
+// и маскирует токен-подобные строки — сравнение сырого секрета после
+// "all" молча ломается (класс 401/403 #536; подтверждено аудитором на
+// 0.32.0). Рецепт: hash_only с ОБЕИХ сторон — односторонний SHA-256
+// фингерпринт, детерминирован (проба на 0.32.0: двойной вызов равен),
+// значение уничтожает, сравнимость сохраняет.
+// Taint (Wave 15): результат паттерна, вызванного с untrusted-аргументом,
+// сам untrusted — one-way-redact обязан стоять на call-site (наряд A.1:
+// «применять redact(..., "hash_only"), а не "all"»). received приходит
+// УЖЕ обёрнутым hash_only, сравнение — двойной фингерпринт
+// H(H(received)) == H(H(env)) <=> received == env: сырой секрет любого
+// вида (буквенный/токен-подобный) и его hash-форма (канал моста №318)
+// проходят одним сравнением; неверный/пустой — нет.
+// Пустой env -> false (отказ, как сейчас). Значения и хеши не печатаются.
+// ============================================================
+pattern SecretMatches(received: String, env_name: String) -> Bool {
+  let expected_raw = env(env_name)
+  if expected_raw == "" then { return false }
+  let expected = to_string(redact(redact(expected_raw, "hash_only"), "hash_only"))
+  if redact(received, "hash_only") == expected then { return true }
+  return false
+}
+
 pattern RequireInternalAuth() -> String {
   // #536 A.1: токен — в заголовке X-Internal-Token, не в URL. Query-токен
   // утекал: исключение requests содержит URL целиком → _log_error писал
-  // значение в журнал (401-лог Render 02:46:55 UTC). Сравнение — ct_eq
-  // (constant-time) вместо сравнения hash_only-обёрток.
-  let token = redact(request_header("X-Internal-Token"), "all")
+  // значение в журнал (401-лог Render 02:46:55 UTC).
+  // #546 A.1: сравнение — SecretMatches (hash_only с обеих сторон, рецепт
+  // Metalogos-#1317): ct_eq по сырой строке заголовка молча ломался на
+  // токен-подобных значениях (gh#1317). Пустой env — auth-off, как раньше.
+  let token = redact(request_header("X-Internal-Token"), "hash_only")
   let expected = env("INTERNAL_API_TOKEN")
   if expected == "" then { return "ok" }
-  if ct_eq(token, expected) then { return "ok" }
+  if SecretMatches(token, "INTERNAL_API_TOKEN") then { return "ok" }
   return "unauthorized"
 }
 
@@ -1852,11 +1879,12 @@ mlogserver {
   // H(received) vs H(expected)=H(H(secret)) — двойной хэш при неидемпотентном
   // redact (0.24/0.25) делал raw-форму непроходимой всегда (403; hash-form
   // продолжала проходить — матрица scripts/fo376_probe_auth.sh). Фикс №376:
-  // сравнение против ОДНОГО H(secret): либо дословное совпадение (hash-form),
-  // либо hash(received)==H(secret) (raw). Предварительный redact("all") на
-  // received ОСТАВЛЕН — он требуется taint-валидатором (untrusted query_param
-  // не решает 'if' без one-way-redact, Wave 15) и на bare-значениях не меняет
-  // значение (hash-form проходит через него неизменной — доказано пробой).
+  // сравнение против ОДНОГО H(secret): сырой секрет или его hash-форма —
+  // оба вида принимает SecretMatches (одним сравнением двойных фингерпринтов).
+  // #546 A.1: на call-site received обёрнут redact(..., "hash_only") —
+  // one-way-redact требуется taint-валидатором (untrusted query_param не
+  // решает 'if' без него, Wave 15), а "hash_only" (в отличие от "all") не
+  // маскирует токен-подобные значения — рецепт Metalogos-#1317, проба 0.32.0.
   // Секрет по сети в raw-форме не ходит у моста №318; hex-тело URL-safe
   // (нет '+'/' ' — не ломается на декоде и перекодировке прокси).
   // Проба: scripts/probe318qp.{mlog,sh} (/qp2 — фиксированный паттерн) +
@@ -1866,11 +1894,8 @@ mlogserver {
   // SendTelegramReply владельцу (или chat_id из тела).
   // query="ping" — проба живости без LLM-расхода (контракт №318).
   route "/osp/analyze" method=POST {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let data = json_body()
     let query = redact(to_string(json_get(data, "query", "")), "all")
     if redact(query, "hash_only") == redact("", "hash_only") then { return respond("400 empty query") }
@@ -1904,11 +1929,8 @@ mlogserver {
   // LLM-вызов внутри LZTelegramSearch синхронный — вызывающая сторона
   // ставит таймаут 90с и читает ответ (JSON {"response": ...}).
   route "/lz/telegram" method=POST {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let data = json_body()
     let q = redact(to_string(json_get(data, "query", "")), "all")
     if redact(q, "hash_only") == redact("", "hash_only") then { return respond("400 empty query") }
@@ -1926,72 +1948,51 @@ mlogserver {
   // Auth — CRON_SECRET, обе формы (конвенция №376, как /osp/analyze).
   // reverse_proxy форвардит префикс /api/expert/ сюда (MLOG_ROUTES_PREFIXES).
   route "/api/expert/automotive" method=GET {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     return respond(ExpertAutomotiveLookup(redact(query_param("query"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
   }
 
   route "/api/expert/compare" method=GET {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     return respond(ExpertCompareVehicles(redact(query_param("vehicles"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
   }
 
   route "/api/expert/residual-value" method=GET {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     return respond(ExpertResidualValueData(redact(query_param("vehicle"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
   }
 
   route "/api/expert/operation-cost" method=GET {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     return respond(ExpertOperationCostData(redact(query_param("vehicle"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
   }
 
   route "/api/expert/chart" method=POST {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let data = json_body()
     let _ = InitDB()
     return respond(ExpertGenerateChart(redact(to_string(json_get(data, "chart_type", "")), "all"), redact(to_string(json_get(data, "vehicle", "")), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
   }
 
   route "/api/expert/briefings" method=GET {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     return respond(ExpertListBriefings(redact(env("OWNER_TELEGRAM_ID"), "all")))
   }
 
   route "/api/expert/briefing" method=POST {
-    let received = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    let expected = to_string(redact(cron_secret, "hash_only"))
-    if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let data = json_body()
     let _ = InitDB()
     return respond(ExpertCreateBriefing(redact(to_string(json_get(data, "topic", "")), "all"), redact(to_string(json_get(data, "depth", "2")), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
@@ -2128,10 +2129,8 @@ mlogserver {
 
   // Morning Brief — 07:20 MSK (4:20 UTC) — Yana: дата, время, погода, офис, мировые события
   route "/cron/morning" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = MorningBrief()
     let _ = YanaSelfLearn()
@@ -2139,50 +2138,40 @@ mlogserver {
   }
 
   route "/cron/evening" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = EveningSummary()
     return respond("200 ok")
   }
 
   route "/cron/weekly" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = WeeklyDigest()
     return respond("200 ok")
   }
 
   route "/cron/monthly" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = MonthlyReview()
     return respond("200 ok")
   }
 
   route "/cron/control" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let _ = ControlCheck()
     return respond("200 ok")
   }
 
   route "/cron/night" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     // №419: логика переехала дословно в паттерн NightSlot (нативный cron-слот,
     // реестр dept/schedules.mlog). Роут остаётся ручным/аварийным триггером —
     // дедуп окон №418 делает двойной запуск безопасным.
@@ -2191,10 +2180,8 @@ mlogserver {
   }
 
   route "/cron/lz-daily" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_lz_daily", "lz", "LZ daily scan triggered by cron")
     let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
     let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/lz-daily", body, "application/json", 240.0))
@@ -2202,10 +2189,8 @@ mlogserver {
 
   // F-2: Reminder delivery cron — called every 5 minutes by external scheduler
   route "/cron/reminders" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let result = DeliverDueReminders()
     return respond("200 " + result)
@@ -2215,10 +2200,8 @@ mlogserver {
   // After a Block C crash, curl this to see exactly which step failed
   // FO-039 B.3: sweep живых превью — гашение по 30 минутам тишины
   route "/cron/preview-sweep" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let result = ForgePreviewSweep()
     let _ = AuditLog("cron_preview_sweep", "scheduler", result)
@@ -2226,10 +2209,8 @@ mlogserver {
   }
 
   route "/cron/last-checkpoints" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let rows = query("SELECT id, timestamp, details FROM trace_log WHERE action = 'checkpoint' ORDER BY id DESC LIMIT 20", [])
     let out = ""
@@ -2245,10 +2226,8 @@ mlogserver {
 
   // Admin morning reply — 7:25 MSK (4:25 UTC) — response to Yana's morning brief
   route "/cron/admin-reply" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_admin_reply", "admin", "admin morning reply triggered by cron")
     let body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
     let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/admin-morning-reply", body, "application/json", 240.0))
@@ -2260,10 +2239,8 @@ mlogserver {
   // SHOP-4 tick: WB/Ozon вотчи каждые 6 ч (покрывает и daily watch-sweep из старой
   // спецификации). Kill-switch SHOP_ENABLED=0 — роут молча отвечает ok.
   route "/cron/shop-tick" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     if env("SHOP_ENABLED") != "1" then { return respond("200 ok (SHOP_ENABLED != 1 — skip)") }
     let _ = AuditLog("cron_shop_tick", "shop", "shop-tick triggered by cron")
     let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/watch-sweep", "{}", "application/json", 240.0))
@@ -2272,10 +2249,8 @@ mlogserver {
 
   // FO-005: golden evals — ночная регрессия качества → алерт при деградации
   route "/cron/golden-evals" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_golden_evals", "qa", "golden evals triggered by cron")
     let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 240.0))
     return respond("200 ok")
@@ -2283,10 +2258,8 @@ mlogserver {
 
   // Индикаторы с verifyDate ≤ 7 дней — превентивное напоминание до утреннего брифа
   route "/cron/indicator-reminders" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by cron")
     let body = json_encode({days_ahead: 7})
     let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body, "application/json", 240.0))
@@ -2296,10 +2269,8 @@ mlogserver {
   // FO-001: ежедневный cron-бэкап главной БД. VACUUM INTO требует несуществующий
   // файл — уникальное имя через strftime; ретеншн по-прежнему на startup (entrypoint).
   route "/cron/backup" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let _ = InitDB()
     let ts_rows = query("SELECT strftime('%Y%m%dT%H%M%SZ', 'now') AS t", [])
     let ts = "unknown"
@@ -2325,10 +2296,11 @@ mlogserver {
   // Тайм-аут cron-job.org (~30 c) безвреден: сервер доделывает цепочку в фоне
   // (прецедент — Morning Brief). Итог цепочки — одним сообщением в Telegram.
   route "/cron/night-tick" method=GET {
-    let secret = redact(query_param("secret"), "all")
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
+    // #546 A.1: let cron_secret возвращён — NightTickCore(cron_secret) ниже
+    // по сигнатуре требует аргумент (сам паттерн читает env, см. №485).
     let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
     // №422: хвост в NightTickCore() — причина та же, см. /repos/task.
     NightTickCore(cron_secret)
   }
@@ -2340,10 +2312,8 @@ mlogserver {
   // контракт 0.21: create/bootstrap ответят ошибкой времени исполнения.
   // list/remove/чтение — безопасны на обоих бинарях.
   route "/schedules/list" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let jobs = cron_list()
     let registry = SchedulesRegistry()
     return respond("200 " + json_encode({jobs: jobs, registry: registry}))
@@ -2353,15 +2323,15 @@ mlogserver {
   // отчёт: ADD/REPLACE/KEEP/REMOVE/ONESHOT/EXTERNAL/FAIL — entrypoint
   // громко ругается на FAIL(...), AuditLog пишет отчёт всегда).
   route "/schedules/bootstrap" method=GET {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
+    let secret = redact(query_param("secret"), "hash_only")
     // #428 A.1: две разные причины отказа были неразличимы в бут-логе
     // (одинаковое 403 Forbidden). Код причины — литерал, значение секрета
     // в ответ не попадает ни в каком виде. Имена кодов — без слова secret:
     // аудитор 0.27.0 помечает respond-литералы со словом secret как
     // секретоподобные (sink clearance violation), проверено бисекцией.
-    if cron_secret == "" then { return respond("403 cron_key_unset") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 key_mismatch") }
+    // #546 A.1: сравнение — SecretMatches (hash_only, рецепт Metalogos-#1317).
+    if env("CRON_SECRET") == "" then { return respond("403 cron_key_unset") }
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 key_mismatch") }
     let _ = InitDB()
     let report = BootstrapSchedules()
     return respond("200 " + report)
@@ -2373,10 +2343,8 @@ mlogserver {
   // cron-выражение обязано быть непустым; битое выражение громко отвергнет
   // сам cron_add (CRON_JOB_FAILED-контракт №418/№413).
   route "/schedules/create" method=POST {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let data = json_body()
     let cron_expr = redact(to_string(json_get(data, "cron", "")), "all")
     let target = redact(to_string(json_get(data, "target", "")), "all")
@@ -2396,10 +2364,8 @@ mlogserver {
   }
 
   route "/schedules/remove" method=POST {
-    let secret = redact(query_param("secret"), "all")
-    let cron_secret = env("CRON_SECRET")
-    if cron_secret == "" then { return respond("403 Forbidden") }
-    if redact(secret, "hash_only") != redact(cron_secret, "hash_only") then { return respond("403 Forbidden") }
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
     let data = json_body()
     let job_id = redact(to_string(json_get(data, "id", "")), "all")
     if redact(job_id, "hash_only") == redact("", "hash_only") then { return respond("400 missing id") }

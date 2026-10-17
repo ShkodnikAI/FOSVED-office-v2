@@ -77,6 +77,17 @@ def _extract_auth_pattern():
     return m.group(0)
 
 
+def _extract_secret_matches_pattern():
+    """Настоящий pattern SecretMatches (#546 A.1) из app.mlog.
+
+    RequireInternalAuth с #546 вызывает SecretMatches — без него харнесс
+    падает UNDEFINED_FUNCTION при компиляции."""
+    src = open(APP_MLOG, encoding="utf-8").read()
+    m = re.search(r"pattern SecretMatches\(.*?\n\}", src, re.S)
+    assert m, "pattern SecretMatches не найден в app.mlog"
+    return m.group(0)
+
+
 def _harness(port, route_text):
     """Минимальный mlogserver-файл: настоящий RequireInternalAuth + настоящий
     маршрут /chain/step; диспетчер и аудитор — стабы (LLM не предмет теста)."""
@@ -87,6 +98,8 @@ def _harness(port, route_text):
     return (
         "// #542 A.2: автогенерируемый харнесс (тест) — НАСТОЯЩИЙ маршрут\n"
         "// /chain/step и RequireInternalAuth из app.mlog, диспетчер — стаб\n"
+        "// #546: RequireInternalAuth вызывает SecretMatches — паттерн включён\n"
+        + _extract_secret_matches_pattern() + "\n\n"
         + _extract_auth_pattern() + "\n\n"
         + "pattern ChainDispatchStub(dept: String, query: String, chat_id: String) -> String {\n"
         + f'  return "{STUB_REPLY}"\n'

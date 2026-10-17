@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Наряд #536 A.4: mlog-тест RequireInternalAuth (заголовок + ct_eq).
+"""Наряд #536 A.4: mlog-тест RequireInternalAuth (заголовок + сравнение).
 
-Поднимает реальный `bin/mlog serve` (0.32.0) на МИНИМАЛЬНОМ харнессе, в
-который программно вставлен НАСТОЯЩИЙ текст pattern RequireInternalAuth,
-извлечённый из app.mlog (статическая гвард ниже проверяет, что в app.mlog
-именно request_header("X-Internal-Token") + ct_eq).
+Адаптирован #546 A.1 (рецепт Metalogos-#1317): сравнение — SecretMatches
+(hash_only с обеих сторон), ct_eq по сырой строке молча ломался на
+токен-подобных значениях. Поднимает реальный `bin/mlog serve` (0.32.0) на
+МИНИМАЛЬНОМ харнессе, в который программно вставлен НАСТОЯЩИЙ текст pattern
+RequireInternalAuth (+ SecretMatches), извлечённый из app.mlog (статическая
+гвард ниже проверяет: заголовок, hash_only-обёртка, вызов SecretMatches).
 
 Кейсы по тексту наряда:
 - верный заголовок  → 200
+- верный заголовок, похожий на токен (gh#1317) → 200 (#546)
 - неверный заголовок → 401
 - без заголовка      → 401
 - при пустом env     → 200 (auth-off: expected == "" → "ok")
 
-Мутация по тексту наряда: «заменить ct_eq на true → тест обязан упасть» —
-реализована как test_mutation_ct_eq_true_is_killed: харнесс с мутацией
-ct_eq(...) → true отвечает 200 на неверный токен, т.е. кейсы кейсов auth
-(401) поймали бы мутацию; мета-тест падает, если мутация НЕизменяема
-(значит, тесты не чувствительны к этому классу регрессии).
+Мутации:
+- #536: «сравнение → true» — харнесс с мутацией отвечает 200 на неверный
+  токен: кейсы 401 поймали бы мутацию (мета-тест падает, если НЕпойман);
+- #546: «вернуть redact(..., "all")» — на токен-подобном верном токене
+  мутант отвечает 401 (значение замаскировано): кейс 200 поймает.
 """
 import os
 import re
@@ -36,6 +39,8 @@ MLOG_BIN = os.path.join(REPO, "bin", "mlog")
 APP_MLOG = os.path.join(REPO, "app.mlog")
 
 TOKEN = "tok-n536-test-12345678"
+# gh#1317-класс «похож на токен» (≥24 b64-класса, цифра И hex-буква)
+TOKENLIKE = "abcdefgh1369abcdefghi13ab"
 PORT_BASE = 10993  # харнесс / мутация / пустой env — порты +0/+1/+2
 
 pytestmark = pytest.mark.skipif(
@@ -51,10 +56,22 @@ def _extract_pattern():
     return m.group(0)
 
 
+def _extract_secret_matches():
+    """Настоящий pattern SecretMatches (#546 A.1) из app.mlog.
+
+    RequireInternalAuth с #546 вызывает SecretMatches — без него харнесс
+    падает UNDEFINED_FUNCTION при компиляции."""
+    src = open(APP_MLOG, encoding="utf-8").read()
+    m = re.search(r"pattern SecretMatches\(.*?\n\}", src, re.S)
+    assert m, "pattern SecretMatches не найден в app.mlog"
+    return m.group(0)
+
+
 def _harness(pattern_text, port):
-    """Минимальный mlogserver-файл с настоящим паттерном."""
+    """Минимальный mlogserver-файл с настоящими паттернами."""
     return (
-        "// #536 A.4: автогенерируемый харнесс (тест) — НАСТОЯЩИЙ паттерн из app.mlog\n"
+        "// #536 A.4 + #546: автогенерируемый харнесс — НАСТОЯЩИЕ паттерны из app.mlog\n"
+        + _extract_secret_matches() + "\n\n"
         + pattern_text + "\n\n"
         + f"mlogserver {{\n  port: {port}\n  host: \"127.0.0.1\"\n\n"
         + "  route \"/auth-probe\" method=GET {\n"
@@ -137,6 +154,13 @@ def serve_with_token():
 
 
 @pytest.fixture()
+def serve_with_tokenlike():
+    s = _Serve(_extract_pattern(), TOKENLIKE)
+    yield s
+    s.stop()
+
+
+@pytest.fixture()
 def serve_empty_env():
     s = _Serve(_extract_pattern(), "")
     yield s
@@ -149,6 +173,13 @@ def serve_empty_env():
 def test_correct_header_200(serve_with_token):
     r = requests.get(serve_with_token.url + "/auth-probe",
                      headers={"X-Internal-Token": TOKEN}, timeout=5)
+    assert r.status_code == 200, r.text
+
+
+def test_tokenlike_header_200(serve_with_tokenlike):
+    # #546: верный токен-подобный заголовок → 200 (gh#1317 ломал ct_eq)
+    r = requests.get(serve_with_tokenlike.url + "/auth-probe",
+                     headers={"X-Internal-Token": TOKENLIKE}, timeout=5)
     assert r.status_code == 200, r.text
 
 
@@ -169,38 +200,65 @@ def test_empty_env_200_auth_off(serve_empty_env):
     assert r.status_code == 200, r.text
 
 
-# ── Мутация по тексту наряда: ct_eq → true обязан быть пойман ────────────
+# ── Мутации: сравнение→true (#536) и «вернуть all» (#546) обязаны пасть ───
 
 
-def test_mutation_ct_eq_true_is_killed():
-    """Мутант ct_eq(...)→true должен вести себя иначе (200 на неверный токен).
+def test_mutation_always_ok_is_killed():
+    """Мутант «сравнение → true» должен вести себя иначе (200 на неверный токен).
 
     Если мутант неотличим от оригинала — кейсы 401 нечувствительны к этому
     классу регрессии, и мета-тест падает («тест обязан упасть» на мутации).
     """
-    mutant = re.sub(r"ct_eq\(token, expected\)", "true",
-                    _extract_pattern())
-    assert mutant != _extract_pattern(), "мутация ct_eq → true не применилась"
+    mutant = re.sub(
+        r'if SecretMatches\(token, "INTERNAL_API_TOKEN"\) then \{ return "ok" \}',
+        'return "ok"', _extract_pattern())
+    assert mutant != _extract_pattern(), "мутация сравнение→true не применилась"
     s = _Serve(mutant, TOKEN)
     try:
         r = requests.get(s.url + "/auth-probe",
                          headers={"X-Internal-Token": "wrong-value"}, timeout=5)
         assert r.status_code == 200, (
-            "мутант ct_eq→true неотличим от оригинала (неверный токен не "
+            "мутант сравнение→true неотличим от оригинала (неверный токен не "
             "пропущен) — кейсы 401 не поймали бы мутацию")
     finally:
         s.stop()
 
 
-# ── Статическая гвард: в app.mlog именно заголовок + ct_eq ───────────────
+def test_mutation_all_policy_is_killed(serve_with_tokenlike):
+    """Мутант #546 «вернуть redact(..., \"all\")» обязан пасть на токен-подобном.
+
+    Оригинал: верный токен-подобный заголовок → 200 (fixture).
+    Мутант: тот же запрос → 401 (redact("all") маскирует значение, gh#1317).
+    """
+    ok = requests.get(serve_with_tokenlike.url + "/auth-probe",
+                      headers={"X-Internal-Token": TOKENLIKE}, timeout=5)
+    assert ok.status_code == 200
+    mutant = _extract_pattern().replace(
+        'redact(request_header("X-Internal-Token"), "hash_only")',
+        'redact(request_header("X-Internal-Token"), "all")')
+    assert mutant != _extract_pattern(), "мутация hash_only→all не применилась"
+    s = _Serve(mutant, TOKENLIKE)
+    try:
+        r = requests.get(s.url + "/auth-probe",
+                         headers={"X-Internal-Token": TOKENLIKE}, timeout=5)
+        assert r.status_code == 401, (
+            "мутант redact(...,\"all\") неотличим на токен-подобном значении — "
+            "регрессия gh#1317 не была бы поймана")
+    finally:
+        s.stop()
 
 
-def test_app_mlog_pattern_uses_header_and_ct_eq():
+# ── Статическая гвард: в app.mlog заголовок + hash_only + SecretMatches ──
+
+
+def test_app_mlog_pattern_uses_header_and_secret_matches():
     pat = _extract_pattern()
     assert 'request_header("X-Internal-Token")' in pat, \
         "app.mlog: RequireInternalAuth не читает заголовок X-Internal-Token"
-    assert "ct_eq(token, expected)" in pat, \
-        "app.mlog: сравнение не constant-time (ct_eq отсутствует)"
+    assert 'redact(request_header("X-Internal-Token"), "hash_only")' in pat, \
+        "app.mlog: заголовок без hash_only-обёртки (gh#1317 — регрессия #546)"
+    assert 'SecretMatches(token, "INTERNAL_API_TOKEN")' in pat, \
+        "app.mlog: сравнение не через SecretMatches (#546 A.1)"
     assert 'query_param("token")' not in pat, \
         "app.mlog: RequireInternalAuth всё ещё читает токен из query (утечка #536)"
     assert 'expected == "" then { return "ok" }' in pat, \
