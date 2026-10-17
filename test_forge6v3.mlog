@@ -1,15 +1,21 @@
 // test_forge6v3.mlog — FO-041 A.5: сквозной dev-запрос → FORGE; дубли;
 // автопрогон. Запуск: METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test6 ./bin/mlog run test_forge6v3.mlog
+// ── #519: миграционный мост ADR-0161 — тот же профиль, что augmented app.mlog прода
+// (entrypoint.sh стр. 197) и dogfood_staging.mlog:17. Без профиля run-гейт №391
+// отказывает секретные CREATE-литералы (private-db), легально нужные тестовой БД.
+profile legacy { egress: permissive_with_audit }
+
 db { url: "sqlite:/tmp/forge-test6/forge.db" }
 import dept/utils
 import dept/dev
 import dept/forge
 import dept/templates
-import dept/forge_model
+// import dept/forge_model — удалён нарядом №449 (архив archive/dead-mlog/), импорт мёртвый (#519)
 
 pattern TInit() -> String {
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_repos (name TEXT PRIMARY KEY, project_slug TEXT, description TEXT, github_url TEXT, commits_count INTEGER DEFAULT 0, last_commit_at TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS secrets_store (key TEXT PRIMARY KEY, value_encrypted TEXT, updated_at TEXT DEFAULT (datetime('now')))")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT DEFAULT (datetime('now')), action TEXT, actor TEXT, dept TEXT, details TEXT, status TEXT)")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, title TEXT, description TEXT, status TEXT DEFAULT 'proposed', priority TEXT DEFAULT 'normal', created_by TEXT, claimed_by TEXT, claimed_at TEXT, blocked_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
@@ -19,7 +25,6 @@ pattern TInit() -> String {
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_step_config (project_slug TEXT, step TEXT, policy TEXT, PRIMARY KEY (project_slug, step))")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_whitelist (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, command TEXT, created_at TEXT DEFAULT (datetime('now')))")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, project_slug TEXT, repo_name TEXT, stage_id TEXT, command TEXT, exit_code TEXT, output TEXT, duration_ms TEXT, created_at TEXT DEFAULT (datetime('now')))")
-  let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_project_secrets (project_slug TEXT, env_key TEXT, secret_ref TEXT, PRIMARY KEY (project_slug, env_key))")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, kind TEXT, question TEXT, context TEXT, options_json TEXT, decision TEXT, decided_by TEXT, decided_at TEXT, telegram_message_id TEXT, created_at TEXT DEFAULT (datetime('now')))")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_remarks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, commit_sha TEXT, text TEXT, file_hint TEXT, attachment_ref TEXT, kind TEXT, status TEXT DEFAULT 'open', resolved_by_commit TEXT, gate_id TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)")
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_previews (slug TEXT PRIMARY KEY, project_slug TEXT, repo_name TEXT, kind TEXT DEFAULT 'live', port INTEGER, pid TEXT, status TEXT DEFAULT 'running', last_access_at TEXT, started_at TEXT)")
@@ -70,3 +75,15 @@ pattern Main1(x: String) -> String {
 }
 
 flow Main { input: String = "" -> Main1 -> output }
+
+// ── #519: тест-стабы app-слоя ──────────────────────────────────────────
+// app.mlog не импортируется (strict-мост №391: в app-файле нет profile
+// legacy, его sink-вызовы не проходят run-гейт) — имена резолвятся стабами.
+// Forge-тест не доходит до диалог/телега-веток dept/dev — это test doubles
+// для компиляции, прод-инварианты не ослаблены (прод-код не тронут).
+pattern RecordAssistantMessage(chat_id: String, dept: String, text: String) -> String {
+  return "ok"
+}
+pattern SendTelegramReply(chat_id: String, text: String) -> String {
+  return "ok"
+}

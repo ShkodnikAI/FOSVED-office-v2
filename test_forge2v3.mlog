@@ -3,11 +3,17 @@
 // Запуск: mkdir -p /tmp/forge-test2 forge-tmp && METALOGOS_ALLOW_EXEC=1 FORGE_REPOS_DIR=/tmp/forge-test2 ./bin/mlog run test_forge2v3.mlog
 // Источники: no-mistakes (принципы конвейера §5.8), Fosved-coder response_parser (§5.7).
 
+// ── #519: миграционный мост ADR-0161 — тот же профиль, что augmented app.mlog прода
+// (entrypoint.sh стр. 197) и dogfood_staging.mlog:17. Без профиля run-гейт №391
+// отказывает секретные CREATE-литералы (private-db), легально нужные тестовой БД.
+profile legacy { egress: permissive_with_audit }
+
 db { url: "sqlite:/tmp/forge-test2/forge.db" }
 import dept/utils
 import dept/dev
 import dept/forge
-import dept/forge_model
+import dept/templates
+// import dept/forge_model — удалён нарядом №449 (архив archive/dead-mlog/), импорт мёртвый (#519)
 
 pattern TestDbInit() -> String {
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_projects (slug TEXT PRIMARY KEY, name TEXT, description TEXT, goal TEXT, project_type TEXT, template_id TEXT, customer_name TEXT, gate_policy TEXT DEFAULT 'key_stages', model_combo TEXT DEFAULT 'fosved-standard', departments TEXT DEFAULT 'dev', status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))")
@@ -136,7 +142,10 @@ pattern Main1(x: String) -> String {
   let _ = ForgeStageStart(rev_stage)
   let wrev = ForgeWriteFiles("forge2-review-repo", "[{\"path\":\"feature.js\",\"content\":\"const x = 1;\\n\"}]", "feat: фича", "dev")
   let checks = RejectCall(checks, "review-parked-to-owner", wrev)
-  let checks = checks + Check("review-task-awaiting-owner", ForgeTaskGetStatus(rev_id) == "awaiting_owner", ForgeTaskGetStatus(rev_id)) + "\n"
+  // #519: проверка «review-task-awaiting-owner» снята — парковку владельцу делал
+  // LLM-ревью в Model-цикле ForgeModelStageWrite, вырезанном нарядом №449;
+  // живой отказ записи на owner-gate-этапе покрыт «review-parked-to-owner» выше
+  let checks = checks + Check("review-task-in-progress-no-write", ForgeTaskGetStatus(rev_id) == "in_progress", ForgeTaskGetStatus(rev_id)) + "\n"
   let _ = ForgeTaskSetStatus(rev_id, "queued")
   let _ = ForgeTaskClaim(rev_id, "dev")
   let rev_stage2 = StageIdBySeq(rev_id, "2")
@@ -150,7 +159,9 @@ pattern Main1(x: String) -> String {
   let _ = db_execute("INSERT OR REPLACE INTO forge_step_config (project_slug, step, policy) VALUES ('forge2-review', 'docs', 'skip')", [])
   let wskip = ForgeWriteFiles("forge2-review-repo", "[{\"path\":\"clean.txt\",\"content\":\"чисто\\n\"}]", "feat: чистый", "dev")
   let checks = checks + Check("docs-skip-composition", starts_with(wskip, "Записано"), wskip) + "\n"
-  let _ = db_execute("DELETE FROM forge_step_config WHERE project_slug = 'forge2-review'", [])
+  // #519: деструктивный SQL — под грантом (ADR-0155, мост №391; без ослабления прод-инварианта)
+  let g_del = grant_issue("db:delete:forge_step_config", 3600, "n", 2)
+  let _ = db_execute_with_grant(g_del, "DELETE FROM forge_step_config WHERE project_slug = 'forge2-review'")
 
   // ═══ E.3: история решений ═══
   let dec = ForgeFindingsDecline(rev_id, rev_stage, "review", "[\"не добавлять аналитику в фичу\"]")
@@ -158,7 +169,9 @@ pattern Main1(x: String) -> String {
   let ctx = ForgeDeclinedContext(rev_id)
   let checks = checks + Check("declined-read-by-steps", contains(ctx, "не добавлять аналитику"), ctx) + "\n"
   // история сломана → предупреждение, конвейер продолжил (советует, не блокирует)
-  let _ = db_execute("DROP TABLE forge_finding_decisions", [])
+  // #519: DROP — под грантом (ADR-0155, мост №391)
+  let g_drop = grant_issue("db:drop:forge_finding_decisions", 3600, "n", 2)
+  let _ = db_execute_with_grant(g_drop, "DROP TABLE forge_finding_decisions")
   let ctx_broken = ForgeDeclinedContext(rev_id)
   let checks = checks + Check("history-broken-no-stop", ctx_broken == "", "история не читается, конвейер продолжает") + "\n"
   let _ = db_execute("CREATE TABLE IF NOT EXISTS forge_finding_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, stage_id TEXT, step TEXT, finding_text TEXT, decision TEXT, decided_at TEXT DEFAULT (datetime('now')))", [])
@@ -169,25 +182,13 @@ pattern Main1(x: String) -> String {
   let cont = ForgeContinuityCheck("forge2-review-repo", rev_stage)
   let checks = RejectCall(checks, "continuity-mismatch", cont)
 
-  // ═══ E.5: читающий цикл (D.3/D.4) ═══
-  let resp_reads = "<read file=\"clean.txt\"/>"
-  let served = ForgeModelStageWrite("forge2-review-repo", "main", resp_reads, "msg", "dev")
-  let checks = checks + Check("read-cycle-served", starts_with(served, "READS:") and contains(served, "чисто"), served) + "\n"
-  let resp_diff = "```diff path=\"clean.txt\"\n-чисто\n+очень чисто\n```"
-  let applied = ForgeModelStageWrite("forge2-review-repo", "main", resp_diff, "fix: точечная правка", "dev")
-  let checks = checks + Check("diff-applied-to-write", starts_with(applied, "Записано"), applied) + "\n"
-  let back = ForgeReadFile("forge2-review-repo", "main", "clean.txt")
-  let checks = checks + Check("diff-content-verified", contains(back, "очень чисто"), back) + "\n"
+  // ═══ E.5: читающий цикл (D.3/D.4) — секция вырезана (#519) ═══
+  // ForgeModelStageWrite/ModelApplyDiff/ModelParseFiles/ModelServeReads —
+  // контур Model-применения диффов удалён из живого кода нарядом №449
+  // (архив archive/dead-mlog/forge_model.mlog, dept/forge.mlog −58 строк).
+  // Тест-секции удалённого контура больше не имеют живого адресата.
 
-  // ═══ E.6: отказ-тесты ═══
-  let bad_diff = ModelApplyDiff("ДРУГОЙ\nКОНТЕНТ", "{\"path\":\"clean.txt\",\"removed\":\"чисто\",\"added\":\"x\"}")
-  let checks = RejectCall(checks, "diff-context-mismatch", bad_diff)
-  let evil = ModelParseFiles("<file path=\"../escape.txt\">x</file>")
-  let checks = RejectCall(checks, "path-traversal-tag", evil)
-  let cmd = ModelParseFiles("<command>rm -rf /</command>")
-  let checks = checks + Check("command-tag-ignored", length(parse_json(cmd)) == 0.0, cmd) + "\n"
-  let six = "[\"a.txt\",\"b.txt\",\"c.txt\",\"d.txt\",\"e.txt\",\"f.txt\"]"
-  let checks = RejectCall(checks, "read-limit-5", ModelServeReads("forge2-review-repo", "main", six))
+  // ═══ E.6: отказ-тесты — только живые вызовы ═══
   // два цикла на одну задачу → второй получает отказ
   let _ = ForgeTaskSetStatus(rev_id, "done")
   let t_dup = ForgeTaskCreate("forge2-review", "Для двойного захвата", "двойной захват", "normal", "owner", "owner")
@@ -229,4 +230,16 @@ pattern Main1(x: String) -> String {
 
 flow Main {
   input: String = "" -> Main1 -> output
+}
+
+// ── #519: тест-стабы app-слоя ──────────────────────────────────────────
+// app.mlog не импортируется (strict-мост №391: в app-файле нет profile
+// legacy, его sink-вызовы не проходят run-гейт) — имена резолвятся стабами.
+// Forge-тест не доходит до диалог/телега-веток dept/dev — это test doubles
+// для компиляции, прод-инварианты не ослаблены (прод-код не тронут).
+pattern RecordAssistantMessage(chat_id: String, dept: String, text: String) -> String {
+  return "ok"
+}
+pattern SendTelegramReply(chat_id: String, text: String) -> String {
+  return "ok"
 }
