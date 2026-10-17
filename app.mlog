@@ -752,10 +752,14 @@ pattern ClearModelFails(model: String) -> String {
 // FOIP-003.14: Internal Endpoint Auth
 // ============================================================
 pattern RequireInternalAuth() -> String {
-  let token = redact(query_param("token"), "all")
+  // #536 A.1: токен — в заголовке X-Internal-Token, не в URL. Query-токен
+  // утекал: исключение requests содержит URL целиком → _log_error писал
+  // значение в журнал (401-лог Render 02:46:55 UTC). Сравнение — ct_eq
+  // (constant-time) вместо сравнения hash_only-обёрток.
+  let token = redact(request_header("X-Internal-Token"), "all")
   let expected = env("INTERNAL_API_TOKEN")
   if expected == "" then { return "ok" }
-  if redact(token, "hash_only") == redact(expected, "hash_only") then { return "ok" }
+  if ct_eq(token, expected) then { return "ok" }
   return "unauthorized"
 }
 
