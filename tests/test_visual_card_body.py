@@ -59,7 +59,9 @@ def test_a2_body_in_canvas_and_wrapped():
 
 
 def test_a2_dark_theme():
-    assert 'color_palette("authority", "dark")' in VISUAL_SRC
+    # #543: тёмная тема — стимпанк-палитра явными константами в шаблоне
+    # (фон #1C140E — тёмный орех); color_palette больше не источник темы
+    assert '"#1C140E"' in VISUAL_SRC, "тёмный фон карточки не задан"
     assert '"#c9a961"' in VISUAL_SRC, "золотой акцент бренда Fosved не задан"
 
 
