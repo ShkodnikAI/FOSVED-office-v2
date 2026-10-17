@@ -369,7 +369,7 @@ docker run -p 10000:10000 --env-file .env fosved
    изменённые — `REMOVE-STALE`+`ADD`, выключенные — `REMOVE`.
 4. Проверка без рестарта (№425: секрет в URL — только percent-кодированным:
    0.21 и Flask декодируют query, литеральный '+' сырой вставкой даёт 403):
-   `curl -sG "https://fosved-office-v2.onrender.com/schedules/list" --data-urlencode "secret=$CRON_SECRET"`
+   `curl -sG "https://<адрес-вашего-сервиса>/schedules/list" --data-urlencode "secret=$CRON_SECRET"`
    — стор + сверка с реестром; `.../schedules/bootstrap` с тем же
    `--data-urlencode` — ручной перезапуск бутстрапа; `POST
    .../schedules/create|remove` — точечные правки поверх стора (та же
