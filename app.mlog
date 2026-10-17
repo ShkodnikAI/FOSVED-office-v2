@@ -1812,27 +1812,6 @@ mlogserver {
     return respond("200 version=" + trim(read_file("VERSION")) + " anti_format=" + has_anti_format)
   }
 
-  // ── #536 A.0 (ВРЕМЕННЫЙ маршрут — удаляется после A.3, в итоговом коде нет)
-  // Диагностика расхождения секретов: prod mlog отклоняет ОБА секрета,
-  // приходящих из того же контейнерного env (bootstrap 403 key_mismatch,
-  // /version FAIL — стартовый лог dep-db9f48jrjlhs73ejcnn0). Отдаём ТОЛЬКО
-  // длины как их видит mlog env() — ни значений, ни хешей (в отчёт идут
-  // длины shell-стороны из entrypoint: «envcheck shell: ...»).
-  // Гвард loopback: Host НЕ годится — reverse_proxy вырезает Host
-  // (reverse_proxy.py:_upstream_headers) и upstream видит 127.0.0.1:10001
-  // от всех; прокси всегда ставит X-Forwarded-For (№445 A.3), а прямые
-  // внутренние curl-вызовы (entrypoint/Python) его не имеют → XFF пуст
-  // = только loopback. Проверено пробой на бинаре 0.32.0 (ok/404).
-  route "/internal/envcheck" method=GET {
-    let xff = redact(request_header("X-Forwarded-For"), "all")
-    if xff != "" then { return respond("404 Not Found") }
-    // бридж №391: length(env) несёт private-метку — respond требует public;
-    // redact(to_string(...), "all") очищает (проба probe4: отвечает длины)
-    let cron_len = redact(to_string(to_int(length(env("CRON_SECRET")))), "all")
-    let internal_len = redact(to_string(to_int(length(env("INTERNAL_API_TOKEN")))), "all")
-    return respond("200 " + json_encode({cron: cron_len, internal: internal_len}))
-  }
-
   // ============================================================
   // FO-026: один шаг fan-out/debate — вызывает Python-плоскость
   // /chain/fanout (ThreadPoolExecutor, параллельность по прецеденту

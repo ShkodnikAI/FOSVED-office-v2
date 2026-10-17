@@ -300,13 +300,11 @@ if [ "$MLOG_BOOT_READY" != "1" ]; then
 fi
 echo "Metalogos healthy — /health 200 (naryad #520 wait loop done)"
 
-# ── Наряд #536 A.0: диагностика расхождения секретов ────────────────────────
-# Прод-mlog отклоняет оба секрета из того же контейнерного env (стартовый лог
-# dep-db9f48jrjlhs73ejcnn0: bootstrap 403 key_mismatch, /version FAIL).
-# Печатаем ТОЛЬКО длины (shell-сторона) и флаг пробелов/переводов строк —
-# значения не выводятся. Ответ маршрута /internal/envcheck (mlog-сторона env)
-# — рядом; маршрут временный и будет удалён после A.3 (по тексту наряда),
-# shell-строки остаются постоянной диагностикой.
+# ── Наряд #536 A.0: диагностика секретов (только длины, без значений) ───────
+# Постоянная диагностика: длины CRON_SECRET / INTERNAL_API_TOKEN глазами
+# shell и флаг наличия пробелов/переводов строк. Значения не печатаются.
+# Временный маршрут /internal/envcheck (mlog-сторона) и его curl удалены
+# после A.3 по тексту наряда («в итоговом коде его нет»).
 echo "envcheck shell: cron=${#CRON_SECRET} internal=${#INTERNAL_API_TOKEN}"
 case "${CRON_SECRET}" in
   *[[:space:]]*) echo "envcheck spaces: cron=yes" ;;
@@ -316,9 +314,20 @@ case "${INTERNAL_API_TOKEN}" in
   *[[:space:]]*) echo "envcheck spaces: internal=yes" ;;
   *) echo "envcheck spaces: internal=no" ;;
 esac
-# #536 A.0: mlog-сторона (без XFF — только loopback, см. маршрут в app.mlog)
-EC_RESP=$(curl -s --max-time 5 "http://127.0.0.1:10001/internal/envcheck" 2>/dev/null || true)
-echo "envcheck route: ${EC_RESP:-no-answer}"
+
+# ── Наряд #536 A.3: самопроверка internal-auth на старте ─────────────────
+# GET /version с заголовком X-Internal-Token (RequireInternalAuth теперь
+# читает заголовок + ct_eq — #536 A.1). Ровно одна строка вердикта;
+# значение токена не выводится. Пустой INTERNAL_API_TOKEN — легальный
+# auth-off режим (expected == "" → "ok"), проверка честно вернёт 200.
+VA=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+  -H "X-Internal-Token: ${INTERNAL_API_TOKEN:-}" \
+  "http://127.0.0.1:10001/version" 2>/dev/null || true)
+if [ "$VA" = "200" ]; then
+  echo "internal-auth: OK"
+else
+  echo "internal-auth: FAIL (HTTP ${VA:-conn-fail})"
+fi
 
 # ── Наряд №419: бутстрап реестра заданий (только на пути кандидата) ────────
 # Реестр dept/schedules.mlog → нативный стор cron (идемпотентно по target).
@@ -386,17 +395,17 @@ if [ -n "$CRON_SECRET" ]; then
 fi
 
 echo "--- Version check ---"
-# №422: /version за RequireInternalAuth — без token-параметра роут честно отвечает
-# 401 и проверка всегда падала («version endpoint not available» в бут-логе).
-# №425: token — через --data-urlencode (0.21 декодирует query, см. бутстрап выше).
-curl -sf --max-time 30 -G "http://127.0.0.1:10001/version" --data-urlencode "token=${INTERNAL_API_TOKEN:-}" 2>/dev/null || echo "version endpoint not available"
+# №422: /version за RequireInternalAuth; #536 A.2: токен — в заголовке
+# X-Internal-Token (не в URL: query-токен утекал в журнал через текст
+# исключений requests)
+curl -sf --max-time 30 -H "X-Internal-Token: ${INTERNAL_API_TOKEN:-}" "http://127.0.0.1:10001/version" 2>/dev/null || echo "version endpoint not available"
 
 echo "--- Department import validation ---"
 for DEPT_ROUTE in "/health" "/version"; do
-  # №422: /version требует token; №425: токен — через --data-urlencode
-  # (сырая вставка в query ломается о декодирование 0.21), в лог не печатаем
+  # №422: /version требует auth; #536 A.2: токен — в заголовке X-Internal-Token,
+  # в лог не печатаем
   if [ "$DEPT_ROUTE" = "/version" ] && [ -n "${INTERNAL_API_TOKEN:-}" ]; then
-    curl -sf --max-time 30 -G "http://127.0.0.1:10001/version" --data-urlencode "token=${INTERNAL_API_TOKEN}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
+    curl -sf --max-time 30 -H "X-Internal-Token: ${INTERNAL_API_TOKEN}" "http://127.0.0.1:10001/version" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
   else
     curl -sf --max-time 30 "http://127.0.0.1:10001${DEPT_ROUTE}" > /dev/null 2>&1 && echo "  ${DEPT_ROUTE}: OK" || echo "  ${DEPT_ROUTE}: FAIL"
   fi
