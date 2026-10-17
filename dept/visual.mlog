@@ -11,7 +11,9 @@
 //   diagram_matrix, diagram_network, diagram_map, diagram_calendar,
 //   diagram_cycle, diagram_bracket, svg_canvas, svg_group, svg_text,
 //   svg_path, svg_rect, svg_circle, svg_line, color_palette,
-//   infographic_qa, html_render) + html_to_pdf для растеризации
+//   infographic_qa, html_render). Растеризация PDF — python-сторона
+//   (/render-card-pdf, /render-svg-pdf; #499 A.5 и #515 — движковый
+//   html_to_pdf теряет кириллицу и срезает вёрстку)
 //
 // 5 типов output'а:
 //   Type 1 — Compression Visual: анализ → dashboard SVG → PDF
@@ -629,10 +631,13 @@ pattern GenerateCompressionVisual(src_type: String, src_id: String, chat_id: Str
   // QA
   let qa = infographic_qa(dashboard_svg)
 
-  // Convert to PDF
-  let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;display:flex;gap:10px;'>" + dashboard_svg + "</body></html>"
+  // #515: PDF верстает python-сторона — движковый html_to_pdf теряет кириллицу
   let output_path = "visuals/compression_" + src_type + "_" + src_id + ".pdf"
-  let _ = html_to_pdf(html, output_path)
+  let rendered = RenderSvgPdfViaProxy(output_path, dashboard_svg, 841.89, 595.28)
+  if rendered != "ok" then {
+    let _ = AuditLog("svg_render_fail", "visual", output_path)
+    return ""
+  }
   let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["compression", src_type, src_id, output_path]))
 
   // naryad-361: файл уходит в чат документом
@@ -716,10 +721,13 @@ pattern GenerateMemorableInfographic(src_type: String, src_id: String, chat_id: 
   // QA check
   let qa = infographic_qa(infographic_svg)
 
-  // Convert to PDF
-  let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + infographic_svg + "</body></html>"
+  // #515: PDF верстает python-сторона — движковый html_to_pdf теряет кириллицу
   let output_path = "visuals/infographic_" + src_type + "_" + src_id + ".pdf"
-  let _ = html_to_pdf(html, output_path)
+  let rendered = RenderSvgPdfViaProxy(output_path, infographic_svg, 800.0, 500.0)
+  if rendered != "ok" then {
+    let _ = AuditLog("svg_render_fail", "visual", output_path)
+    return ""
+  }
   let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["memorable", src_type, src_id, output_path]))
 
   // naryad-361: файл уходит в чат документом
@@ -781,9 +789,13 @@ pattern GenerateReferenceSheet(entity_type: String, entity_id: String, chat_id: 
   let svg = svg_canvas(595.28, 841.89, "0 0 595.28 841.89", [header, body, footer])
   let qa = infographic_qa(svg)
 
-  let html = "<!DOCTYPE html><html><body style='margin:0;padding:0;'>" + svg + "</body></html>"
+  // #515: PDF верстает python-сторона — движковый html_to_pdf теряет кириллицу
   let output_path = "visuals/ref_" + entity_type + "_" + entity_id + ".pdf"
-  let _ = html_to_pdf(html, output_path)
+  let rendered = RenderSvgPdfViaProxy(output_path, svg, 595.28, 841.89)
+  if rendered != "ok" then {
+    let _ = AuditLog("svg_render_fail", "visual", output_path)
+    return ""
+  }
   let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["reference", entity_type, entity_id, output_path]))
 
   // naryad-361: файл уходит в чат документом
@@ -934,6 +946,21 @@ pattern RenderCardPdfViaProxy(fpath: String, badge: String, topic: String, statu
   if fpath == "" then { return "" }
   let body = json_encode({path: fpath, card: {badge: badge, topic: topic, status: status, confidence: confidence, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, terms: terms, accent: accent, ink: ink, paper: paper, dim: dim, rule: rule}})
   let resp = TryVal(try http_post("http://127.0.0.1:4000/render-card-pdf", body, "application/json", 90.0))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "" }
+  if redact(to_string(json_get(parsed, "status", "")), "all") == "ok" then { return "ok" }
+  return ""
+}
+
+// ═══ #515: SVG-визуалы верстает python-сторона (/render-svg-pdf) ═══
+// Движковый html_to_pdf срезает теги и теряет кириллицу (root cause #499).
+// MuPDF открывает SVG как документ и конвертирует в PDF с юникодом.
+// Честный отказ: не ok — PDF не создан, в чат не уходит (как в карточке #499).
+pattern RenderSvgPdfViaProxy(fpath: String, svg: String, width: Float, height: Float) -> String {
+  if fpath == "" then { return "" }
+  let body = json_encode({path: fpath, svg: svg, width: width, height: height})
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/render-svg-pdf", body, "application/json", 90.0))
   if to_string(resp) == "()" then { return "" }
   let parsed = TryVal(try parse_json(to_string(resp)))
   if to_string(parsed) == "()" then { return "" }

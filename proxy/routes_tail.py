@@ -681,6 +681,61 @@ def card_summary_endpoint():
     return jsonify({'status': 'ok', 'summary': summary})
 
 
+# ── #515: движковый html_to_pdf → python-вёрстка для SVG-визуалов ──────────
+# root cause #499: движковый html_to_pdf (mlog 0.30.0, src/builtins/pdf.rs)
+# срезает все теги и пишет кириллицу сырыми UTF-8-байтами базовым Helvetica
+# без /Encoding — PDF пустой/каша. Карточка переведена на свой
+# python-маршрут (#499 A.5); остальные генераторы Визуала (compression/memorable/reference)
+# строят SVG из нативных примитивов (svg_canvas/chart_*/svg_text) — MuPDF
+# открывает SVG как документ и конвертирует в PDF с сохранением юникода
+# (проверено живым прогоном: «Апрель»/«Май» в get_text; 16.10).
+
+
+@app.route('/render-svg-pdf', methods=['POST'])
+def render_svg_pdf_endpoint():
+    """#515: SVG → PDF (pymupdf native SVG input, юникод сохраняется).
+
+    Request: {path, svg}. path — относительный (от CWD) или абсолютный,
+    как в маршруте карточки. Returns {status: ok, path, size} | error."""
+    d = request.get_json(force=True) or {}
+    fpath = str(d.get('path', ''))
+    svg = str(d.get('svg') or '')
+    if not fpath or not svg.strip():
+        return jsonify({'status': 'error', 'error': 'path and svg are required'}), 400
+    target = Path(fpath)
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    target = target.resolve()
+    allowed_roots = [Path.cwd().resolve(), Path('/tmp')]
+    if not any(str(target).startswith(str(r)) for r in allowed_roots):
+        return jsonify({'status': 'error', 'error': 'path outside allowed roots'}), 403
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import fitz  # pymupdf — лениво, только Визуал
+        src = fitz.open(stream=svg.encode('utf-8'), filetype='svg')
+        try:
+            width, height = src[0].rect.width, src[0].rect.height
+            # SVG — не PDF: конвертация MuPDF сохраняет юникод-тексты
+            # (проверено: «Апрель»/«Май» в get_text, 16.10)
+            pdf_bytes = src.convert_to_pdf()
+            pdf = fitz.open(stream=pdf_bytes, filetype='pdf')
+            try:
+                out = fitz.open()
+                pdf_page = out.new_page(width=width, height=height)
+                pdf_page.show_pdf_page(pdf_page.rect, pdf, 0)
+                out.save(str(target), deflate=True)
+            finally:
+                pdf.close()
+        finally:
+            src.close()
+    except Exception as e:  # noqa: BLE001 — честный 500, mlog-сторона решает фолбэк
+        log.error(f"render-svg-pdf failed: {e}")
+        return jsonify({'status': 'error', 'error': str(e)[:300]}), 500
+    size = os.path.getsize(target)
+    _log_audit('svg_pdf_rendered', {'path': str(target)[:200], 'size': size}, dept='visual')
+    return jsonify({'status': 'ok', 'path': str(target), 'size': size})
+
+
 @app.route('/render-card-pdf', methods=['POST'])
 def render_card_pdf_endpoint():
     """#499 A.5: вёрстка PDF-карточки Визуала с кириллицей (pymupdf + DejaVu).
