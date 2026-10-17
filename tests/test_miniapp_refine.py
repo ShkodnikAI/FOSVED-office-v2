@@ -90,8 +90,9 @@ def fake_dispatch(monkeypatch):
         def json(self):
             return {"result": "НОВЫЙ ОТЧЁТ ПОСЛЕ УТОЧНЕНИЯ"}
 
-    def fake_post(url, json=None, timeout=None):
-        calls["chain"].append({"url": url, "json": json, "timeout": timeout})
+    def fake_post(url, json=None, timeout=None, headers=None):
+        calls["chain"].append({"url": url, "json": json, "timeout": timeout,
+                               "headers": headers or {}})
         return FakeResp()
 
     def fake_tg(chat_id, text, button_text="Otkryt otchet", button_url=None):
