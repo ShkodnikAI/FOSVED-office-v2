@@ -300,6 +300,26 @@ if [ "$MLOG_BOOT_READY" != "1" ]; then
 fi
 echo "Metalogos healthy — /health 200 (naryad #520 wait loop done)"
 
+# ── Наряд #536 A.0: диагностика расхождения секретов ────────────────────────
+# Прод-mlog отклоняет оба секрета из того же контейнерного env (стартовый лог
+# dep-db9f48jrjlhs73ejcnn0: bootstrap 403 key_mismatch, /version FAIL).
+# Печатаем ТОЛЬКО длины (shell-сторона) и флаг пробелов/переводов строк —
+# значения не выводятся. Ответ маршрута /internal/envcheck (mlog-сторона env)
+# — рядом; маршрут временный и будет удалён после A.3 (по тексту наряда),
+# shell-строки остаются постоянной диагностикой.
+echo "envcheck shell: cron=${#CRON_SECRET} internal=${#INTERNAL_API_TOKEN}"
+case "${CRON_SECRET}" in
+  *[[:space:]]*) echo "envcheck spaces: cron=yes" ;;
+  *) echo "envcheck spaces: cron=no" ;;
+esac
+case "${INTERNAL_API_TOKEN}" in
+  *[[:space:]]*) echo "envcheck spaces: internal=yes" ;;
+  *) echo "envcheck spaces: internal=no" ;;
+esac
+# #536 A.0: mlog-сторона (без XFF — только loopback, см. маршрут в app.mlog)
+EC_RESP=$(curl -s --max-time 5 "http://127.0.0.1:10001/internal/envcheck" 2>/dev/null || true)
+echo "envcheck route: ${EC_RESP:-no-answer}"
+
 # ── Наряд №419: бутстрап реестра заданий (только на пути кандидата) ────────
 # Реестр dept/schedules.mlog → нативный стор cron (идемпотентно по target).
 # На легаси-пути бутстрап не запускается: 4-аргументный cron_add/TZ — контракт
