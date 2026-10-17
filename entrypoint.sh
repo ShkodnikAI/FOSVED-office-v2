@@ -315,6 +315,109 @@ case "${INTERNAL_API_TOKEN}" in
   *) echo "envcheck spaces: internal=no" ;;
 esac
 
+# ── Наряд #536 A.0-bis: кто слушает :10001 и с каким окружением ────────────
+# Аудиторская диагностика (возврат #536, 17.10): mlog на проде отклоняет оба
+# секрета, которые шлёт shell из того же окружения, при обоих способах
+# сравнения. Снимаем фактическое окружение ПРОЦЕССА-слушателя :10001 (то,
+# что mlog получил на exec после gosu) и сравниваем со значениями в этом
+# shell. Печатаются только PID, cmdline (бинарь + файл) и ДЛИНЫ значений;
+# совпадение значений — по sha256, вычисляемому внутри shell, сам хеш не
+# печатается. Значения секретов не печатаются нигде. Способ: /proc/net/tcp(6)
+# (st=0A, порт 10001=0x2711) + /proc/*/fd -> socket:[inode]; ss в образе нет.
+# Блок только читает /proc, ничего не меняет.
+EVCHECK_INODES="$( { awk '$2 ~ /:2711$/ && $4 == "0A" {print $10}' /proc/net/tcp 2>/dev/null; awk '$2 ~ /:2711$/ && $4 == "0A" {print $10}' /proc/net/tcp6 2>/dev/null; } | sort -u )"
+EVCHECK_PIDS=""
+for EVCHECK_INO in $EVCHECK_INODES; do
+  for EVCHECK_PDIR in /proc/[0-9]*; do
+    EVCHECK_PID="${EVCHECK_PDIR#/proc/}"
+    for EVCHECK_FD in "$EVCHECK_PDIR"/fd/*; do
+      EVCHECK_L="$(readlink "$EVCHECK_FD" 2>/dev/null || true)"
+      if [ "$EVCHECK_L" = "socket:[${EVCHECK_INO}]" ]; then
+        case ",${EVCHECK_PIDS}," in
+          *",${EVCHECK_PID},"*) ;;
+          *) EVCHECK_PIDS="${EVCHECK_PIDS:+${EVCHECK_PIDS},}${EVCHECK_PID}" ;;
+        esac
+        break
+      fi
+    done
+  done
+done
+if [ -n "$EVCHECK_PIDS" ]; then
+  for EVCHECK_PID in $(printf '%s' "$EVCHECK_PIDS" | tr ',' ' '); do
+    EVCHECK_CMD="$(tr '\0\n' '  ' < "/proc/${EVCHECK_PID}/cmdline" 2>/dev/null | sed 's/ *$//' || true)"
+    echo "envcheck listeners: pid=${EVCHECK_PID} cmd=${EVCHECK_CMD% }"
+  done
+else
+  echo "envcheck listeners: none"
+fi
+if [ "$(printf '%s' "$EVCHECK_PIDS" | tr -cd ',' | wc -c)" -ge 1 ]; then
+  echo "envcheck note: multiple listeners — proc/same lines follow listener order"
+fi
+for EVCHECK_PID in $(printf '%s' "$EVCHECK_PIDS" | tr ',' ' '); do
+  EVCHECK_PROC_LINE=""
+  EVCHECK_SAME_LINE=""
+  for EVCHECK_KEY in CRON_SECRET INTERNAL_API_TOKEN; do
+    case "$EVCHECK_KEY" in
+      CRON_SECRET) EVCHECK_LABEL="cron" ;;
+      *) EVCHECK_LABEL="internal" ;;
+    esac
+    # Длина значения из /proc/<PID>/environ — байт-в-байт (без среза хвостовых
+    # \n командной подстановкой: python печатает только ЧИСЛО). absent —
+    # переменной в окружении процесса нет; unreadable — /proc/<PID>/environ
+    # не прочитался.
+    EVCHECK_LEN="$(python3 - "$EVCHECK_PID" "$EVCHECK_KEY" <<'PYEV' 2>/dev/null
+import sys
+keyb = sys.argv[2].encode() + b"="
+try:
+    data = open("/proc/%s/environ" % sys.argv[1], "rb").read()
+except Exception:
+    print("unreadable")
+    sys.exit(0)
+for e in data.split(b"\0"):
+    if e.startswith(keyb):
+        print(len(e) - len(keyb))
+        sys.exit(0)
+print("absent")
+PYEV
+)"
+    case "$EVCHECK_LEN" in
+      ''|*[!0-9]*)
+        # Значения в окружении процесса нет (absent/unreadable) — совпасть
+        # не может. Вывод length-строки сам покажет аудитору причину.
+        EVCHECK_SAME="no"
+        ;;
+      *)
+        # sha256 обеих сторон внутри shell; хеши живут в переменных,
+        # не печатаются. Сырые байты значения процесса идут пайпом из
+        # python прямо в sha256sum — не через $() и не в лог.
+        EVCHECK_SHELL_HASH="$(printf '%s' "${!EVCHECK_KEY:-}" | sha256sum | cut -d' ' -f1)"
+        EVCHECK_PROC_HASH="$(python3 - "$EVCHECK_PID" "$EVCHECK_KEY" <<'PYEV' 2>/dev/null | sha256sum | cut -d' ' -f1
+import sys
+keyb = sys.argv[2].encode() + b"="
+for e in open("/proc/%s/environ" % sys.argv[1], "rb").read().split(b"\0"):
+    if e.startswith(keyb):
+        sys.stdout.buffer.write(e[len(keyb):])
+        sys.exit(0)
+sys.exit(1)
+PYEV
+)"
+        if [ -n "$EVCHECK_PROC_HASH" ] && [ "$EVCHECK_SHELL_HASH" = "$EVCHECK_PROC_HASH" ]; then
+          EVCHECK_SAME="yes"
+        else
+          EVCHECK_SAME="no"
+        fi
+        ;;
+    esac
+    EVCHECK_PROC_LINE="${EVCHECK_PROC_LINE:+${EVCHECK_PROC_LINE} }${EVCHECK_LABEL}=${EVCHECK_LEN}"
+    EVCHECK_SAME_LINE="${EVCHECK_SAME_LINE:+${EVCHECK_SAME_LINE} }${EVCHECK_LABEL}=${EVCHECK_SAME}"
+  done
+  echo "envcheck proc ${EVCHECK_PID}: ${EVCHECK_PROC_LINE}"
+  echo "envcheck same: ${EVCHECK_SAME_LINE}"
+done
+unset EVCHECK_INODES EVCHECK_PIDS EVCHECK_INO EVCHECK_PDIR EVCHECK_PID EVCHECK_FD \
+      EVCHECK_L EVCHECK_CMD EVCHECK_KEY EVCHECK_LABEL EVCHECK_LEN EVCHECK_SAME \
+      EVCHECK_SHELL_HASH EVCHECK_PROC_HASH EVCHECK_PROC_LINE EVCHECK_SAME_LINE
+
 # ── Наряд #536 A.3: самопроверка internal-auth на старте ─────────────────
 # GET /version с заголовком X-Internal-Token (RequireInternalAuth теперь
 # читает заголовок + ct_eq — #536 A.1). Ровно одна строка вердикта;
