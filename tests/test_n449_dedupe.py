@@ -85,9 +85,10 @@ def test_duplicates_baseline_matches_adr():
     adr = (REPO_ROOT / "docs" / "adr" / "0014-duplicate-patterns-departmental-voice.md").read_text(encoding="utf-8")
     data = registry()
     dupes = sorted(name for name, info in data["patterns"].items() if info["duplicate"])
-    assert len(dupes) == 7, f"список дублей изменился: {dupes} — обнови ADR-0014"
-    for name in dupes:
-        assert name in adr, f"{name} не зафиксирован в ADR-0014"
+    # наряд #514 (2026-10-16): недетерминированный бут — все дубли разведены
+    # переименованием с dept-контекстом, список 7 → 0 (ADR-0014, дополнение 2).
+    assert len(dupes) == 0, f"дубли паттернов вернулись: {dupes} — голоса отделов разводить по ADR-0014 (дополнение 2)"
+    assert "Дополнение 2026-10-16" in adr, "ADR-0014 не фиксирует разводку #514"
 
 
 def test_string_only_slot_patterns_intact():

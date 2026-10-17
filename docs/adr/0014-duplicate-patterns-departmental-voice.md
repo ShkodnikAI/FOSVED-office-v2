@@ -50,3 +50,37 @@
 
 Список дублей: 8 → 7 (`scripts/compare_dupes.py`, гвард
 `tests/test_n449_dedupe.py` обновлены согласованно).
+
+---
+
+## Дополнение 2026-10-16 (наряд #514: недетерминированный бут — разводка всех дублей)
+
+Бут-логи прода 13.10 показали: порядок резолва дублей НЕДЕТЕРМИНИРОВАН
+(07:41:30 «already in utils, redefined in legal», 07:41:33 — наоборот).
+Поведение офиса различалось между рестартами без изменений кода; скрытый
+риск: `app.mlog /search` парсит JSON именно utils-версии `SearchArchive`
+— при выигравшей legal-версии `/search` падал бы на parse_json.
+
+Решение — разводка всех оставшихся дублей (7 → 0) переименованием с
+dept-контекстом; голос отдела сохранён ПОЛНОСТЬЮ — тела не менялись:
+
+- `SearchArchive` — авторское место `dept/utils`; legal-вариант →
+  `LegalSearchArchive` (engineering-вариант ушёл в 2026-10-04);
+- `DISCLAIMER_TOP/BOTTOM` → `LegalDisclaimerTop/Bottom`,
+  `EngineeringDisclaimerTop/Bottom`, `DesignDisclaimerTop/Bottom`;
+- `RunQuarterlyMethodologyReview` → `LegalQuarterlyMethodologyReview` /
+  `DesignQuarterlyMethodologyReview`;
+- `QuarterlyMethodologyReview` → `EngineeringQuarterlyMethodologyReview` /
+  `QaQuarterlyMethodologyReview`;
+- `WrapWithDisclaimer` → `EngineeringWrapWithDisclaimer` /
+  `DesignWrapWithDisclaimer`;
+- `ApplyDisclaimer` → `LegalApplyDisclaimer` / `QaApplyDisclaimer`.
+
+Вызовы слотов `dept/scheduler.mlog` перевязаны на dept-имена. Гварды:
+`tests/test_n514_unique_patterns.py` (уникальность всех имён по dept/*,
+совместимость вызова app.mlog /search с utils-сигнатурой); гвард
+`tests/test_n449_dedupe.py` обновлён: список дублей 7 → 0.
+
+Охранная грамота текстов (§2 AGENTS.md: голос отдела) продолжает
+действовать: отделные дисклеймеры/обзоры не унифицированы — разведены
+только ИМЕНА, резолв стал детерминированным.
