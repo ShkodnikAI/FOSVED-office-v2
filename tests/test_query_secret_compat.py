@@ -43,17 +43,23 @@ def test_entrypoint_has_no_raw_token_in_query():
     assert "?token=${INTERNAL_API_TOKEN" not in src
 
 
-def test_entrypoint_encodes_secret_and_token():
+def test_entrypoint_encodes_secret_and_header_token():
     src = _ep()
-    # бутстрап (три попытки) и version-чек — через -G --data-urlencode;
-    # #429 A.3 добавил второй --data-urlencode "secret=..." — фоновый прогрев
-    # /cron/onliner-warm при старте (curl -G на 127.0.0.1:4000, секрет в query
-    # внутреннего запроса, в лог не печатается)
+    # бутстрап (три попытки) и фоновый прогрев — через -G --data-urlencode;
+    # #429 A.3 добавил второй --data-urlencode "secret=..." — прогрев
+    # /cron/onliner-warm при старте (секрет в query внутреннего запроса,
+    # в лог не печатается)
     assert src.count('--data-urlencode "secret=${CRON_SECRET}"') == 2
-    assert src.count('--data-urlencode "token=${INTERNAL_API_TOKEN:-}"') == 1
-    assert src.count('--data-urlencode "token=${INTERNAL_API_TOKEN}"') == 1
-    # все три вызова используют -G (data уходит в query, метод остаётся GET)
-    assert src.count("-G ") >= 3
+    # #536 A.2/A.3: INTERNAL_API_TOKEN больше не ходит в URL (утечка через
+    # текст исключений requests) — только заголовок X-Internal-Token:
+    # A.3-вердикт + version-чек (:-вариант) и department-validation (без :-)
+    assert src.count('--data-urlencode "token=${INTERNAL_API_TOKEN:-}"') == 0
+    assert src.count('--data-urlencode "token=${INTERNAL_API_TOKEN}"') == 0
+    assert 'data-urlencode "token=' not in src, "токен в query запрещён (#536)"
+    assert src.count('-H "X-Internal-Token: ${INTERNAL_API_TOKEN:-}"') == 2
+    assert src.count('-H "X-Internal-Token: ${INTERNAL_API_TOKEN}"') == 1
+    # -G остаётся у двух secret-вызовов (bootstrap + прогрев)
+    assert src.count("-G ") >= 2
 
 
 def test_entrypoint_bootstrap_url_has_no_query():

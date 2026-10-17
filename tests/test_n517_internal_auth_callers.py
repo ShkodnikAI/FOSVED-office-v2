@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Наряд #517 (FOIP-003.14): внутренние вызыватели /chain/step передают токен.
+"""Наряд #517 (FOIP-003.14) → #536 A.2/A.4: внутренние вызыватели /chain/step.
 
-Находка: с заданным INTERNAL_API_TOKEN прод `/chain/step` отвечает 401 на
-собственных внутренних клиентов (fan-out, нарядная очередь, miniapp refine) —
-они шлют POST без ?token=, а RequireInternalAuth (app.mlog:754) ждёт токен в
-query_param("token"). Вероятная причина жалоб «нет параллельной работы» и
-«уточнение не сработало» (#498).
+История: #517 завёл query-токен (?token=); прод-приёмка #498 (лог Render
+02:46:55 UTC) показала, что исключение requests содержит URL целиком, и
+_log_error писал значение токена в журнал открытым текстом; кроме того
+внутренние вызовы получали 401. #536 A.1/A.2: RequireInternalAuth читает
+заголовок X-Internal-Token (request_header + ct_eq), вызыватели шлют
+headers=_internal_auth_headers(); токен в URL запрещён.
 
 Гварды:
-- chain_parallel._invoke_step / narad_queue._invoke_step / routes_core
-  refine → URL содержит ?token=<env INTERNAL_API_TOKEN>;
-- env не задан → URL без query (auth-off по замыслу FOIP-003.14);
-- токен URL-экранируется (safe=""), ключи не логируются (проверка — в коде
-  хелпера _internal_auth_qs, redact-политика запросов не менялась);
-- все три вызывателя ходят именно на /chain/step (путь не подменён).
+- _internal_auth_headers: непустой env → {"X-Internal-Token": token},
+  пустой env → {} (auth-off по замыслу FOIP-003.14, expected == "" → "ok");
+- все три вызывателя (chain_parallel / narad_queue / routes_core refine)
+  через monkeypatch http_requests.post: URL БЕЗ "?token=", заголовок присутствует;
+- НИ ОДИН вызов /chain/step не содержит token= в URL (текст #536 A.4);
+- статический гвард: источники используют _internal_auth_headers(), следы
+  _internal_auth_qs / chain/step?token отсутствуют.
 """
 import os
 import sys
@@ -56,9 +58,9 @@ class _FakeResp:
 
 
 def _capture_post(monkeypatch, bucket):
-    """Стаб http_requests.post: захватывает URL/timeout, возвращает 200 OK."""
-    def fake_post(url, json=None, timeout=None):  # noqa: A002 — сигнатура requests
-        bucket.append({"url": url, "json": json, "timeout": timeout})
+    """Стаб http_requests.post: захватывает URL/headers/timeout, 200 OK."""
+    def fake_post(url, json=None, timeout=None, headers=None):  # noqa: A002 — сигнатура requests
+        bucket.append({"url": url, "json": json, "timeout": timeout, "headers": headers or {}})
         return _FakeResp()
     monkeypatch.setattr(cp.http_requests, "post", fake_post)
     monkeypatch.setattr(nq.http_requests, "post", fake_post)
@@ -79,58 +81,64 @@ def client():
     return flask_app.test_client()
 
 
-# ── _internal_auth_qs: базовая семантика ─────────────────────────────────
+# ── _internal_auth_headers: базовая семантика (#536 A.2) ─────────────────
 
 
-def test_auth_qs_empty_env_is_empty(monkeypatch):
+def test_auth_headers_empty_env(monkeypatch):
     monkeypatch.setenv("INTERNAL_API_TOKEN", "")
-    assert pcore._internal_auth_qs() == ""
+    assert pcore._internal_auth_headers() == {}
 
 
-def test_auth_qs_with_token_is_quoted_query(monkeypatch):
+def test_auth_headers_with_token(monkeypatch):
     monkeypatch.setenv("INTERNAL_API_TOKEN", "tok with/space&rand")
-    qs = pcore._internal_auth_qs()
-    assert qs.startswith("?token=")
-    assert "/" not in qs and " " not in qs and "&" not in qs, "токен URL-экранирован"
+    h = pcore._internal_auth_headers()
+    assert h == {"X-Internal-Token": "tok with/space&rand"}, \
+        "заголовок несёт ТОЧНОЕ значение env (без URL-экранирования)"
 
 
 # ── chain_parallel (fan-out/debate) ──────────────────────────────────────
 
 
-def test_chain_parallel_sends_token(monkeypatch):
+def test_chain_parallel_sends_header(monkeypatch):
     bucket = _capture_post(monkeypatch, [])
     monkeypatch.setenv("INTERNAL_API_TOKEN", "tok-fanout-123")
     out = cp._invoke_step("osp", "вопрос", "0", "grp-1")
     assert out == "OK-СТЕП"
-    assert bucket and bucket[0]["url"].startswith(cp.MLOGSERVE_URL + "/chain/step?token=tok-fanout-123")
-    body = bucket[0]["json"]
+    call = bucket[0]
+    assert call["url"] == cp.MLOGSERVE_URL + "/chain/step", "URL без query"
+    assert call["headers"].get("X-Internal-Token") == "tok-fanout-123"
+    body = call["json"]
     assert body["dept"] == "osp" and body["query"] == "вопрос"
 
 
-def test_chain_parallel_auth_off_no_query(monkeypatch):
+def test_chain_parallel_auth_off_no_token(monkeypatch):
     bucket = _capture_post(monkeypatch, [])
     monkeypatch.setenv("INTERNAL_API_TOKEN", "")
     cp._invoke_step("osp", "вопрос", "0", "grp-1")
-    assert "?" not in bucket[0]["url"], "пустой env — запрос без ?token= (auth-off)"
+    assert "?" not in bucket[0]["url"], "пустой env — запрос без query (auth-off)"
+    assert bucket[0]["headers"] == {}, "пустой env — заголовков нет"
 
 
 # ── narad_queue (нарядная очередь) ───────────────────────────────────────
 
 
-def test_narad_queue_sends_token(monkeypatch):
+def test_narad_queue_sends_header(monkeypatch):
     bucket = _capture_post(monkeypatch, [])
     monkeypatch.setenv("INTERNAL_API_TOKEN", "tok-narad-456")
     out = nq._invoke_step("forge", "наряд", "555")
     assert out == "OK-СТЕП"
-    assert bucket and bucket[0]["url"].startswith(nq.MLOGSERVE_URL + "/chain/step?token=tok-narad-456")
-    assert bucket[0]["json"]["group_id"].startswith("narad-")
+    call = bucket[0]
+    assert call["url"] == nq.MLOGSERVE_URL + "/chain/step"
+    assert call["headers"].get("X-Internal-Token") == "tok-narad-456"
+    assert call["json"]["group_id"].startswith("narad-")
 
 
-def test_narad_queue_auth_off_no_query(monkeypatch):
+def test_narad_queue_auth_off_no_token(monkeypatch):
     bucket = _capture_post(monkeypatch, [])
     monkeypatch.setenv("INTERNAL_API_TOKEN", "")
     nq._invoke_step("forge", "наряд", "555")
     assert "?" not in bucket[0]["url"]
+    assert bucket[0]["headers"] == {}
 
 
 # ── miniapp refine (#498 маршрут уточнения) ──────────────────────────────
@@ -153,7 +161,7 @@ def _cleanup_doc(cid):
     routes_core._query("DELETE FROM audit_log WHERE action='miniapp_refine'")
 
 
-def test_refine_sends_token(client, monkeypatch):
+def test_refine_sends_header(client, monkeypatch):
     bucket = _capture_post(monkeypatch, [])
     monkeypatch.setenv("INTERNAL_API_TOKEN", "tok-refine-789")
     cid = _insert_doc()
@@ -162,13 +170,15 @@ def test_refine_sends_token(client, monkeypatch):
                         json={"doc_id": cid, "note_text": "учти вариативность", "refine": True},
                         headers=API_AUTH)
         assert r.status_code == 200, r.get_data(as_text=True)
-        assert bucket and bucket[0]["url"].startswith(routes_core.MLOGSERVE_URL + "/chain/step?token=tok-refine-789")
-        assert bucket[0]["json"]["dept"] == "osp"
+        call = bucket[0]
+        assert call["url"] == routes_core.MLOGSERVE_URL + "/chain/step"
+        assert call["headers"].get("X-Internal-Token") == "tok-refine-789"
+        assert call["json"]["dept"] == "osp"
     finally:
         _cleanup_doc(cid)
 
 
-def test_refine_auth_off_no_query(client, monkeypatch):
+def test_refine_auth_off_no_token(client, monkeypatch):
     bucket = _capture_post(monkeypatch, [])
     monkeypatch.setenv("INTERNAL_API_TOKEN", "")
     cid = _insert_doc()
@@ -177,19 +187,60 @@ def test_refine_auth_off_no_query(client, monkeypatch):
                         json={"doc_id": cid, "note_text": "учти вариативность", "refine": True},
                         headers=API_AUTH)
         assert r.status_code == 200, r.get_data(as_text=True)
-        assert bucket and "?" not in bucket[0]["url"]
+        assert bucket[0]["headers"] == {}
+        assert "?" not in bucket[0]["url"]
     finally:
         _cleanup_doc(cid)
 
 
-# ── Статический гвард: три вызывателя идут через _internal_auth_qs ───────
+# ── #536 A.4: ни один вызов /chain/step не несёт token= в URL ────────────
+# Три вызывателя через monkeypatch http_requests.post; и с токеном, и без —
+# URL обязан быть чистым от token=. В полной батарее через те же модули
+# могут ходить и другие вызовы (enrich и пр.) — фильтруем по /chain/step,
+# а запрет token= проверяем на ВСЕ захваченные вызовы.
 
 
-def test_all_three_callers_use_auth_qs():
+@pytest.mark.parametrize("env_token", ["tok-mutation-check-42", ""])
+def test_no_caller_puts_token_in_url(monkeypatch, env_token):
+    monkeypatch.setenv("INTERNAL_API_TOKEN", env_token)
+    bucket = _capture_post(monkeypatch, [])
+    cp._invoke_step("osp", "вопрос", "0", "grp-1")
+    nq._invoke_step("forge", "наряд", "555")
+    cid = _insert_doc()
+    try:
+        client = flask_app.test_client()
+        flask_app.config['TESTING'] = True
+        r = client.post('/miniapp/note',
+                        json={"doc_id": cid, "note_text": "учти вариативность", "refine": True},
+                        headers=API_AUTH)
+        assert r.status_code == 200, r.get_data(as_text=True)
+    finally:
+        _cleanup_doc(cid)
+    for i, call in enumerate(bucket):
+        assert "token=" not in call["url"], \
+            f"вызов #{i}: token= в URL запрещён (#536 — утечка через исключения requests): {call['url']}"
+    step_calls = [c for c in bucket if c["url"].split("?")[0].endswith("/chain/step")]
+    assert len(step_calls) == 3, \
+        f"ожидались вызовы всех трёх вызывателей /chain/step, захвачено {len(step_calls)}: " \
+        + "; ".join(c["url"] for c in bucket)
+    for call in step_calls:
+        assert call["url"] == "http://127.0.0.1:10001/chain/step", call["url"]
+        if env_token:
+            assert call["headers"].get("X-Internal-Token") == env_token, call["headers"]
+        else:
+            assert call["headers"] == {}, call["headers"]
+
+
+# ── Статический гвард: заголовок вместо query ────────────────────────────
+
+
+def test_all_three_callers_use_auth_headers():
     srcs = {
         "chain_parallel": open(cp.__file__.replace(".pyc", ".py"), encoding="utf-8").read(),
         "narad_queue": open(nq.__file__.replace(".pyc", ".py"), encoding="utf-8").read(),
         "routes_core": open(routes_core.__file__.replace(".pyc", ".py"), encoding="utf-8").read(),
     }
     for name, src in srcs.items():
-        assert "_internal_auth_qs()" in src, f"{name}: вызов /chain/step без _internal_auth_qs"
+        assert "_internal_auth_headers()" in src, f"{name}: вызов /chain/step без _internal_auth_headers"
+        assert "_internal_auth_qs" not in src, f"{name}: остался след старой query-функции"
+        assert "chain/step?token" not in src, f"{name}: токен в URL (утечка #536)"
