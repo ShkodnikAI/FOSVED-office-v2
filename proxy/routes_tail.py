@@ -436,6 +436,12 @@ def _render_card_pdf_fitz(card: dict, out_path: str) -> int:
     ink = _hex_to_rgb01(card.get("ink") or "#ebeaec")
     dim = _hex_to_rgb01(card.get("dim") or "#908198")
     rule = _hex_to_rgb01(card.get("rule") or "#312537")
+    # #543 A.1: новые цветовые поля card. Фолбэки — прежнее поведение
+    # (текст на латуни был paper, разделы были dim, вердикт был accent).
+    # Имя поля цвета вердикта — verdict_c: `verdict` занят текстом вердикта.
+    title_c = _hex_to_rgb01(card.get("title") or card.get("paper") or "#100e11")
+    heading_c = _hex_to_rgb01(card.get("heading") or card.get("dim") or "#908198")
+    verdict_c = _hex_to_rgb01(card.get("verdict_c") or card.get("accent") or "#c9a961")
 
     fontfile = _find_cyrillic_fontfile()
     font = fitz.Font(fontfile=fontfile)
@@ -457,21 +463,51 @@ def _render_card_pdf_fitz(card: dict, out_path: str) -> int:
             tw.write_text(page, color=color)
             return f.text_length(text, fontsize=size)
 
-        # ── шапка 0–72: золотая плашка, бейдж + тема в две строки ──
+        # ── шапка 0–72: латунная плашка, бейдж + тема в две строки ──
         # #521 A.4: перенос по ширине с «…» на границе слова, не обрезка посреди слова
+        # #543 A.1: текст шапки — title (пергамент); справа шестерня — ширина
+        # текста меньше на 40 pt, чтобы орнамент не налезал на заголовок
         page.draw_rect(fitz.Rect(0, 0, W, 72), fill=accent, color=None)
         badge = str(card.get("badge") or "ОТЧЁТ")[:20]
         topic = str(card.get("topic") or "")
-        put(26, badge, 10.0, paper, bold=True)
+        put(26, badge, 10.0, title_c, bold=True)
         ty = 44.0
-        for row in _wrap_pdf_text(topic, font_bold, 13.0, W - 36.0, 2):
-            put(ty, row, 13.0, paper, bold=True)
+        for row in _wrap_pdf_text(topic, font_bold, 13.0, W - 36.0 - 40.0, 2):
+            put(ty, row, 13.0, title_c, bold=True)
             ty += 16.0
 
-        # ── статус-бар 72–96 ──
-        # #521 A.5: служебный статус убран; уверенность приходит словом из mlog
-        # (CardConfLabel: числовая шкала 0..4 и low/medium/high — низкая/средняя/высокая)
-        page.draw_rect(fitz.Rect(0, 72, W, 96), fill=rule, color=None)
+        # ── #543 A.1: орнамент — только вектор, без текста ──
+        # двойная латунная линия под шапкой (на орехе статус-зоны): 1 pt + 0.5 pt, отступ 2 pt
+        page.draw_line(fitz.Point(0, 73.5), fitz.Point(W, 73.5), color=_hex_to_rgb01("#B08D57"), width=1.0)
+        page.draw_line(fitz.Point(0, 75.5), fitz.Point(W, 75.5), color=rule, width=0.5)
+        # заклёпки по углам шапки: круг r=3, заливка латунь, обводка тёмная
+        _rivet = _hex_to_rgb01("#B08D57")
+        _rivet_edge = _hex_to_rgb01("#3A2A18")
+        for rx, ry in ((14.0, 14.0), (W - 14.0, 14.0), (14.0, 58.0), (W - 14.0, 58.0)):
+            page.draw_circle(fitz.Point(rx, ry), 3.0, color=_rivet_edge, fill=_rivet, width=0.8)
+        # шестерня в правом верхнем углу шапки: окружность r=16, 10 прямоугольных
+        # зубьев, заливка rule (#5A4228), центр r=5 цвета шапки
+        _gx, _gy, _gr = W - 40.0, 36.0, 16.0
+        page.draw_circle(fitz.Point(_gx, _gy), _gr, color=None, fill=rule, width=0)
+        import math as _math
+        for _i in range(10):
+            _a = _i * (2.0 * _math.pi / 10.0)
+            _w = 0.10
+            _r1, _r2 = _gr - 1.0, _gr + 4.0
+            pts = [
+                fitz.Point(_gx + _r1 * _math.cos(_a - _w), _gy + _r1 * _math.sin(_a - _w)),
+                fitz.Point(_gx + _r2 * _math.cos(_a - _w), _gy + _r2 * _math.sin(_a - _w)),
+                fitz.Point(_gx + _r2 * _math.cos(_a + _w), _gy + _r2 * _math.sin(_a + _w)),
+                fitz.Point(_gx + _r1 * _math.cos(_a + _w), _gy + _r1 * _math.sin(_a + _w)),
+            ]
+            page.draw_polyline(pts, color=None, fill=rule, closePath=True)
+        page.draw_circle(fitz.Point(_gx, _gy), 5.0, color=None, fill=accent, width=0)
+
+        # ── статус-зона 72–96 ──
+        # #521 A.5: уверенность словом; #543 A.1: фон — paper (фон единый,
+        # тёмный орех), линия rule сверху — двойная латунная линия под шапкой видна
+        page.draw_rect(fitz.Rect(0, 72, W, 96), fill=paper, color=None)
+        page.draw_line(fitz.Point(0, 72.25), fitz.Point(W, 72.25), color=rule, width=0.5)
         conf_label = str(card.get("confidence") or "").strip()
         if conf_label:
             put(88, "Уверенность: " + conf_label, 8.5, dim)
@@ -481,12 +517,12 @@ def _render_card_pdf_fitz(card: dict, out_path: str) -> int:
         verdict = str(card.get("verdict") or "").strip()
         if verdict and y < 452.0:
             for row in _wrap_pdf_text("Вердикт: " + verdict, font, 10.0, W - 36.0, 3):
-                put(y, row, 10.0, accent, bold=True)
+                put(y, row, 10.0, verdict_c, bold=True)
                 y += 14.0
             y += 5.0
         theses = str(card.get("theses") or "").strip()
         if theses and y < 452.0:
-            put(y, "ТЕЗИСЫ", 8.0, dim, bold=True)
+            put(y, "ТЕЗИСЫ", 8.0, heading_c, bold=True)
             y += 13.0
             for t in theses.split("\n"):
                 t = t.strip()
@@ -502,8 +538,9 @@ def _render_card_pdf_fitz(card: dict, out_path: str) -> int:
             y += 5.0
         probs = str(card.get("probs") or "").strip()
         if probs and y < 452.0:
-            put(y, "ВЕРОЯТНОСТИ СЦЕНАРИЕВ", 8.0, dim, bold=True)
+            put(y, "ВЕРОЯТНОСТИ СЦЕНАРИЕВ", 8.0, heading_c, bold=True)
             y += 13.0
+            _pct_sum, _pct_seen = 0.0, False
             for p in probs.split("\n"):
                 p = p.strip()
                 if not p:
@@ -516,11 +553,22 @@ def _render_card_pdf_fitz(card: dict, out_path: str) -> int:
                         break
                     put(y, row, 9.0, ink)
                     y += 12.0
+                # #543 A.3: сумма найденных вероятностей (первый N% строки)
+                _m = re.search(r"(\d+(?:[.,]\d+)?)\s*%", p)
+                if _m:
+                    _pct_sum += float(_m.group(1).replace(",", "."))
+                    _pct_seen = True
+            # #543 A.3: сумма ≠ 100% ±2 → строка dim под списком
+            if _pct_seen and abs(_pct_sum - 100.0) > 2.0 and y < 452.0:
+                _sum_txt = str(int(round(_pct_sum))) if abs(_pct_sum - round(_pct_sum)) < 1e-9 \
+                    else f"{_pct_sum:.1f}"
+                put(y, f"Сумма сценариев: {_sum_txt}%", 8.5, dim)
+                y += 12.0
             y += 5.0
         # #522 A.1: термины простым языком — раньше доменов и даты (важнее)
         terms = str(card.get("terms") or "").strip()
         if terms and y < 452.0:
-            put(y, "ПРОСТЫМ ЯЗЫКОМ", 8.0, dim, bold=True)
+            put(y, "ПРОСТЫМ ЯЗЫКОМ", 8.0, heading_c, bold=True)
             y += 13.0
             for t in terms.split("\n"):
                 t = t.strip()
@@ -547,9 +595,12 @@ def _render_card_pdf_fitz(card: dict, out_path: str) -> int:
                 y += 12.0
 
         # ── подвал 474–504 ──
-        page.draw_rect(fitz.Rect(0, H - 30, W, H), fill=accent, color=None)
+        # #543 A.1: подвал на фоне paper (фон карточки единый), линия rule
+        # сверху, текст title — пиксельный тест наряда (W/2, H−20) = paper
+        page.draw_rect(fitz.Rect(0, H - 30, W, H), fill=paper, color=None)
+        page.draw_line(fitz.Point(0, H - 30.25), fitz.Point(W, H - 30.25), color=rule, width=0.5)
         footer = "FOSVED OFFICE | " + str(card.get("created_at") or "")
-        put(H - 12.0, footer[:80], 7.0, paper, bold=True)
+        put(H - 12.0, footer[:80], 7.0, title_c, bold=True)
 
         doc.save(out_path, deflate=True)
     finally:

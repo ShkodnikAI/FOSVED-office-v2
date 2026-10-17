@@ -345,7 +345,8 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   // вероятности сценариев (если есть), источники-домены, дата проверки
   let mut verdict = CardSectionLine(body_text, "ердикт", 90.0)
   let mut theses = CardCollectTheses(body_text, 4.0, 96.0)
-  let mut probs = CardCollectProbs(body_text, 3.0, 46.0)
+  // #543 A.3: до 6 строк (было 3 — четвёртый сценарий отбрасывался)
+  let mut probs = CardCollectProbs(body_text, 6.0, 46.0)
   let domains = CardCollectDomains(body_text, 3.0)
   let check_date = CardSectionLine(body_text, "роверка прогноза", 70.0)
   let mut terms = ""
@@ -428,39 +429,47 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   if src_type == "report" then { let badge = "ОТЧЁТ" }
 
   // ── Build card using SVG primitives ──
-  // #499 A.2: тёмная тема FOSVED (прежде — light). Золотой #c9a961 —
-  // бренд Fosved; контраст на тёмном проверен infographic_qa (probe499qa).
-  let style = color_palette("authority", "dark")
-  let ink = redact(to_string(json_get(style, "ink", "#ebeaec")), "all")
-  let accent = "#c9a961"
-  let paper = redact(to_string(json_get(style, "paper", "#100e11")), "all")
-  let dim_c = redact(to_string(json_get(style, "muted", "#908198")), "all")
-  let rule = redact(to_string(json_get(style, "rule", "#312537")), "all")
+  // #543 A.1: стимпанк-палитра (решение владельца 17.10). Цвета уходят
+  // полями card в /render-card-pdf (accent/paper/ink/dim/rule + новые
+  // title/heading/verdict_c) — python-сторона НЕ хардкодит. Контраст
+  // посчитан аудитором (наряд #543): пергамент на латуни 5.91, ink 13.02,
+  // медь 6.82, латунь 8.77, dim 7.73 — все ≥ 4.5.
+  let accent = "#6E4F22"   // шапка 0–72 — старая латунь
+  let paper = "#1C140E"    // фон карточки — тёмный орех
+  let ink = "#E8D9B8"      // основной текст
+  let dim_c = "#C9A36A"    // второстепенный текст
+  let rule = "#5A4228"     // линии
+  let title_c = "#F3E3C3"  // заголовок и бейдж — пергамент
+  let heading_c = "#D98E3A" // заголовки разделов — медь
+  let verdict_c = "#D4AF6A" // вердикт — латунь
 
   // ── шапка 0–72: бейдж + тема в две строки ──
   // #521 A.4: заголовок чистится и переносится по ширине с многоточием
   // на границе слова, а не обрезается посреди слова substring(topic, 0, 40)
   let title_rows = split(CardWrapText(CardCleanLine(topic), 26.0, 2.0), "\n")
-  let mut title_frag = svg_text(18.0, 24.0, badge, 10.0, paper)
+  let mut title_frag = svg_text(18.0, 24.0, badge, 10.0, title_c)
   let mut ty = 44.0
   each trow in title_rows {
     let tr = trim(to_string(trow))
     if tr != "" then {
-      let title_frag = title_frag + svg_text(18.0, ty, tr, 14.0, paper)
+      let title_frag = title_frag + svg_text(18.0, ty, tr, 14.0, title_c)
       let ty = ty + 16.0
     }
   }
   let header = svg_group([svg_rect(0.0, 0.0, 360.0, 72.0, accent, accent) + title_frag], "translate(0.0,0.0)")
 
   // ── статус-бар 72–96 ──
-  // #521 A.5: служебный «Статус: sent» убран; уверенность — понятным словом
+  // #521 A.5: служебный «Статус: sent» убран; уверенность — понятным словом.
+  // #543 A.1: фон статус-бара — paper (фон единый, тёмный орех), сверху
+  // тонкая линия rule — так двойная латунная линия под шапкой видна.
   let conf_label = CardConfLabel(confidence)
   let mut status_text = "Уверенность: " + conf_label
   if conf_label == "" then { let status_text = "" }
-  let status_bar = svg_group([svg_rect(0.0, 0.0, 360.0, 24.0, rule, rule) +
+  let status_bar = svg_group([svg_rect(0.0, 0.0, 360.0, 1.5, rule, rule) +
     svg_text(18.0, 16.0, status_text, 9.0, dim_c)], "translate(0.0,72.0)")
-  let footer = svg_group([svg_rect(0.0, 0.0, 360.0, 30.0, accent, accent) +
-    svg_text(18.0, 18.0, "FOSVED OFFICE | " + created_at, 7.0, paper)], "translate(0.0,474.0)")
+  let footer = svg_group([svg_rect(0.0, 0.0, 360.0, 30.0, paper, paper) +
+    svg_rect(0.0, 0.0, 360.0, 1.0, rule, rule) +
+    svg_text(18.0, 18.0, "FOSVED OFFICE | " + created_at, 7.0, title_c)], "translate(0.0,474.0)")
 
   // ── #499 A.1/A.2: тело карточки (область 96–474) ──
   // Вёрстка с переносом по ширине (CardWrapText — svg_text не переносит),
@@ -472,7 +481,7 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
     each row in vrows {
       let rr = trim(to_string(row))
       if rr != "" and y < 356.0 then {
-        let frag = frag + svg_text(18.0, y, rr, 10.0, accent)
+        let frag = frag + svg_text(18.0, y, rr, 10.0, verdict_c)
         let y = y + 14.0
       }
     }
@@ -480,7 +489,7 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   }
   if theses != "" then {
     if y < 356.0 then {
-      let frag = frag + svg_text(18.0, y, "ТЕЗИСЫ", 8.0, dim_c)
+      let frag = frag + svg_text(18.0, y, "ТЕЗИСЫ", 8.0, heading_c)
       let y = y + 13.0
     }
     each t in split(theses, "\n") {
@@ -500,7 +509,7 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   }
   if probs != "" then {
     if y < 356.0 then {
-      let frag = frag + svg_text(18.0, y, "ВЕРОЯТНОСТИ СЦЕНАРИЕВ", 8.0, dim_c)
+      let frag = frag + svg_text(18.0, y, "ВЕРОЯТНОСТИ СЦЕНАРИЕВ", 8.0, heading_c)
       let y = y + 13.0
     }
     each p in split(probs, "\n") {
@@ -514,7 +523,7 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   }
   // #522 A.1: термины простым языком — раньше доменов и даты (важнее)
   if terms != "" and y < 356.0 then {
-    let frag = frag + svg_text(18.0, y, "ПРОСТЫМ ЯЗЫКОМ", 8.0, dim_c)
+    let frag = frag + svg_text(18.0, y, "ПРОСТЫМ ЯЗЫКОМ", 8.0, heading_c)
     let y = y + 13.0
     each te in split(terms, "\n") {
       let tee = trim(to_string(te))
@@ -551,7 +560,7 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   // срезает вёрстку (см. докстринг RenderCardPdfViaProxy). SVG выше —
   // источник QA-гейта (заполненность/контраст до отправки).
   let output_path = "visuals/card_" + src_type + "_" + src_id + ".pdf"
-  let rendered = RenderCardPdfViaProxy(output_path, badge, CardCleanLine(topic), status, conf_label, created_at, verdict, theses, probs, domains, check_date, terms, accent, ink, paper, dim_c, rule)
+  let rendered = RenderCardPdfViaProxy(output_path, badge, CardCleanLine(topic), status, conf_label, created_at, verdict, theses, probs, domains, check_date, terms, accent, ink, paper, dim_c, rule, title_c, heading_c, verdict_c)
   if rendered != "ok" then {
     // честный отказ: файл не создан — пустой/битый PDF в чат не уходит
     let _ = AuditLog("card_render_fail", "visual", src_id)
@@ -942,9 +951,12 @@ pattern GetVisualPath(visual_id: String) -> String {
 // заполненность/контраст содержания до отправки.
 // Возврат "ok" | "" — при сбое карточка НЕ отправляется (честный отказ
 // вместо пустого/битого файла), сбой журналируется card_render_fail.
-pattern RenderCardPdfViaProxy(fpath: String, badge: String, topic: String, status: String, confidence: String, created_at: String, verdict: String, theses: String, probs: String, domains: String, check_date: String, terms: String, accent: String, ink: String, paper: String, dim: String, rule: String) -> String {
+pattern RenderCardPdfViaProxy(fpath: String, badge: String, topic: String, status: String, confidence: String, created_at: String, verdict: String, theses: String, probs: String, domains: String, check_date: String, terms: String, accent: String, ink: String, paper: String, dim: String, rule: String, title: String, heading: String, verdict_c: String) -> String {
+  // #543 A.1: палитра передаётся полями card; поле цвета вердикта названо
+  // verdict_c — имя verdict из наряда занято ТЕКСТОМ вердикта (коллизия),
+  // отклонение зафиксировано в отчёте #543.
   if fpath == "" then { return "" }
-  let body = json_encode({path: fpath, card: {badge: badge, topic: topic, status: status, confidence: confidence, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, terms: terms, accent: accent, ink: ink, paper: paper, dim: dim, rule: rule}})
+  let body = json_encode({path: fpath, card: {badge: badge, topic: topic, status: status, confidence: confidence, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, terms: terms, accent: accent, ink: ink, paper: paper, dim: dim, rule: rule, title: title, heading: heading, verdict_c: verdict_c}})
   let resp = TryVal(try http_post("http://127.0.0.1:4000/render-card-pdf", body, "application/json", 90.0))
   if to_string(resp) == "()" then { return "" }
   let parsed = TryVal(try parse_json(to_string(resp)))

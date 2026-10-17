@@ -69,10 +69,10 @@ def test_a4_title_wraps_two_lines_not_cut():
     assert 'CardWrapText(CardCleanLine(topic), 26.0, 2.0)' in SRC, "заголовок SVG не переносится"
     assert "substring(topic, 0.0, 40.0)" not in SRC.split("pattern GenerateCompressionVisual")[0].split("pattern GenerateAnalysisCard")[-1], \
         "SVG-заголовок всё ещё режется посреди слова"
-    # python-вёрстка: перенос вместо [:80]
+    # python-вёрстка: перенос вместо [:80]; #543 — ширина минус 40 pt под шестерню
     assert "topic = str(card.get(\"topic\") or \"\")\n" in TAIL_SRC.replace("topic = str(card.get(\"topic\") or \"\")\n", "topic = str(card.get(\"topic\") or \"\")\n"), "заголовок python-вёрстки"
     assert 'topic = str(card.get("topic") or "")[:80]' not in TAIL_SRC, "python-вёрстка режет заголовок [:80]"
-    assert "_wrap_pdf_text(topic, font_bold, 13.0, W - 36.0, 2)" in TAIL_SRC, "python-вёрстка не переносит заголовок"
+    assert "_wrap_pdf_text(topic, font_bold, 13.0, W - 36.0 - 40.0, 2)" in TAIL_SRC, "python-вёрстка не переносит заголовок"
 
 
 def test_a5_no_sent_status_and_word_confidence():
