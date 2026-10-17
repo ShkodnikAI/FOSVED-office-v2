@@ -639,25 +639,25 @@ sleep 2
 echo "=== T1: /admin ==="
 curl -s -X POST http://localhost:10000/webhook/telegram \
   -H "Content-Type: application/json" \
-  -d '{"message":{"text":"/admin","from":{"id":2044005421},"chat":{"id":2044005421}}}'
+  -d '{"message":{"text":"/admin","from":{"id":1},"chat":{"id":1}}}'
 sleep 1
 
 echo "=== T2: /admin status ==="
 curl -s -X POST http://localhost:10000/webhook/telegram \
   -H "Content-Type: application/json" \
-  -d '{"message":{"text":"/admin status","from":{"id":2044005421},"chat":{"id":2044005421}}}'
+  -d '{"message":{"text":"/admin status","from":{"id":1},"chat":{"id":1}}}'
 sleep 1
 
 echo "=== T3: /admin build добавь команду /ping ==="
 curl -s -X POST http://localhost:10000/webhook/telegram \
   -H "Content-Type: application/json" \
-  -d '{"message":{"text":"/admin build добавь команду /ping которая отвечает pong","from":{"id":2044005421},"chat":{"id":2044005421}}}'
+  -d '{"message":{"text":"/admin build добавь команду /ping которая отвечает pong","from":{"id":1},"chat":{"id":1}}}'
 sleep 2
 
 echo "=== T4: /admin analyze ==="
 curl -s -X POST http://localhost:10000/webhook/telegram \
   -H "Content-Type: application/json" \
-  -d '{"message":{"text":"/admin analyze","from":{"id":2044005421},"chat":{"id":2044005421}}}'
+  -d '{"message":{"text":"/admin analyze","from":{"id":1},"chat":{"id":1}}}'
 sleep 2
 
 echo "=== T5: /cron/night ==="

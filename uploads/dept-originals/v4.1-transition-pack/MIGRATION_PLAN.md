@@ -2,7 +2,7 @@
 
 **Project:** ShkodnikAI/fosved-bot + ShkodnikAI/fosved-miniapp
 **Target version:** v4.1 (Fosved Office full architecture)
-**Owner:** @ShkodnikAI (Telegram ID 2044005421)
+**Owner:** @ShkodnikAI (Telegram ID задаётся переменной OWNER_TELEGRAM_ID)
 **Plan author:** Claude Opus (planning session)
 **Plan version:** 1.0
 **Plan date:** 2026-05-09

@@ -2,7 +2,7 @@
 
 **Block:** Three-Department Integration (Разработка, Дизайн, Тестирование)
 **Target:** existing fosved-bot v4.1 + Visual Department already deployed
-**Owner:** @ShkodnikAI (Telegram ID 2044005421)
+**Owner:** @ShkodnikAI (Telegram ID задаётся переменной OWNER_TELEGRAM_ID)
 **Block version:** 1.0
 **Date:** 2026-05-15
 **Estimated duration:** 12-16 days of focused work, realistic 4-5 weeks with buffers

@@ -16,7 +16,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
-const OWNER_ID = 2044005421;
+const OWNER_ID = Number(process.env.OWNER_TELEGRAM_ID);
 
 export async function GET(request: NextRequest) {
   // Auth check (use existing helper)

@@ -416,7 +416,7 @@ export async function publishVerifiedForecast(verificationId) {
  * Returns combined ranked results.
  */
 export async function searchUnified(query, options = {}) {
-  const { userId = 2044005421, limit = 20 } = options;
+  const { userId = 0, limit = 20 } = options;
 
   if (!query || !query.trim()) {
     return { db: [], channel: [], total: 0 };

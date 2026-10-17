@@ -3,7 +3,7 @@
 **Block:** Visual Department for fosved-bot
 **Version:** 1.0
 **Target:** fosved-bot v4.1 (already deployed and running)
-**Owner:** @ShkodnikAI (Telegram ID 2044005421)
+**Owner:** @ShkodnikAI (Telegram ID задаётся переменной OWNER_TELEGRAM_ID)
 
 ---
 

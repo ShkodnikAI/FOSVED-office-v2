@@ -23,7 +23,7 @@ import crypto from 'crypto';
 const prisma = new PrismaClient();
 const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const OWNER_ID = 2044005421;
+const OWNER_ID = Number(process.env.OWNER_TELEGRAM_ID);
 
 // Emergency disable via env: VISUAL_AUTO_GENERATION=false
 const AUTO_GENERATION_ENABLED = process.env.VISUAL_AUTO_GENERATION !== 'false';

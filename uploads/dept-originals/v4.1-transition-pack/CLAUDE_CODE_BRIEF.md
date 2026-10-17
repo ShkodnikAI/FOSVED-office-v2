@@ -1,7 +1,7 @@
 # CLAUDE_CODE_BRIEF.md — Operational Discipline for Claude Code
 
 **For:** Claude (Anthropic) operating in Claude Code as the implementation engine for fosved-bot v4.1 migration
-**Owner:** @ShkodnikAI (Telegram ID 2044005421)
+**Owner:** @ShkodnikAI (Telegram ID задаётся переменной OWNER_TELEGRAM_ID)
 **Author:** Claude Opus (planning session)
 **Version:** 1.0
 **Date:** 2026-05-09
@@ -299,7 +299,7 @@ For handler tests with mocking:
 ```bash
 # Read the handler signature, construct fake msg object:
 node -e "
-const fakeMsg = { from: { id: 2044005421 }, chat: { id: 2044005421 }, text: '/expert тестовая тема' };
+const fakeMsg = { from: { id: 1 }, chat: { id: 1 }, text: '/expert тестовая тема' };
 // Then invoke handler directly if exposed, or...
 // (alternatively, just send to bot and inspect production response)
 "
