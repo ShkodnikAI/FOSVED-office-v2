@@ -111,3 +111,38 @@ def test_serve_starts_and_health_answers(tmp_path):
             p.kill()
         if created:
             version.unlink(missing_ok=True)
+
+
+# ── Наряд #520: ожидание готовности mlog serve до /health ───────────────────
+# Прод-лог 16.10: старт 0.32.0 ~57 с, прежнее окно 10×2 с = 20 с рвало бут —
+# bootstrap расписаний conn-fail ×3, нативные расписания не регистрировались,
+# стартовые проверки FAIL без причины. Гварды (статические — сам entrypoint
+# в CI не исполняется, живой бут проверяется деплоем, §8.2 п.3):
+
+
+def _entrypoint_src() -> str:
+    return (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+
+
+def test_n520_wait_limit_at_least_120s():
+    m = re.search(r'MLOG_BOOT_WAIT_SECS="\$\{MLOG_BOOT_WAIT_SECS:-(\d+)\}"', _entrypoint_src())
+    assert m, "нет переменной MLOG_BOOT_WAIT_SECS в entrypoint.sh"
+    assert int(m.group(1)) >= 120, f"лимит ожидания {m.group(1)} с < 120 с — бут 0.32.0 (~57 с) снова порвётся"
+
+
+def test_n520_wait_targets_health_and_loud_timeout_exit():
+    src = _entrypoint_src()
+    block = src[src.index("MLOG_BOOT_WAIT_SECS"):src.index("Metalogos healthy")]
+    assert "/health" in block, "ожидание не по /health"
+    assert 'MLOG_BOOT_READY=1' in block, "нет признака готовности"
+    assert "did not become healthy" in block and "exit 1" in src[src.index("did not become healthy"):src.index("Metalogos healthy")], \
+        "таймаут ожидания — не громкий выход (§445 A.2)"
+
+
+def test_n520_bootstrap_and_checks_run_after_ready():
+    src = _entrypoint_src()
+    i_ready = src.index("Metalogos healthy")
+    i_bootstrap = src.index("bootstrapping native schedules")
+    i_version = src.index("--- Version check ---")
+    assert i_ready < i_bootstrap < i_version, \
+        "bootstrap расписаний и стартовые проверки обязаны идти после подтверждённой готовности mlog serve"
