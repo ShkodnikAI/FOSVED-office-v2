@@ -35,7 +35,7 @@ const grok = new OpenAI({
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const OWNER_ID = 2044005421;
+const OWNER_ID = Number(process.env.OWNER_TELEGRAM_ID);
 
 // Source tier hierarchy (1 = highest credibility, 5 = lowest)
 const SOURCE_TIERS = {

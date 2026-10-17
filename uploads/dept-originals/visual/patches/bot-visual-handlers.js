@@ -20,7 +20,7 @@
 // ============================================================================
 
 const visual = require('./lib/visual');
-const isOwner = (msg) => msg.from.id === 2044005421;
+const isOwner = (msg) => msg.from.id === Number(process.env.OWNER_TELEGRAM_ID);
 
 // Helper: detect source type from id pattern or owner-supplied prefix
 async function detectSourceType(idStr) {

@@ -3,7 +3,7 @@
 **Version:** 1.0
 **Date:** 2026-05-09
 **For:** Migration of `ShkodnikAI/fosved-bot` + `ShkodnikAI/fosved-miniapp` to v4.1 architecture
-**Owner:** @ShkodnikAI (Telegram ID 2044005421)
+**Owner:** @ShkodnikAI (Telegram ID задаётся переменной OWNER_TELEGRAM_ID)
 
 ---
 

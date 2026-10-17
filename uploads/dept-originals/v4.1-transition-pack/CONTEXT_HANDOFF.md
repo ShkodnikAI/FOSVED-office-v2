@@ -1,7 +1,7 @@
 # CONTEXT_HANDOFF.md — Concentrated Project Context
 
 **Project:** Fosved Office (fosved-bot + fosved-miniapp)
-**Owner:** @ShkodnikAI (Telegram ID 2044005421)
+**Owner:** @ShkodnikAI (Telegram ID задаётся переменной OWNER_TELEGRAM_ID)
 **Author:** Claude Opus (planning session)
 **Version:** 1.0
 **Date:** 2026-05-09
@@ -192,7 +192,7 @@ Sharing the architecture (profile + skills + archive + metric + reviews) but sep
 - Building full multi-user (auth flows, RBAC, UI for user management, data isolation) is months of work
 - v4.1 is large enough already; multi-user would push it to v5.0
 
-**What this means for Claude Code:** add `userId Int @default(2044005421)` to Conversation, Project, Task, Invoice, Document, Analysis, KnowledgeArtifact, ExpertBriefing, ResearchSource, etc. Don't add `where: { userId }` filters in queries (those would change semantics). Just have the field for future use.
+**What this means for Claude Code:** add `userId Int @default(0)` to Conversation, Project, Task, Invoice, Document, Analysis, KnowledgeArtifact, ExpertBriefing, ResearchSource, etc. Don't add `where: { userId }` filters in queries (those would change semantics). Just have the field for future use.
 
 ### Decision 7 — Why Telegram Archive Channel is separate from Drive Channel
 

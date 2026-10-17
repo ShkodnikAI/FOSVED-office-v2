@@ -2,7 +2,7 @@
 
 **Block:** Kuznitsa (Кузница кадров / Veteran) Department Integration
 **Target:** existing fosved-bot v4.1 + all prior departments
-**Owner:** @ShkodnikAI (Telegram ID 2044005421)
+**Owner:** @ShkodnikAI (Telegram ID задаётся переменной OWNER_TELEGRAM_ID)
 **Block version:** 1.0
 **Date:** 2026-05
 **Estimated effort:** 3 days focused work
