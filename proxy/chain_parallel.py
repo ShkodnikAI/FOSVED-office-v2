@@ -37,7 +37,7 @@ import requests as http_requests
 
 from flask import request, jsonify
 
-from proxy.core import app, _log_audit, _log_error, log, _internal_auth_headers
+from proxy.core import app, _log_audit, _log_error, log, _internal_auth_headers, _chain_step_json
 
 MLOGSERVE_URL = "http://127.0.0.1:10001"
 STEP_TIMEOUT_SECS = float(os.environ.get("CHAIN_STEP_TIMEOUT_SECS", "90"))
@@ -60,7 +60,8 @@ def _invoke_step(dept, query, chat_id, group_id, round_no=1, peer_context=None):
     # (query-токен утекал в журнал через текст исключений requests)
     resp = http_requests.post(f"{MLOGSERVE_URL}/chain/step", json=payload, headers=_internal_auth_headers(), timeout=STEP_TIMEOUT_SECS)
     resp.raise_for_status()
-    data = resp.json()
+    # #542 A.1: контракт JSON {"result": ...}; не-JSON — громкая ошибка с телом
+    data = _chain_step_json(resp)
     return str(data.get("result", ""))
 
 

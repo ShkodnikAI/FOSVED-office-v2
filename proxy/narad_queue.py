@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 import requests as http_requests
 
-from proxy.core import _log_audit, _query, log, _internal_auth_headers
+from proxy.core import _log_audit, _query, log, _internal_auth_headers, _chain_step_json
 
 MLOGSERVE_URL = os.environ.get("MLOGSERVE_URL", "http://127.0.0.1:10001")
 STEP_TIMEOUT_SECS = float(os.environ.get("CHAIN_STEP_TIMEOUT_SECS", "90"))
@@ -119,7 +119,8 @@ def _invoke_step(dept, query, chat_id):
     # #536 A.2 (эволюция #517): токен — в заголовке X-Internal-Token, не в URL
     resp = http_requests.post(f"{MLOGSERVE_URL}/chain/step", json=payload, headers=_internal_auth_headers(), timeout=STEP_TIMEOUT_SECS)
     resp.raise_for_status()
-    return str(resp.json().get("result", ""))
+    # #542 A.1: контракт JSON {"result": ...}; не-JSON — громкая ошибка с телом
+    return str(_chain_step_json(resp).get("result", ""))
 
 
 def _accept_markup(narad_id):
