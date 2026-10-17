@@ -513,6 +513,28 @@ def _internal_auth_headers():
         return {}
     return {"X-Internal-Token": token}
 
+
+def _chain_step_json(resp):
+    """#542 A.1: разбор ответа mlogserve /chain/step с громкой ошибкой.
+
+    Контракт (app.mlog, /chain/step): JSON {"result": <текст отдела>}.
+    До #542 маршрут возвращал сырой текст отдела — resp.json() падал
+    «Expecting value» (прод 33d61ad, 17.10 07:04), причина из лога была
+    невидима. Не-JSON или тело без result → RuntimeError с ПЕРВЫМИ 200
+    символами тела в сообщении (тело маршрута — ответ отдела, секретов не
+    содержит; токен ходит в заголовке #536 и в тело не попадает) — ошибка
+    доходит до журналов вызывателей (_log_error / журналы fanout).
+    """
+    try:
+        data = resp.json()
+    except ValueError as e:
+        body = str(getattr(resp, "text", "") or "")[:200]
+        raise RuntimeError(f"chain/step: ответ не JSON ({e}); тело[:200]: {body}") from None
+    if not isinstance(data, dict) or "result" not in data:
+        body = str(getattr(resp, "text", "") or "")[:200]
+        raise RuntimeError(f"chain/step: в ответе нет поля result; тело[:200]: {body}")
+    return data
+
 # ── FO-007: error_log и гигиена журналов (issue #67) ────────────────────
 # Политика: молчаливый except запрещён (CI-проверка: scripts/check_silent_excepts.py).
 # Ошибки внешних вызовов и потери данных → error_log (через _log_error);

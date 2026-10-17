@@ -23,6 +23,7 @@ from proxy.core import (
     get_secret, set_secret, delete_secret, _has_db_override, INTEGRATIONS_REGISTRY,
     DB_PATH, DB_FILE, BASE_DIR, LIB_DIR, CFG_DIR, API_SECRET, RENDER_URL,
     _internal_auth_headers,
+    _chain_step_json,
     TELEGRAM_BOT_TOKEN, TELEGRAM_ARCHIVE_CHANNEL_ID,
     memory, require_telegram, _TG_BOOTSTRAP_PAGE, _verify_init_data, _verify_webhook_secret,
     auto_enrich, _has_enricher, _auto_enrich_fn,
@@ -484,7 +485,9 @@ def _miniapp_refine(doc_id, note_text):
             headers=_internal_auth_headers(),
             timeout=REFINE_TIMEOUT_SECS)
         resp.raise_for_status()
-        reply = str(resp.json().get("result", ""))
+        # #542 A.1: контракт JSON {"result": ...}; не-JSON — громкая ошибка
+        # с первыми 200 символами тела (причина из лога видна, секретов нет)
+        reply = str(_chain_step_json(resp).get("result", ""))
     except Exception as e:  # noqa: BLE001 — mlog недоступен/таймаут: честный сбой
         _log_error(f"miniapp refine dispatch failed for {doc_id}: {e}",
                    source="miniapp_refine", dept=dept, kind="refine_dispatch")
@@ -538,6 +541,23 @@ def _save_generated_report(dept, title, query, raw_text):
     return new_doc_id
 
 
+def _tg_notify_action_ready(new_id, action_label, title):
+    """#542 A.3: результат действия кнопки отчёта доходит до владельца
+    в Telegram (страница может быть закрыта/запрос оборван — результат
+    не теряется). Формат по наряду: «<Действие> готов — <заголовок>»
+    + кнопка «Открыть», как в доставке уточнения. Вызывается РОВНО ОДИН
+    раз из каждой создающей документ ветки miniapp_action — двойная
+    отправка исключена точкой вызова (гвард тестом на 1 вызов).
+    OWNER_TELEGRAM_ID не задан (dev-стенд) — доставка пропускается."""
+    chat_id = os.environ.get("OWNER_TELEGRAM_ID", "")
+    if not chat_id or not new_id:
+        return
+    _tg_send_report_with_button(
+        chat_id, f"{action_label} готов — {title}",
+        button_text="Открыть",
+        button_url=f"{RENDER_URL}/miniapp/{new_id}")
+
+
 @app.post("/webhook/miniapp-action")
 def miniapp_action():
     """Handle Mini App action bar button clicks (Journalist, Depth, Control, Counter)."""
@@ -571,6 +591,8 @@ def miniapp_action():
         result = call_llm("osp", messages)
         reply = result.get("reply", "")
         new_id = _save_generated_report(dept, f"Журналистская версия: {title}", "journalist", reply)
+        # #542 A.3: результат — владельцу в Telegram (ровно один вызов)
+        _tg_notify_action_ready(new_id, "Журналист", f"Журналистская версия: {title}")
         return jsonify({"status": "ok", "reply": reply, "action": "journalist", "doc_id": new_id})
     
     elif action.startswith("deepen_to_"):
@@ -583,6 +605,8 @@ def miniapp_action():
         result = call_llm("osp", messages)
         reply = result.get("reply", "")
         new_id = _save_generated_report(dept, f"Углублено (ур. {level}): {title}", "deepen", reply)
+        # #542 A.3: результат — владельцу в Telegram (ровно один вызов)
+        _tg_notify_action_ready(new_id, f"Погружение (ур. {level})", f"Углублено (ур. {level}): {title}")
         return jsonify({"status": "ok", "reply": reply, "action": "deepen", "level": level, "doc_id": new_id})
     
     elif action.startswith("control_"):
@@ -603,6 +627,8 @@ def miniapp_action():
         result = call_llm("osp", messages)
         reply = result.get("reply", "")
         new_id = _save_generated_report(dept, f"Контр-прогноз: {title}", "counter_forecast", reply)
+        # #542 A.3: результат — владельцу в Telegram (ровно один вызов)
+        _tg_notify_action_ready(new_id, "Контр-прогноз", f"Контр-прогноз: {title}")
         return jsonify({"status": "ok", "reply": reply, "action": "counter_forecast", "doc_id": new_id})
     
     elif action == "archive":
@@ -621,6 +647,8 @@ def miniapp_action():
         result = call_llm("osp", messages)
         reply = result.get("reply", "")
         new_id = _save_generated_report(dept, f"Кризис-протокол: {title}", "crisis_protocol", reply)
+        # #542 A.3: результат — владельцу в Telegram (ровно один вызов)
+        _tg_notify_action_ready(new_id, "Кризис-протокол", f"Кризис-протокол: {title}")
         return jsonify({"status": "ok", "reply": reply, "action": "crisis_protocol", "doc_id": new_id})
     
     return jsonify({"status": "error", "msg": f"unknown action: {action}"}), 400
