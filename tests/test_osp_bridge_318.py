@@ -33,23 +33,22 @@ def test_route_exists_exactly_once():
 
 def test_auth_is_query_secret_hash_compare():
     block = _route_block()
-    # №376: предварительный redact("all") сохранён — требование taint-валидатора
-    # (untrusted query_param не решает 'if' без one-way-redact, Wave 15).
-    assert 'redact(query_param("secret"), "all")' in block, \
-        "one-way-redact query_param перед решением if — конвенция №327 + taint Wave 15"
-    # №327: ожидание строится как redact-hash секрета (ОДИН hash)
-    assert 'let expected = to_string(redact(cron_secret, "hash_only"))' in block, \
-        "ожидание строится как redact-hash секрета"
-    # №376: сравнение против ОДНОГО H(secret), обе формы:
-    # hash-form дословно (мост LZ №318) ИЛИ hash(received)==H(secret) (raw, cron-стиль).
-    # Исторический паттерн 'redact(expected, "hash_only")' (двойной хэш) запрещён —
-    # при неидемпотентном redact (0.24/0.25) он делал raw-форму всегда 403.
-    assert 'if received != expected and redact(received, "hash_only") != expected then { return respond("403 Forbidden") }' in block, \
-        "№376: приём обеих форм секрета против одного H(secret)"
-    assert 'redact(expected, "hash_only")' not in block, \
-        "№376: двойной хэш ожидания запрещён (raw-форма непроходима при неидемпотентном redact)"
-    assert 'if cron_secret == "" then { return respond("403 Forbidden") }' in block, \
-        "пустой env-секрет = 403 (fail-closed)"
+    # #546 A.1 (рецепт Metalogos-#1317): предварительный redact("hash_only") —
+    # требование taint-валидатора (untrusted query_param не решает 'if' без
+    # one-way-redact, Wave 15); "hash_only" (в отличие от "all") не маскирует
+    # токен-подобные значения — класс 403/401 #536 (gh#1317, проба на 0.32.0).
+    assert 'redact(query_param("secret"), "hash_only")' in block, \
+        "one-way-redact query_param перед решением if (hash_only — gh#1317)"
+    assert 'redact(query_param("secret"), "all")' not in block, \
+        "redact(...,\"all\") маскирует токен-подобные секреты — запрет #546"
+    # #546 A.1: сравнение — единый SecretMatches (двойной фингерпринт с ОБЕИХ
+    # сторон). Исторический запрет двойного хэша снят нарядом #546: redact
+    # hash_only на 0.32.0 детерминирован, обёртка симметрична — обе формы
+    # (raw и hash-form) проходят; живая проба 17/17 в test_secret_compare_serve.py.
+    assert 'SecretMatches(secret, "CRON_SECRET") == false' in block, \
+        "№546: сравнение секрета через единый SecretMatches"
+    assert 'if cron_secret == ""' not in block, \
+        "пустой env проверяется внутри SecretMatches (false → 403, fail-closed)"
 
 
 def test_ping_probe_present_no_llm():
