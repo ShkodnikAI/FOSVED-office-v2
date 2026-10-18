@@ -96,9 +96,10 @@ pattern LZGateNegativeSignals(artifact_id: Int) -> String {
   if len(rows) == 0 then { return "FAIL: not found" }
   let stage = to_string(json_get(get(rows, 0), "hype_cycle_stage", ""))
   if stage == "peak" then {
-    let check = redact(to_string(TryVal(try call_llm("Technology at Peak of Inflated Expectations. Check for negative signals (failed POCs, talent exodus, regulatory blocks, cost overruns). Technology: " + to_string(json_get(get(rows, 0.0), "title", "")) + ". List any negative signals found or say NONE."))), "all")
+    // #556 A.4: вызов через шов LZLlm; NONE — устойчиво («NONE.», «NONE — …»)
+    let check = redact(LZLlm("Technology at Peak of Inflated Expectations. Check for negative signals (failed POCs, talent exodus, regulatory blocks, cost overruns). Technology: " + to_string(json_get(get(rows, 0), "title", "")) + ". List any negative signals found or say NONE."), "all")
     if to_string(check) == "()" then { let check = "[оценка недоступна — провайдеры модели не ответили]" }
-    if check == "NONE" then { return "PASS: no negative signals at peak" }
+    if LZNone(check) then { return "PASS: no negative signals at peak" }
     return "WARN: negative signals at peak — " + check
   }
   return "PASS: not at peak stage"
@@ -116,7 +117,8 @@ pattern LZGateHypeVsFlows(technology: String) -> String {
 pattern LZGateOSPReferral(query: String) -> String {
   let result = redact(to_string(TryVal(try call_llm("Does this query involve investment recommendations or portfolio implications? Query: " + query + " Reply YES or NO."))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if result == "YES" then {
+  // #556 A.4: устойчивое да — «Yes.», «YES — …» больше не теряются
+  if LZYes(result) then {
     // №318: в query — ОДНОСТОРОННИЙ redact-hash секрета (№327/ADR-0161):
     // public-метка (нет private-egress), URL-safe (hex — нет '+'/' ' — не
     // ломается на декоде 0.21 и перекодировке прокси), секрет не светится
@@ -138,7 +140,7 @@ pattern LZGateOSPReferral(query: String) -> String {
 pattern LZGateCompetingCheck(technology: String) -> String {
   let result = redact(to_string(TryVal(try call_llm("Name 2-3 competing alternatives to " + technology + " that solve the same fundamental problem differently. If none exist, reply NONE."))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if result == "NONE" then { return "PASS: no known alternatives" }
+  if LZNone(result) then { return "PASS: no known alternatives" }
   return "PASS: alternatives identified — " + result
 }
 
@@ -146,7 +148,7 @@ pattern LZGateCompetingCheck(technology: String) -> String {
 pattern LZGateCrossDomain(technology: String, src_domain: String) -> String {
   let result = redact(to_string(TryVal(try call_llm("Could " + technology + " (currently in " + src_domain + ") have applications in other domains? Name 1-2 cross-domain possibilities or reply NONE."))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if result == "NONE" then { return "PASS: no cross-domain potential identified" }
+  if LZNone(result) then { return "PASS: no cross-domain potential identified" }
   return "PASS: cross-domain potential — " + result
 }
 
@@ -403,7 +405,8 @@ pattern LZSourcesFooter(context: String, live: String) -> String {
 // DOMAIN CLASSIFICATION + CONTEXT BUILDER
 // ═══════════════════════════════════════════════════════════════════════
 pattern LZClassifyDomain(query: String) -> String {
-  let result = redact(to_string(TryVal(try call_llm("Classify this query into exactly one domain: tech, politics, economics, geopolitics, events. Query: " + query + ". Reply with single word only."))), "all")
+  // #556: вызов через шов LZLlm (в батарее — стаб)
+  let result = redact(LZLlm("Classify this query into exactly one domain: tech, politics, economics, geopolitics, events. Query: " + query + ". Reply with single word only."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   return result
 }
@@ -560,44 +563,242 @@ pattern LoadLZSkills(query: String, domain: String) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// DATA INTEGRITY HELPERS (#556) — адресация по id, форматы ответов модели,
+// устойчивый да/нет, идемпотентная миграция данных. Предусловие #553–#555:
+// новые механики (буферы, триаж, провенанс, независимость подтверждений)
+// сюда НЕ входят. Шов LLM-вызовов LZLlm определён в app-слое (app.mlog):
+// импортированные определения сильнее локальных, нативы не перекрываются —
+// проверено пробой bin/mlog перед нарядом.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Нормализация названия (#556 A.1): lower, trim, схлопнутые пробелы.
+// replace заменяет все вхождения: 3 прохода схлопывают серии до 16 пробелов —
+// для названий артефактов достаточно. Сравнение держится в mlog, а не в SQL:
+// SQLite lower() понимает только ASCII, кириллические названия не матчились бы.
+pattern LZNormTitle(title: String) -> String {
+  let t = lower(trim(to_string(title)))
+  let a = replace(t, "  ", " ")
+  let b = replace(a, "  ", " ")
+  return replace(b, "  ", " ")
+}
+
+// Адресация артефакта (#556 A.1): точное совпадение нормализованного названия
+// и домена. Нет записи — создать и вернуть новый id. Все UPDATE по
+// knowledge_artifacts и tracked_technologies — только по id: обновление по
+// подстроке названия одной командой меняло все похожие записи («AI» задевало
+// «AI chips» и «OpenAI»).
+pattern LZArtifactId(title: String, domain: String) -> Float {
+  let nt = LZNormTitle(title)
+  let dom = trim(to_string(domain))
+  let rows = query("SELECT id, title FROM knowledge_artifacts WHERE domain = ? ORDER BY id", [dom])
+  let mut found = -1.0
+  each r in rows {
+    if found < 0.0 then {
+      if LZNormTitle(to_string(json_get(r, "title", ""))) == nt then {
+        let found = to_float(json_get(r, "id", "0"))
+      }
+    }
+  }
+  if found > 0.0 then { return found }
+  db_execute("INSERT INTO knowledge_artifacts (title, domain, source, source_tier, status) VALUES (?, ?, 'lz', 2, 'tracking')", [trim(to_string(title)), dom])
+  let created = query("SELECT id FROM knowledge_artifacts WHERE domain = ? ORDER BY id DESC LIMIT 1", [dom])
+  return to_float(json_get(get(created, 0), "id", "0"))
+}
+
+// Строка tracked_technologies артефакта (#556 A.1): создаётся при первой
+// записи со скором; до #556 строк никто не создавал и все UPDATE шли в пустоту.
+pattern LZTechRowId(artifact_id: Float, technology: String) -> Float {
+  let rows = query("SELECT id FROM tracked_technologies WHERE artifact_id = ? ORDER BY id LIMIT 1", [artifact_id])
+  if length(rows) > 0.0 then { return to_float(json_get(get(rows, 0), "id", "0")) }
+  db_execute("INSERT INTO tracked_technologies (artifact_id, technology_name) VALUES (?, ?)", [artifact_id, trim(to_string(technology))])
+  let created = query("SELECT id FROM tracked_technologies WHERE artifact_id = ? ORDER BY id DESC LIMIT 1", [artifact_id])
+  return to_float(json_get(get(created, 0), "id", "0"))
+}
+
+// Стадия хайпа (#556 A.2): код из первой строки вида STAGE: <code>.
+// Не распознано — пустая строка: стадия в базе не меняется, владельцу —
+// пометка в ответе. В hype_cycle_stage пишется только код, полный текст
+// ответа модели остаётся в ответе владельцу.
+pattern LZStageFromText(text: String) -> String {
+  let t = trim(to_string(text))
+  if starts_with(upper(t), "STAGE:") then {
+    let rest_raw = substring(t, 6.0, length(t))
+    let nl = index_of(rest_raw, "\n")
+    let mut line = rest_raw
+    if nl >= 0.0 then { let line = substring(rest_raw, 0.0, nl) }
+    let code = lower(trim(line))
+    if code == "trigger" then { return "trigger" }
+    if code == "peak" then { return "peak" }
+    if code == "trough" then { return "trough" }
+    if code == "slope" then { return "slope" }
+    if code == "plateau" then { return "plateau" }
+  }
+  return ""
+}
+
+// Скор прорыва (#556 A.3): из строки SCORES: 1y=<0-100> 3y=<0-100> 5y=<0-100>
+// 10y=<0-100>. Возвращает долю 0-1 или -1 — не распознано, значения не менять.
+// to_float_or вместо to_float: на нечисловом хвосте to_float бросает
+// исключение (№514), а мусорный ответ модели не должен ронять навык.
+pattern LZScoreFor(text: String, horizon: String) -> Float {
+  let t = to_string(text)
+  let si = index_of(t, "SCORES:")
+  if si < 0.0 then { return -1.0 }
+  let tail = trim(substring(t, si + 7.0, length(t)))
+  let nl = index_of(tail, "\n")
+  let mut line = tail
+  if nl >= 0.0 then { let line = substring(tail, 0.0, nl) }
+  let toks = split(line, " ")
+  let mut found = -1.0
+  each tok in toks {
+    if found < 0.0 then {
+      let s = trim(to_string(tok))
+      let eq = index_of(s, "=")
+      if eq > 0.0 then {
+        let key = lower(trim(substring(s, 0.0, eq)))
+        if key == horizon then {
+          let val_raw = trim(substring(s, eq + 1.0, length(s)))
+          let v = to_float_or(val_raw, -1.0)
+          if v >= 0.0 and v <= 100.0 then { let found = v / 100.0 }
+        }
+      }
+    }
+  }
+  return found
+}
+
+// Устойчивый да/нет (#556 A.4): после trim и upper ответ начинается с YES
+// или ДА. Раньше строгое сравнение с "YES" теряло «Yes.», «YES — …», «да» —
+// инфлекшн-алерт в ОСП не уходил.
+pattern LZYes(text: String) -> Bool {
+  let t = upper(trim(to_string(text)))
+  if starts_with(t, "YES") then { return true }
+  if starts_with(t, "ДА") then { return true }
+  return false
+}
+
+// Аналог для NONE (#556 A.4): «NONE.», «NONE — …» распознаются.
+pattern LZNone(text: String) -> Bool {
+  let t = upper(trim(to_string(text)))
+  return starts_with(t, "NONE")
+}
+
+// Миграция данных (#556 A.5) — идемпотентна, вызывается из InitDB (app.mlog)
+// при каждом старте, изменения сами себя не повторяют. Ничего не удаляет
+// (правило офиса): длинные стадии — разобрать первую строку по A.2 или NULL;
+// дубли по нормализованному названию и домену — keeper с минимальным id,
+// updated_at keeper'а — максимум группы, остальные — статус archived.
+pattern LZDataMaintain() -> String {
+  // шаг 1а: длинные стадии с корректной первой строкой STAGE: <code> — разобрать
+  db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = lower(trim(substr(hype_cycle_stage, 8, instr(substr(hype_cycle_stage, 8) || char(10), char(10)) - 1))) WHERE length(hype_cycle_stage) > 12 AND upper(substr(hype_cycle_stage, 1, 6)) = 'STAGE:' AND lower(trim(substr(hype_cycle_stage, 8, instr(substr(hype_cycle_stage, 8) || char(10), char(10)) - 1))) IN ('trigger', 'peak', 'trough', 'slope', 'plateau')", [])
+  // шаг 1б: остальные длинные (мусор «весь текст ответа») — NULL
+  let junk = query("SELECT COUNT(*) AS c FROM knowledge_artifacts WHERE length(hype_cycle_stage) > 12", [])
+  db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = NULL WHERE length(hype_cycle_stage) > 12", [])
+  let n_nulled = to_float(json_get(get(junk, 0), "c", "0"))
+  // шаг 2: дубли — keeper = минимальный id, дубликаты — archived.
+  // Archived-строки исключены: повторный запуск не переархивирует и не растит счётчик.
+  let rows = query("SELECT id, title, domain, updated_at FROM knowledge_artifacts WHERE status != 'archived' ORDER BY id", [])
+  let mut seen = "\n"
+  let mut archived = 0.0
+  each r in rows {
+    let rid = to_float(json_get(r, "id", "0"))
+    let dom = trim(to_string(json_get(r, "domain", "")))
+    let nt = LZNormTitle(to_string(json_get(r, "title", "")))
+    let key = dom + "||" + nt
+    if contains(seen, key + "\n") then {
+      let earlier = query("SELECT id, title FROM knowledge_artifacts WHERE id < ? AND domain = ? AND status != 'archived' ORDER BY id", [rid, dom])
+      let mut dup = false
+      each e in earlier {
+        if dup == false then {
+          if LZNormTitle(to_string(json_get(e, "title", ""))) == nt then { let dup = true }
+        }
+      }
+      if dup then {
+        db_execute("UPDATE knowledge_artifacts SET status = 'archived' WHERE id = ?", [rid])
+        let dupe_upd = to_string(json_get(r, "updated_at", ""))
+        each e2 in earlier {
+          if LZNormTitle(to_string(json_get(e2, "title", ""))) == nt then {
+            db_execute("UPDATE knowledge_artifacts SET updated_at = MAX(COALESCE(updated_at, ''), ?) WHERE id = ?", [dupe_upd, to_float(json_get(e2, "id", "0"))])
+          }
+        }
+        let archived = archived + 1.0
+      }
+    }
+    let seen = seen + key + "\n"
+  }
+  return "stages_nulled=" + to_string(n_nulled) + " dupes_archived=" + to_string(archived)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // CORE SKILLS (5) — native call_llm implementations
 // ═══════════════════════════════════════════════════════════════════════
 
 // Skill 1: hype-cycle-mapping
 pattern LZHypeCycleMap(technology: String, chat_id: String) -> String {
-  let result = redact(to_string(TryVal(try call_llm("HYPE CYCLE MAPPING for: " + technology + "\n\nClassify onto Gartner hype cycle:\n1. Innovation Trigger — breakthrough generates attention\n2. Peak of Inflated Expectations — overpromotion\n3. Trough of Disillusionment — expectations correct\n4. Slope of Enlightenment — practical use emerges\n5. Plateau of Productivity — mainstream adoption\n\nProvide: stage, evidence, timeline_to_next_stage, investment_implication (buy/sell/wait)"))), "all")
+  // #556 A.2: добавлено требование формата первой строки — смысловая часть промпта не менялась
+  let result = redact(LZLlm("HYPE CYCLE MAPPING for: " + technology + "\n\nClassify onto Gartner hype cycle:\n1. Innovation Trigger — breakthrough generates attention\n2. Peak of Inflated Expectations — overpromotion\n3. Trough of Disillusionment — expectations correct\n4. Slope of Enlightenment — practical use emerges\n5. Plateau of Productivity — mainstream adoption\n\nFIRST LINE of the reply MUST be exactly: STAGE: <trigger|peak|trough|slope|plateau>\nThen provide: stage, evidence, timeline_to_next_stage, investment_implication (buy/sell/wait)"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  // Store result
-  db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = ?, updated_at = datetime('now') WHERE title LIKE ?", [result, "%" + technology + "%"])
-  // Gate 3: Check negative signals at peak
-  let neg_check = LZGateNegativeSignals(0)
+  // #556 A.1/A.2: адресация по id; в базе — только код из 5 значений,
+  // полный текст ответа остаётся владельцу; не распознано — стадия не меняется
+  let domain = LZClassifyDomain(technology)
+  let aid = LZArtifactId(technology, domain)
+  let stage = LZStageFromText(result)
+  let mut stage_note = ""
+  if stage == "" then { let stage_note = "\n⚠️ Стадия не распознана — значение в базе не менялось" }
+  if stage != "" then {
+    db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = ?, updated_at = datetime('now') WHERE id = ?", [stage, aid])
+  }
+  // Gate 3: Check negative signals at peak — настоящий id артефакта (#556 A.4,
+  // раньше LZGateNegativeSignals(0) — запрос WHERE id = 0, всегда FAIL: not found)
+  let neg_check = LZGateNegativeSignals(aid)
   // Gate 4: Verify hype vs flows
   let flow_check = LZGateHypeVsFlows(technology)
-  return "📊 Hype Cycle: " + technology + "\n" + result + "\n" + neg_check + "\n" + flow_check
+  return "📊 Hype Cycle: " + technology + "\n" + result + "\n" + neg_check + "\n" + flow_check + stage_note
 }
 
 // Skill 2: disruption-scoring
 pattern LZDisruptionScore(technology: String, chat_id: String) -> String {
-  let result = redact(to_string(TryVal(try call_llm("DISRUPTION SCORING for: " + technology + "\n\nEvaluate 5 components (0-100 each):\n1. Performance ratio vs incumbent\n2. Cost trajectory\n3. Patent activity concentration\n4. Talent flow signal\n5. VC investment patterns\n\nCompute weighted disruption probability at horizons: 1y, 3y, 5y, 10y.\nStatus: tracking | hot | confirmed_disruption | cooled | failed"))), "all")
+  // #556 A.3: добавлено требование строки SCORES — смысловая часть промпта не менялась
+  let result = redact(LZLlm("DISRUPTION SCORING for: " + technology + "\n\nEvaluate 5 components (0-100 each):\n1. Performance ratio vs incumbent\n2. Cost trajectory\n3. Patent activity concentration\n4. Talent flow signal\n5. VC investment patterns\n\nCompute weighted disruption probability at horizons: 1y, 3y, 5y, 10y.\nStatus: tracking | hot | confirmed_disruption | cooled | failed\n\nFIRST LINE of the reply MUST be exactly: SCORES: 1y=<0-100> 3y=<0-100> 5y=<0-100> 10y=<0-100>"), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  // Store scores
-  db_execute("UPDATE tracked_technologies SET disruption_1y = ?, disruption_3y = ?, disruption_5y = ?, disruption_10y = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [0.0, 0.0, 0.0, 0.0, "%" + technology + "%"])
+  // #556 A.1/A.3: скоры — из ответа модели (доли 0-1), а не жёсткие нули;
+  // в knowledge_artifacts.disruption_score — горизонт 3y; строка
+  // tracked_technologies создаётся при первой записи; не распознано — не менять
+  let domain = LZClassifyDomain(technology)
+  let aid = LZArtifactId(technology, domain)
+  let s1 = LZScoreFor(result, "1y")
+  let s3 = LZScoreFor(result, "3y")
+  let s5 = LZScoreFor(result, "5y")
+  let s10 = LZScoreFor(result, "10y")
+  let mut score_note = ""
+  if s1 < 0.0 or s3 < 0.0 or s5 < 0.0 or s10 < 0.0 then {
+    let score_note = "\n⚠️ Скор прорыва не распознан — значения в базе не менялись"
+  }
+  if s1 >= 0.0 and s3 >= 0.0 and s5 >= 0.0 and s10 >= 0.0 then {
+    let tid = LZTechRowId(aid, technology)
+    db_execute("UPDATE tracked_technologies SET disruption_1y = ?, disruption_3y = ?, disruption_5y = ?, disruption_10y = ?, updated_at = datetime('now') WHERE id = ?", [s1, s3, s5, s10, tid])
+    db_execute("UPDATE knowledge_artifacts SET disruption_score = ?, last_scored_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", [s3, aid])
+  }
   // Gate 7: Check competing alternatives
   let alt_check = LZGateCompetingCheck(technology)
   // Gate 8: Cross-domain potential
   let cross_check = LZGateCrossDomain(technology, "tech")
-  return "🎯 Disruption Score: " + technology + "\n" + result + "\n" + alt_check + "\n" + cross_check
+  return "🎯 Disruption Score: " + technology + "\n" + result + "\n" + alt_check + "\n" + cross_check + score_note
 }
 
 // Skill 3: inflection-detection
 pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
-  let result = redact(to_string(TryVal(try call_llm("INFLECTION DETECTION for: " + technology + "\n\nWatch for signals:\n1. First non-academic deployments\n2. Regulatory attention signals\n3. Corporate VC entry\n4. Supply chain emergence\n5. Technical standards formation\n6. Talent concentration shift\n\nIs this technology at inflection point? Provide evidence and confidence level."))), "all")
+  let result = redact(LZLlm("INFLECTION DETECTION for: " + technology + "\n\nWatch for signals:\n1. First non-academic deployments\n2. Regulatory attention signals\n3. Corporate VC entry\n4. Supply chain emergence\n5. Technical standards formation\n6. Talent concentration shift\n\nIs this technology at inflection point? Provide evidence and confidence level."), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
   // If inflection detected, escalate to hot
-  let check = redact(to_string(TryVal(try call_llm("Is this technology at inflection? Reply YES or NO. Analysis: " + result))), "all")
+  let check = redact(LZLlm("Is this technology at inflection? Reply YES or NO. Analysis: " + result), "all")
   if to_string(check) == "()" then { let check = "[оценка недоступна — провайдеры модели не ответили]" }
-  if check == "YES" then {
-    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE title LIKE ?", ["hot", "%" + technology + "%"])
+  // #556 A.4: устойчивый да/нет — «Yes.», «YES — …», «да» срабатывают
+  // (раньше строгое сравнение с YES молча теряло алерт в ОСП)
+  if LZYes(check) then {
+    // #556 A.1: адресация по id, не по подстроке названия
+    let aid = LZArtifactId(technology, LZClassifyDomain(technology))
+    db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["hot", aid])
     // #446 A.2 (решение владельца: построить): алерт уходит в ЖИВОЙ
     // /osp/analyze (:10001) по контракту №318 — hash-form секрета,
     // fire-and-forget 5с: анализ продолжается на сервере, отчёт приходит
@@ -613,7 +814,7 @@ pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
 pattern LZOrderOfBattle(technology: String, chat_id: String) -> String {
   let result = redact(to_string(TryVal(try call_llm("TECHNOLOGY ORDER OF BATTLE for: " + technology + "\n\nCompare competing actors' capabilities:\n1. Compute capacity\n2. Talent concentration\n3. Data access\n4. Capital resources\n5. IP position (patents)\n6. Manufacturing capability\n7. Regulatory environment\n8. Time-to-market\n\nWho has structural advantage? Who can catch up? Who is structurally disadvantaged?"))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  db_execute("UPDATE tracked_technologies SET oob_data = ?, updated_at = datetime('now') WHERE technology_name LIKE ?", [result, "%" + technology + "%"])
+  db_execute("UPDATE tracked_technologies SET oob_data = ?, updated_at = datetime('now') WHERE id = ?", [result, LZTechRowId(LZArtifactId(technology, LZClassifyDomain(technology)), technology)])
   return "⚔️ OOB: " + technology + "\n" + result
 }
 
@@ -918,8 +1119,10 @@ pattern LZDeepScan(query: String, chat_id: String) -> String {
   // Synthesize
   let result = redact(to_string(TryVal(try call_llm("DEEP SCAN synthesis for: " + query + "\nDomain: " + domain + "\nSkills: " + skills + "\n\nWeb: " + web + "\nScience: " + science + "\nGitHub: " + github + "\nYouTube: " + yt + "\n\nProvide comprehensive intelligence assessment with disruption scoring and inflection analysis."))), "all")
   if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  // Store artifact
-  db_execute("INSERT INTO knowledge_artifacts (title, domain, source, source_tier, status) VALUES (?, ?, ?, 2, ?)", [query, domain, "deep_scan", "tracking"])
+  // #556 A.1: адресация через LZArtifactId — повторный скан того же запроса
+  // обновляет запись, а не создаёт дубль (раньше — слепой INSERT на каждый скан)
+  let aid = LZArtifactId(query, domain)
+  db_execute("UPDATE knowledge_artifacts SET source = ?, updated_at = datetime('now') WHERE id = ?", ["deep_scan", aid])
   return "🔍 Deep Scan: " + query + "\n" + result
 }
 
