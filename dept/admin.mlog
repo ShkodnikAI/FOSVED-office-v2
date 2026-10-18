@@ -381,6 +381,24 @@ pattern AdminCheckStaleDepts() -> String {
   return "никогда: [" + never_used + "] устарели: [" + stale_used + "]"
 }
 
+// ── #550 A.2: hash-токен внутреннего доступа к /admin-ua/* ─────────────────
+// ОТКЛОНЕНИЕ ОТ ТЕКСТА НАРЯДА (задокументировано в отчёте #550): наряд
+// предлагал http_get(url, headers) со ссылкой на REFERENCE:873, но живая
+// проба 0.32.0 (18.10) показала: http_get принимает только (url, timeout
+// 1..300) — бисекция HTTP_TIMEOUT_RANGE; кастомных исходящих заголовков
+// нет; парсер объектов не допускает ключи с дефисом ({"X-Internal-Token":…}
+// — parse error «expected IDENT»). Равнозначный канал — query itok=<16 hex>:
+// substring(redact(INTERNAL_API_TOKEN + ":admin-ua", "hash_only"), 6, 22) —
+// ровно sha256(токен + ":admin-ua")[:16] (кросс-проба mlog/Python совпала:
+// 5ddbb39c4e150128), сырой секрет по сети не ходит, scope не даёт токену
+// открывать другие домены (прецедент ReposAccessToken #442). Сравнение —
+// на Python hmac.compare_digest; пустой env — Python fail-closed (401).
+pattern AdminUaToken() -> String {
+  let s = env("INTERNAL_API_TOKEN")
+  if s == "" then { return "" }
+  return substring(to_string(redact(s + ":admin-ua", "hash_only")), 6.0, 22.0)
+}
+
 pattern AdminNightCycle() -> String {
   let start_time = now()
   let _ = AuditLog("night_cycle_start", "admin", "night cycle started")
@@ -390,7 +408,8 @@ pattern AdminNightCycle() -> String {
   // Phase 1a: Scanner (Python UA — file inventory)
   // #485 A.2: каждый http_get фазы — под try; сбой фазы даёт честную строку
   // «Phase N: недоступна (причина)» и НЕ роняет весь ночной цикл.
-  let tr_scan = try http_get("http://127.0.0.1:4000/admin-ua/scan")
+  // #550 A.2: доступ — только с внутренним hash-токеном (itok).
+  let tr_scan = try http_get("http://127.0.0.1:4000/admin-ua/scan?itok=" + AdminUaToken())
   let mut scan_summary = "Phase 1a: недоступна (" + redact(substring(TryVal(try to_string(tr_scan.error.message)), 0.0, 120.0), "all") + ")"
   let scan_ok = redact(to_string(TryVal(tr_scan)), "all")
   if scan_ok != "()" then {
@@ -399,7 +418,7 @@ pattern AdminNightCycle() -> String {
   let report = report + "Phase 1a/7: Scanner\n" + scan_summary + "\n\n"
 
   // Phase 1b: Analyzer (Python UA — patterns, routes, imports) — #485 A.2
-  let tr_analyze = try http_get("http://127.0.0.1:4000/admin-ua/analyze")
+  let tr_analyze = try http_get("http://127.0.0.1:4000/admin-ua/analyze?itok=" + AdminUaToken())
   let mut analyze_summary = "Phase 1b: недоступна (" + redact(substring(TryVal(try to_string(tr_analyze.error.message)), 0.0, 120.0), "all") + ")"
   let analyze_ok = redact(to_string(TryVal(tr_analyze)), "all")
   if analyze_ok != "()" then {
@@ -408,7 +427,7 @@ pattern AdminNightCycle() -> String {
   let report = report + "Phase 1b/7: Analyzer\n" + analyze_summary + "\n\n"
 
   // Phase 1c: Grapher (Python UA — knowledge graph → SQLite) — #485 A.2
-  let tr_graph = try http_get("http://127.0.0.1:4000/admin-ua/graph")
+  let tr_graph = try http_get("http://127.0.0.1:4000/admin-ua/graph?itok=" + AdminUaToken())
   let mut graph_summary = "Phase 1c: недоступна (" + redact(substring(TryVal(try to_string(tr_graph.error.message)), 0.0, 120.0), "all") + ")"
   let graph_ok = redact(to_string(TryVal(tr_graph)), "all")
   if graph_ok != "()" then {
@@ -417,7 +436,7 @@ pattern AdminNightCycle() -> String {
   let report = report + "Phase 1c/7: Grapher\n" + graph_summary + "\n\n"
 
   // Phase 2: Reviewer (Python UA — orphans, security, bugs, architecture) — #485 A.2
-  let tr_review = try http_get("http://127.0.0.1:4000/admin-ua/review")
+  let tr_review = try http_get("http://127.0.0.1:4000/admin-ua/review?itok=" + AdminUaToken())
   let mut review_summary = "Phase 2: недоступна (" + redact(substring(TryVal(try to_string(tr_review.error.message)), 0.0, 120.0), "all") + ")"
   let mut health = "?"
   let review_ok = redact(to_string(TryVal(tr_review)), "all")
@@ -440,7 +459,7 @@ pattern AdminNightCycle() -> String {
   let report = report + "Phase 5/7: Proposals\n" + substring(proposals, 0, 500) + "\n\n"
 
   // Phase 6: Documenter (Python UA) — #485 A.2
-  let tr_docs = try http_get("http://127.0.0.1:4000/admin-ua/docs")
+  let tr_docs = try http_get("http://127.0.0.1:4000/admin-ua/docs?itok=" + AdminUaToken())
   let mut docs_count = "Phase 6: недоступна (" + redact(substring(TryVal(try to_string(tr_docs.error.message)), 0.0, 120.0), "all") + ")"
   let docs_ok = redact(to_string(TryVal(tr_docs)), "all")
   if docs_ok != "()" then {
@@ -557,25 +576,25 @@ pattern AdminBuild(task: String, chat_id: String) -> String {
 pattern AdminAnalyze() -> String {
   let _ = AuditLog("admin_analyze", "admin", "UA 6-subagent analysis started")
 
-  // Sub-agent 1: Scanner (file inventory)
-  let scan_result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan"), "all")
+  // Sub-agent 1: Scanner (file inventory) — #550 A.2: внутренний hash-токен
+  let scan_result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan?itok=" + AdminUaToken()), "all")
   let scan_summary = redact(to_string(json_get(parse_json(scan_result), "summary", "Scanner failed")), "all")
 
   // Sub-agent 2: Analyzer (patterns, routes, imports)
-  let analyze_result = redact(http_get("http://127.0.0.1:4000/admin-ua/analyze"), "all")
+  let analyze_result = redact(http_get("http://127.0.0.1:4000/admin-ua/analyze?itok=" + AdminUaToken()), "all")
   let analyze_summary = redact(to_string(json_get(parse_json(analyze_result), "summary", "Analyzer failed")), "all")
 
   // Sub-agent 3: Grapher (knowledge graph → SQLite)
-  let graph_result = redact(http_get("http://127.0.0.1:4000/admin-ua/graph"), "all")
+  let graph_result = redact(http_get("http://127.0.0.1:4000/admin-ua/graph?itok=" + AdminUaToken()), "all")
   let graph_summary = redact(to_string(json_get(parse_json(graph_result), "summary", "Grapher failed")), "all")
 
   // Sub-agent 4: Reviewer (orphans, security, bugs, architecture)
-  let review_result = redact(http_get("http://127.0.0.1:4000/admin-ua/review"), "all")
+  let review_result = redact(http_get("http://127.0.0.1:4000/admin-ua/review?itok=" + AdminUaToken()), "all")
   let review_summary = redact(to_string(json_get(parse_json(review_result), "summary", "Reviewer failed")), "all")
   let health = redact(to_string(json_get(parse_json(review_result), "health_score", "?")), "all")
 
   // Sub-agent 6: Documenter (auto-docs)
-  let docs_result = redact(http_get("http://127.0.0.1:4000/admin-ua/docs"), "all")
+  let docs_result = redact(http_get("http://127.0.0.1:4000/admin-ua/docs?itok=" + AdminUaToken()), "all")
   let docs_structure = redact(to_string(json_get(parse_json(docs_result), "structure", "")), "all")
 
   let disclaimer = AdminDisclaimer()
@@ -597,7 +616,7 @@ pattern AdminAnalyze() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminScan() -> String {
   let _ = AuditLog("admin_scan", "admin", "UA scan started")
-  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan"), "all")
+  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan?itok=" + AdminUaToken()), "all")
   let summary = redact(to_string(json_get(parse_json(result), "summary", "Scan failed")), "all")
   let _ = AuditLog("admin_scan", "admin", "UA scan done")
   return summary
@@ -613,7 +632,7 @@ pattern AdminTour() -> String {
   let disclaimer = AdminDisclaimer()
 
   // Get scan data for context
-  let scan_result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan"), "all")
+  let scan_result = redact(http_get("http://127.0.0.1:4000/admin-ua/scan?itok=" + AdminUaToken()), "all")
   let scan_data = redact(to_string(json_get(parse_json(scan_result), "summary", "")), "all")
 
   let tour_prompt = disclaimer + "\n\nGenerate a guided architecture tour of Fosved Office based on scan data.\nStructure:\n1. Overview (total files, lines, departments)\n2. Core: app.mlog and routing\n3. Departments: each dept with patterns count\n4. Infrastructure: proxy, scheduler, utils\n5. Key metrics: graph nodes/edges, health score\n6. Notable: largest files, most connected, potential issues\n\nBe technical, concise, informative."
@@ -631,7 +650,7 @@ pattern AdminTour() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminDocs() -> String {
   let _ = AuditLog("admin_docs", "admin", "UA docs started")
-  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/docs"), "all")
+  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/docs?itok=" + AdminUaToken()), "all")
   let structure = redact(to_string(json_get(parse_json(result), "structure", "Docs failed")), "all")
   let _ = AuditLog("admin_docs", "admin", "UA docs done")
   return substring(structure, 0.0, 3000.0)
@@ -642,7 +661,7 @@ pattern AdminDocs() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminGraph() -> String {
   let _ = AuditLog("admin_graph", "admin", "UA graph build started")
-  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/graph"), "all")
+  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/graph?itok=" + AdminUaToken()), "all")
   let summary = redact(to_string(json_get(parse_json(result), "summary", "Graph build failed")), "all")
   let nodes = redact(to_string(json_get(parse_json(result), "nodes", "0")), "all")
   let edges = redact(to_string(json_get(parse_json(result), "edges", "0")), "all")
@@ -661,7 +680,7 @@ pattern AdminImpact(file_path: String) -> String {
 
   let _ = AuditLog("admin_impact", "admin", "UA impact: " + file_path)
   let encoded_path = replace(file_path, " ", "%20")
-  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/impact?file=" + encoded_path), "all")
+  let result = redact(http_get("http://127.0.0.1:4000/admin-ua/impact?file=" + encoded_path + "&itok=" + AdminUaToken()), "all")
   let summary = redact(to_string(json_get(parse_json(result), "summary", "Impact analysis failed")), "all")
   let risk = redact(to_string(json_get(parse_json(result), "risk", "unknown")), "all")
   let _ = AuditLog("admin_impact", "admin", "impact done: " + file_path + " risk=" + risk)

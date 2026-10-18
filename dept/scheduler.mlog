@@ -480,11 +480,78 @@ pattern DbBackupSlot() -> String {
   return "backup ok: " + path
 }
 
+// ── #550 A.1: отложенная доставка владельцу — ночная почта ─────────────────
+// Всё, что отправляется владельцу во время NightTickSlot/night-цикла (итог
+// тика, FO-027-алерты, «Ночная проверка», ночной LZ DAILY), пишется в
+// owner_outbox (OutboxPut) и выгружается слотом night-report (07:15 MSK)
+// одним сообщением (OutboxFlush). Ночью — тишина (цель наряда #550).
+// Таблица — общая с Python (proxy/core.py init_db): ночной LZ DAILY пишется
+// из proxy/lz_github.py (deliver="outbox"), выгружается той же меткой.
+pattern OutboxPut(source: String, text: String) -> String {
+  let _ = InitDB()
+  let _ = db_execute("INSERT INTO owner_outbox (source, text) VALUES (?1, ?2)", [source, text])
+  return "queued"
+}
+
+// Выгрузка: одно сообщение с заголовком «🌙 Ночной отчёт» и разделами по
+// source; переполнение ~3500 символов делит на части (лимит Telegram 4096,
+// конвенция обрезок офиса — 3500). Повторный запуск в тот же день ничего
+// не шлёт (дедуп по date(sent_at)=date('now') — SQL, переживает рестарт).
+// sent_at проставляется всем строкам после отправки (контракт наряда:
+// «после отправки sent_at = now»; сбой Telegram теряет блок — так же
+// терялось и прежнее немедленное сообщение, audit_log фиксирует прогон).
+pattern OutboxFlush() -> String {
+  let _ = InitDB()
+  let dup_rows = query("SELECT COUNT(*) AS cnt FROM owner_outbox WHERE sent_at IS NOT NULL AND date(sent_at) = date('now')", [])
+  let mut dup_cnt = 0.0
+  each dr in dup_rows {
+    let dup_cnt = to_float(json_get(dr, "cnt", "0"))
+  }
+  if dup_cnt > 0.0 then { return "outbox: delivered-again" }
+
+  let rows = query("SELECT id, source, text FROM owner_outbox WHERE sent_at IS NULL ORDER BY id", [])
+  if length(rows) == 0.0 then { return "outbox: empty" }
+
+  let mut msg = "🌙 Ночной отчёт"
+  let mut part_no = 1.0
+  each r in rows {
+    let src = redact(to_string(json_get(r, "source", "?")), "all")
+    let txt = to_string(json_get(r, "text", ""))
+    let block = "\n\n— " + src + " —\n" + txt
+    if length(msg) + length(block) > 3500.0 then {
+      let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), msg + "\n\n(часть " + to_string(to_int(part_no)) + ")")
+      let msg = "🌙 Ночной отчёт (продолжение)"
+      let part_no = part_no + 1.0
+    }
+    let msg = msg + block
+  }
+  let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), msg)
+  let _ = db_execute("UPDATE owner_outbox SET sent_at = datetime('now') WHERE sent_at IS NULL", [])
+  let _ = AuditLog("owner_outbox_flush", "system", "delivered part=" + to_string(to_int(part_no)) + " rows=" + to_string(to_int(length(rows))))
+  return "outbox: delivered"
+}
+
+// Слот 07:15 MSK (dept/schedules.mlog: night-report) — единственная точка
+// доставки ночной почты. TryVal — сбой выгрузки не роняет крон-прогон,
+// причина уходит в audit_log.
+pattern NightReportSlot() -> String {
+  let _ = InitDB()
+  let tr_flush = try OutboxFlush()
+  let result = redact(to_string(TryVal(tr_flush)), "all")
+  if result == "()" then {
+    let reason = redact(substring(TryVal(try to_string(tr_flush.error.message)), 0.0, 120.0), "all")
+    let _ = AuditLog("cron_night_report", "system", "outbox flush failed: " + reason)
+    return "night-report: FAIL"
+  }
+  let _ = AuditLog("cron_night_report", "system", redact(substring(result, 0.0, 200.0), "all"))
+  return result
+}
+
 // ── #255, консолидация 2026-09-21: ночная корзина (нативный слот) ──────────
 // Тело /cron/night-tick: диспетчер обходит /cron/*-роуты по порядку —
 // backup → indicator-reminders → shop-tick → golden-evals → night.
-// Итог цепочки — одним сообщением в Telegram. Секрет нужен внутренним
-// HTTP-вызовам (роуты остаются ручным/аварийным фолбэком — п.4 наряда).
+// #550 A.1: итог тика больше не уходит немедленно в Telegram — через
+// OutboxPut в owner_outbox, доставка слотом night-report в 07:15 MSK.
 pattern NightTickSlot() -> String {
   let _ = InitDB()
   let base = "http://127.0.0.1:4000/cron/"
@@ -493,12 +560,28 @@ pattern NightTickSlot() -> String {
   let mut report = "night-tick:"
   let r_backup = redact(to_string(TryVal(try http_get(base + "backup" + qs, 300.0))), "all")
   if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else { report = report + " backup=ok" }
-  let r_ind = redact(to_string(TryVal(try http_get(base + "indicator-reminders" + qs, 300.0))), "all")
-  if to_string(r_ind) == "()" then { report = report + " indicators=FAIL" } else { report = report + " indicators=ok" }
+  // #550 A.3: /cron/indicator-reminders и /cron/golden-evals — маршруты
+  // mlog-сервера :10001 (app.mlog), Flask :4000 отвечает на них 404 (факт 4
+  // наряда: "indicators=FAIL evals=FAIL"). Вызываем Python-эндпоинты напрямую
+  // (как backup-фаза выше); роуты :10001 остаются ручным/аварийным фолбэком,
+  // AuditLog-записи сохранены за ними. Причина решения — в отчёте #550.
+  let body_ind = json_encode({days_ahead: 7.0})
+  let r_ind = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body_ind, "application/json", 300.0))), "all")
+  if to_string(r_ind) == "()" then {
+    report = report + " indicators=FAIL"
+  } else {
+    let _ = AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by night tick")
+    report = report + " indicators=ok"
+  }
   let r_shop = redact(to_string(TryVal(try http_get(base + "shop-tick" + qs, 300.0))), "all")
   if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
-  let r_evals = redact(to_string(TryVal(try http_get(base + "golden-evals" + qs, 300.0))), "all")
-  if to_string(r_evals) == "()" then { report = report + " evals=FAIL" } else { report = report + " evals=ok" }
+  let r_evals = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 300.0))), "all")
+  if to_string(r_evals) == "()" then {
+    report = report + " evals=FAIL"
+  } else {
+    let _ = AuditLog("cron_golden_evals", "qa", "golden evals triggered by night tick")
+    report = report + " evals=ok"
+  }
   // #485 A.1: ночной цикл вызывается В ПРОЦЕССЕ (оба — паттерны одной программы),
   // а не http_get в несуществующий Flask /cron/night — тот 404-ил, а слот трактовал
   // отсутствие ответа как «запущен(фоном)». Семантика try-присваивания и полей
@@ -513,7 +596,9 @@ pattern NightTickSlot() -> String {
     report = report + " night=ok"
   }
   let _ = AuditLog("cron_night_tick", "system", report)
-  let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), report)
+  // #550 A.1: итог тика — в outbox (доставка слотом night-report в 07:15 MSK),
+  // немедленной ночной отправки больше нет.
+  let _ = OutboxPut("night-tick", report)
   return report
 }
 

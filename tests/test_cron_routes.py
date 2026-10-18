@@ -75,10 +75,16 @@ def test_night_tick_chains_all_nightly_jobs():
     sched = (REPO_ROOT / "dept" / "scheduler.mlog").read_text(encoding="utf-8")
     slot_idx = sched.find("pattern NightTickSlot()")
     assert slot_idx > 0
-    slot_body = sched[slot_idx:slot_idx + 2000]
+    slot_body = sched[slot_idx:slot_idx + 4000]  # #550: тело выросло (outbox + прямые вызовы)
     assert '"backup"' in slot_body
-    assert '"indicator-reminders"' in slot_body
+    # #550 A.3: indicator-reminders/golden-evals — маршруты mlog :10001, Flask :4000
+    # отвечал 404 (факт 4 наряда) — слот зовёт Python-эндпоинты напрямую;
+    # mlog-роуты остаются ручным/аварийным фолбэком (гвард в test_n550_night_report).
+    assert 'indicator-pre-reminders' in slot_body
     assert '"shop-tick"' in slot_body
-    assert '"golden-evals"' in slot_body
+    assert 'scheduler/golden-evals' in slot_body
     assert "try NightSlot()" in slot_body             # #485: ночь — в процессе, с TryVal
-    assert "SendTelegramReply" in slot_body           # итог цепочки — в TG
+    # #550 A.1: итог цепочки — в outbox (доставка слотом night-report 07:15 MSK),
+    # немедленной ночной отправки больше нет.
+    assert 'OutboxPut("night-tick"' in slot_body
+    assert "SendTelegramReply" not in slot_body

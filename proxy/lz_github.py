@@ -251,14 +251,18 @@ def scheduler_lz_daily():
     """
     LZ Daily Report: scan GitHub → LLM analysis → save to memory → return report.
     Called by /cron/lz-daily or manually.
+    #550 A.1: deliver="outbox" — ночной прогон (NightSlot Phase 1) пишет отчёт
+    в owner_outbox (доставка слотом night-report в 07:15 MSK), дефолт "telegram"
+    — утренний слот/ручные прогоны шлют как раньше.
     """
     d = request.get_json(force=True) or {}
     owner_id = d.get("owner_id", os.environ.get("OWNER_TELEGRAM_ID", ""))
     dry_run = d.get("dry_run", False)
-    return scheduler_lz_daily_core(dry_run=dry_run, owner_id=owner_id)
+    deliver = d.get("deliver", "telegram")
+    return scheduler_lz_daily_core(dry_run=dry_run, owner_id=owner_id, deliver=deliver)
 
 
-def scheduler_lz_daily_core(dry_run, owner_id):
+def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
     try:
         # ── Phase 1: GitHub Scan (direct API) ─────────────────
         log.info("LZ Daily: starting GitHub scan")
@@ -453,9 +457,17 @@ def scheduler_lz_daily_core(dry_run, owner_id):
         report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
 
         # ── Phase 5: Send to Owner (Admin) ────────────────────
+        # #550 A.1: deliver="outbox" (ночной прогон из NightSlot Phase 1) —
+        # отчёт пишется в owner_outbox; Telegram-доставку выполняет OutboxFlush
+        # слота night-report в 07:15 MSK. Дефолт — немедленная отправка.
         msg_id = None
         if owner_id and not dry_run:
-            if len(report) > 1500:
+            if deliver == "outbox":
+                _query(
+                    "INSERT INTO owner_outbox (source, text) VALUES (?, ?)",
+                    ("lz-daily", report),
+                )
+            elif len(report) > 1500:
                 msg_id = _tg_send_report_with_button(owner_id, report)
             else:
                 msg_id = _tg_send_message(owner_id, report)

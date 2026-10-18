@@ -174,14 +174,18 @@ def _rss_state_table():
 
 def rss_enabled_feeds():
     """FORGE-UI-10 (#203): активные ленты для collect_rss — код + таблица
-    состояния. Выключенные (enabled=0) и удалённые (deleted=1) пропускаются."""
+    состояния. Выключенные (enabled=0) и удалённые (deleted=1) пропускаются.
+    #550 A.4: ленты из БД (rss_sources) не имеют колонки language — отдаём
+    language: "" явно, чтобы collect_rss не падал KeyError'ом и не терял
+    все записи такой ленты (факт 5 наряда: 'news insert failed: language').
+    """
     from proxy.core import _query
     _rss_state_table()
     out = {}
     rows = _query("SELECT feed, url, name, tag FROM rss_sources "
                   "WHERE enabled=1 AND deleted=0 ORDER BY feed", fetch=True) or []
     for r in rows:
-        out[r["feed"]] = {"url": r["url"], "name": r["name"], "category": r["tag"]}
+        out[r["feed"]] = {"url": r["url"], "name": r["name"], "category": r["tag"], "language": ""}
     return out
 
 
@@ -225,10 +229,13 @@ def collect_rss():
                     except Exception as e:
                         log.warning(f"[collector] bad published date {published}: {e}")
                 try:
+                    # #550 A.4: .get вместо [..] — ленты без language/category/name
+                    # (в т.ч. все ленты из БД) не должны ронять вставку записей:
+                    # KeyError 'language' терял ВСЕ записи ленты (data_loss).
                     _query("""INSERT OR IGNORE INTO news_cache
                         (source,title,summary,url,category,language,published,hash)
                         VALUES (?,?,?,?,?,?,?,?)""",
-                        (fc["name"], title, summary, url, fc["category"], fc["language"], pub_date, content_hash))
+                        (fc.get("name", feed_id), title, summary, url, fc.get("category", ""), fc.get("language", ""), pub_date, content_hash))
                     collected += 1
                 except Exception as e2:
                     _log_error(f"feedparser news insert failed: {e2}", source="collector", dept="news", kind="data_loss")

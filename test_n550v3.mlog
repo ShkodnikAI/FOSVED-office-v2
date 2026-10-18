@@ -1,0 +1,156 @@
+// test_n550v3.mlog — Наряд #550 A.1: outbox ночной доставки.
+// Легенда:
+//   b1 NightReportSlot на пустом outbox → "outbox: empty";
+//   b2/b3 OutboxPut ×3 → 3 строки с sent_at NULL;
+//   b4 NightReportSlot → "outbox: delivered";
+//   b5 повторный NightReportSlot в тот же день → "already delivered today";
+//   b6 все 3 строки помечены sent_at;
+//   b7/b8 мок-отправка: заголовок «🌙 Ночной отчёт» + все три source-раздела;
+//   b9 OutboxPut возвращает "queued".
+// NB: мок Telegram — через шов SendTelegramReply (конвенция тест-стабов
+// #519: app.mlog не импортируется, имена резолвятся стабами; прод-код не
+// тронут). Отправленный текст пишется в test_sent — разделы проверяются
+// запросом. Запуск: rm -rf /tmp/n550-test && mkdir -p /tmp/n550-test, затем
+//   ./bin/mlog run test_n550v3.mlog
+db { url: "sqlite:/tmp/n550-test/outbox.db" }
+import dept/scheduler
+
+// ── тест-стабы app-слоя (#519) ──────────────────────────────────────────
+pattern InitDB() -> String {
+  return "ok"
+}
+pattern AuditLog(action: String, dept: String, details: String) -> String {
+  return "ok"
+}
+// Мок Telegram-шва: прод-SendTelegramReply уходит в api.telegram.org, тест —
+// пишет «отправленное» в таблицу test_sent (тот же приём, что acc-мок SecSend).
+pattern SendTelegramReply(chat_id: String, text: String) -> String {
+  let _ = db_execute("INSERT INTO test_sent (chat_id, text) VALUES (?1, ?2)", [chat_id, text])
+  return "mock-ok"
+}
+// Стабы transitively-imported dept-модулей (scheduler → finance/legal/
+// engineering/marketing/lz/utils) — только для компиляции (run-гейт №523),
+// до них в b1–b10 исполнение не доходит.
+pattern RecordAssistantMessage(chat_id: String, dept: String, text: String) -> String {
+  return "ok"
+}
+pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
+  return ""
+}
+pattern ReadDeptProfile(dept: String) -> String {
+  return ""
+}
+pattern YanaRecallMemories(query: String) -> String {
+  return "[]"
+}
+pattern YanaNowInfo() -> String {
+  return ""
+}
+pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
+  return "ok"
+}
+pattern TeamAskBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamBoardBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamPublish(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float) -> String {
+  return ""
+}
+pattern TeamSecondPass(dept: String, query: String, context: String, draft: String) -> String {
+  return draft
+}
+pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
+  return parse_json("{}")
+}
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  return "{\"error\": \"stub\"}"
+}
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS owner_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), source TEXT NOT NULL, text TEXT NOT NULL, sent_at TEXT)")
+  let _ = db_execute("CREATE INDEX IF NOT EXISTS idx_owner_outbox_sent ON owner_outbox(sent_at)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_sent (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, text TEXT)")
+  // #519: очистка тестовой БД — деструктивный SQL под грантом (ADR-0155)
+  let g_del_outbox = grant_issue("db:delete:owner_outbox", 3600, "n", 2)
+  let g_del_sent = grant_issue("db:delete:test_sent", 3600, "n", 2)
+  let _ = db_execute_with_grant(g_del_outbox, "DELETE FROM owner_outbox")
+  let _ = db_execute_with_grant(g_del_sent, "DELETE FROM test_sent")
+  return "ok"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return name + "=true;" }
+  return name + "=false;"
+}
+
+pattern _CountPending() -> Float {
+  let rows = query("SELECT COUNT(*) AS cnt FROM owner_outbox WHERE sent_at IS NULL", [])
+  return to_float(json_get(get(rows, 0), "cnt", "0"))
+}
+
+pattern _CountSent() -> Float {
+  let rows = query("SELECT COUNT(*) AS cnt FROM owner_outbox WHERE sent_at IS NOT NULL", [])
+  return to_float(json_get(get(rows, 0), "cnt", "0"))
+}
+
+pattern _SentText() -> String {
+  let rows = query("SELECT text FROM test_sent ORDER BY id", [])
+  let mut out = ""
+  each r in rows {
+    let out = out + to_string(json_get(r, "text", "")) + "\n---\n"
+  }
+  return out
+}
+
+pattern Run(x: String) -> String {
+  let _ = TestDbInit()
+  let mut out = ""
+
+  // b1: пустой outbox — flush честно отвечает "outbox: empty"
+  let r1 = NightReportSlot()
+  let out = out + _Mark("b1_empty_flush", contains(r1, "outbox: empty"))
+
+  // b9: OutboxPut возвращает "queued"
+  let put1 = OutboxPut("night-tick", "night-tick: backup=ok shop=ok night=ok")
+  let out = out + _Mark("b9_put_queued", put1 == "queued")
+
+  // b2: одна строка в очереди
+  let out = out + _Mark("b2_one_pending", _CountPending() == 1.0)
+
+  // b3: ещё два источника — fo027 и lz-daily (сценарий ночи)
+  let _ = OutboxPut("fo027", "FO-027: цепочка a1b2 истекла без прогресса >24 ч (3 степов)")
+  let _ = OutboxPut("lz-daily", "LZ DAILY REPORT — scan ok")
+  let out = out + _Mark("b3_three_pending", _CountPending() == 3.0)
+
+  // b4: слот доставляет
+  let r4 = NightReportSlot()
+  let out = out + _Mark("b4_delivered", contains(r4, "outbox: delivered"))
+
+  // b5: повторный запуск в тот же день ничего не шлёт
+  let r5 = NightReportSlot()
+  let out = out + _Mark("b5_dedup_same_day", contains(r5, "already delivered today"))
+
+  // b6: все строки помечены sent_at
+  let out = out + _Mark("b6_all_sent", _CountSent() == 3.0 and _CountPending() == 0.0)
+
+  // b7: заголовок «🌙 Ночной отчёт» в отправленном
+  let sent = _SentText()
+  let out = out + _Mark("b7_header", contains(sent, "🌙 Ночной отчёт"))
+
+  // b8: все три source-раздела в одном блоке отправки
+  let out = out + _Mark("b8_sections", contains(sent, "— night-tick —") and contains(sent, "— fo027 —") and contains(sent, "— lz-daily —"))
+
+  // Итоговое сообщение — одно (без деления: 3 коротких блока)
+  let out = out + _Mark("b10_single_message", length(query("SELECT id FROM test_sent", [])) == 1.0)
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Run -> output
+}
