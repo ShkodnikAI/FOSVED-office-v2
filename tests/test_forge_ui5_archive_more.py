@@ -117,8 +117,13 @@ def test_archive_rows_watch_only_real_control():
     assert 'на контроле: ' in INDEX
     # «изменить» — честное сообщение, реального write-эндпоинта нет
     assert 'Изменение периода контроля — нужен отдельный наряд (write-эндпоинта нет)' in INDEX
-    # клик по строке открывает отчёт (sheet), не «изменить»
-    assert 'data-report="\'+esc(r.title)+\'"' in INDEX
+    # клик по строке открывает отчёт; «изменить» перехватывается раньше.
+    # #552: раньше строка открывала sheet-заглушку (data-report/data-body),
+    # теперь — полную страницу отчёта /miniapp/<id> (data-doc).
+    assert 'data-doc="\'+esc(r.id)+\'"' in INDEX
+    idx_aredit = INDEX.index('hasAttribute("data-aredit")')
+    idx_doc = INDEX.index('hasAttribute("data-doc")')
+    assert idx_aredit < idx_doc
 
 
 # ── Backend: /api/attention, /api/audit, /api/archive-watches ────────────

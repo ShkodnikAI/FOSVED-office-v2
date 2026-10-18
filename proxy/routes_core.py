@@ -46,6 +46,7 @@ from proxy.reports import (
     html_lib_escape, strip_html_for_archive, _html_base, _dept_header,
     _status_icon, _dept_kpis, _build_action_bar, ARCHIVE_MONTHS_RU,
     _browse_page, _evidence_badges_css, doc_action_token, doc_token_verify,
+    miniapp_back_bar,
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -322,6 +323,7 @@ def _miniapp_get_inner(doc_id):
 <style>{css}
 body {{ font-family:var(--b,'IBM Plex Sans',system-ui,sans-serif); color:var(--ink,#1C1B18); background:var(--paper,#EFEAE0); margin:0; }}
 </style></head><body>
+{miniapp_back_bar()}
 <div class="report-container">
 <div class="report-header" style="background:linear-gradient(135deg,{c['start']},{c['end']})">
   <h1>{html_lib_escape(name)}</h1>
@@ -347,6 +349,11 @@ body {{ font-family:var(--b,'IBM Plex Sans',system-ui,sans-serif); color:var(--i
 {action_bar}</body></html>'''
     # GRAPH-1: replace [[CHART]]/[[/CHART]] markers in stored HTML too
     stored_html = stored_html.replace('[[CHART]]', '<div class="report-chart">').replace('[[/CHART]]', '</div>')
+    # #552 A.1: бар возврата в Mini App — и в fallback-ренере тоже
+    if "<body" in stored_html:
+        stored_html = stored_html.replace("<body>", "<body>" + miniapp_back_bar(), 1)
+    else:
+        stored_html = miniapp_back_bar() + stored_html
     if "</body>" in stored_html:
         stored_html = stored_html.replace("</body>", f"{action_bar}</body>")
     # #497 A.2: мастер-ключ в страницу не подставлять (см. комментарий выше) —
