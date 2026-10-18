@@ -1,0 +1,229 @@
+// test_n556v3.mlog — Наряд #556: база знаний ЛЗ пишет то, что о ней заявлено.
+// Легенда:
+//   b1 (тест 1): /lz hype X с моком "STAGE: peak\n…" → stage=peak у X,
+//                у записи «X chips» без изменений; в базе код, не весь текст;
+//   b2 (тест 2): мок без строки STAGE → стадия не изменилась, ответ с пометкой;
+//   b3 (тест 3): SCORES: 1y=10 3y=40 5y=60 10y=80 → 0.1/0.4/0.6/0.8 в
+//                tracked_technologies, disruption_score = 0.4;
+//   b4 (тест 4): стадия peak → Gate 3 получил настоящий id (PASS, не FAIL);
+//   b5 (тест 5): LZYes/LZNone устойчивы («Yes.», «YES — …», «да», «NONE.»);
+//   b6 (тест 6): два скана одного запроса → одна запись (LZArtifactId);
+//   b7 (тест 7): миграция LZDataMaintain — стадии разобраны/NULL, дубли слиты,
+//                ничего не удалено, повторный запуск ничего не меняет.
+// NB: мок LLM — через шов LZLlm (определение в app.mlog прода; в тестовом
+// замыкании его нет, стаб обязателен). Очередь ответов — test_llm_mock,
+// порядок потребления FIFO по OFFSET (test_mock_idx). Гейт 4 и гейты 7/8
+// зовут нативный call_llm напрямую — без ключа он мгновенно падает в
+// "[оценка недоступна…]" и в очередь мока не входит.
+// Запуск: rm -rf /tmp/n556-test && mkdir -p /tmp/n556-test && ./bin/mlog run test_n556v3.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/n556-test/lz.db" }
+import dept/utils
+import dept/lz
+
+// ── тест-стабы app-слоя (конвенция #519) ────────────────────────────────
+pattern InitDB() -> String {
+  return "ok"
+}
+pattern AuditLog(action: String, dept: String, details: String) -> String {
+  return "ok"
+}
+pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
+  return "ok"
+}
+pattern TeamAskBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamBoardBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamPublish(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float) -> String {
+  return ""
+}
+pattern TeamSecondPass(dept: String, query: String, context: String, draft: String) -> String {
+  return draft
+}
+pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
+  return parse_json("{}")
+}
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  return "{\"error\": \"stub\"}"
+}
+// Стаб шва LZLlm: FIFO-очередь ответов, загруженных тестом в test_llm_mock.
+pattern LZLlm(prompt: String) -> String {
+  let off = _MockShift()
+  let rows = query("SELECT text FROM test_llm_mock ORDER BY id LIMIT 1 OFFSET ?", [off])
+  if length(rows) == 0.0 then { return "[mock: очередь пуста]" }
+  return to_string(json_get(get(rows, 0), "text", ""))
+}
+
+pattern _MockShift() -> Float {
+  let rows = query("SELECT n FROM test_mock_idx WHERE id = 1", [])
+  if length(rows) == 0.0 then {
+    let _ = db_execute("INSERT INTO test_mock_idx (id, n) VALUES (1, 1)", [])
+    return 0.0
+  }
+  let n = to_float(json_get(get(rows, 0), "n", "0"))
+  let _ = db_execute("UPDATE test_mock_idx SET n = ? WHERE id = 1", [n + 1.0])
+  return n
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return name + "=true;" }
+  return name + "=false;"
+}
+
+pattern TestDbInit() -> String {
+  // Схема — из app.mlog InitDB (те же DDL для knowledge_artifacts /
+  // tracked_technologies); тестовые таблицы мока добавлены здесь.
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS knowledge_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, title TEXT NOT NULL, domain TEXT NOT NULL, source TEXT, source_url TEXT, source_tier INTEGER DEFAULT 2, hype_cycle_stage TEXT, disruption_score REAL DEFAULT 0.0, inflection_signals TEXT DEFAULT '[]', cross_domain_potential TEXT DEFAULT '[]', competing_alternatives TEXT DEFAULT '[]', status TEXT DEFAULT 'tracking', confirmation_count INTEGER DEFAULT 0, tracked_since TEXT DEFAULT (datetime('now')), last_scored_at TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS tracked_technologies (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id INTEGER, technology_name TEXT NOT NULL, category TEXT, oob_data TEXT DEFAULT '{}', patent_activity TEXT DEFAULT '[]', talent_flow TEXT DEFAULT '[]', vc_investment TEXT DEFAULT '[]', disruption_1y REAL, disruption_3y REAL, disruption_5y REAL, disruption_10y REAL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_llm_mock (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_mock_idx (id INTEGER PRIMARY KEY, n FLOAT)", [])
+  return "ok"
+}
+
+pattern _MockQueue(answers: String) -> String {
+  // answers — ответы через разделитель "|||": по одному LZLlm-вызову на элемент
+  let toks = split(answers, "|||")
+  each t in toks {
+    let _ = db_execute("INSERT INTO test_llm_mock (text) VALUES (?)", [to_string(t)])
+  }
+  return "queued"
+}
+
+pattern _StageOf(title: String) -> String {
+  let rows = query("SELECT hype_cycle_stage AS st FROM knowledge_artifacts WHERE title = ?", [title])
+  if length(rows) == 0.0 then { return "NO ROW" }
+  return to_string(json_get(get(rows, 0), "st", ""))
+}
+
+pattern _CountTech(artifact_id: Float) -> Float {
+  let rows = query("SELECT COUNT(*) AS c FROM tracked_technologies WHERE artifact_id = ?", [artifact_id])
+  return to_float(json_get(get(rows, 0), "c", "0"))
+}
+
+pattern _Fid(title: String) -> Float {
+  let rows = query("SELECT id AS i FROM knowledge_artifacts WHERE title = ?", [title])
+  if length(rows) == 0.0 then { return -1.0 }
+  return to_float(json_get(get(rows, 0), "i", "0"))
+}
+
+pattern _TechRow(artifact_id: Float) -> String {
+  let rows = query("SELECT disruption_1y AS a, disruption_3y AS b, disruption_5y AS c, disruption_10y AS d FROM tracked_technologies WHERE artifact_id = ?", [artifact_id])
+  if length(rows) == 0.0 then { return "" }
+  return to_string(get(rows, 0))
+}
+
+pattern _ArtScore(artifact_id: Float) -> String {
+  let rows = query("SELECT disruption_score AS s FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+  if length(rows) == 0.0 then { return "" }
+  return to_string(get(rows, 0))
+}
+
+pattern _RowById(artifact_id: Float) -> String {
+  let rows = query("SELECT hype_cycle_stage AS st, updated_at AS u, status AS s FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+  if length(rows) == 0.0 then { return "" }
+  return to_string(get(rows, 0))
+}
+
+pattern _RowStatus(artifact_id: Float) -> String {
+  let rows = query("SELECT status AS s FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+  if length(rows) == 0.0 then { return "" }
+  return to_string(get(rows, 0))
+}
+
+pattern _DroneStage() -> String {
+  let rows = query("SELECT hype_cycle_stage AS st FROM knowledge_artifacts WHERE title = 'Дрон-свайны'", [])
+  if length(rows) == 0.0 then { return "NO ROW" }
+  return to_string(json_get(get(rows, 0), "st", ""))
+}
+
+pattern Run(x: String) -> String {
+  let _ = TestDbInit()
+  let mut out = ""
+
+  // ── b1 (тест 1): STAGE: peak пишется кодом только в свою запись ────────
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status) VALUES ('X', 'tech', 'trough', 'tracking')", [])
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status) VALUES ('X chips', 'tech', 'trough', 'tracking')", [])
+  // порядок мока = порядок вызовов кода: сначала ответ навыка, потом классификация, потом гейт
+  let _ = _MockQueue("STAGE: peak\nПик завышенных ожиданий, доказательства и таймлайн.|||tech|||NONE")
+  let r1 = LZHypeCycleMap("X", "chat556")
+  let out = out + _Mark("b1_stage_peak_written", _StageOf("X") == "peak")
+  let out = out + _Mark("b1_neighbor_untouched", _StageOf("X chips") == "trough")
+  let out = out + _Mark("b1_single_row_updated", length(query("SELECT id FROM knowledge_artifacts WHERE hype_cycle_stage = 'peak'", [])) == 1.0)
+  let out = out + _Mark("b1_full_text_not_in_db", contains(to_string(query("SELECT hype_cycle_stage FROM knowledge_artifacts WHERE title = 'X'", [])), "Пик завышенных ожиданий") == false)
+  let out = out + _Mark("b1_reply_keeps_full_text", contains(r1, "Пик завышенных ожиданий"))
+
+  // ── b2 (тест 2): без строки STAGE стадия не меняется, есть пометка ─────
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status) VALUES ('Y', 'tech', 'slope', 'tracking')", [])
+  let _ = _MockQueue("Ответ модели без формата: рассуждение о стадии, без строки STAGE.|||tech")
+  let r2 = LZHypeCycleMap("Y", "chat556")
+  let out = out + _Mark("b2_stage_unchanged", _StageOf("Y") == "slope")
+  let out = out + _Mark("b2_unrecognized_note", contains(r2, "не распознана"))
+
+  // ── b3 (тест 3): скоры из ответа, не нули ──────────────────────────────
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status) VALUES ('W', 'tech', 'trough', 'tracking')", [])
+  let _ = _MockQueue("SCORES: 1y=10 3y=40 5y=60 10y=80\nВероятности по горизонтам.|||tech")
+  let r3 = LZDisruptionScore("W", "chat556")
+  let wid = _Fid("W")
+  let trow = _TechRow(wid)
+  let out = out + _Mark("b3_tech_row_created", trow != "")
+  let out = out + _Mark("b3_scores_1y_3y", contains(trow, "a: 0.1") and contains(trow, "b: 0.4"))
+  let out = out + _Mark("b3_scores_5y_10y", contains(trow, "c: 0.6") and contains(trow, "d: 0.8"))
+  let art = _ArtScore(wid)
+  let out = out + _Mark("b3_artifact_score_3y", contains(art, "s: 0.4"))
+  let out = out + _Mark("b3_no_warning", contains(r3, "не распознан") == false)
+
+  // ── b4 (тест 4): Gate 3 с настоящим id — PASS вместо FAIL: not found ───
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status) VALUES ('P', 'tech', 'peak', 'tracking')", [])
+  let _ = _MockQueue("STAGE: peak\nПик.|||tech|||NONE")
+  let r4 = LZHypeCycleMap("P", "chat556")
+  let out = out + _Mark("b4_gate3_real_id", contains(r4, "PASS: no negative signals at peak"))
+  let out = out + _Mark("b4_no_fail_not_found", contains(r4, "FAIL: not found") == false)
+
+  // ── b5 (тест 5): устойчивые да/нет ─────────────────────────────────────
+  let out = out + _Mark("b5_yes_variants", LZYes("Yes.") and LZYes("YES — потому что") and LZYes("да"))
+  let out = out + _Mark("b5_no_is_false", LZYes("No") == false and LZYes("NONE") == false)
+  let out = out + _Mark("b5_none_variants", LZNone("NONE.") and LZNone("NONE — нет альтернатив"))
+  let out = out + _Mark("b5_no_not_none", LZNone("No") == false)
+
+  // ── b6 (тест 6): два скана одного запроса → одна запись ────────────────
+  let aid1 = LZArtifactId("Квантовый сканер", "tech")
+  let aid2 = LZArtifactId("квантовый  сканер", "tech")
+  let aid3 = LZArtifactId("Квантовый сканер", "politics")
+  let out = out + _Mark("b6_same_id_on_rescan", aid1 == aid2 and aid1 > 0.0)
+  let out = out + _Mark("b6_domain_matters", aid3 != aid1)
+  let out = out + _Mark("b6_single_row", length(query("SELECT id FROM knowledge_artifacts WHERE domain = 'tech' AND title = 'Квантовый сканер'", [])) == 1.0)
+  let out = out + _Mark("b6_norm_match_count", length(query("SELECT id FROM knowledge_artifacts WHERE domain = 'tech' AND title IN ('Квантовый сканер', 'квантовый  сканер')", [])) == 1.0)
+
+  // ── b7 (тест 7): миграция — разбор/NULL, слияние дублей, без удаления ──
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status, updated_at) VALUES ('Гиперлуп', 'tech', 'STAGE: trough\nПолный текст ответа модели длиннее двенадцати символов', 'tracking', '2026-01-02 10:00:00')", [])
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status, updated_at) VALUES ('гиперлуп', 'tech', 'мусор — весь текст ответа модели без формата', 'tracking', '2026-01-05 09:00:00')", [])
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status, updated_at) VALUES ('Дрон-свайны', 'politics', 'весь текст модели, длиннее лимита', 'tracking', '2026-01-03 11:00:00')", [])
+  let n_before = to_float(json_get(get(query("SELECT COUNT(*) AS c FROM knowledge_artifacts", []), 0), "c", "0"))
+  let m1 = LZDataMaintain()
+  let keeper = _Fid("Гиперлуп")
+  let dup = _Fid("гиперлуп")
+  let keeper_row = _RowById(keeper)
+  let dup_row = _RowStatus(dup)
+  let drone_row = _DroneStage()
+  let n_after = to_float(json_get(get(query("SELECT COUNT(*) AS c FROM knowledge_artifacts", []), 0), "c", "0"))
+  let out = out + _Mark("b7_keeper_stage_parsed", contains(keeper_row, "st: trough"))
+  let out = out + _Mark("b7_keeper_upd_is_max", contains(keeper_row, "u: 2026-01-05 09:00:00"))
+  let out = out + _Mark("b7_dup_archived", contains(dup_row, "s: archived"))
+  let out = out + _Mark("b7_junk_stage_nulled", drone_row == "")
+  let out = out + _Mark("b7_count_unchanged", n_before == n_after and n_before == 10.0)
+  let out = out + _Mark("b7_report_numbers", contains(m1, "dupes_archived=1"))
+  let m2 = LZDataMaintain()
+  let out = out + _Mark("b7_idempotent_rerun", contains(m2, "stages_nulled=0") and contains(m2, "dupes_archived=0"))
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Run -> output
+}

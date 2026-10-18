@@ -80,6 +80,8 @@ def test_gate_pattern_untouched_contract():
     """Гейт остаётся YES/NO-вызовом с fire-and-forget (№318: redact-hash)."""
     assert "pattern LZGateOSPReferral(query: String) -> String" in LZ_SRC
     gate_seg = LZ_SRC[LZ_SRC.index("pattern LZGateOSPReferral"):LZ_SRC.index("pattern LZGateCompetingCheck")]
-    assert 'if result == "YES" then' in gate_seg
+    # #556 A.4: решение гейта — через устойчивый LZYes («Yes.», «YES — …»
+    # больше не терялись строгим сравнением с "YES")
+    assert 'if LZYes(result) then' in gate_seg
     assert 'redact(env("CRON_SECRET"), "hash_only")' in gate_seg, (
         "секрет в мосте №318 ходит только односторонним redact-hash")
