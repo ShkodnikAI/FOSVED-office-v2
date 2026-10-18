@@ -158,6 +158,33 @@ def _dept_kpis(dept):
 <div class="card kpi"><div class="num status-blue">{(t['ti']+t['to2']):,}</div><div class="lbl">Tokeny / ned</div></div>
 <div class="card kpi"><div class="num">{d['c']}</div><div class="lbl">Dialogi / ned</div></div></div>"""
 
+def miniapp_back_bar():
+    """#552 A.1: возврат в Mini App со страницы отчёта.
+
+    Кнопка «Назад» Telegram (BackButton) и ссылка «← К отчётам» ведут на
+    корень Mini App (/miniapp-spa); tgWebAppData сохраняется в ссылке, если
+    пришёл в query страницы, — иначе сработает bootstrap-страница SEC-4.
+    Ссылка несёт inline-стили: report_css.txt подключён только в enriched-
+    пути страницы, а бар должен читаться и в fallback-ренерах.
+    """
+    return (
+        '<div class="report-backbar">'
+        '<a class="report-back" href="/miniapp-spa" '
+        'style="display:inline-block;margin:10px 16px 2px;color:#E8262E;'
+        'text-decoration:none;font-size:14px;font-weight:600">← К отчётам</a></div>'
+        '<script>(function(){'
+        'var tg=window.Telegram&&window.Telegram.WebApp?window.Telegram.WebApp:null;'
+        'var qs=new URLSearchParams(location.search);'
+        'var tgd=qs.get("tgWebAppData")||"";'
+        'var backUrl="/miniapp-spa"+(tgd?"?tgWebAppData="+encodeURIComponent(tgd):"");'
+        'var lnk=document.querySelector(".report-back");if(lnk)lnk.href=backUrl;'
+        'if(tg&&tg.BackButton){'
+        'tg.BackButton.onClick(function(){location.href=backUrl;});'
+        'tg.BackButton.show();}'
+        '})();</script>'
+    )
+
+
 def _build_action_bar(dept, doc_id, existing_notes_html=""):
     """Build action bar HTML + JS for Mini App reports."""
     # #497 A.1: в страницу кладётся токен документа (валиден ТОЛЬКО для
@@ -213,13 +240,17 @@ def _build_action_bar(dept, doc_id, existing_notes_html=""):
 <div class="notes-section">
 <div class="notes-title">Важные замечания</div>
 <div class="notes-list" id="notesList">{existing_notes_html}</div>
+<!-- #552 A.2: поля «Заметка» и «Уточнение» разнесены и подписаны —
+перепутать их нельзя. Кнопки текстом (не значки), высота 44 px — палец. -->
+<div class="notes-label">Заметка для себя (отдел не перезапускается)</div>
 <div class="notes-input">
 <input type="text" id="noteInput" placeholder="Добавить замечание..." onkeydown="if(event.key==='Enter')addNote()"/>
-<button onclick="addNote()">+</button>
+<button onclick="addNote()">Сохранить</button>
 </div>
-<div class="notes-input">
+<div class="notes-label accent">Уточнить и пересчитать отчёт</div>
+<div class="notes-input notes-input-refine">
 <input type="text" id="refineInput" placeholder="Уточнение — отдел пересчитает отчёт..." onkeydown="if(event.key==='Enter')addRefine()"/>
-<button onclick="addRefine()">↻</button>
+<button class="refine-btn" onclick="addRefine()">Пересчитать</button>
 </div>
 {versions_html}
 </div>
@@ -260,11 +291,11 @@ function addRefine(){{
   fetch('/miniapp/note',{{method:'POST',headers:{{'Content-Type':'application/json','Authorization':'Bearer '+_docToken}},body:JSON.stringify({{doc_id:docId,note_text:text,refine:true}})}})
     .then(function(r){{ return r.json().then(function(data){{ return {{ok:r.status,data:data}}; }}); }})
     .then(function(res){{
-      if(btn){{ btn.disabled=false; btn.textContent='↻'; }}
+      if(btn){{ btn.disabled=false; btn.textContent='Пересчитать'; }}
       if(res.ok!==200){{ alert('Ошибка: '+(res.data.msg||res.ok)); return; }}
       location.href='/miniapp/'+res.data.doc_id;
     }})
-    .catch(function(){{ if(btn){{ btn.disabled=false; btn.textContent='↻'; }} alert('Сетевая ошибка — отдел мог не ответить'); }});
+    .catch(function(){{ if(btn){{ btn.disabled=false; btn.textContent='Пересчитать'; }} alert('Сетевая ошибка — отдел мог не ответить'); }});
 }}
 function doAction(action){{
   var btn = event && event.target ? event.target.closest('.action-btn') : null;
