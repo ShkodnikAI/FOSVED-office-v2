@@ -66,12 +66,17 @@ def test_admin_night_cycle_phases_protected():
 
 
 def test_night_slot_persists_and_reports():
-    """A.3: NightSlot пишет итог в admin_night_reports и шлёт итог в Telegram."""
+    """A.3: NightSlot пишет итог в admin_night_reports и отдаёт владельцу.
+
+    #550 A.1: немедленная отправка заменена outbox-записью (OutboxPut("night",
+    ...)) — доставка слотом night-report в 07:15 МСК, ночью тишина.
+    """
     seg = "\n".join(_code_lines(_segment(APP, "pattern NightSlot()")))
     assert "INSERT INTO admin_night_reports" in seg, "итог не сохраняется"
     assert '"night-slot"' in seg, "нет маркера scan_data='night-slot' (утренний читатель его ищет)"
     assert 'AuditLog("night_slot_done"' in seg, "нет audit-записи о завершении"
-    assert "SendTelegramReply" in seg, "итог не уходит в Telegram"
+    assert 'OutboxPut("night"' in seg, "итог не уходит в outbox (#550 A.1)"
+    assert "SendTelegramReply" not in seg, "ночная отправка всё ещё немедленная"
     assert 'kv_set("admin_night_summary"' in seg, "живой KV-путь #381 потерян"
     assert "try AdminNightCycle()" in seg, "Phase 3 не защищена try"
     assert "night_status" in seg, "нет честного статуса ok/partial"

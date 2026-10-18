@@ -4,6 +4,7 @@
 llm_proxy.py остаётся точкой сборки/entrypoint — деплой-контракт не тронут.
 Этот модуль не знает о Flask-роутах и провайдерах (только они импортируют его).
 """
+import hmac
 import os
 import sys
 import json
@@ -94,6 +95,14 @@ def auth_middleware():
         return None
     # Protect API, admin, memory, miniapp-action endpoints
     if any(path.startswith(p) for p in PROTECTED_PREFIXES):
+        # #550 A.2: /admin-ua/ — только 127.0.0.1/::1 И внутренний токен.
+        # Ночные фазы 1a–6 (mlog AdminNightCycle) били сюда без авторизации
+        # и с июля получали 401 — теперь доступ локальный + токен (см.
+        # _admin_ua_authorized). Bearer-ветка для префикса не применяется.
+        if path.startswith("/admin-ua/"):
+            if _admin_ua_authorized():
+                return None
+            return jsonify({"error": "unauthorized"}), 401
         # Internal requests from mlog (localhost) are allowed to /memory/
         # and /dialog/ without Bearer — mlog http_post() has no custom-header
         # support. External traffic is blocked by reverse_proxy (SEC-1) and
@@ -134,6 +143,54 @@ def _check_bearer():
         return True
     auth = request.headers.get('Authorization', '')
     return auth == f'Bearer {API_SECRET}'
+
+
+def _admin_ua_token_hash(token: str) -> str:
+    """#550 A.2: hash-токен для mlog-клиентов — первые 16 hex sha256(токен + ":admin-ua").
+
+    Живая проба 18.10 (наряд #550): redact(s + ":admin-ua", "hash_only")
+    mlog 0.32.0 = [HASH:<sha256 hex>] → substring(6, 22) = ровно эта строка
+    (проба на INTERNAL_API_TOKEN="test-token-123456": обе стороны дали
+    5ddbb39c4e150128). Scope ":admin-ua" делает токен невзаимозаменяемым
+    с другими hash-токенами (прецедент ReposAccessToken #442).
+    """
+    return hashlib.sha256((token + ":admin-ua").encode()).hexdigest()[:16]
+
+
+def _admin_ua_authorized():
+    """#550 A.2: /admin-ua/* — только 127.0.0.1/::1 И внутренний токен.
+
+    Каналы токена:
+    1. Заголовок X-Internal-Token (hmac.compare_digest) — клиенты, умеющие
+       заголовки (Python-код, curl, будущие версии Metalogos).
+    2. Query-параметр itok=<16 hex> — hash-токен с scope ":admin-ua".
+       ОТКЛОНЕНИЕ ОТ ТЕКСТА НАРЯДА (задокументировано в отчёте): наряд
+       предлагал http_get(url, headers), но живая проба mlog 0.32.0
+       показала: http_get принимает только (url, timeout 1..300),
+       кастомных исходящих заголовков нет, а парсер объектов не допускает
+       ключи с дефисом. Наименьший равнозначный по безопасности канал —
+       hash-токен в query: сырой секрет по сети не ходит, hash бесполезен
+       вне предсказания для других scope (прецедент #442).
+
+    Fail-closed: пустой INTERNAL_API_TOKEN → отказ всегда (админ-домен
+    не открывается «open mode»-ом — прямое требование наряда).
+    X-Forwarded-For с адресом не-localhost (внешний вход через
+    reverse_proxy, №445 A.3: XFF перезаписывается адресом клиента) →
+    отказ даже с верным токеном — снаружи префикс не открывается.
+    """
+    if request.remote_addr not in ("127.0.0.1", "::1"):
+        return False
+    xff_first = (request.headers.get("X-Forwarded-For", "") or "").split(",")[0].strip()
+    if xff_first and xff_first not in ("127.0.0.1", "::1"):
+        return False
+    token = os.environ.get("INTERNAL_API_TOKEN", "")
+    if not token:
+        return False
+    header_token = request.headers.get("X-Internal-Token", "")
+    if header_token and hmac.compare_digest(header_token, token):
+        return True
+    itok = request.args.get("itok", "")
+    return bool(itok) and hmac.compare_digest(itok, _admin_ua_token_hash(token))
 
 def _verify_webhook_secret():
     """Verify Telegram webhook secret token header."""
@@ -394,6 +451,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original_query TEXT, original_response TEXT, correction TEXT, corr_type TEXT, created_at TEXT DEFAULT (datetime('now')));
         CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')));
+        -- #550 A.1: отложенная доставка владельцу — ночная почта (NightTickSlot,
+        -- NightSlot FO-027/«Ночная проверка», ночной lz-daily) пишется сюда,
+        -- слот night-report (07:15 MSK) выгружает одним сообщением (OutboxFlush).
+        CREATE TABLE IF NOT EXISTS owner_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), source TEXT NOT NULL, text TEXT NOT NULL, sent_at TEXT);
+        CREATE INDEX IF NOT EXISTS idx_owner_outbox_sent ON owner_outbox(sent_at);
         CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')));
         -- FO-009: темпоральный KG — valid_to NULL = актуально; superseded_by → новая версия

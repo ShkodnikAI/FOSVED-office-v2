@@ -1690,22 +1690,26 @@ pattern NightSlot() -> String {
     let exp_chain = redact(to_string(json_get(er, "chain_id", "?")), "all")
     let exp_count = redact(to_string(json_get(er, "c", "?")), "all")
     let _ = AuditLog("chain_expired", "system", exp_chain + " steps=" + exp_count)
-    let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), "FO-027: цепочка " + exp_chain + " истекла без прогресса >24 ч (" + exp_count + " степов) — resume: /chain continue " + exp_chain + " <query>")
+    // #550 A.1: алерт — в outbox (доставка 07:15 MSK), ночью тишина
+    let _ = OutboxPut("fo027", "FO-027: цепочка " + exp_chain + " истекла без прогресса >24 ч (" + exp_count + " степов) — resume: /chain continue " + exp_chain + " <query>")
   }
 
   // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
   // #485 A.3: счётчик недоступных фаз — основа честного статуса в итоге
+  // #550 A.2: доступ — только с внутренним hash-токеном (itok)
   let mut phase_fail = 0.0
   let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
   let ua_body = "{}"
-  let mut ua_result = TryVal(try http_post("http://127.0.0.1:4000/admin-ua/night-cycle", ua_body, "application/json"))
+  let mut ua_result = TryVal(try http_post("http://127.0.0.1:4000/admin-ua/night-cycle?itok=" + AdminUaToken(), ua_body, "application/json"))
   if to_string(ua_result) == "()" then { ua_result = "{}" }
   if to_string(ua_result) == "{}" then { phase_fail = phase_fail + 1.0 }
   let ua_summary = redact(to_string(json_get(parse_json(ua_result), "summary", "UA cycle failed")), "all")
 
   // Phase 1: LZ Daily Report (GitHub scan → Admin)
+  // #550 A.1: ночной прогон LZ DAILY шлёт в outbox (deliver: "outbox"),
+  // утренний слот lz-daily (09:10) и ручные прогоны — как раньше, в Telegram.
   let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
-  let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID")})
+  let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID"), deliver: "outbox"})
   let mut lz_result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0))
   if to_string(lz_result) == "()" then { lz_result = "{}" }
   if to_string(lz_result) == "{}" then { phase_fail = phase_fail + 1.0 }
@@ -1775,7 +1779,7 @@ pattern NightSlot() -> String {
   let review_json = json_encode({status: night_status, summary: substring(result, 0, 400), health: health_last, findings_open: findings_open})
   let save_res = TryVal(try db_execute("INSERT INTO admin_night_reports (scan_data, review_data, health_score, findings_count) VALUES (?1, ?2, ?3, ?4)", ["night-slot", review_json, health_num, findings_open]))
   let _ = AuditLog("night_slot_done", "admin", "status=" + night_status + " health=" + health_last + " findings=" + to_string(to_int(findings_open)) + " saved=" + to_string(save_res))
-  let _ = TryVal(try SendTelegramReply(env("OWNER_TELEGRAM_ID"), "🌙 Ночная проверка: " + night_status + ", здоровье " + health_last + "/10, открытых находок: " + to_string(to_int(findings_open)) + "\n\n" + substring(result, 0, 2800)))
+  let _ = TryVal(try OutboxPut("night", "Ночная проверка: " + night_status + ", здоровье " + health_last + "/10, открытых находок: " + to_string(to_int(findings_open)) + "\n\n" + substring(result, 0, 2800)))
   return result
 }
 
