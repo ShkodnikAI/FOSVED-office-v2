@@ -11,7 +11,7 @@ import uuid
 
 import requests as http_requests
 
-from proxy.core import log, _log_error, TELEGRAM_BOT_TOKEN, http_requests
+from proxy.core import log, _log_error, TELEGRAM_BOT_TOKEN, http_requests, RENDER_URL
 
 # ── Text formatting helpers for Telegram ────────────────────────────
 
@@ -137,14 +137,21 @@ def _tg_send_voice(chat_id, voice_path):
     return None
 
 def _tg_send_report_with_button(chat_id, text, button_text="Otkryt otchet", button_url=None):
-    """Send text with an inline button via Telegram Bot API."""
+    """Send text with an inline button via Telegram Bot API.
+
+    Наряд #561: кнопка на /miniapp/<id> — web_app-кнопка (Telegram открывает
+    Mini App с initData, иначе require_telegram отдаёт bootstrap-страницу);
+    прочие URL и дефолт t.me/FosvedMiniApp — прежняя обычная url-кнопка.
+    """
     if not TELEGRAM_BOT_TOKEN:
         log.warning("TELEGRAM_BOT_TOKEN not set, cannot send report")
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    reply_markup = {
-        "inline_keyboard": [[{"text": button_text, "url": button_url or "https://t.me/FosvedMiniApp"}]]
-    }
+    if button_url and (button_url.startswith(RENDER_URL) or "/miniapp/" in button_url):
+        btn = {"text": button_text, "web_app": {"url": button_url}}
+    else:
+        btn = {"text": button_text, "url": button_url or "https://t.me/FosvedMiniApp"}
+    reply_markup = {"inline_keyboard": [[btn]]}
     payload = {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
     try:
         resp = http_requests.post(url, json=payload, timeout=30)
