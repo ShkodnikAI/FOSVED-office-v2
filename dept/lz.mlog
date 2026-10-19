@@ -276,14 +276,31 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   }
   // ── Watchlist ──
   if starts_with(t, "/lz watch add") then {
-    let q = substring(query, 13.0, 300.0)
+    // #566: срез 14 — за пробелом префикса (было 13: тема писалась с ведущим
+    // пробелом и ломала точные SELECT по topic)
+    let q = substring(query, 14.0, 300.0)
     return LZWatchAdd(q, chat_id)
   }
   if starts_with(t, "/lz watch remove") then {
-    let q = substring(query, 16.0, 300.0)
+    // #566: срез 17 — за пробелом префикса (было 16)
+    let q = substring(query, 17.0, 300.0)
     return LZWatchRemove(q)
   }
   if starts_with(t, "/lz watch") or starts_with(t, "/lz watchlist") then {
+    return LZWatchList()
+  }
+  // ── #566: устав объявляет /lab-watch (library/lz.md:119) — алиасы watchlist.
+  // /lab-watch status <топик> — трактую как показ списка (фильтрация по топику —
+  // отдельное решение, LZWatchList и так возвращает записи с topic/domain).
+  if starts_with(t, "/lab-watch add") then {
+    let q = substring(query, 15.0, 300.0)
+    return LZWatchAdd(q, chat_id)
+  }
+  if starts_with(t, "/lab-watch remove") then {
+    let q = substring(query, 18.0, 300.0)
+    return LZWatchRemove(q)
+  }
+  if starts_with(t, "/lab-watch") then {
     return LZWatchList()
   }
   // ── Archive ──
@@ -1202,6 +1219,16 @@ pattern LZAllScan(query: String, chat_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // WATCHLIST + ARCHIVE + METRICS
 // ═══════════════════════════════════════════════════════════════════════
+
+// ── #566 A.1: seed-категория watchlist — тонкие скиллы против жирных tool-слоёв ──
+// Домен осмысленный (Computational из «Технологии (10)» устава lz.md:52), не
+// auto: LZWatchAdd пишет domain="auto" (:1207), seed идёт прямым идемпотентным
+// INSERT (WHERE NOT EXISTS) со статусом active и дефолтными порогами из DDL.
+// Статус сигнала — КАНДИДАТ, не алерт: 2 независимых подтверждения < 3 (lz.md:31).
+pattern LZWatchSeedCategory() -> String {
+  db_execute("INSERT INTO watchlist_entries (topic, domain, status) SELECT 'thin-skills-vs-fat-tool-layers', 'Computational', 'active' WHERE NOT EXISTS (SELECT 1 FROM watchlist_entries WHERE topic = 'thin-skills-vs-fat-tool-layers')", [])
+  return "seeded"
+}
 
 pattern LZWatchAdd(topic: String, chat_id: String) -> String {
   db_execute("INSERT INTO watchlist_entries (topic, domain, status) VALUES (?, ?, ?)", [topic, "auto", "active"])

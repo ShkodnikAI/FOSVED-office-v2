@@ -146,6 +146,7 @@ Reverse Proxy (Flask)
 | `/yana` | персональный ассистент |
 | `/osp`, `/osp deep`, `/osp full`, `/osp wargame` | ОСП: разбор вопроса (режимы глубины, варгейм) |
 | `/lz`, `/lz deep`, `/lz osint`, `/lz osint advanced`, `/lz profile` <actor> | Лаборатория знаний: скан, OSINT, профилирование |
+| `/lab-watch` | ЛЗ: watchlist-категории — список/статус, add/remove топика (#566) |
 | `/expert` | экспертный департамент |
 | `/quickexpert` <тема>, `/deepexpert` <тема> | эксперт: быстрый брифинг (уровень 1), глубокий (уровень 3) |
 | `/marketing` | маркетинг |
