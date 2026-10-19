@@ -449,7 +449,9 @@ pattern OnlinerWarmSlot() -> String {
 
 pattern GoldenEvalsSlot() -> String {
   let _ = AuditLog("cron_golden_evals", "qa", "golden evals triggered by native cron")
-  let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 240.0))
+  // #569 A.1: второй вызов без секрета (403-класс с NightTickSlot) —
+  // hash-form по образцу onliner-warm выше (№443), cron_secret_ok принимает.
+  let result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals?secret=" + redact(env("CRON_SECRET"), "hash_only"), "{}", "application/json", 240.0))
   return "golden-evals ok"
 }
 
@@ -570,16 +572,22 @@ pattern NightTickSlot() -> String {
   if to_string(r_ind) == "()" then {
     report = report + " indicators=FAIL"
   } else {
-    let _ = AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by night tick")
+    // #569 A.4: AuditLog под TryVal — сбой записи аудита (прод 02:00:44:
+    // database is locked) не должен убить слот до OutboxPut.
+    let _ = TryVal(try AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by night tick"))
     report = report + " indicators=ok"
   }
   let r_shop = redact(to_string(TryVal(try http_get(base + "shop-tick" + qs, 300.0))), "all")
   if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
-  let r_evals = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals", "{}", "application/json", 300.0))), "all")
+  // #569 A.1: источник 403 в 02:00:04Z прод-лога — golden-evals вызывался
+  // БЕЗ ?secret= (гард cron_secret_ok → "Forbidden", 403) — фаза никогда
+  // не выполнялась ночью. Секрет добавлен, как у backup-фазы выше.
+  let r_evals = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals" + qs, "{}", "application/json", 300.0))), "all")
   if to_string(r_evals) == "()" then {
     report = report + " evals=FAIL"
   } else {
-    let _ = AuditLog("cron_golden_evals", "qa", "golden evals triggered by night tick")
+    // #569 A.4: см. комментарий выше — аудит не роняет слот.
+    let _ = TryVal(try AuditLog("cron_golden_evals", "qa", "golden evals triggered by night tick"))
     report = report + " evals=ok"
   }
   // #485 A.1: ночной цикл вызывается В ПРОЦЕССЕ (оба — паттерны одной программы),
@@ -595,7 +603,13 @@ pattern NightTickSlot() -> String {
   } else {
     report = report + " night=ok"
   }
-  let _ = AuditLog("cron_night_tick", "system", report)
+  // #569 A.4: один сбой не роняет весь слот. Прод 19.10: NightSlot упал
+  // (поймано try выше), затем AuditLog("cron_night_tick") сам упал на
+  // database is locked → dispatch error → OutboxPut не выполнился, ночного
+  // отчёта не было. Аудит — best-effort под TryVal; OutboxPut — последняя
+  // операция и выполняется при любом исходе фаз, текст ошибки в report
+  // (night=FAIL(...)) уже собран try-веткой выше.
+  let _ = TryVal(try AuditLog("cron_night_tick", "system", report))
   // #550 A.1: итог тика — в outbox (доставка слотом night-report в 07:15 MSK),
   // немедленной ночной отправки больше нет.
   let _ = OutboxPut("night-tick", report)

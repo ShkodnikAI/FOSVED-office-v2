@@ -1711,10 +1711,17 @@ pattern NightSlot() -> String {
   // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
   // #485 A.3: счётчик недоступных фаз — основа честного статуса в итоге
   // #550 A.2: доступ — только с внутренним hash-токеном (itok)
+  // #569 A.3: явный таймаут. Замер (бенч на клоне дерева, scripts вне репо):
+  // Phase 1-4 ≈ 34 с локально (доминирует cross-file calls-скан фазы 3 —
+  // тысячи read_text); прод-наблюдение 19.10: Phase 3 шла 02:00:10→02:03:14
+  // (~3 мин, Render CPU + INSERT'ы в транзакции). Итог: 600 с = запас x2 от
+  // прод-верхней оценки; требование наряда (>= 300) выполнено. Прежний
+  // дефолт 30 с обрывал mlog-клиент, пока Python-цикл ещё писал — mlog шёл
+  // к своим записям под чужим локом (02:00:39 database is locked, слот упал).
   let mut phase_fail = 0.0
   let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
   let ua_body = "{}"
-  let mut ua_result = TryVal(try http_post("http://127.0.0.1:4000/admin-ua/night-cycle?itok=" + AdminUaToken(), ua_body, "application/json"))
+  let mut ua_result = TryVal(try http_post("http://127.0.0.1:4000/admin-ua/night-cycle?itok=" + AdminUaToken(), ua_body, "application/json", 600.0))
   if to_string(ua_result) == "()" then { ua_result = "{}" }
   if to_string(ua_result) == "{}" then { phase_fail = phase_fail + 1.0 }
   let ua_summary = redact(to_string(json_get(parse_json(ua_result), "summary", "UA cycle failed")), "all")

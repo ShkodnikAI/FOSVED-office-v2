@@ -1854,76 +1854,85 @@ def admin_ua_night_cycle():
         analysis = _ua_analyze_internal()
 
         log.info("UA Night Cycle: Phase 3/6 — Grapher")
-        # Build graph in SQLite
+        # Наряд #569 A.2: держатель блокировки 19.10 — этот conn. Прежний код
+        # открывал транзакцию DELETE'ем и держал её минуты (INSERT'ы вперемешку
+        # с медленным сканом файлов), а на пути исключения (kg_scan_rebuild
+        # падал на само-блокировке: писал через _query свежим соединением под
+        # собственным же локом) conn не закрывался — фрейм+traceback образуют
+        # цикл, соединение уничтожается только GC, WRITE-лок держится до
+        # рестарта (прод: 02:00:39–03:42Z). Теперь: рёбра собираются в памяти,
+        # одна короткая транзакция, гарантированные commit/rollback + close на
+        # всех путях; kg_scan_rebuild — строго ПОСЛЕ закрытия conn.
         conn = sqlite3.connect(str(DB_FILE))
-        c = conn.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS knowledge_graph
-            (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT,
-             file_path TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS knowledge_edges
-            (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT,
-             edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
-        # FO-009: узлы не стираются — история сохраняется; рёбра перестраиваются
-        c.execute("DELETE FROM knowledge_edges")
-        nodes_list = []
+        try:
+            c = conn.cursor()
+            c.execute("""CREATE TABLE IF NOT EXISTS knowledge_graph
+                (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT, node_name TEXT,
+                 file_path TEXT, description TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
+            c.execute("""CREATE TABLE IF NOT EXISTS knowledge_edges
+                (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT,
+                 edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
+            nodes_list = []
 
-        nodes_saved = 0
-        edges_saved = 0
-        now_ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            nodes_saved = 0
+            edges_rows = []  # #569 A.2: батч вместо INSERT'ов внутри скана
+            now_ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 
-        for fa in analysis:
-            rel = fa['path']
-            nodes_list.append({'node_type': 'file', 'node_name': rel, 'file_path': rel,
-                               'description': f"{len(fa.get('patterns', []))}p {len(fa.get('routes', []))}r"})
-            nodes_saved += 1
-            for p in fa.get('patterns', []):
-                pname = p.get('name', '')
-                if not pname: continue
-                nodes_list.append({'node_type': 'pattern', 'node_name': pname, 'file_path': rel, 'description': ''})
+            for fa in analysis:
+                rel = fa['path']
+                nodes_list.append({'node_type': 'file', 'node_name': rel, 'file_path': rel,
+                                   'description': f"{len(fa.get('patterns', []))}p {len(fa.get('routes', []))}r"})
                 nodes_saved += 1
-                c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
-                          (rel, pname, 'defines', rel, now_ts))
-                edges_saved += 1
-            for r in fa.get('routes', []):
-                rname = r.get('path', '')
-                if not rname: continue
-                nodes_list.append({'node_type': 'route', 'node_name': rname, 'file_path': rel,
-                                   'description': r.get('method', '')})
-                nodes_saved += 1
-                c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
-                          (rel, rname, 'exposes', rel, now_ts))
-                edges_saved += 1
-            for imp in fa.get('imports', []):
-                c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
-                          (rel, imp + '.mlog', 'imports', rel, now_ts))
-                edges_saved += 1
+                for p in fa.get('patterns', []):
+                    pname = p.get('name', '')
+                    if not pname: continue
+                    nodes_list.append({'node_type': 'pattern', 'node_name': pname, 'file_path': rel, 'description': ''})
+                    nodes_saved += 1
+                    edges_rows.append((rel, pname, 'defines', rel, now_ts))
+                for r in fa.get('routes', []):
+                    rname = r.get('path', '')
+                    if not rname: continue
+                    nodes_list.append({'node_type': 'route', 'node_name': rname, 'file_path': rel,
+                                       'description': r.get('method', '')})
+                    nodes_saved += 1
+                    edges_rows.append((rel, rname, 'exposes', rel, now_ts))
+                for imp in fa.get('imports', []):
+                    edges_rows.append((rel, imp + '.mlog', 'imports', rel, now_ts))
 
-        # Cross-file pattern calls
-        pattern_to_file = {}
-        for fa in analysis:
-            for p in fa.get('patterns', []):
-                if p.get('name'): pattern_to_file[p['name']] = fa['path']
-        for fa in analysis:
-            rel = fa['path']
-            for pname, pfile in pattern_to_file.items():
-                if pname in ('Main', 'InitDB', 'mlogserver'): continue
-                if pfile != rel:
-                    try:
-                        content = (Path('/office') / rel).read_text(errors='ignore')
-                        if pname + '(' in content:
-                            c.execute("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
-                                      (rel, pname, 'calls', rel, now_ts))
-                            edges_saved += 1
-                    except Exception as e:
-                        _log_error(f"knowledge_edges insert failed: {e}", source="kg_rebuild", dept="lz", kind="data_loss")
+            # Cross-file pattern calls
+            pattern_to_file = {}
+            for fa in analysis:
+                for p in fa.get('patterns', []):
+                    if p.get('name'): pattern_to_file[p['name']] = fa['path']
+            for fa in analysis:
+                rel = fa['path']
+                for pname, pfile in pattern_to_file.items():
+                    if pname in ('Main', 'InitDB', 'mlogserver'): continue
+                    if pfile != rel:
+                        try:
+                            content = (Path('/office') / rel).read_text(errors='ignore')
+                            if pname + '(' in content:
+                                edges_rows.append((rel, pname, 'calls', rel, now_ts))
+                        except Exception as e:
+                            _log_error(f"knowledge_edges insert failed: {e}", source="kg_rebuild", dept="lz", kind="data_loss")
 
-        # FO-009: темпоральная фиксация узлов скана
+            # FO-009: узлы не стираются — история сохраняется; рёбра перестраиваются
+            c.execute("DELETE FROM knowledge_edges")
+            if edges_rows:
+                c.executemany("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) VALUES (?,?,?,?,?)",
+                              edges_rows)
+            conn.commit()  # #569 A.2: лок снят ДО kg_scan_rebuild — нет само-блокировки
+        except Exception:
+            conn.rollback()  # #569 A.2: транзакция завершена на любом пути
+            raise
+        finally:
+            conn.close()  # #569 A.2: соединение закрыто на любом пути — нет зомби-лока
+        edges_saved = len(edges_rows)
+
+        # FO-009: темпоральная фиксация узлов скана (после commit+close — #569 A.2)
         kg_res_nc = kg_scan_rebuild(nodes_list, source='admin_ua_night_cycle')
         log.info(f"UA Night Cycle: KG temporal +{kg_res_nc['inserted']} new, ~{kg_res_nc['updated']} updated, "
                  f"={kg_res_nc['noop']} unchanged, -{kg_res_nc['closed_missing']} closed")
-
-        conn.commit()
-        conn.close()
 
         log.info("UA Night Cycle: Phase 4/6 — Reviewer")
         review = _ua_review_internal()
