@@ -1,0 +1,148 @@
+// test_n559v3.mlog — Наряд #559: метрики ЛЗ — LZLabScore из собственных
+// таблиц, честные пометки «не хватает данных», роуты /lab-score|/lab-recalibrate.
+// Легенда:
+//   b1 (тест 1): пустая база — каждая метрика либо числом, либо честной
+//                пометкой «не хватает данных X» (Тест 2 наряда);
+//   b2 (тест 2): outcome-алерты (3 retracted / 1 confirmed / 2 pending) →
+//                FPR = 0.75 по разрешившимся, pending не считаются;
+//   b3 (тест 3): грейденные ключи (#565) → disruption_accuracy числом +
+//                последний прогон grading_runs производен от raw;
+//   b4 (тест 4): роуты /lab-score и /lab-recalibrate в HandleLZ (устав :123).
+// NB: DetectDepartment (app.mlog) в замыкание батареи не входит — его проводку
+// держит pytest-гвард tests/test_n559_lab_score.py.
+// Запуск: rm -rf /tmp/n559-test && mkdir -p /tmp/n559-test && ./bin/mlog run test_n559v3.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/n559-test/lz.db" }
+import dept/utils
+import dept/lz
+
+// ── тест-стабы app-слоя (конвенция #519) ────────────────────────────────
+pattern InitDB() -> String {
+  return "ok"
+}
+pattern AuditLog(action: String, dept: String, details: String) -> String {
+  return "ok"
+}
+pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
+  return "ok"
+}
+pattern TeamAskBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamBoardBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamPublish(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float) -> String {
+  return ""
+}
+pattern TeamSecondPass(dept: String, query: String, context: String, draft: String) -> String {
+  return draft
+}
+pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
+  return parse_json("{}")
+}
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  return "{\"error\": \"stub\"}"
+}
+pattern LZLlm(prompt: String) -> String {
+  let off = _MockShift()
+  let rows = query("SELECT text FROM test_llm_mock ORDER BY id LIMIT 1 OFFSET ?", [off])
+  if length(rows) == 0.0 then { return "ock: очередь пуста]" }
+  return to_string(json_get(get(rows, 0), "text", ""))
+}
+
+pattern _MockShift() -> Float {
+  let rows = query("SELECT n FROM test_mock_idx WHERE id = 1", [])
+  if length(rows) == 0.0 then {
+    let _ = db_execute("INSERT INTO test_mock_idx (id, n) VALUES (1, 1)", [])
+    return 0.0
+  }
+  let n = to_float(json_get(get(rows, 0), "n", "0"))
+  let _ = db_execute("UPDATE test_mock_idx SET n = ? WHERE id = 1", [n + 1.0])
+  return n
+}
+
+pattern _MockQueue(answers: String) -> String {
+  let toks = split(answers, "|||")
+  each t in toks {
+    let _ = db_execute("INSERT INTO test_llm_mock (text) VALUES (?)", [to_string(t)])
+  }
+  return "queued"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return name + "=true;" }
+  return name + "=false;"
+}
+
+pattern TestDbInit() -> String {
+  // Схема — из app.mlog InitDB (#553/#565/#559); тестовые таблицы мока здесь.
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS knowledge_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, title TEXT NOT NULL, domain TEXT NOT NULL, source TEXT, source_url TEXT, source_tier INTEGER DEFAULT 2, hype_cycle_stage TEXT, disruption_score REAL DEFAULT 0.0, inflection_signals TEXT DEFAULT '[]', cross_domain_potential TEXT DEFAULT '[]', competing_alternatives TEXT DEFAULT '[]', status TEXT DEFAULT 'tracking', confirmation_count INTEGER DEFAULT 0, tracked_since TEXT DEFAULT (datetime('now')), last_scored_at TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), provenance TEXT DEFAULT '{}')", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS tracked_technologies (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id INTEGER, technology_name TEXT NOT NULL, category TEXT, oob_data TEXT DEFAULT '{}', patent_activity TEXT DEFAULT '[]', talent_flow TEXT DEFAULT '[]', vc_investment TEXT DEFAULT '[]', disruption_1y REAL, disruption_3y REAL, disruption_5y REAL, disruption_10y REAL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS prediction_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id INTEGER, kind TEXT, claim TEXT, predicted_at TEXT DEFAULT (datetime('now')), verify_source TEXT, due_at TEXT, status TEXT DEFAULT 'pending', graded_at TEXT, score REAL, grader TEXT, caveats TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS grading_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_date TEXT DEFAULT (datetime('now')), metric TEXT, n INTEGER, raw TEXT, summary TEXT, caveats TEXT, grader_errata TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS disruption_alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id INTEGER, alert_type TEXT, severity TEXT DEFAULT 'medium', confirmation_count INTEGER DEFAULT 0, osp_triggered INTEGER DEFAULT 0, message TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT, outcome TEXT DEFAULT 'pending')", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS scan_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_type TEXT, sources_queried TEXT, artifacts_found INTEGER, created_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_llm_mock (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_mock_idx (id INTEGER PRIMARY KEY, n FLOAT)", [])
+  return "ok"
+}
+
+pattern Run(x: String) -> String {
+  let _ = TestDbInit()
+  let out = ""
+
+  // ── b1 (тест 1): пустая база — честные пометки, не заглушки ─────────────
+  let s1 = LZLabScore()
+  let out = out + _Mark("b1_header", contains(s1, "ЛЗ метрики"))
+  let out = out + _Mark("b1_fpr_honest", contains(s1, "false_positive_rate — не хватает данных: разрешившихся алертов"))
+  let out = out + _Mark("b1_acc_honest", contains(s1, "disruption_accuracy — не хватает данных: грейденных ключей предсказаний — 0"))
+  let out = out + _Mark("b1_ttd_honest", contains(s1, "time_to_detection — не хватает данных"))
+  let out = out + _Mark("b1_idr_honest", contains(s1, "inflection detection rate — не хватает данных"))
+  let out = out + _Mark("b1_cross_honest", contains(s1, "cross_domain_hit_rate — не хватает данных"))
+  let out = out + _Mark("b1_invest_honest", contains(s1, "investment_lead_time — не хватает данных"))
+
+  // ── b2 (тест 2): FPR по outcome разрешившихся алертов ───────────────────
+  let _ = db_execute("INSERT INTO disruption_alerts (artifact_id, alert_type, outcome) VALUES (1, 'disruption', 'retracted')", [])
+  let _ = db_execute("INSERT INTO disruption_alerts (artifact_id, alert_type, outcome) VALUES (1, 'disruption', 'retracted')", [])
+  let _ = db_execute("INSERT INTO disruption_alerts (artifact_id, alert_type, outcome) VALUES (2, 'disruption', 'retracted')", [])
+  let _ = db_execute("INSERT INTO disruption_alerts (artifact_id, alert_type, outcome) VALUES (2, 'disruption', 'confirmed')", [])
+  let _ = db_execute("INSERT INTO disruption_alerts (artifact_id, alert_type, outcome) VALUES (3, 'disruption', 'pending')", [])
+  let _ = db_execute("INSERT INTO disruption_alerts (artifact_id, alert_type, outcome) VALUES (3, 'disruption', 'pending')", [])
+  let s2 = LZLabScore()
+  let out = out + _Mark("b2_fpr_numeric", contains(s2, "false_positive_rate = 0.75"))
+  let out = out + _Mark("b2_fpr_n", contains(s2, "retracted 3 из разрешившихся 4"))
+  let out = out + _Mark("b2_fpr_caveats", contains(s2, "caveats: автоподсчёт по outcome"))
+
+  // ── b3 (тест 3): disruption_accuracy из грейденных ключей (#565) ────────
+  let _ = _MockQueue("SCORES: 1y=10 3y=40 5y=60 10y=80|||tech")
+  let _ = LZDisruptionScore("Квантовый трактор", "test-chat")
+  let _ = _MockQueue("STAGE: peak\nПолный текст ответа модели с обоснованием оценки|||tech|||NONE.")
+  let _ = LZHypeCycleMap("Квантовый трактор", "test-chat")
+  let _ = _MockQueue("Есть признаки инфлекшна: первые внедрения и корпоративный VC|||YES|||tech")
+  let _ = LZInflectionDetect("Квантовый трактор", "test-chat")
+  let _ = db_execute("UPDATE prediction_keys SET due_at = datetime('now', '-1 day') WHERE status = 'pending'", [])
+  let recal = LZRecalibrate()
+  let out = out + _Mark("b3_recal_graded", contains(recal, "грейдено 3 из 3"))
+  let s3 = LZLabScore()
+  let out = out + _Mark("b3_acc_numeric", contains(s3, "disruption_accuracy = 1"))
+  let out = out + _Mark("b3_acc_n", contains(s3, "n=3"))
+  let out = out + _Mark("b3_lastrun", contains(s3, "последний прогон калибровки: grading_runs#"))
+  let out = out + _Mark("b3_lastrun_raw_derived", contains(s3, "производны от raw, #565"))
+  let out = out + _Mark("b3_acc_caveats", contains(s3, "caveats: rule grader"))
+
+  // ── b4 (тест 4): роуты устава :123 ──────────────────────────────────────
+  let r1 = HandleLZ("/lab-score", "test-chat")
+  let out = out + _Mark("b4_route_score", contains(r1, "ЛЗ метрики"))
+  let r2 = HandleLZ("/lab-recalibrate", "test-chat")
+  let out = out + _Mark("b4_route_recalibrate", contains(r2, "грейдимых (окно сверки наступило) — 0"))
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Run -> output
+}
