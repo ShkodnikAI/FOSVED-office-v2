@@ -98,8 +98,27 @@ def _tg_send_formatted(chat_id, text, dept=None):
     return _tg_send_message(chat_id, text)
 
 # ──────────────────────────── TELEGRAM HELPERS ────────────────────────────
+def _tg_err_parts(resp, e):
+    """Наряд #567: (status_code, description) сбоя Telegram API — БЕЗ URL.
+
+    str(e) у requests.HTTPError содержит полный URL с токеном бота — в лог
+    идут только код статуса и description из JSON-ответа Telegram (если ответ
+    есть); для не-HTTP сбоев (таймаут/соединение) — только тип исключения.
+    """
+    code, desc = None, None
+    if resp is not None:
+        code = getattr(resp, "status_code", None)
+        try:
+            desc = resp.json().get("description")
+        except Exception:
+            desc = None
+    if desc is None:
+        desc = type(e).__name__
+    return code, desc
+
 def _tg_send_message(chat_id, text, parse_mode=None, reply_markup=None):
-    """Send a text message via Telegram Bot API. FO-015: reply_markup для inline-кнопок Guardian."""
+    """Send a text message via Telegram Bot API. FO-015: reply_markup для inline-кнопок Guardian.
+    Наряд #567: в лог — status/desc/len, без {e} (URL содержит токен)."""
     if not TELEGRAM_BOT_TOKEN:
         log.warning("TELEGRAM_BOT_TOKEN not set, cannot send message")
         return None
@@ -109,22 +128,27 @@ def _tg_send_message(chat_id, text, parse_mode=None, reply_markup=None):
         payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
+    resp = None
     try:
         resp = http_requests.post(url, json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("ok"):
             return data["result"].get("message_id")
-    except Exception as e:
-        log.error(f"Telegram sendMessage failed: {e}")
+    except Exception as e:  # noqa: BLE001 — в лог без URL/токена (A.2 #567)
+        code, desc = _tg_err_parts(resp, e)
+        log.error("Telegram sendMessage failed: status=%s desc=%s len=%s",
+                  code, desc, len(text or ""))
     return None
 
 def _tg_send_voice(chat_id, voice_path):
-    """Send a voice file via Telegram Bot API using multipart upload."""
+    """Send a voice file via Telegram Bot API using multipart upload.
+    Наряд #567: в лог — status/desc, без {e}."""
     if not TELEGRAM_BOT_TOKEN:
         log.warning("TELEGRAM_BOT_TOKEN not set, cannot send voice")
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice"
+    resp = None
     try:
         with open(voice_path, "rb") as f:
             resp = http_requests.post(url, data={"chat_id": chat_id}, files={"voice": f}, timeout=60)
@@ -132,9 +156,53 @@ def _tg_send_voice(chat_id, voice_path):
         data = resp.json()
         if data.get("ok"):
             return data["result"].get("message_id")
-    except Exception as e:
-        log.error(f"Telegram sendVoice failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        code, desc = _tg_err_parts(resp, e)
+        log.error("Telegram sendVoice failed: status=%s desc=%s", code, desc)
     return None
+
+def _tg_split_report(text, limit=4000):
+    """Наряд #567: части ≤ limit — по абзацу (\\n\\n), иначе по строке (\\n), иначе жёстко.
+
+    Лимит Telegram sendMessage — 4096 символов; запас до него — чтобы кнопка
+    и служебные поля не вытолкнули часть за лимит.
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    while len(text) > limit:
+        window = text[:limit + 1]
+        cut, sep = window.rfind("\n\n"), 2          # граница абзаца
+        if cut <= 0:
+            cut, sep = window.rfind("\n"), 1        # граница строки
+        if cut <= 0:
+            cut, sep = limit, 0                     # жёстко
+        parts.append(text[:cut].rstrip())
+        text = text[cut + sep:].lstrip() if sep else text[cut:]
+    if text:
+        parts.append(text)
+    return parts
+
+
+def _tg_send_one_with_button(chat_id, text, btn):
+    """Один вызов sendMessage: текст + кнопка (reply_markup). Возврат message_id/None.
+    Наряд #567: в лог — status/desc/len, без {e} (URL содержит токен)."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": [[btn]]}}
+    resp = None
+    try:
+        resp = http_requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            return data["result"].get("message_id")
+    except Exception as e:  # noqa: BLE001 — в лог без URL/токена (A.2 #567)
+        code, desc = _tg_err_parts(resp, e)
+        log.error("Telegram sendReport failed: status=%s desc=%s len=%s",
+                  code, desc, len(text or ""))
+    return None
+
 
 def _tg_send_report_with_button(chat_id, text, button_text="Otkryt otchet", button_url=None):
     """Send text with an inline button via Telegram Bot API.
@@ -142,40 +210,48 @@ def _tg_send_report_with_button(chat_id, text, button_text="Otkryt otchet", butt
     Наряд #561: кнопка на /miniapp/<id> — web_app-кнопка (Telegram открывает
     Mini App с initData, иначе require_telegram отдаёт bootstrap-страницу);
     прочие URL и дефолт t.me/FosvedMiniApp — прежняя обычная url-кнопка.
+    Наряд #567: текст > 4000 идёт частями ≤ 4000 — части 1..n-1 через
+    _tg_send_message без кнопки, последняя — с кнопкой; возврат — message_id
+    последней части. Не ушедшая часть — log.error с её номером.
     """
     if not TELEGRAM_BOT_TOKEN:
         log.warning("TELEGRAM_BOT_TOKEN not set, cannot send report")
         return None
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    parts = _tg_split_report(text, limit=4000)
+    if len(parts) > 1:
+        log.info("Telegram sendReport: long text split into %d parts (len=%d)",
+                 len(parts), len(text or ""))
     if button_url and (button_url.startswith(RENDER_URL) or "/miniapp/" in button_url):
         btn = {"text": button_text, "web_app": {"url": button_url}}
     else:
         btn = {"text": button_text, "url": button_url or "https://t.me/FosvedMiniApp"}
-    reply_markup = {"inline_keyboard": [[btn]]}
-    payload = {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
-    try:
-        resp = http_requests.post(url, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("ok"):
-            return data["result"].get("message_id")
-    except Exception as e:
-        log.error(f"Telegram sendReport failed: {e}")
-    return None
+    mid = None
+    for i, part in enumerate(parts):
+        if i < len(parts) - 1:
+            mid = _tg_send_message(chat_id, part)  # части 1..n-1 — без кнопки
+        else:
+            mid = _tg_send_one_with_button(chat_id, part, btn)  # последняя — с кнопкой
+        if mid is None:
+            log.error("Telegram sendReport: part %d/%d not delivered (len=%d)",
+                      i + 1, len(parts), len(part))
+    return mid
 
 def _tg_get_file(file_id):
-    """Get file path from Telegram Bot API given a file_id."""
+    """Get file path from Telegram Bot API given a file_id.
+    Наряд #567: в лог — status/desc, без {e}."""
     if not TELEGRAM_BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
+    resp = None
     try:
         resp = http_requests.get(url, params={"file_id": file_id}, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         if data.get("ok") and data.get("result", {}).get("file_path"):
             return data["result"]["file_path"]
-    except Exception as e:
-        log.error(f"Telegram getFile failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        code, desc = _tg_err_parts(resp, e)
+        log.error("Telegram getFile failed: status=%s desc=%s", code, desc)
     return None
 
 def _tg_download_file(file_path):
@@ -183,12 +259,14 @@ def _tg_download_file(file_path):
     if not TELEGRAM_BOT_TOKEN:
         return None
     url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+    resp = None
     try:
         resp = http_requests.get(url, timeout=60)
         resp.raise_for_status()
         return resp.content
-    except Exception as e:
-        log.error(f"Telegram file download failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        code, desc = _tg_err_parts(resp, e)
+        log.error("Telegram file download failed: status=%s desc=%s", code, desc)
     return None
 
 
@@ -203,6 +281,7 @@ def _tg_send_photo(chat_id, photo_path, caption=None, parse_mode=None, reply_mar
         log.warning("TELEGRAM_BOT_TOKEN not set, cannot send photo")
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    resp = None
     try:
         with open(photo_path, 'rb') as f:
             payload = {'chat_id': chat_id}
@@ -217,8 +296,9 @@ def _tg_send_photo(chat_id, photo_path, caption=None, parse_mode=None, reply_mar
         data = resp.json()
         if data.get('ok'):
             return data['result'].get('message_id')
-    except Exception as e:
-        log.error(f"Telegram sendPhoto failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        code, desc = _tg_err_parts(resp, e)
+        log.error("Telegram sendPhoto failed: status=%s desc=%s", code, desc)
     return None
 
 
@@ -228,6 +308,7 @@ def _tg_send_document(chat_id, file_path, caption=None):
         log.warning("TELEGRAM_BOT_TOKEN not set, cannot send document")
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    resp = None
     try:
         with open(file_path, "rb") as f:
             data = {"chat_id": chat_id}
@@ -238,9 +319,11 @@ def _tg_send_document(chat_id, file_path, caption=None):
             j = resp.json()
             if j.get("ok"):
                 return j["result"].get("message_id")
-            log.error(f"sendDocument not ok: {j}")
-    except Exception as e:
-        log.error(f"Telegram sendDocument failed: {e}")
+            log.error("sendDocument not ok: ok=%s error_code=%s description=%s",
+                      j.get("ok"), j.get("error_code"), j.get("description"))
+    except Exception as e:  # noqa: BLE001
+        code, desc = _tg_err_parts(resp, e)
+        log.error("Telegram sendDocument failed: status=%s desc=%s", code, desc)
     return None
 
 def _safe_filename_part(s, maxlen=40):
@@ -265,8 +348,9 @@ def _send_chat_action_loop(chat_id, action="typing", interval=5):
         while not stop.is_set():
             try:
                 _tg_send_chat_action(chat_id, action)
-            except Exception as e:
-                _log_error(f"chat_action send failed for {chat_id}: {e}", source="typing", dept="system", kind="external")
+            except Exception as e:  # noqa: BLE001 — без {e}: URL содержит токен (#567)
+                _log_error(f"chat_action send failed for {chat_id}: {type(e).__name__}",
+                           source="typing", dept="system", kind="external")
             stop.wait(interval)
 
     t = threading.Thread(target=_loop, daemon=True)
@@ -274,14 +358,18 @@ def _send_chat_action_loop(chat_id, action="typing", interval=5):
     return stop
 
 def _tg_send_chat_action(chat_id, action):
-    """Send a chat action to Telegram (typing, upload_photo, etc.)."""
+    """Send a chat action to Telegram (typing, upload_photo, etc.).
+    Наряд #567: в лог — status/desc, без {e}."""
     if not TELEGRAM_BOT_TOKEN:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+    resp = None
     try:
-        http_requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=10)
-    except Exception as e:
-        _log_error(f"sendChatAction failed for {chat_id}: {e}", source="typing", dept="system", kind="external")
+        resp = http_requests.post(url, json={"chat_id": chat_id, "action": action}, timeout=10)
+    except Exception as e:  # noqa: BLE001
+        code, desc = _tg_err_parts(resp, e)
+        _log_error(f"sendChatAction failed for {chat_id}: status={code} desc={desc}",
+                   source="typing", dept="system", kind="external")
 
 
 # ═══ FO-013: промежуточные статусы и кусочная отправка (issue #73) ══════════
