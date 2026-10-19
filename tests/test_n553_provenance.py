@@ -58,4 +58,4 @@ def test_a2_charter_provenance_paragraph():
 
 def test_battery_in_ci_loop():
     assert "test_n553v3.mlog" in CI
-    assert "for f in test_forge{1..9}v3.mlog test_narad{1..3}v3.mlog test_n550v3.mlog test_n553v3.mlog test_n556v3.mlog" in CI
+    assert "for f in test_forge{1..9}v3.mlog test_narad{1..3}v3.mlog test_n550v3.mlog test_n553v3.mlog test_n556v3.mlog test_n565v3.mlog" in CI

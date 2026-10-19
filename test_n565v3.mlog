@@ -1,0 +1,197 @@
+// test_n565v3.mlog — Наряд #565: гигиена измерений ЛЗ — ключи предсказаний,
+// журнал сырых прогонов, честная калибровка.
+// Легенда:
+//   b1 (тест 1): пустая prediction_keys → «Нечем калибровать: ключей предсказаний — 0»,
+//                слова accuracy в выводе нет, прогон журналирован (n=0);
+//   b2 (тест 2): предсказания (скор/стадия/инфлекшн) → pending-ключи с claim/due_at;
+//   b3 (тест 3): окно сверки наступило, исходы зафиксированы → грейдинг,
+//                сводка (mean/median) воспроизводится из raw с расхождением 0;
+//   b4 (тест 4): rule-грейдер скора — линейная близость, полный промах = 0.5;
+//   b5 (тест 5): повторная калибровка без due-ключей — честный ответ, дублей нет.
+// NB: мок LLM через шов LZLlm (стаб обязателен). Порядок LZLlm в навыках:
+// ответ навыка, классификатор домена, гейт (см. test_n553v3).
+// Запуск: rm -rf /tmp/n565-test && mkdir -p /tmp/n565-test && ./bin/mlog run test_n565v3.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/n565-test/lz.db" }
+import dept/utils
+import dept/lz
+
+// ── тест-стабы app-слоя (конвенция #519) ────────────────────────────────
+pattern InitDB() -> String {
+  return "ok"
+}
+pattern AuditLog(action: String, dept: String, details: String) -> String {
+  return "ok"
+}
+pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
+  return "ok"
+}
+pattern TeamAskBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamBoardBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamPublish(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float) -> String {
+  return ""
+}
+pattern TeamSecondPass(dept: String, query: String, context: String, draft: String) -> String {
+  return draft
+}
+pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
+  return parse_json("{}")
+}
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  return "{\"error\": \"stub\"}"
+}
+// Стаб шва LZLlm: FIFO-очередь ответов test_llm_mock (OFFSET-потребление).
+pattern LZLlm(prompt: String) -> String {
+  let off = _MockShift()
+  let rows = query("SELECT text FROM test_llm_mock ORDER BY id LIMIT 1 OFFSET ?", [off])
+  if length(rows) == 0.0 then { return "ock: очередь пуста]" }
+  return to_string(json_get(get(rows, 0), "text", ""))
+}
+
+pattern _MockShift() -> Float {
+  let rows = query("SELECT n FROM test_mock_idx WHERE id = 1", [])
+  if length(rows) == 0.0 then {
+    let _ = db_execute("INSERT INTO test_mock_idx (id, n) VALUES (1, 1)", [])
+    return 0.0
+  }
+  let n = to_float(json_get(get(rows, 0), "n", "0"))
+  let _ = db_execute("UPDATE test_mock_idx SET n = ? WHERE id = 1", [n + 1.0])
+  return n
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return name + "=true;" }
+  return name + "=false;"
+}
+
+pattern TestDbInit() -> String {
+  // Схема — из app.mlog InitDB (+provenance #553); тестовые таблицы мока здесь.
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS knowledge_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, title TEXT NOT NULL, domain TEXT NOT NULL, source TEXT, source_url TEXT, source_tier INTEGER DEFAULT 2, hype_cycle_stage TEXT, disruption_score REAL DEFAULT 0.0, inflection_signals TEXT DEFAULT '[]', cross_domain_potential TEXT DEFAULT '[]', competing_alternatives TEXT DEFAULT '[]', status TEXT DEFAULT 'tracking', confirmation_count INTEGER DEFAULT 0, tracked_since TEXT DEFAULT (datetime('now')), last_scored_at TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), provenance TEXT DEFAULT '{}')", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS tracked_technologies (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id INTEGER, technology_name TEXT NOT NULL, category TEXT, oob_data TEXT DEFAULT '{}', patent_activity TEXT DEFAULT '[]', talent_flow TEXT DEFAULT '[]', vc_investment TEXT DEFAULT '[]', disruption_1y REAL, disruption_3y REAL, disruption_5y REAL, disruption_10y REAL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS prediction_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id INTEGER, kind TEXT, claim TEXT, predicted_at TEXT DEFAULT (datetime('now')), verify_source TEXT, due_at TEXT, status TEXT DEFAULT 'pending', graded_at TEXT, score REAL, grader TEXT, caveats TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS grading_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_date TEXT DEFAULT (datetime('now')), metric TEXT, n INTEGER, raw TEXT, summary TEXT, caveats TEXT, grader_errata TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS scan_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_type TEXT, sources_queried TEXT, artifacts_found INTEGER, created_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_llm_mock (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_mock_idx (id INTEGER PRIMARY KEY, n FLOAT)", [])
+  return "ok"
+}
+
+pattern _MockQueue(answers: String) -> String {
+  let toks = split(answers, "|||")
+  each t in toks {
+    let _ = db_execute("INSERT INTO test_llm_mock (text) VALUES (?)", [to_string(t)])
+  }
+  return "queued"
+}
+
+pattern _Fid(title: String) -> Float {
+  let rows = query("SELECT id AS i FROM knowledge_artifacts WHERE title = ?", [title])
+  if length(rows) == 0.0 then { return -1.0 }
+  return to_float(json_get(get(rows, 0), "i", "0"))
+}
+
+// пересчёт mean/median ИЗ raw-строки (JSONL) — независимый путь к сводке
+pattern _RecalcFromRaw(raw: String) -> String {
+  let lines = split(raw, "\n")
+  let mut vals = ""
+  let mut cnt = 0.0
+  each ln in lines {
+    let t = trim(to_string(ln))
+    if t != "" then {
+      let obj = parse_json(t)
+      let sc = to_float(json_get(obj, "score", "-1"))
+      if sc >= 0.0 then {
+        let vals = vals + to_string(sc) + " "
+        let cnt = cnt + 1.0
+      }
+    }
+  }
+  let parts = split(trim(vals), " ")
+  let sorted = sort(parts)
+  let mut sum = 0.0
+  each v in sorted {
+    let sum = sum + to_float(to_string(v))
+  }
+  let mean = sum / cnt
+  let half = cnt / 2.0
+  let mut median = 0.0
+  if to_float(to_int(half)) == half then {
+    let median = (to_float(to_string(get(sorted, half - 1.0))) + to_float(to_string(get(sorted, half)))) / 2.0
+  }
+  if to_float(to_int(half)) != half then {
+    let median = to_float(to_string(get(sorted, to_int(half))))
+  }
+  return to_string(cnt) + "|" + to_string(mean) + "|" + to_string(median)
+}
+
+pattern Run(x: String) -> String {
+  let _ = TestDbInit()
+  let out = ""
+
+  // ── b1 (тест 1): пустые ключи — честное «нечем калибровать» ─────────────
+  let r1 = LZRecalibrate()
+  let out = out + _Mark("b1_honest_empty", contains(r1, "Нечем калибровать: ключей предсказаний — 0"))
+  let out = out + _Mark("b1_no_accuracy_word", contains(r1, "accuracy") == false)
+  let out = out + _Mark("b1_run_logged_n0", length(query("SELECT id FROM grading_runs WHERE n = 0 AND caveats != ''", [])) == 1.0)
+
+  // ── b2 (тест 2): предсказания создают pending-ключи с claim/due_at ──────
+  let _ = _MockQueue("SCORES: 1y=10 3y=40 5y=60 10y=80|||tech")
+  let _ = LZDisruptionScore("Квантовый трактор", "test-chat")
+  let _ = _MockQueue("STAGE: peak\nПолный текст ответа модели с обоснованием оценки|||tech|||NONE.")
+  let _ = LZHypeCycleMap("Квантовый трактор", "test-chat")
+  let _ = _MockQueue("Есть признаки инфлекшна: первые внедрения и корпоративный VC|||YES|||tech")
+  let _ = LZInflectionDetect("Квантовый трактор", "test-chat")
+  let aid = _Fid("Квантовый трактор")
+  let out = out + _Mark("b2_three_pending", length(query("SELECT id FROM prediction_keys WHERE status = 'pending'", [])) == 3.0)
+  let out = out + _Mark("b2_score_claim", length(query("SELECT id FROM prediction_keys WHERE kind = 'disruption_score' AND claim = 'disruption_score(3y)=0.4' AND due_at IS NOT NULL AND verify_source != ''", [])) == 1.0)
+  let out = out + _Mark("b2_stage_claim", length(query("SELECT id FROM prediction_keys WHERE kind = 'hype_stage' AND claim = 'hype_stage=peak'", [])) == 1.0)
+  let out = out + _Mark("b2_inflection_claim", length(query("SELECT id FROM prediction_keys WHERE kind = 'inflection' AND claim = 'inflection=YES->hot'", [])) == 1.0)
+  let out = out + _Mark("b2_all_with_due", length(query("SELECT id FROM prediction_keys WHERE due_at IS NULL", [])) == 0.0)
+
+  // ── b3 (тест 3): окно наступило — грейдинг, сводка воспроизводима из raw ─
+  // исходы в артефакте совпадают с claim (score 0.4, stage peak, статус hot)
+  let _ = db_execute("UPDATE prediction_keys SET due_at = datetime('now', '-1 day') WHERE status = 'pending'", [])
+  let r3 = LZRecalibrate()
+  let out = out + _Mark("b3_graded_3", contains(r3, "грейдено 3.0 из 3.0") or contains(r3, "грейдено 3 из 3"))
+  let out = out + _Mark("b3_keys_graded", length(query("SELECT id FROM prediction_keys WHERE status = 'graded' AND score = 1.0 AND grader != '' AND graded_at IS NOT NULL", [])) == 3.0)
+  let run3 = query("SELECT id AS i, raw AS r, summary AS s, n AS n FROM grading_runs WHERE raw != '' ORDER BY id DESC LIMIT 1", [])
+  let r3row = get(run3, 0)
+  let raw3 = to_string(json_get(r3row, "r", ""))
+  let sm3 = parse_json(to_string(json_get(r3row, "s", "")))
+  let rec3 = _RecalcFromRaw(raw3)
+  let rec_parts = split(rec3, "|")
+  let out = out + _Mark("b3_summary_from_raw_mean", to_float(json_get(sm3, "mean", "0")) == to_float(to_string(get(rec_parts, 1))))
+  let out = out + _Mark("b3_summary_from_raw_median", to_float(json_get(sm3, "median", "0")) == to_float(to_string(get(rec_parts, 2))))
+  let out = out + _Mark("b3_summary_n_matches", to_float(json_get(sm3, "n", "0")) == to_float(json_get(r3row, "n", "0")))
+  let out = out + _Mark("b3_run_caveats", length(query("SELECT id FROM grading_runs WHERE raw != '' AND caveats != ''", [])) == 1.0)
+
+  // ── b4 (тест 4): rule-грейдер скора — линейная близость с полным промахом 0.5 ─
+  let _ = _MockQueue("SCORES: 1y=20 3y=80 5y=90 10y=95|||tech")
+  let _ = LZDisruptionScore("Квантовый трактор", "test-chat")
+  // исход уехал: артефакт показывает 0.2 против предсказанных 0.8
+  let _ = db_execute("UPDATE knowledge_artifacts SET disruption_score = 0.2 WHERE id = ?", [aid])
+  let _ = db_execute("UPDATE prediction_keys SET due_at = datetime('now', '-1 day') WHERE status = 'pending'", [])
+  let r4 = LZRecalibrate()
+  let out = out + _Mark("b4_graded_1", contains(r4, "грейдено 1 из 1"))
+  let out = out + _Mark("b4_full_miss_zero", length(query("SELECT id FROM prediction_keys WHERE status = 'graded' AND score = 0.0 AND grader = 'rule:linear-half-range'", [])) == 1.0)
+
+  // ── b5 (тест 5): калибровка без due-ключей — честно и без дублей ─────────
+  let graded_before = length(query("SELECT id FROM prediction_keys WHERE status = 'graded'", []))
+  let r5 = LZRecalibrate()
+  let out = out + _Mark("b5_honest_no_due", contains(r5, "грейдимых (окно сверки наступило) — 0"))
+  let out = out + _Mark("b5_no_new_graded", length(query("SELECT id FROM prediction_keys WHERE status = 'graded'", [])) == graded_before)
+  let out = out + _Mark("b5_no_accuracy_word", contains(r5, "accuracy") == false)
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Run -> output
+}
