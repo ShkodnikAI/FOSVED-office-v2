@@ -182,10 +182,14 @@ def _harness_mlog(port):
     outbox_text = _extract("OutboxPut", sched_src, "owner_outbox")
     tick_text = _extract("NightTickSlot", sched_src, 'OutboxPut("night-tick"')
     tryval_text = _extract("TryVal", utils_src, "return")  # офисный, не builtin
-    # хвост InitDB вызывает LZDataMaintain (dept/lz.mlog) — стаб для харнесса
+    # хвост InitDB вызывает LZDataMaintain и LZWatchSeedCategory (dept/lz.mlog,
+    # #566) — стабы для харнесса
     init_db_text = init_db_text.replace("let _ = LZDataMaintain()",
                                         "let _ = LZDataMaintainStub()")
     assert "LZDataMaintainStub()" in init_db_text, "подмена LZDataMaintain не удалась"
+    init_db_text = init_db_text.replace("let _ = LZWatchSeedCategory()",
+                                        "let _ = LZWatchSeedCategoryStub()")
+    assert "LZWatchSeedCategoryStub()" in init_db_text, "подмена LZWatchSeedCategory не удалась"
     # прод-сценарий: NightSlot бросает database-locked-класс ошибку
     tick_text = tick_text.replace("let tr_night = try NightSlot()",
                                   "let tr_night = try NightSlotStub()")
@@ -207,6 +211,9 @@ def _harness_mlog(port):
         + "  return \"ok\"\n"
         + "}\n\n"
         + "pattern LZDataMaintainStub() -> String {\n"
+        + "  return \"ok\"\n"
+        + "}\n\n"
+        + "pattern LZWatchSeedCategoryStub() -> String {\n"
         + "  return \"ok\"\n"
         + "}\n\n"
         + "pattern AuditLog(action: String, dept: String, details: String) -> String {\n"

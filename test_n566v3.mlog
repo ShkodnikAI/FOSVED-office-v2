@@ -1,0 +1,98 @@
+// test_n566v3.mlog — Наряд #566: watchlist-категория «тонкие скиллы против
+// жирных tool-слоёв» — seed, домен, роуты /lab-watch, отсутствие алертов.
+// Легенда:
+//   b1 (тест 1): seed — запись active с доменом Computational (не auto),
+//                повторный seed не дублирует;
+//   b2 (тест 2): 2 подтверждения < 3 — disruption_alerts пуст (устав :31);
+//   b3 (тест 3): роуты /lab-watch add|remove|status работают (устав :119).
+// NB: LZDisclaimer и LZWatch-функции — локальные паттерны dept/lz (стабы
+// app-слоя — по конвенции #519).
+// Запуск: rm -rf /tmp/n566-test && mkdir -p /tmp/n566-test && ./bin/mlog run test_n566v3.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/n566-test/lz.db" }
+import dept/utils
+import dept/lz
+
+// ── тест-стабы app-слоя (конвенция #519) ────────────────────────────────
+pattern InitDB() -> String {
+  return "ok"
+}
+pattern AuditLog(action: String, dept: String, details: String) -> String {
+  return "ok"
+}
+pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
+  return "ok"
+}
+pattern TeamAskBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamBoardBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamPublish(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float) -> String {
+  return ""
+}
+pattern TeamSecondPass(dept: String, query: String, context: String, draft: String) -> String {
+  return draft
+}
+pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
+  return parse_json("{}")
+}
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  return "{\"error\": \"stub\"}"
+}
+pattern LZLlm(prompt: String) -> String {
+  return "ock: очередь пуста]"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return name + "=true;" }
+  return name + "=false;"
+}
+
+pattern TestDbInit() -> String {
+  // Схема — из app.mlog InitDB (watchlist_entries, disruption_alerts)
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS watchlist_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, topic TEXT NOT NULL, domain TEXT, threshold_disruption REAL DEFAULT 70.0, threshold_inflection INTEGER DEFAULT 1, status TEXT DEFAULT 'active', created_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS disruption_alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id INTEGER, alert_type TEXT, severity TEXT DEFAULT 'medium', confirmation_count INTEGER DEFAULT 0, osp_triggered INTEGER DEFAULT 0, message TEXT, created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS knowledge_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, title TEXT NOT NULL, domain TEXT NOT NULL, source TEXT, source_url TEXT, source_tier INTEGER DEFAULT 2, hype_cycle_stage TEXT, disruption_score REAL DEFAULT 0.0, inflection_signals TEXT DEFAULT '[]', cross_domain_potential TEXT DEFAULT '[]', competing_alternatives TEXT DEFAULT '[]', status TEXT DEFAULT 'tracking', confirmation_count INTEGER DEFAULT 0, tracked_since TEXT DEFAULT (datetime('now')), last_scored_at TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), provenance TEXT DEFAULT '{}')", [])
+  return "ok"
+}
+
+pattern Run(x: String) -> String {
+  let _ = TestDbInit()
+  let out = ""
+
+  // ── b1 (тест 1): seed — запись с осмысленным доменом, идемпотентна ──────
+  let s1 = LZWatchSeedCategory()
+  let dom = query("SELECT domain AS d, status AS s FROM watchlist_entries WHERE topic = 'thin-skills-vs-fat-tool-layers'", [])
+  let out = out + _Mark("b1_seeded", s1 == "seeded")
+  let out = out + _Mark("b1_domain_computational", length(dom) == 1.0 and to_string(json_get(get(dom, 0), "d", "")) == "Computational")
+  let out = out + _Mark("b1_status_active", to_string(json_get(get(dom, 0), "s", "")) == "active")
+  let _ = LZWatchSeedCategory()
+  let out = out + _Mark("b1_idempotent", length(query("SELECT id FROM watchlist_entries WHERE topic = 'thin-skills-vs-fat-tool-layers'", [])) == 1.0)
+  let listed = LZWatchList()
+  let out = out + _Mark("b1_in_list", contains(listed, "thin-skills-vs-fat-tool-layers") and contains(listed, "Computational"))
+  let out = out + _Mark("b1_no_auto_domain", contains(listed, "auto") == false)
+
+  // ── b2 (тест 2): кандидат при 2 подтверждениях — алертов нет ────────────
+  let out = out + _Mark("b2_no_alerts", length(query("SELECT id FROM disruption_alerts", [])) == 0.0)
+
+  // ── b3 (тест 3): роуты /lab-watch по уставу ─────────────────────────────
+  let st = HandleLZ("/lab-watch status", "test-chat")
+  let out = out + _Mark("b3_route_status", contains(st, "thin-skills-vs-fat-tool-layers"))
+  let ad = HandleLZ("/lab-watch add тест-тема", "test-chat")
+  let out = out + _Mark("b3_route_add", contains(ad, "тест-тема"))
+  let out = out + _Mark("b3_add_domain_auto", length(query("SELECT id FROM watchlist_entries WHERE topic = 'тест-тема' AND domain = 'auto'", [])) == 1.0)
+  let rm = HandleLZ("/lab-watch remove тест-тема", "test-chat")
+  let out = out + _Mark("b3_route_remove", length(query("SELECT id FROM watchlist_entries WHERE topic = 'тест-тема' AND status = 'expired'", [])) == 1.0)
+  let out = out + _Mark("b3_seed_untouched", length(query("SELECT id FROM watchlist_entries WHERE topic = 'thin-skills-vs-fat-tool-layers' AND status = 'active'", [])) == 1.0)
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Run -> output
+}
