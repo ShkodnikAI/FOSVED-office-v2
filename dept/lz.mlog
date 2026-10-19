@@ -67,6 +67,27 @@ import dept/utils
 //   message TEXT,
 //   created_at TIMESTAMP DEFAULT datetime('now'), resolved_at TIMESTAMP
 // );
+// CREATE TABLE prediction_keys (
+//   id SERIAL PRIMARY KEY, artifact_id INT REFERENCES knowledge_artifacts(id),
+//   kind TEXT, -- disruption_score|hype_stage|inflection|status
+//   claim TEXT, -- грейдимая формулировка предсказания
+//   predicted_at TIMESTAMP DEFAULT datetime('now'),
+//   verify_source TEXT, -- URL/источник сверки; rule-ключи — rescore:monthly/quarterly
+//   due_at TIMESTAMP, -- окно верификации
+//   status TEXT DEFAULT 'pending', -- pending|graded|expired
+//   graded_at TIMESTAMP, score REAL, grader TEXT, caveats TEXT
+// );
+// #565 A.1: ключ предсказания пишется В МОМЕНТ предсказания alongside результата;
+// ретроактивные ключи запрещены нарядом. Формат грейдера и провенанс LLM — #553.
+// CREATE TABLE grading_runs (
+//   id SERIAL PRIMARY KEY, run_date TIMESTAMP DEFAULT datetime('now'),
+//   metric TEXT, n INT,
+//   raw TEXT, -- JSONL прогонов: по строке на ключ
+//   summary TEXT, -- медиана и среднее раздельно; производны от raw
+//   caveats TEXT, grader_errata TEXT
+// );
+// #565 A.2: сводная цифра метрики обязана воспроизводиться из raw; ad-hoc
+// пересчёты в выводах запрещены. Референс-гигиена — bench aicodeking/leanrea.
 
 // ═══════════════════════════════════════════════════════════════════════
 // DISCLOSURE
@@ -774,6 +795,8 @@ pattern LZHypeCycleMap(technology: String, chat_id: String) -> String {
     db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = ?, updated_at = datetime('now') WHERE id = ?", [stage, aid])
     // #553: стадия — суждение модели, провенанс в момент записи
     let _ = LZProvRecord(aid, "hype_cycle_stage", "LZLlm")
+    // #565 A.1: стадия — грейдимый ключ; сверка — ежемесячный re-scoring (устав Scheduler)
+    db_execute("INSERT INTO prediction_keys (artifact_id, kind, claim, verify_source, due_at) VALUES (?, 'hype_stage', ?, 'rescore:monthly', datetime('now', '+30 days'))", [aid, "hype_stage=" + stage])
   }
   // Gate 3: Check negative signals at peak — настоящий id артефакта (#556 A.4,
   // раньше LZGateNegativeSignals(0) — запрос WHERE id = 0, всегда FAIL: not found)
@@ -807,6 +830,8 @@ pattern LZDisruptionScore(technology: String, chat_id: String) -> String {
     db_execute("UPDATE knowledge_artifacts SET disruption_score = ?, last_scored_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", [s3, aid])
     // #553: скор — суждение модели, провенанс в момент записи
     let _ = LZProvRecord(aid, "disruption_score", "LZLlm")
+    // #565 A.1: предсказание = грейдимый ключ (горизонт 3y — он пишется в артефакт)
+    db_execute("INSERT INTO prediction_keys (artifact_id, kind, claim, verify_source, due_at) VALUES (?, 'disruption_score', ?, 'rescore:monthly', datetime('now', '+1095 days'))", [aid, "disruption_score(3y)=" + to_string(s3)])
   }
   // Gate 7: Check competing alternatives
   let alt_check = LZGateCompetingCheck(technology)
@@ -831,6 +856,8 @@ pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
     // #553: переход статуса — вердикт модели по проверке инфлекшна (LZYes),
     // провенанс фиксирует и канал суждения, и применившее его правило
     let _ = LZProvRecord(aid, "status", "LZInflectionDetect+LZYes")
+    // #565 A.1: инфлекшн-вердикт — грейдимый ключ; сверка — quarterly обзор устава
+    db_execute("INSERT INTO prediction_keys (artifact_id, kind, claim, verify_source, due_at) VALUES (?, 'inflection', 'inflection=YES->hot', 'rescore:quarterly', datetime('now', '+90 days'))", [aid])
     // #446 A.2 (решение владельца: построить): алерт уходит в ЖИВОЙ
     // /osp/analyze (:10001) по контракту №318 — hash-form секрета,
     // fire-and-forget 5с: анализ продолжается на сервере, отчёт приходит
@@ -1276,12 +1303,143 @@ pattern LZChannels() -> String {
   return "📡 Channels:\n" + to_string(rows)
 }
 
+// ── Грейдинг предсказаний (#565) ─────────────────────────────────────────
+// rule-грейдер одного ключа: исход = зафиксированное состояние артефакта на
+// момент грейдинга, окно = due_at. Возвращает JSON-строку raw-прогона.
+// LLM-эскалация — только при передаче конкретных ключей и исходов, провенанс
+// по #553 (наряд); здесь — детерминированные правила, honest по умолчанию.
+pattern LZGradeKey(key_id: Float, artifact_id: Float, kind: String, claim: String) -> String {
+  if kind == "disruption_score" then {
+    let rows = query("SELECT disruption_score AS s FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+    if length(rows) > 0.0 then {
+      let cur = to_float(json_get(get(rows, 0), "s", "0"))
+      let claimed = to_float_or(trim(substring(claim, index_of(claim, "=") + 1.0, length(claim))), -1.0)
+      if claimed >= 0.0 then {
+        let mut dev = cur - claimed
+        if dev < 0.0 then { let dev = 0.0 - dev }
+        let score = 1.0 - dev / 0.5
+        if score < 0.0 then { let score = 0.0 }
+        let grader = "rule:linear-half-range"
+        let out_line = json_encode({key_id: key_id, kind: kind, claim: claim, outcome: cur, score: score, grader: grader})
+        db_execute("UPDATE prediction_keys SET status = 'graded', graded_at = datetime('now'), score = ?, grader = ?, caveats = ? WHERE id = ?", [score, grader, "исход = disruption_score артефакта на момент грейдинга; полный промах = отклонение 0.5", key_id])
+        return out_line
+      }
+    }
+  }
+  if kind == "hype_stage" then {
+    let rows = query("SELECT hype_cycle_stage AS s FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+    if length(rows) > 0.0 then {
+      let cur = to_string(json_get(get(rows, 0), "s", ""))
+      let claimed = trim(substring(claim, index_of(claim, "=") + 1.0, length(claim)))
+      if cur != "" then {
+        let score = 0.0
+        if cur == claimed then { let score = 1.0 }
+        let grader = "rule:stage-equality"
+        let out_line = json_encode({key_id: key_id, kind: kind, claim: claim, outcome: cur, score: score, grader: grader})
+        db_execute("UPDATE prediction_keys SET status = 'graded', graded_at = datetime('now'), score = ?, grader = ?, caveats = ? WHERE id = ?", [score, grader, "исход = hype_cycle_stage артефакта на момент грейдинга; совпадение = 1", key_id])
+        return out_line
+      }
+    }
+  }
+  if kind == "inflection" then {
+    let rows = query("SELECT status AS s FROM knowledge_artifacts WHERE id = ?", [artifact_id])
+    if length(rows) > 0.0 then {
+      let cur = to_string(json_get(get(rows, 0), "s", ""))
+      let score = 0.0
+      if cur == "hot" or cur == "confirmed_disruption" then { let score = 1.0 }
+      let grader = "rule:inflection-status"
+      let out_line = json_encode({key_id: key_id, kind: kind, claim: claim, outcome: cur, score: score, grader: grader})
+      db_execute("UPDATE prediction_keys SET status = 'graded', graded_at = datetime('now'), score = ?, grader = ?, caveats = ? WHERE id = ?", [score, grader, "исход = статус артефакта на момент грейдинга; hot/confirmed_disruption = 1", key_id])
+      return out_line
+    }
+  }
+  // неизвестный kind — не грейдим (score -1: прогон пропустит ключ)
+  return json_encode({key_id: key_id, kind: kind, claim: claim, outcome: "", score: -1.0, grader: "rule:unimplemented"})
+}
+
+// Журнал сырых прогонов: каждая калибровка — строка в grading_runs (A.2)
+pattern LZGradingRunLog(metric: String, n: Float, raw: String, caveats: String) -> Float {
+  db_execute("INSERT INTO grading_runs (metric, n, raw, caveats) VALUES (?, ?, ?, ?)", [metric, n, raw, caveats])
+  let created = query("SELECT id AS i FROM grading_runs ORDER BY id DESC LIMIT 1", [])
+  return to_float(json_get(get(created, 0), "i", "0"))
+}
+
+// Сводка — медиана и среднее раздельно, считаются ИЗ raw-строк (JSONL),
+// а не из промежуточных значений: воспроизводимость из raw (A.2)
+pattern LZSummaryFromRaw(raw: String) -> String {
+  let lines = split(raw, "\n")
+  let mut vals = ""
+  let mut cnt = 0.0
+  each ln in lines {
+    let t = trim(to_string(ln))
+    if t != "" then {
+      let obj = parse_json(t)
+      let sc = to_float(json_get(obj, "score", "-1"))
+      if sc >= 0.0 then {
+        let vals = vals + to_string(sc) + " "
+        let cnt = cnt + 1.0
+      }
+    }
+  }
+  if cnt == 0.0 then { return json_encode({n: 0.0, mean: 0.0, median: 0.0, note: "нет грейденных ключей в raw"}) }
+  let parts = split(trim(vals), " ")
+  let sorted = sort(parts)
+  let mut sum = 0.0
+  each v in sorted {
+    let sum = sum + to_float(to_string(v))
+  }
+  let mean = sum / cnt
+  // медиана: нечётный n — средний элемент; чётный — среднее двух средних.
+  // to_int() — встроенный; floor/% в mlog нет (пробы probe_mod/probe_int).
+  let half = cnt / 2.0
+  if to_float(to_int(half)) == half then {
+    let median = (to_float(to_string(get(sorted, half - 1.0))) + to_float(to_string(get(sorted, half)))) / 2.0
+    return json_encode({n: cnt, mean: mean, median: median})
+  }
+  let median = to_float(to_string(get(sorted, to_int(half))))
+  return json_encode({n: cnt, mean: mean, median: median})
+}
+
 pattern LZRecalibrate() -> String {
-  // Recalibrate disruption scores based on latest outcomes
-  let result = redact(to_string(TryVal(try call_llm("Recalibrate all tracked technologies: compare past disruption predictions with actual outcomes. Compute accuracy rate. Adjust scoring weights if systematic bias detected."))), "all")
-  if to_string(result) == "()" then { let result = "[оценка недоступна — провайдеры модели не ответили]" }
-  db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 0)", ["recalibrate"])
-  return "🔄 Recalibration complete:\n" + result
+  // #565 A.3: калибровка ТОЛЬКО по prediction_keys. Без ключей — честное
+  // «нечем калибровать»: никакого accuracy rate из ниотчего (раньше промпт
+  // просил LLM «Compute accuracy rate» при отсутствии в схеме и предсказаний,
+  // и исходов — выдуманная точность уходила в чат, след — scan_logs).
+  let total_rows = query("SELECT COUNT(*) AS c FROM prediction_keys", [])
+  let total = to_float(json_get(get(total_rows, 0), "c", "0"))
+  let _ = db_execute("INSERT INTO scan_logs (scan_type, artifacts_found) VALUES (?, 0)", ["recalibrate"])
+  if total == 0.0 then {
+    let run_id = LZGradingRunLog("recalibrate", 0.0, "", "ключей предсказаний — 0; калибровать нечем")
+    return "Нечем калибровать: ключей предсказаний — 0 (прогон журналирован: grading_runs#" + to_string(run_id) + ")"
+  }
+  let due = query("SELECT id, artifact_id, kind, claim FROM prediction_keys WHERE status = 'pending' AND due_at IS NOT NULL AND due_at <= datetime('now') ORDER BY id", [])
+  let n_due = length(due)
+  if n_due == 0.0 then {
+    let run_id = LZGradingRunLog("recalibrate", 0.0, "", "ключей предсказаний — " + to_string(total) + ", грейдимых (окно сверки наступило) — 0")
+    return "Нечем калибровать: ключей предсказаний — " + to_string(total) + ", грейдимых (окно сверки наступило) — 0 (прогон журналирован: grading_runs#" + to_string(run_id) + ")"
+  }
+  let mut raw = ""
+  let mut graded = 0.0
+  each k in due {
+    let kid = to_float(json_get(k, "id", "0"))
+    let kaid = to_float(json_get(k, "artifact_id", "0"))
+    let kind = to_string(json_get(k, "kind", ""))
+    let claim = to_string(json_get(k, "claim", ""))
+    let line = LZGradeKey(kid, kaid, kind, claim)
+    let obj = parse_json(line)
+    if to_float(json_get(obj, "score", "-1")) >= 0.0 then {
+      let graded = graded + 1.0
+      let raw = raw + line + "\n"
+    }
+  }
+  let skipped = n_due - graded
+  let run_id = LZGradingRunLog("recalibrate-keys", graded, raw, "rule grader: исход = состояние артефакта на момент грейдинга, окно = due_at; n=" + to_string(graded) + ", пропущено (неизвестный kind/нет исхода)=" + to_string(skipped))
+  let sm = LZSummaryFromRaw(raw)
+  db_execute("UPDATE grading_runs SET summary = ? WHERE id = ?", [sm, run_id])
+  let sm_obj = parse_json(sm)
+  let mut tail = ""
+  if skipped > 0.0 then { let tail = "; пропущено ключей (неизвестный kind/нет исхода): " + to_string(skipped) }
+  return "Калибровка по ключам предсказаний: грейдено " + to_string(graded) + " из " + to_string(n_due) + " due (всего ключей " + to_string(total) + "); mean=" + to_string(json_get(sm_obj, "mean", "0")) + ", median=" + to_string(json_get(sm_obj, "median", "0")) + " — производны от raw прогона grading_runs#" + to_string(run_id) + "; caveats: rule grader, исход = состояние артефакта на момент грейдинга, окно = due_at, n=" + to_string(graded) + tail
 }
 
 // ═══════════════════════════════════════════════════════════════════════
