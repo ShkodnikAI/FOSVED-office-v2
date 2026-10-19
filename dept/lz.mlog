@@ -65,7 +65,9 @@ import dept/utils
 //   confirmation_count INT DEFAULT 0,
 //   osp_triggered BOOLEAN DEFAULT FALSE, -- auto-triggered OSP if disruption≥70%
 //   message TEXT,
-//   created_at TIMESTAMP DEFAULT datetime('now'), resolved_at TIMESTAMP
+//   created_at TIMESTAMP DEFAULT datetime('now'), resolved_at TIMESTAMP,
+//   outcome TEXT DEFAULT 'pending' -- confirmed|retracted|pending (#559: исход
+//   алерта проставляется вручную при разборе; FPR считается по разрешившимся)
 // );
 // CREATE TABLE prediction_keys (
 //   id SERIAL PRIMARY KEY, artifact_id INT REFERENCES knowledge_artifacts(id),
@@ -302,6 +304,13 @@ pattern HandleLZ(query: String, chat_id: String) -> String {
   }
   if starts_with(t, "/lab-watch") then {
     return LZWatchList()
+  }
+  // ── #559: устав объявляет /lab-score, /lab-recalibrate (library/lz.md:123) ──
+  if starts_with(t, "/lab-score") then {
+    return LZLabScore()
+  }
+  if starts_with(t, "/lab-recalibrate") then {
+    return LZRecalibrate()
   }
   // ── Archive ──
   if starts_with(t, "/lz archive") then {
@@ -1425,6 +1434,58 @@ pattern LZSummaryFromRaw(raw: String) -> String {
   }
   let median = to_float(to_string(get(sorted, to_int(half))))
   return json_encode({n: cnt, mean: mean, median: median})
+}
+
+// ── Метрики устава ЛЗ (#559) ─────────────────────────────────────────────
+// LZLabScore: расчёт из С ОБСТВЕННЫХ таблиц офиса (запрет наряда: не
+// подтягивать внешние данные ради красивых цифр). Каждая строка — метрика
+// с n и caveats (дисциплина #565 A.5); данных нет — честная пометка «не
+// хватает данных X», не заглушка (Тест 2 наряда). Формулы следуют
+// формулировкам устава library/lz.md:65-70, определения не менялись.
+pattern LZLabScore() -> String {
+  let out = "ЛЗ метрики (устав, library/lz.md:65-70; период: вся база):\n"
+  // False positive rate — «преждевременные/ошибочные alerts»: доля retracted
+  // среди разрешившихся (outcome проставлен). Трактовка: pending не считаем.
+  let retr = query("SELECT COUNT(*) AS c FROM disruption_alerts WHERE outcome = 'retracted'", [])
+  let resolved = query("SELECT COUNT(*) AS c FROM disruption_alerts WHERE outcome IN ('retracted', 'confirmed')", [])
+  let n_retr = to_float(json_get(get(retr, 0), "c", "0"))
+  let n_res = to_float(json_get(get(resolved, 0), "c", "0"))
+  if n_res == 0.0 then {
+    let out = out + "false_positive_rate — не хватает данных: разрешившихся алертов (confirmed/retracted) — 0 (outcome проставляется вручную при разборе)\n"
+  }
+  if n_res > 0.0 then {
+    let out = out + "false_positive_rate = " + to_string(n_retr / n_res) + " (retracted " + to_string(n_retr) + " из разрешившихся " + to_string(n_res) + "; caveats: автоподсчёт по outcome, окно — вся база)\n"
+  }
+  // Time-to-detection — «от публикации до фиксации сигнала»: нужна дата
+  // первой публикации источником — в схеме не фиксируется (провенанс #553
+  // пишется только для суждений модели). Честная пометка, не суррогат.
+  let out = out + "time_to_detection — не хватает данных: дата первой публикации источником не фиксируется в схеме (нужен отдельный наряд на сбор метаданных URL)\n"
+  // Inflection detection rate — «замечены до очевидности большинству»:
+  // считается по индикаторной сетке категории; сетка живёт в досье
+  // (markdown), в БД её нет — считать не из чего.
+  let out = out + "inflection detection rate — не хватает данных: индикаторная сетка категории вне БД (досье docs/departments/lz-watchlist-thin-skills.md, раздел 6); сверка сетки — вручную по графику 30/60/90/180\n"
+  // Disruption accuracy — «материализовались как ожидалось»: по грейденным
+  // ключам предсказаний (#565) и последнему прогону grading_runs.
+  let graded = query("SELECT COUNT(*) AS c, COALESCE(AVG(score), 0.0) AS m FROM prediction_keys WHERE status = 'graded'", [])
+  let pending = query("SELECT COUNT(*) AS c FROM prediction_keys WHERE status = 'pending'", [])
+  let n_graded = to_float(json_get(get(graded, 0), "c", "0"))
+  let n_pending = to_float(json_get(get(pending, 0), "c", "0"))
+  if n_graded == 0.0 then {
+    let out = out + "disruption_accuracy — не хватает данных: грейденных ключей предсказаний — 0 (pending: " + to_string(n_pending) + "); окно верификации ещё не наступило или ключи не созданы\n"
+  }
+  if n_graded > 0.0 then {
+    let out = out + "disruption_accuracy = " + to_string(json_get(get(graded, 0), "m", "0")) + " (среднее score по грейденным ключам; n=" + to_string(n_graded) + "; caveats: rule grader, исход = состояние артефакта на момент грейдинга)\n"
+  }
+  let lastrun = query("SELECT id AS i, n AS n, summary AS s FROM grading_runs WHERE raw != '' ORDER BY id DESC LIMIT 1", [])
+  if length(lastrun) > 0.0 then {
+    let lr = get(lastrun, 0)
+    let sm = parse_json(to_string(json_get(lr, "s", "{}")))
+    let out = out + "последний прогон калибровки: grading_runs#" + to_string(json_get(lr, "i", "0")) + ", n=" + to_string(json_get(lr, "n", "0")) + ", mean=" + to_string(json_get(sm, "mean", "0")) + ", median=" + to_string(json_get(sm, "median", "0")) + " (производны от raw, #565)\n"
+  }
+  // Cross-domain hit rate и investment lead time — исходов сверок в схеме нет.
+  let out = out + "cross_domain_hit_rate — не хватает данных: исходов cross-domain предсказаний в схеме нет\n"
+  let out = out + "investment_lead_time — не хватает данных: сверок с mass market в схеме нет\n"
+  return out
 }
 
 pattern LZRecalibrate() -> String {
