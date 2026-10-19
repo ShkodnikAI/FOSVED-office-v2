@@ -16,14 +16,15 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.32.0 — прод-бинарь (линия
-# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.32.0, ADR-0009/0012/0015/0017/0018;
-# бинарь из официального релиза тега v0.32.0 (assets + SHA256SUMS), source commit 08482d15,
-# sha256 артефакта dd8164b747aa99cb953d3f7a29e084ba38d432df376aa2f05cfd2187e2bc59a2 —
-# наряд #516: check-паритет с 0.30.0 на офисном корпусе (537 errors, идентичный
-# профиль классов [REDACT]/[IRREVERSIBLE_NO_GRANT]/egress №391/[HTML_INJECTION]),
-# 0 parse errors app/dept/dogfood; pytest 1314 passed; warnings: 2 vs 6 у 0.30.0
-# (сняты дубли onX-concatenation); grammar rev 1 — без смены ревизии грамматики
+# Metalogos v0.33.1 — прод-бинарь (линия
+# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1, ADR-0009/0012/0015/0017/0018;
+# бинарь из официального релиза тега v0.33.1 (assets + SHA256SUMS), source commit 268cdde9,
+# sha256 артефакта bef3e1b24e10aa909eb6250b71eb7b74911f8df6e8d758f029f991bd9131de98 —
+# наряд #571: check-паритет с предыдущим пином на офисном корпусе (540 → 541 errors;
+# единственная новая находка [PII_EGRESS_OUTPUT] argument 0 of respond in route
+# GET /schedules/list — по запрету наряда НЕ чинится, зафиксирована в отчёте),
+# 0 parse errors app/dept; audit dept гейт №312 (mlog-0271) — 0 [ERROR];
+# grammar rev 1 — без смены ревизии грамматики; serve-подъём interpreter без отказа
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
 # грузит сырой app.mlog). bin/mlog-0271 (0.27.1) вендорен как прошлый-хороший
 # тест-гвард (ADR-0015; было mlog-027 = 0.27.0 — выведен; было mlog-025 —
