@@ -87,15 +87,6 @@ version: 2.0
 
 ---
 
-## Метрики
-
-- **Disruption accuracy** — tracked technologies материализовались как ожидалось
-- **Inflection detection rate** — замечены до очевидности большинству
-- **False positive rate** — преждевременные/ошибочные alerts
-- **Time-to-detection** — от публикации до фиксации сигнала
-- **Cross-domain hit rate** — успешные cross-domain предсказания
-- **Investment lead time** — раньше mass market
-
 ## Scheduler
 
 1. **Every 4h** — incremental scan (arxiv, biorxiv, medrxiv, patents)
