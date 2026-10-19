@@ -25,6 +25,37 @@ import requests as http_requests
 import secrets_crypto
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+class _TgTokenRedactFilter(logging.Filter):
+    """Наряд #567: маскирование токена бота в любой записи лога.
+
+    str(e) у requests.HTTPError после raise_for_status() содержит полный URL
+    запроса вида https://api.telegram.org/bot<токен>/… — фильтр заменяет
+    регэксп `bot<цифры>:<символы токена>` на `bot<redacted>` в уже
+    отформатированном сообщении (record.getMessage()), покрывая и токен,
+    попавший через record.args. Повешен на все хендлеры root-логгера —
+    логгеры всех модулей (avby_collector, fosved.key_health, …) идут через
+    propagate в root-хендлеры и тоже маскируются.
+    """
+    _TOKEN_RE = re.compile(r"bot\d{5,}:[A-Za-z0-9_-]{20,}")
+
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+            if msg and "bot" in msg:
+                masked = self._TOKEN_RE.sub("bot<redacted>", msg)
+                if masked != msg:
+                    record.msg, record.args = masked, None
+        except Exception:
+            pass  # фильтр логирования не имеет права ронять логирование
+        return True
+
+
+_tg_token_redact_filter = _TgTokenRedactFilter()
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_tg_token_redact_filter)
+
 log = logging.getLogger("llm_proxy")
 
 sys.path.insert(0, str(BASE_DIR / 'lib'))
