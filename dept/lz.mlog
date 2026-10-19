@@ -24,6 +24,7 @@ import dept/utils
 //   cross_domain_potential TEXT DEFAULT '[]', -- JSON: [{target_domain, applicability_score}]
 //   competing_alternatives TEXT DEFAULT '[]', -- JSON: [{alt_name, approach, viability}]
 //   status TEXT DEFAULT 'tracking', -- tracking|hot|confirmed_disruption|cooled|failed
+//   provenance TEXT DEFAULT EMPTY_JSON, -- #553: провенанс LLM-полей; JSON: поле -> provider/model/params/recorded_at/via, либо поле -> rule (правило)
 //   confirmation_count INT DEFAULT 0, -- must reach 3 before disruption alert
 //   tracked_since TIMESTAMP DEFAULT datetime('now'),
 //   last_scored_at TIMESTAMP,
@@ -602,7 +603,30 @@ pattern LZArtifactId(title: String, domain: String) -> Float {
   if found > 0.0 then { return found }
   db_execute("INSERT INTO knowledge_artifacts (title, domain, source, source_tier, status) VALUES (?, ?, 'lz', 2, 'tracking')", [trim(to_string(title)), dom])
   let created = query("SELECT id FROM knowledge_artifacts WHERE domain = ? ORDER BY id DESC LIMIT 1", [dom])
-  return to_float(json_get(get(created, 0), "id", "0"))
+  let new_id = to_float(json_get(get(created, 0), "id", "0"))
+  // #553: домен на создании — значение чистого правила, не LLM
+  let _ = LZProvRule(new_id, "domain", "LZClassifyDomain")
+  return new_id
+}
+
+// ── Провенанс LLM-полей (#553): записывается В МОМЕНТ записи значения ──
+// Формат по наряду: поле -> provider/model/params/recorded_at/via — для
+// суждений модели; поле -> rule — для значений чистых правил. JSON строится
+// на стороне SQL (json_object): ключи-поля бывают зарезервированными
+// словами mlog (domain, rule — проба 553b, двойное вложение), и скобки
+// в mlog-литералах не нужны вовсе. provider/model — из env; не заданы —
+// честное unrecorded, не выдуманное имя. Температура в mlog-слое не видна
+// (ставится proxy per-dept) — unrecorded, не выдуманное число.
+pattern LZProvRecord(artifact_id: Float, field: String, via: String) -> String {
+  let prov = env_or("METALOGOS_LLM_PROVIDER", "unrecorded")
+  let model = env_or("METALOGOS_LLM_MODEL", "unrecorded")
+  db_execute("UPDATE knowledge_artifacts SET provenance = json_set(COALESCE(provenance, '{}'), ?, json_object('provider', ?, 'model', ?, 'params', json_object('temperature', 'unrecorded'), 'recorded_at', datetime('now'), 'via', ?)) WHERE id = ?", ["$." + field, prov, model, via, artifact_id])
+  return "ok"
+}
+
+pattern LZProvRule(artifact_id: Float, field: String, rule_name: String) -> String {
+  db_execute("UPDATE knowledge_artifacts SET provenance = json_set(COALESCE(provenance, '{}'), ?, json_object('rule', ?)) WHERE id = ?", ["$." + field, rule_name, artifact_id])
+  return "ok"
 }
 
 // Строка tracked_technologies артефакта (#556 A.1): создаётся при первой
@@ -689,8 +713,9 @@ pattern LZNone(text: String) -> Bool {
 // дубли по нормализованному названию и домену — keeper с минимальным id,
 // updated_at keeper'а — максимум группы, остальные — статус archived.
 pattern LZDataMaintain() -> String {
-  // шаг 1а: длинные стадии с корректной первой строкой STAGE: <code> — разобрать
-  db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = lower(trim(substr(hype_cycle_stage, 8, instr(substr(hype_cycle_stage, 8) || char(10), char(10)) - 1))) WHERE length(hype_cycle_stage) > 12 AND upper(substr(hype_cycle_stage, 1, 6)) = 'STAGE:' AND lower(trim(substr(hype_cycle_stage, 8, instr(substr(hype_cycle_stage, 8) || char(10), char(10)) - 1))) IN ('trigger', 'peak', 'trough', 'slope', 'plateau')", [])
+  // шаг 1а: длинные стадии с корректной первой строкой STAGE: <code> — разобрать;
+  // #553: перезапись значения правилом — провенанс rule в том же UPDATE
+  db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = lower(trim(substr(hype_cycle_stage, 8, instr(substr(hype_cycle_stage, 8) || char(10), char(10)) - 1))), provenance = json_set(COALESCE(provenance, '{}'), '$.hype_cycle_stage', json_object('rule', 'LZDataMaintain:STAGE-parse')) WHERE length(hype_cycle_stage) > 12 AND upper(substr(hype_cycle_stage, 1, 6)) = 'STAGE:' AND lower(trim(substr(hype_cycle_stage, 8, instr(substr(hype_cycle_stage, 8) || char(10), char(10)) - 1))) IN ('trigger', 'peak', 'trough', 'slope', 'plateau')", [])
   // шаг 1б: остальные длинные (мусор «весь текст ответа») — NULL
   let junk = query("SELECT COUNT(*) AS c FROM knowledge_artifacts WHERE length(hype_cycle_stage) > 12", [])
   db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = NULL WHERE length(hype_cycle_stage) > 12", [])
@@ -747,6 +772,8 @@ pattern LZHypeCycleMap(technology: String, chat_id: String) -> String {
   if stage == "" then { let stage_note = "\n⚠️ Стадия не распознана — значение в базе не менялось" }
   if stage != "" then {
     db_execute("UPDATE knowledge_artifacts SET hype_cycle_stage = ?, updated_at = datetime('now') WHERE id = ?", [stage, aid])
+    // #553: стадия — суждение модели, провенанс в момент записи
+    let _ = LZProvRecord(aid, "hype_cycle_stage", "LZLlm")
   }
   // Gate 3: Check negative signals at peak — настоящий id артефакта (#556 A.4,
   // раньше LZGateNegativeSignals(0) — запрос WHERE id = 0, всегда FAIL: not found)
@@ -778,6 +805,8 @@ pattern LZDisruptionScore(technology: String, chat_id: String) -> String {
     let tid = LZTechRowId(aid, technology)
     db_execute("UPDATE tracked_technologies SET disruption_1y = ?, disruption_3y = ?, disruption_5y = ?, disruption_10y = ?, updated_at = datetime('now') WHERE id = ?", [s1, s3, s5, s10, tid])
     db_execute("UPDATE knowledge_artifacts SET disruption_score = ?, last_scored_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", [s3, aid])
+    // #553: скор — суждение модели, провенанс в момент записи
+    let _ = LZProvRecord(aid, "disruption_score", "LZLlm")
   }
   // Gate 7: Check competing alternatives
   let alt_check = LZGateCompetingCheck(technology)
@@ -799,6 +828,9 @@ pattern LZInflectionDetect(technology: String, chat_id: String) -> String {
     // #556 A.1: адресация по id, не по подстроке названия
     let aid = LZArtifactId(technology, LZClassifyDomain(technology))
     db_execute("UPDATE knowledge_artifacts SET status = ?, updated_at = datetime('now') WHERE id = ?", ["hot", aid])
+    // #553: переход статуса — вердикт модели по проверке инфлекшна (LZYes),
+    // провенанс фиксирует и канал суждения, и применившее его правило
+    let _ = LZProvRecord(aid, "status", "LZInflectionDetect+LZYes")
     // #446 A.2 (решение владельца: построить): алерт уходит в ЖИВОЙ
     // /osp/analyze (:10001) по контракту №318 — hash-form секрета,
     // fire-and-forget 5с: анализ продолжается на сервере, отчёт приходит

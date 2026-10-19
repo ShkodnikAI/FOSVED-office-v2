@@ -1,0 +1,182 @@
+// test_n553v3.mlog — Наряд #553: каждое LLM-порождённое поле артефакта КБ ЛЗ
+// сопровождается провенансом (provider/model/params/recorded_at/via) в момент
+// записи значения; правило-значения — rule.
+// Легенда:
+//   b1 (тест 1): LZHypeCycleMap с моком STAGE: peak — стадия записана, провенанс
+//                hype_cycle_stage заполнен (provider/model/recorded_at), домен
+//                нового артефакта — rule-провенанс LZClassifyDomain;
+//   b2 (тест 2): LZDisruptionScore с моком SCORES — disruption_score=0.4,
+//                провенанс disruption_score заполнен, мерж: провенанс стадии
+//                b1 не затёрт;
+//   b3 (тест 3): LZInflectionDetect с моком YES — статус hot, провенанс status
+//                с via LZInflectionDetect+LZYes;
+//   b4 (тест 4): LZArtifactId нового названия — rule-провенанс домена; у
+//                найденного существующего повторный вызов провенанс не портит;
+//   b5 (тест 5): у артефакта после b1-b3 все четыре записи провенанса на месте;
+//   b6 (тест 6): LZDataMaintain — разбор длинной стадии правилом оставляет
+//                rule-провенанс LZDataMaintain:STAGE-parse.
+// NB: мок LLM — через шов LZLlm (в тестовом замыкании стаба нет — обязателен).
+// Очередь — test_llm_mock, FIFO по OFFSET. Гейт 4 и гейты 7/8 зовут нативный
+// call_llm — без ключа мгновенно падают в "[оценка недоступна…]" и в мок не
+// входят. Провенанс строится на стороне SQL (json_object) — см. LZProvRecord.
+// Запуск: rm -rf /tmp/n553-test && mkdir -p /tmp/n553-test && ./bin/mlog run test_n553v3.mlog
+profile legacy { egress: permissive_with_audit }
+db { url: "sqlite:/tmp/n553-test/lz.db" }
+import dept/utils
+import dept/lz
+
+// ── тест-стабы app-слоя (конвенция #519) ────────────────────────────────
+pattern InitDB() -> String {
+  return "ok"
+}
+pattern AuditLog(action: String, dept: String, details: String) -> String {
+  return "ok"
+}
+pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
+  return "ok"
+}
+pattern TeamAskBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamBoardBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamPublish(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float) -> String {
+  return ""
+}
+pattern TeamSecondPass(dept: String, query: String, context: String, draft: String) -> String {
+  return draft
+}
+pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
+  return parse_json("{}")
+}
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  return "{\"error\": \"stub\"}"
+}
+// Стаб шва LZLlm: FIFO-очередь ответов, загруженных тестом в test_llm_mock.
+pattern LZLlm(prompt: String) -> String {
+  let off = _MockShift()
+  let rows = query("SELECT text FROM test_llm_mock ORDER BY id LIMIT 1 OFFSET ?", [off])
+  if length(rows) == 0.0 then { return "ock: очередь пуста]" }
+  return to_string(json_get(get(rows, 0), "text", ""))
+}
+
+pattern _MockShift() -> Float {
+  let rows = query("SELECT n FROM test_mock_idx WHERE id = 1", [])
+  if length(rows) == 0.0 then {
+    let _ = db_execute("INSERT INTO test_mock_idx (id, n) VALUES (1, 1)", [])
+    return 0.0
+  }
+  let n = to_float(json_get(get(rows, 0), "n", "0"))
+  let _ = db_execute("UPDATE test_mock_idx SET n = ? WHERE id = 1", [n + 1.0])
+  return n
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return name + "=true;" }
+  return name + "=false;"
+}
+
+pattern TestDbInit() -> String {
+  // Схема — из app.mlog InitDB + ALTER #553 (provenance); тестовые таблицы
+  // мока добавлены здесь.
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS knowledge_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, title TEXT NOT NULL, domain TEXT NOT NULL, source TEXT, source_url TEXT, source_tier INTEGER DEFAULT 2, hype_cycle_stage TEXT, disruption_score REAL DEFAULT 0.0, inflection_signals TEXT DEFAULT '[]', cross_domain_potential TEXT DEFAULT '[]', competing_alternatives TEXT DEFAULT '[]', status TEXT DEFAULT 'tracking', confirmation_count INTEGER DEFAULT 0, tracked_since TEXT DEFAULT (datetime('now')), last_scored_at TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), provenance TEXT DEFAULT '{}')", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS tracked_technologies (id INTEGER PRIMARY KEY AUTOINCREMENT, artifact_id INTEGER, technology_name TEXT NOT NULL, category TEXT, oob_data TEXT DEFAULT '{}', patent_activity TEXT DEFAULT '[]', talent_flow TEXT DEFAULT '[]', vc_investment TEXT DEFAULT '[]', disruption_1y REAL, disruption_3y REAL, disruption_5y REAL, disruption_10y REAL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_llm_mock (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_mock_idx (id INTEGER PRIMARY KEY, n FLOAT)", [])
+  return "ok"
+}
+
+pattern _MockQueue(answers: String) -> String {
+  // answers — ответы через разделитель "|||": по одному LZLlm-вызову на элемент
+  let toks = split(answers, "|||")
+  each t in toks {
+    let _ = db_execute("INSERT INTO test_llm_mock (text) VALUES (?)", [to_string(t)])
+  }
+  return "queued"
+}
+
+pattern _Fid(title: String) -> Float {
+  let rows = query("SELECT id AS i FROM knowledge_artifacts WHERE title = ?", [title])
+  if length(rows) == 0.0 then { return -1.0 }
+  return to_float(json_get(get(rows, 0), "i", "0"))
+}
+
+pattern _Prov(artifact_id: Float, path: String) -> String {
+  let rows = query("SELECT json_extract(provenance, ?) AS v FROM knowledge_artifacts WHERE id = ?", [path, artifact_id])
+  if length(rows) == 0.0 then { return "NO ROW" }
+  return to_string(json_get(get(rows, 0), "v", ""))
+}
+
+pattern Run(x: String) -> String {
+  let _ = TestDbInit()
+  let out = ""
+
+  // ── b1 (тест 1): LZHypeCycleMap — стадия + провенанс LLM-поля + rule-домен ──
+  // Порядок LZLlm: ответ навыка, классификатор домена, гейт 3 (стадия peak)
+  let _ = _MockQueue("STAGE: peak\nДальше полный текст ответа модели с обоснованием оценки|||tech|||NONE.")
+  let h1 = LZHypeCycleMap("Квантовый трактор", "test-chat")
+  let aid1 = _Fid("Квантовый трактор")
+  let out = out + _Mark("b1_stage_written", _Prov(aid1, "$.hype_cycle_stage.via") == "LZLlm")
+  let stg = query("SELECT hype_cycle_stage AS s FROM knowledge_artifacts WHERE id = ?", [aid1])
+  let out = out + _Mark("b1_stage_value_peak", to_string(json_get(get(stg, 0), "s", "")) == "peak")
+  let out = out + _Mark("b1_prov_provider", _Prov(aid1, "$.hype_cycle_stage.provider") == "unrecorded")
+  let out = out + _Mark("b1_prov_model", _Prov(aid1, "$.hype_cycle_stage.model") == "unrecorded")
+  let out = out + _Mark("b1_prov_via", _Prov(aid1, "$.hype_cycle_stage.via") == "LZLlm")
+  let out = out + _Mark("b1_prov_ts_19", length(_Prov(aid1, "$.hype_cycle_stage.recorded_at")) == 19.0)
+  let out = out + _Mark("b1_prov_params_temp", _Prov(aid1, "$.hype_cycle_stage.params.temperature") == "unrecorded")
+  let out = out + _Mark("b1_domain_rule", _Prov(aid1, "$.domain.rule") == "LZClassifyDomain")
+
+  // ── b2 (тест 2): LZDisruptionScore — скор + провенанс, мерж не затёрт ────
+  // Порядок LZLlm: ответ навыка, классификатор домена
+  let _ = _MockQueue("SCORES: 1y=10 3y=40 5y=60 10y=80|||tech")
+  let d1 = LZDisruptionScore("Квантовый трактор", "test-chat")
+  let sc = query("SELECT disruption_score AS s FROM knowledge_artifacts WHERE id = ?", [aid1])
+  let out = out + _Mark("b2_score_04", to_float(json_get(get(sc, 0), "s", "0")) == 0.4)
+  let out = out + _Mark("b2_prov_model", _Prov(aid1, "$.disruption_score.model") == "unrecorded")
+  let out = out + _Mark("b2_prov_via", _Prov(aid1, "$.disruption_score.via") == "LZLlm")
+  let out = out + _Mark("b2_merge_stage_kept", _Prov(aid1, "$.hype_cycle_stage.via") == "LZLlm")
+  let out = out + _Mark("b2_merge_domain_kept", _Prov(aid1, "$.domain.rule") == "LZClassifyDomain")
+
+  // ── b3 (тест 3): LZInflectionDetect — статус hot + провенанс гибрида ─────
+  // Порядок LZLlm: ответ навыка, проверка да/нет, классификатор (в YES-ветке)
+  let _ = _MockQueue("Есть признаки инфлекшна: первые внедрения и корпоративный VC|||YES|||tech")
+  let i1 = LZInflectionDetect("Квантовый трактор", "test-chat")
+  let st = query("SELECT status AS s FROM knowledge_artifacts WHERE id = ?", [aid1])
+  let out = out + _Mark("b3_status_hot", to_string(json_get(get(st, 0), "s", "")) == "hot")
+  let out = out + _Mark("b3_prov_via", _Prov(aid1, "$.status.via") == "LZInflectionDetect+LZYes")
+  let out = out + _Mark("b3_prov_model", _Prov(aid1, "$.status.model") == "unrecorded")
+
+  // ── b4 (тест 4): LZArtifactId — rule-провенанс на создании; повторный вызов
+  // существующего не портит провенанс ──
+  let aid2 = LZArtifactId("Новый сенсор", "tech")
+  let out = out + _Mark("b4_new_rule", _Prov(aid2, "$.domain.rule") == "LZClassifyDomain")
+  let _ = _MockQueue("STAGE: trough\nТекст ответа модели длиннее двенадцати символов|||tech")
+  let h2 = LZHypeCycleMap("Новый сенсор", "test-chat")
+  let again = LZArtifactId("Новый сенсор", "tech")
+  let out = out + _Mark("b4_same_id", again == aid2)
+  let out = out + _Mark("b4_rule_kept", _Prov(aid2, "$.domain.rule") == "LZClassifyDomain")
+
+  // ── b5 (тест 5): полный провенанс артефакта после b1-b3 ──────────────────
+  let keys = query("SELECT COUNT(*) AS n FROM json_each((SELECT provenance FROM knowledge_artifacts WHERE id = ?))", [aid1])
+  let out = out + _Mark("b5_four_fields", to_float(json_get(get(keys, 0), "n", "0")) == 4.0)
+  let out = out + _Mark("b5_status_ts_19", length(_Prov(aid1, "$.status.recorded_at")) == 19.0)
+
+  // ── b6 (тест 6): LZDataMaintain — rule-провенанс разбора стадии ──────────
+  let _ = db_execute("INSERT INTO knowledge_artifacts (title, domain, hype_cycle_stage, status) VALUES (?, ?, ?, ?)", ["Миграционный дрон", "tech", "STAGE: slope\nПолный текст ответа модели длиннее двенадцати символов", "tracking"])
+  let aid3 = _Fid("Миграционный дрон")
+  let m1 = LZDataMaintain()
+  let out = out + _Mark("b6_stage_parsed", length(query("SELECT id FROM knowledge_artifacts WHERE id = ? AND hype_cycle_stage = 'slope'", [aid3])) == 1.0)
+  let out = out + _Mark("b6_rule_prov", _Prov(aid3, "$.hype_cycle_stage.rule") == "LZDataMaintain:STAGE-parse")
+  let m2 = LZDataMaintain()
+  let out = out + _Mark("b6_idempotent", contains(m2, "stages_nulled=0"))
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Run -> output
+}
