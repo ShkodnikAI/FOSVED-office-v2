@@ -472,6 +472,15 @@ def scheduler_morning_brief():
             brief = brief + "\n\n" + keys_line
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
+        # №588 B.2: бриф — в dialog_history (dept='yana', role='assistant',
+        # chat_id=owner) тем же способом, каким пишутся обычные ответы Яны;
+        # без этого ответ Админа 07:25 не находит бриф («не найден свежий отчёт»).
+        try:
+            _query("INSERT INTO dialog_history (dept, chat_id, role, content) VALUES ('yana', ?, 'assistant', ?)",
+                   (str(owner_id), brief))
+        except Exception as e:
+            _log_error(f"morning brief dialog_history write failed: {e}",
+                       source="scheduler_morning_brief", dept="yana", kind="db_write")
         _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})

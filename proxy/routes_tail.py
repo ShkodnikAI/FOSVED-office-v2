@@ -1934,6 +1934,15 @@ _GOLDEN_DIR = Path(__file__).resolve().parent.parent / "tests" / "golden"
 _GOLDEN_MIN_SCORE = float(os.environ.get("GOLDEN_MIN_SCORE", "0.6"))       # абсолютный порог
 _GOLDEN_REGRESSION_DROP = float(os.environ.get("GOLDEN_REGRESSION_DROP", "0.15"))  # падение vs предыдущий прогон
 
+def _is_night_msk(now=None):
+    """№588 B.3: ночное окно тишины (#550) — 22:00–06:59 MSK (MSK = UTC+3,
+    фиксированный пояс). Ночью алерты качества уходят в owner_outbox
+    (доставка слотом night-report 07:15 MSK), днём — сразу в Telegram."""
+    now = now or datetime.now(timezone.utc)
+    msk_hour = (now.hour + 3) % 24
+    return msk_hour >= 22 or msk_hour < 7
+
+
 def _golden_load(dept):
     """Загрузить golden-набор департамента (tests/golden/<dept>.json)."""
     path = _GOLDEN_DIR / f"{dept}.json"
@@ -2071,9 +2080,13 @@ def scheduler_golden_evals():
         summary = _golden_run_dept(dept, tasks)
         prev = _golden_previous_avg(dept)
         summary["previous_avg"] = prev
-        summary["regression"] = bool(
-            summary["avg_score"] < _GOLDEN_MIN_SCORE
-            or (prev is not None and (prev - summary["avg_score"]) >= _GOLDEN_REGRESSION_DROP))
+        # №588 B.3: причины раздельно — «ниже порога 0.6» НЕ «регрессия»
+        # (прод 21.10: yana 0.54 (было 0.54) приходила как «❌ Регрессия»).
+        below_threshold = bool(summary["avg_score"] < _GOLDEN_MIN_SCORE)
+        dropped = bool(prev is not None and (prev - summary["avg_score"]) >= _GOLDEN_REGRESSION_DROP)
+        summary["below_threshold"] = below_threshold
+        summary["regression"] = dropped
+        summary["needs_attention"] = bool(below_threshold or dropped)
         # Тренд: dept_metrics (screen FO-011, morning brief)
         try:
             _query("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES (?,?,?,?,?)",
@@ -2082,22 +2095,30 @@ def scheduler_golden_evals():
         except Exception as e:
             _log_error(f"golden: dept_metrics insert failed {dept}: {e}",
                        source="golden_evals", dept=dept, kind="metrics_loss")
-        if summary["regression"]:
+        if summary["needs_attention"]:
             alerts.append(summary)
         results.append(summary)
 
-    # Сигнал владельцу: мгновенный алерт по регрессии
+    # Сигнал владельцу: №588 B.3 — причины раздельно; ночью (22:00–06:59 MSK,
+    # тишина #550) алерт уходит в owner_outbox (доставка 07:15), днём — сразу.
     owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
     if alerts and owner_id:
-        lines = ["❌ Регрессия качества департаментов (golden evals):"]
+        lines = []
         for s in alerts:
             prev_txt = f" (было {s['previous_avg']:.2f})" if s.get("previous_avg") is not None else ""
-            lines.append(f"• {s['dept']}: {s['avg_score']:.2f}{prev_txt}, проваленных задач: {s['failed']}")
+            if s.get("regression"):
+                lines.append(f"❌ Регрессия: {s['dept']} {s['avg_score']:.2f}{prev_txt}, проваленных задач: {s['failed']}")
+            else:
+                lines.append(f"⚠️ Качество ниже порога: {s['dept']} {s['avg_score']:.2f} (порог {_GOLDEN_MIN_SCORE:.2f}){prev_txt}, проваленных задач: {s['failed']}")
             worst = min(s["results"], key=lambda r: r["score"]) if s["results"] else None
             if worst:
                 lines.append(f"  худшая: {worst['task']} = {worst['score']:.2f}")
+        alert_text = "Алерт качества департаментов (golden evals):\n" + "\n".join(lines)
         try:
-            _tg_send_message(owner_id, "\n".join(lines))
+            if _is_night_msk():
+                _query("INSERT INTO owner_outbox (source, text) VALUES ('golden-evals', ?)", (alert_text,))
+            else:
+                _tg_send_message(owner_id, alert_text)
         except Exception as e:
             _log_error(f"golden: owner alert send failed: {e}", source="golden_evals", kind="external")
 

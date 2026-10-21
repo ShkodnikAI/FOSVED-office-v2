@@ -259,6 +259,11 @@ def scheduler_lz_daily():
     owner_id = d.get("owner_id", os.environ.get("OWNER_TELEGRAM_ID", ""))
     dry_run = d.get("dry_run", False)
     deliver = d.get("deliver", "telegram")
+    # №588 B.1: deliver="none" — ночной прогон (NightSlot Phase 1) НЕ доставляет
+    # отчёт ни в outbox, ни в Telegram (полный отчёт остаётся слоту 09:10);
+    # прогон нужен ради скана/памяти и счётчиков в ответе.
+    if deliver not in ("telegram", "outbox", "none"):
+        deliver = "telegram"
     return scheduler_lz_daily_core(dry_run=dry_run, owner_id=owner_id, deliver=deliver)
 
 
@@ -359,7 +364,7 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
 
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория Загадок Фосвед Офиса. Задача: проанализировать ежедневный скан мира.\n\n"
+                 "Ты — Лаборатория знаний Фосвед Офиса. Задача: проанализировать ежедневный скан мира.\n\n"
                  "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ и СОБЫТИЯ, которые Админ должен знать.\n\n"
                  "Структура отчёта:\n"
                  "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — с disrupting potential 1-10\n"
@@ -387,7 +392,7 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                 news_section = f"\n{world_news_text}\n"
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория Загадок Фосвед Офиса. Проведи ежедневный обзор новинок и событий.\n\n"
+                 "Ты — Лаборатория знаний Фосвед Офиса. Проведи ежедневный обзор новинок и событий.\n\n"
                  "Структура отчёта:\n"
                  "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — с disrupting potential 1-10\n"
                  "2. 🌍 Ключевые мировые события — экономика, политика, breakthrough\n"
@@ -462,7 +467,9 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
         # слота night-report в 07:15 MSK. Дефолт — немедленная отправка.
         msg_id = None
         if owner_id and not dry_run:
-            if deliver == "outbox":
+            if deliver == "none":
+                pass  # №588 B.1: ночная доставка запрещена — см. scheduler_lz_daily
+            elif deliver == "outbox":
                 _query(
                     "INSERT INTO owner_outbox (source, text) VALUES (?, ?)",
                     ("lz-daily", report),

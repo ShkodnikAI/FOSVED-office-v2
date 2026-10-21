@@ -514,23 +514,133 @@ pattern OutboxFlush() -> String {
   let rows = query("SELECT id, source, text FROM owner_outbox WHERE sent_at IS NULL ORDER BY id", [])
   if length(rows) == 0.0 then { return "outbox: empty" }
 
-  let mut msg = "🌙 Ночной отчёт"
-  let mut part_no = 1.0
+  // №588 B.1: куски всех блоков режутся по абзацам (OutboxSplitChunks, ≤3400),
+  // части собираются ТОЛЬКО вокруг кусков — пустая «часть 1» из одного
+  // заголовка больше невозможна, кусок ≤3400 помещается в часть ≤3500.
+  let mut all_json = ""
+  let mut total = 0.0
   each r in rows {
     let src = redact(to_string(json_get(r, "source", "?")), "all")
     let txt = to_string(json_get(r, "text", ""))
-    let block = "\n\n— " + src + " —\n" + txt
-    if length(msg) + length(block) > 3500.0 then {
-      let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), msg + "\n\n(часть " + to_string(to_int(part_no)) + ")")
-      let msg = "🌙 Ночной отчёт (продолжение)"
-      let part_no = part_no + 1.0
+    let block = "— " + src + " —\n" + txt
+    let arr = parse_json(OutboxSplitChunks(block, 3400.0))
+    each piece in arr {
+      let pc = to_string(piece)
+      if length(pc) > 0.0 then {
+        let all_json = all_json + json_encode(pc) + ","
+        let total = total + 1.0
+      }
     }
-    let msg = msg + block
   }
-  let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), msg)
+  if total == 0.0 then { return "outbox: nothing deliverable" }
+  let parts = parse_json("[" + substring(all_json, 0.0, length(all_json) - 1.0) + "]")
+
+  let mut i = 0.0
+  let mut part_no = 1.0
+  let mut cur = ""
+  while i < length(parts) {
+    let piece = to_string(get(parts, i))
+    if length(cur) + length(piece) + 2.0 > 3500.0 then {
+      // закрыть часть — только если в ней есть хотя бы один кусок (№588: пустых частей нет)
+      if length(cur) > 0.0 then {
+        let header = "🌙 Ночной отчёт"
+        if part_no > 1.0 then { let header = "🌙 Ночной отчёт (часть " + to_string(to_int(part_no)) + ")" }
+        let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), header + "\n" + cur)
+        let part_no = part_no + 1.0
+      }
+      let cur = piece
+    } else {
+      if length(cur) > 0.0 then { let cur = cur + "\n\n" + piece } else { let cur = piece }
+    }
+    let i = i + 1.0
+  }
+  if length(cur) > 0.0 then {
+    let header = "🌙 Ночной отчёт"
+    if part_no > 1.0 then { let header = "🌙 Ночной отчёт (часть " + to_string(to_int(part_no)) + ")" }
+    let _ = SendTelegramReply(env("OWNER_TELEGRAM_ID"), header + "\n" + cur)
+  }
   let _ = db_execute("UPDATE owner_outbox SET sent_at = datetime('now') WHERE sent_at IS NULL", [])
-  let _ = AuditLog("owner_outbox_flush", "system", "delivered part=" + to_string(to_int(part_no)) + " rows=" + to_string(to_int(length(rows))))
+  let _ = AuditLog("owner_outbox_flush", "system", "delivered parts=" + to_string(to_int(part_no)) + " chunks=" + to_string(to_int(total)) + " rows=" + to_string(to_int(length(rows))))
   return "outbox: delivered"
+}
+
+// №588 B.1: резка текста на куски ≤ max_len по абзацам "\n\n"; абзац длиннее
+// max_len режется жёстко (substring, как _tg_split_report #567). Возвращает
+// json_encode массива строк: mlog не строит списки динамически — строковый
+// аккумулятор единственный; пустые куски не возвращаются никогда.
+pattern OutboxSplitChunks(text: String, max_len: Float) -> String {
+  let mut parts_json = ""
+  let mut count = 0.0
+  let paras = split(text, "\n\n")
+  let mut cur = ""
+  each p in paras {
+    let par = to_string(p)
+    if length(par) > 0.0 then {
+      if length(par) > max_len then {
+        if length(cur) > 0.0 then {
+          let parts_json = parts_json + json_encode(cur) + ","
+          let count = count + 1.0
+          let cur = ""
+        }
+        let mut off = 0.0
+        while off < length(par) {
+          let piece = substring(par, off, off + max_len)
+          if length(piece) > 0.0 then {
+            let parts_json = parts_json + json_encode(piece) + ","
+            let count = count + 1.0
+          }
+          let off = off + max_len
+        }
+      } else {
+        if length(cur) + length(par) + 2.0 > max_len then {
+          if length(cur) > 0.0 then {
+            let parts_json = parts_json + json_encode(cur) + ","
+            let count = count + 1.0
+          }
+          let cur = par
+        } else {
+          if length(cur) > 0.0 then { let cur = cur + "\n\n" + par } else { let cur = par }
+        }
+      }
+    }
+  }
+  if length(cur) > 0.0 then {
+    let parts_json = parts_json + json_encode(cur) + ","
+    let count = count + 1.0
+  }
+  if count == 0.0 then { return "[]" }
+  return "[" + substring(parts_json, 0.0, length(parts_json) - 1.0) + "]"
+}
+
+// ── №588 A.3: resume-маркеры ночного цикла (night_run_state) — повторный
+// старт в ту же дату (catch-up после рестарта OOM) не повторяет выполненные
+// фазы. DDL — в InitDB app.mlog. Three семантики:
+//   NightPhaseDone(name) → "done"|"new" — чек до фазы (mark-after-run);
+//   NightPhaseMark(name) — пометить выполненной (после успеха);
+//   NightPhaseBegin(name) → "done"|"acquired" — at-most-once (ЛЗ в ночи —
+//   не больше одного раза за дату, даже при сбое).
+pattern NightPhaseDone(name: String) -> String {
+  let rows = query("SELECT phases FROM night_run_state WHERE day = date('now')", [])
+  let mut csv = ""
+  each r in rows { let csv = to_string(json_get(r, "phases", "")) }
+  if contains(csv, name + ",") then { return "done" }
+  return "new"
+}
+
+pattern NightPhaseMark(name: String) -> String {
+  let _ = db_execute("INSERT OR IGNORE INTO night_run_state (day, phases) VALUES (date('now'), '')", [])
+  let _ = db_execute("UPDATE night_run_state SET phases = phases || ?1, updated_at = datetime('now') WHERE day = date('now')", [name + ","])
+  return "ok"
+}
+
+pattern NightPhaseBegin(name: String) -> String {
+  let _ = db_execute("INSERT OR IGNORE INTO night_run_state (day, phases) VALUES (date('now'), '')", [])
+  let rows = query("SELECT phases FROM night_run_state WHERE day = date('now')", [])
+  let mut csv = ""
+  each r in rows { let csv = to_string(json_get(r, "phases", "")) }
+  if contains(csv, name + ",") then { return "done" }
+  let _ = db_execute("UPDATE night_run_state SET phases = phases || ?1, updated_at = datetime('now') WHERE day = date('now')", [name + ","])
+  return "acquired"
 }
 
 // Слот 07:15 MSK (dept/schedules.mlog: night-report) — единственная точка
@@ -559,52 +669,89 @@ pattern NightTickSlot() -> String {
   let base = "http://127.0.0.1:4000/cron/"
   let qs = "?secret=" + env("CRON_SECRET")
 
+  // №588 A.3: resume-маркеры — повторный старт в ту же дату (catch-up после
+  // рестарта) продолжает с невыполненных фаз; выполненные — skip(dup).
+  let _ = db_execute("INSERT OR IGNORE INTO night_run_state (day, phases) VALUES (date('now'), '')", [])
+  let ph_rows = query("SELECT phases FROM night_run_state WHERE day = date('now')", [])
+  let mut phases_csv = ""
+  each pr in ph_rows { let phases_csv = to_string(json_get(pr, "phases", "")) }
+
   let mut report = "night-tick:"
-  let r_backup = redact(to_string(TryVal(try http_get(base + "backup" + qs, 300.0))), "all")
-  if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else { report = report + " backup=ok" }
+  if contains(phases_csv, "backup,") then {
+    report = report + " backup=skip(dup)"
+  } else {
+    let r_backup = redact(to_string(TryVal(try http_get(base + "backup" + qs, 300.0))), "all")
+    if to_string(r_backup) == "()" then { report = report + " backup=FAIL" } else {
+      report = report + " backup=ok"
+      let _ = NightPhaseMark("backup")
+    }
+  }
   // #550 A.3: /cron/indicator-reminders и /cron/golden-evals — маршруты
   // mlog-сервера :10001 (app.mlog), Flask :4000 отвечает на них 404 (факт 4
   // наряда: "indicators=FAIL evals=FAIL"). Вызываем Python-эндпоинты напрямую
   // (как backup-фаза выше); роуты :10001 остаются ручным/аварийным фолбэком,
   // AuditLog-записи сохранены за ними. Причина решения — в отчёте #550.
-  let body_ind = json_encode({days_ahead: 7.0})
-  let r_ind = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body_ind, "application/json", 300.0))), "all")
-  if to_string(r_ind) == "()" then {
-    report = report + " indicators=FAIL"
+  if contains(phases_csv, "indicators,") then {
+    report = report + " indicators=skip(dup)"
   } else {
-    // #569 A.4: AuditLog под TryVal — сбой записи аудита (прод 02:00:44:
-    // database is locked) не должен убить слот до OutboxPut.
-    let _ = TryVal(try AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by night tick"))
-    report = report + " indicators=ok"
+    let body_ind = json_encode({days_ahead: 7.0})
+    let r_ind = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/indicator-pre-reminders", body_ind, "application/json", 300.0))), "all")
+    if to_string(r_ind) == "()" then {
+      report = report + " indicators=FAIL"
+    } else {
+      // #569 A.4: AuditLog под TryVal — сбой записи аудита (прод 02:00:44:
+      // database is locked) не должен убить слот до OutboxPut.
+      let _ = TryVal(try AuditLog("cron_indicator_reminders", "system", "indicator pre-reminders triggered by night tick"))
+      report = report + " indicators=ok"
+      let _ = NightPhaseMark("indicators")
+    }
   }
-  let r_shop = redact(to_string(TryVal(try http_get(base + "shop-tick" + qs, 300.0))), "all")
-  if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else { report = report + " shop=ok" }
-  // #569 A.1: источник 403 в 02:00:04Z прод-лога — golden-evals вызывался
-  // БЕЗ ?secret= (гард cron_secret_ok → "Forbidden", 403) — фаза никогда
-  // не выполнялась ночью. Форма — hash_only (№443, как у onliner-warm и
-  // GoldenEvalsSlot ниже): raw-секрет в http_post = private-egress
-  // (Category-A гварда долга №327, CI run 39227678822); cron_secret_ok
-  // принимает hash-form встречно (№425).
-  let r_evals = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals?secret=" + redact(env("CRON_SECRET"), "hash_only"), "{}", "application/json", 300.0))), "all")
-  if to_string(r_evals) == "()" then {
-    report = report + " evals=FAIL"
+  if contains(phases_csv, "shop,") then {
+    report = report + " shop=skip(dup)"
   } else {
-    // #569 A.4: см. комментарий выше — аудит не роняет слот.
-    let _ = TryVal(try AuditLog("cron_golden_evals", "qa", "golden evals triggered by night tick"))
-    report = report + " evals=ok"
+    let r_shop = redact(to_string(TryVal(try http_get(base + "shop-tick" + qs, 300.0))), "all")
+    if to_string(r_shop) == "()" then { report = report + " shop=FAIL" } else {
+      report = report + " shop=ok"
+      let _ = NightPhaseMark("shop")
+    }
+  }
+  if contains(phases_csv, "evals,") then {
+    report = report + " evals=skip(dup)"
+  } else {
+    // #569 A.1: источник 403 в 02:00:04Z прод-лога — golden-evals вызывался
+    // БЕЗ ?secret= (гард cron_secret_ok → "Forbidden", 403) — фаза никогда
+    // не выполнялась ночью. Форма — hash_only (№443, как у onliner-warm и
+    // GoldenEvalsSlot ниже): raw-секрет в http_post = private-egress
+    // (Category-A гварда долга №327, CI run 39227678822); cron_secret_ok
+    // принимает hash-form встречно (№425).
+    let r_evals = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals?secret=" + redact(env("CRON_SECRET"), "hash_only"), "{}", "application/json", 300.0))), "all")
+    if to_string(r_evals) == "()" then {
+      report = report + " evals=FAIL"
+    } else {
+      // #569 A.4: см. комментарий выше — аудит не роняет слот.
+      let _ = TryVal(try AuditLog("cron_golden_evals", "qa", "golden evals triggered by night tick"))
+      report = report + " evals=ok"
+      let _ = NightPhaseMark("evals")
+    }
   }
   // #485 A.1: ночной цикл вызывается В ПРОЦЕССЕ (оба — паттерны одной программы),
   // а не http_get в несуществующий Flask /cron/night — тот 404-ил, а слот трактовал
   // отсутствие ответа как «запущен(фоном)». Семантика try-присваивания и полей
   // TryResult.error.code/.message подтверждена живой пробой на bin/mlog 0.28.0
   // (404 → Err "http_get() returned status 404: …", успех → значение, ошибка → Unit).
-  let tr_night = try NightSlot()
-  let r_night = redact(to_string(TryVal(tr_night)), "all")
-  if r_night == "()" then {
-    let night_reason = redact(substring(TryVal(try to_string(tr_night.error.message)), 0.0, 120.0), "all")
-    report = report + " night=FAIL(" + night_reason + ")"
+  // №588 A.3: фаза night — resume: выполненная за дату не повторяется.
+  if contains(phases_csv, "night,") then {
+    report = report + " night=skip(dup)"
   } else {
-    report = report + " night=ok"
+    let tr_night = try NightSlot()
+    let r_night = redact(to_string(TryVal(tr_night)), "all")
+    if r_night == "()" then {
+      let night_reason = redact(substring(TryVal(try to_string(tr_night.error.message)), 0.0, 120.0), "all")
+      report = report + " night=FAIL(" + night_reason + ")"
+    } else {
+      report = report + " night=ok"
+      let _ = NightPhaseMark("night")
+    }
   }
   // #569 A.4: один сбой не роняет весь слот. Прод 19.10: NightSlot упал
   // (поймано try выше), затем AuditLog("cron_night_tick") сам упал на

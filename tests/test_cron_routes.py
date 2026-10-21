@@ -75,7 +75,7 @@ def test_night_tick_chains_all_nightly_jobs():
     sched = (REPO_ROOT / "dept" / "scheduler.mlog").read_text(encoding="utf-8")
     slot_idx = sched.find("pattern NightTickSlot()")
     assert slot_idx > 0
-    slot_body = sched[slot_idx:slot_idx + 4000]  # #550: тело выросло (outbox + прямые вызовы)
+    slot_body = sched[slot_idx:slot_idx + 6000]  # #550/#588: тело выросло (outbox + прямые вызовы + resume-гварды)
     assert '"backup"' in slot_body
     # #550 A.3: indicator-reminders/golden-evals — маршруты mlog :10001, Flask :4000
     # отвечал 404 (факт 4 наряда) — слот зовёт Python-эндпоинты напрямую;
@@ -84,6 +84,8 @@ def test_night_tick_chains_all_nightly_jobs():
     assert '"shop-tick"' in slot_body
     assert 'scheduler/golden-evals' in slot_body
     assert "try NightSlot()" in slot_body             # #485: ночь — в процессе, с TryVal
+    # №588 A.3: resume-гварды — повторный старт не повторяет выполненные фазы
+    assert "NightPhaseMark(" in slot_body and "skip(dup)" in slot_body
     # #550 A.1: итог цепочки — в outbox (доставка слотом night-report 07:15 MSK),
     # немедленной ночной отправки больше нет.
     assert 'OutboxPut("night-tick"' in slot_body
