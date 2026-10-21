@@ -3,7 +3,9 @@
 """FORGE-UI-11 tests (#204): альбомная ориентация (Главная, Наряды, Чат).
 
 Гварды:
-- media-запрос (orientation: landscape) and (min-width: 700px) существует;
+- media-запрос широкой раскладки существует (№590: ≥900px любой ориентации +
+  700–899px в альбомной; прежний (orientation: landscape) and (min-width: 700px)
+  расширен, правило №204 сохранено внутри);
 - боковая навигация: док превращается в левую панель 76px (скрытие нижнего
   вида, border-right, те же 5 пунктов — DOM не трогается);
 - Главная — двухколоночная сетка 1.1fr/1fr с явным размещением герой+статистика
@@ -20,13 +22,17 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 with open(os.path.join(REPO_ROOT, "miniapp", "index.html"), encoding="utf-8") as _f:
     INDEX = _f.read()
 
-m = re.search(r"@media \(orientation: landscape\) and \(min-width: 700px\)\{(.*?)\n\}\n</style>", INDEX, re.S)
+# №590 A.1: условие расширено — ≥900px (любая ориентация) ИЛИ 700–899px в альбомной
+m = re.search(r"@media \(min-width: 900px\), \(orientation: landscape\) and \(min-width: 700px\) and \(max-width: 899\.9px\)\{(.*?)\n\}", INDEX, re.S)
 LAND = m.group(1) if m else ""
 
 
 def test_landscape_media_block_exists():
-    assert LAND, "альбомный media-блок не найден"
-    assert "(orientation: landscape) and (min-width: 700px)" in INDEX
+    assert LAND, "media-блок широкой раскладки не найден"
+    assert "(min-width: 900px), (orientation: landscape) and (min-width: 700px) and (max-width: 899.9px)" in INDEX
+    # №590 A.1: ограничение 480px снято внутри блока
+    assert "#app{max-width:none}" in LAND
+    assert "#app{max-width:1440px}" in INDEX  # рабочий холст с центровкой на ≥900
 
 
 def test_side_rail_from_dock():
@@ -55,8 +61,9 @@ def test_narads_chat_adapted_not_stretched():
 
 
 def test_portrait_untouched():
-    # все альбомные правила — внутри media-блока; снаружи layout без изменений
+    # все широкие правила — внутри media-блоков; снаружи layout без изменений
     outside = INDEX.replace(LAND, "")
+    outside = outside.replace("#app{max-width:1440px}", "")
     assert "padding-left:76px" not in outside
     assert ".dock{position:fixed;left:0" not in outside
     assert "grid-template-columns:1.1fr 1fr" not in outside
