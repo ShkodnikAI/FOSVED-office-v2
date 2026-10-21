@@ -37,6 +37,13 @@ from proxy.core import INTEGRATIONS_REGISTRY, get_secret  # noqa: E402
 
 TIMEOUT_S = 10.0
 
+
+def _qwen_models_url():
+    """№586 A.1: URL /models для Qwen — тот же регион, что и PROVIDERS["qwen"]
+    (международный по умолчанию; китайский — через QWEN_BASE_URL)."""
+    base = os.environ.get("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+    return base + "/models"
+
 # Классификация санкционных ограничений из исходного манифеста fdf7ae1:
 # ANTHROPIC/OpenAI — False (заблокированы для владельца), Telegram/DeepSeek/
 # Groq/Z.ai/GitHub — True. Ключи, которых в исходном манифесте не было,
@@ -98,6 +105,11 @@ KEY_MANIFEST = [
      "how_link": "https://platform.moonshot.ai/console/api-keys",
      "why": "LLM-провайдер.",
      "check": {"type": "openai_models", "url": "https://api.moonshot.ai/v1/models"}},
+    {"env_key": "QWEN_API_KEY", "label": "Qwen (Alibaba)", "kind": "model",  # №586 A.1
+     "required": False, "sanctions_ok": True,
+     "how_link": "https://bailian.console.alibabacloud.com",
+     "why": "LLM-провайдер (DashScope, OpenAI-совместимый режим; регион — QWEN_BASE_URL).",
+     "check": {"type": "openai_models", "url": _qwen_models_url()}},
     {"env_key": "TAVILY_API_KEY", "label": "Tavily (веб-поиск)", "kind": "service",
      "required": True, "sanctions_ok": True,
      "how_link": "https://app.tavily.com",
@@ -166,8 +178,10 @@ def _body_flag(resp, flag):
         return False
 
 
-def _run_check(env_key, spec, value):
-    """Один проверочный вызов. Возвращает (status, http_code, detail)."""
+def _run_check(env_key, spec, value, models_out=None):
+    """Один проверочный вызов. Возвращает (status, http_code, detail).
+    №586 B.1: если models_out — список, в него собираются до 10 id моделей
+    из ответа /models (для сэмпла в ответе проверки из Mini App)."""
     t = spec["type"]
     headers = {"Authorization": f"Bearer {value}"} if t in ("openai_models", "tavily_usage", "github_rate_limit", "deepseek") else {}
     if t == "anthropic_models":
@@ -233,6 +247,15 @@ def _run_check(env_key, spec, value):
         if t == "openai_models":
             resp = http_requests.get(spec["url"], headers=headers, timeout=_HTTP_TIMEOUT_S)
             status, detail = _classify(resp)
+            if status == "ok" and models_out is not None:
+                try:
+                    body = resp.json()
+                    data = body.get("data") if isinstance(body, dict) else None
+                    ids = [str(m.get("id")) for m in (data or [])
+                           if isinstance(m, dict) and m.get("id")]
+                    models_out.extend(ids[:10])
+                except Exception:  # noqa: BLE001 — сэмпл моделей не влияет на вердикт
+                    pass
             return status, resp.status_code, detail
         if t == "anthropic_models":
             resp = http_requests.get(spec["url"], headers=headers, timeout=_HTTP_TIMEOUT_S)
@@ -294,14 +317,48 @@ def check_all(timeout=TIMEOUT_S):
 
 def save_results(summary):
     """Сохранить последний результат в key_health_status (upsert по env_key)."""
-    from proxy.core import _query
     for r in summary["results"]:
-        _query(
-            "INSERT INTO key_health_status (env_key, status, http_code, detail, checked_at) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(env_key) DO UPDATE SET status=excluded.status, http_code=excluded.http_code, "
-            "detail=excluded.detail, checked_at=excluded.checked_at",
-            (r["env_key"], r["status"], r["http_code"], r["detail"], summary["checked_at"]),
-        )
+        save_result(r, checked_at=summary["checked_at"])
+
+
+def save_result(r, checked_at=None):
+    """№586 B.1: upsert одной строки в key_health_status (проверка из Mini App)."""
+    from proxy.core import _query
+    _query(
+        "INSERT INTO key_health_status (env_key, status, http_code, detail, checked_at) VALUES (?,?,?,?,?) "
+        "ON CONFLICT(env_key) DO UPDATE SET status=excluded.status, http_code=excluded.http_code, "
+        "detail=excluded.detail, checked_at=excluded.checked_at",
+        (r["env_key"], r["status"], r["http_code"], r["detail"], checked_at or time.strftime("%Y-%m-%d %H:%M:%S")),
+    )
+
+
+def check_entry_detailed(entry, timeout=20.0):
+    """№586 B.1: проверка одного ключа по запросу из Mini App.
+    Отличия от check_entry: таймаут 20 с (задание), сэмпл моделей
+    (до 10 id из /models), checked_at в результате. Значение ключа
+    НИКОГДА не попадает в результат."""
+    global _HTTP_TIMEOUT_S
+    _prev = _HTTP_TIMEOUT_S
+    _HTTP_TIMEOUT_S = timeout
+    try:
+        env_key = entry["env_key"]
+        value = _key_value(env_key)
+        base = {"env_key": env_key, "label": entry["label"], "kind": entry["kind"],
+                "required": entry["required"], "sanctions_ok": entry["sanctions_ok"]}
+        if not value:
+            return {**base, "status": "missing", "http_code": None, "detail": "ключ не задан",
+                    "models_sample": [], "checked_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        spec = entry.get("check")
+        if not spec:
+            return {**base, "status": "unverified", "http_code": None,
+                    "detail": "задан; дешёвой проверки для этого провайдера нет",
+                    "models_sample": [], "checked_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        models_sample = []
+        status, code, detail = _run_check(env_key, spec, value, models_out=models_sample)
+        return {**base, "status": status, "http_code": code, "detail": detail,
+                "models_sample": models_sample, "checked_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    finally:
+        _HTTP_TIMEOUT_S = _prev
 
 
 def format_report(summary):
