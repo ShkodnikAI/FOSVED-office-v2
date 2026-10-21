@@ -487,6 +487,8 @@ def init_db():
         -- слот night-report (07:15 MSK) выгружает одним сообщением (OutboxFlush).
         CREATE TABLE IF NOT EXISTS owner_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), source TEXT NOT NULL, text TEXT NOT NULL, sent_at TEXT);
         CREATE INDEX IF NOT EXISTS idx_owner_outbox_sent ON owner_outbox(sent_at);
+        -- №587 A.1: оценки владельца «+»/«−» (DDL дублирует InitDB app.mlog)
+        CREATE TABLE IF NOT EXISTS reply_ratings (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, kind TEXT DEFAULT 'reply', ref TEXT DEFAULT '', chat_id TEXT, message_id INTEGER, vote INTEGER, comment TEXT, prompt_message_id INTEGER, created_at TEXT DEFAULT (datetime('now')), voted_at TEXT);
         CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS channel_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT, dept TEXT, title TEXT, channel_message_id TEXT, archived_at TEXT DEFAULT (datetime('now')));
         -- FO-009: темпоральный KG — valid_to NULL = актуально; superseded_by → новая версия

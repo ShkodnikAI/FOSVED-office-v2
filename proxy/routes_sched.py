@@ -472,6 +472,8 @@ def scheduler_morning_brief():
             brief = brief + "\n\n" + keys_line
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
+        # №587 A.2: ряд оценки к брифу Яны (kind=brief)
+        owner_rate_attach(owner_id, msg_id, "yana", kind="brief")
         _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
@@ -614,6 +616,8 @@ def scheduler_admin_morning_reply():
         final_reply = (night_line + "\n\n" + reply) if night_line else reply
 
         msg_id = _tg_send_formatted(owner_id, final_reply, dept="admin")
+        # №587 A.2: ряд оценки к ответу Админа
+        owner_rate_attach(owner_id, msg_id, "admin", kind="reply")
         _log_audit("scheduler_admin_morning_reply", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "reply": final_reply, "msg_id": msg_id})
@@ -650,6 +654,8 @@ def scheduler_evening_summary():
 
         # Send to owner
         msg_id = _tg_send_message(owner_id, summary)
+        # №587 A.2: ряд оценки к вечерней сводке
+        owner_rate_attach(owner_id, msg_id, "yana", kind="digest")
 
         # Publish daily digest to archive channel
         if TELEGRAM_ARCHIVE_CHANNEL_ID:
@@ -674,6 +680,26 @@ def scheduler_evening_summary():
         log.error(f"evening_summary error: {e}")
         _log_audit("scheduler_evening_summary_error", {"error": str(e)[:500]})
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def _ratings_counts_line(days=7):
+    """№587 A.4: строка «Оценки владельца (7 дн.): dept +N / −M …» из reply_ratings.
+    Цифры считаются SQL-ом, не LLM. Пусто — если оценок нет."""
+    try:
+        rows = _query(
+            "SELECT dept, COALESCE(SUM(CASE WHEN vote=1 THEN 1 ELSE 0 END),0) AS plus, "
+            "COALESCE(SUM(CASE WHEN vote=-1 THEN 1 ELSE 0 END),0) AS minus "
+            "FROM reply_ratings WHERE voted_at IS NOT NULL "
+            "AND voted_at > datetime('now', ?) GROUP BY dept ORDER BY plus DESC, minus DESC",
+            (f"-{days} days",), fetch=True)
+        if not rows:
+            return ""
+        parts = [f"{r['dept']} +{r['plus']} / −{r['minus']}" for r in rows]
+        return f"📊 Оценки владельца ({days} дн.): " + ", ".join(parts)
+    except Exception as e:  # noqa: BLE001
+        _log_error(f"ratings line failed: {e}", source="ratings_counts", kind="db_read")
+        return ""
+
 
 @app.post("/scheduler/weekly-digest")
 def scheduler_weekly_digest():
@@ -700,11 +726,18 @@ def scheduler_weekly_digest():
         result = call_llm("yana", messages)
         digest = result["reply"]
 
+        # №587 A.4: строка оценок владельца за 7 дней — цифры вставляет код, не LLM
+        ratings_line = _ratings_counts_line(days=7)
+        if ratings_line:
+            digest = ratings_line + "\n\n" + digest
+
         # Send via SendReport (if > 800 chars, use Mini App button)
         if len(digest) > 800:
-            msg_id = _tg_send_report_with_button(owner_id, digest)
+            msg_id = _tg_send_report_with_button(owner_id, digest, rate_dept="yana")
         else:
             msg_id = _tg_send_message(owner_id, digest)
+            # №587 A.2: ряд оценки к дайджесту
+            owner_rate_attach(owner_id, msg_id, "yana", kind="digest")
 
         _log_audit("scheduler_weekly_digest", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id, "chars": len(digest)})
 

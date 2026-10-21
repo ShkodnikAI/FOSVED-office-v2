@@ -185,11 +185,83 @@ def _tg_split_report(text, limit=4000):
     return parts
 
 
-def _tg_send_one_with_button(chat_id, text, btn):
+# ── №587 A.1/A.2: ряд оценки владельца «+»/«−» ──────────────────────────
+def _rate_buttons_enabled():
+    """kv rate_buttons (kv_store mlog-бинаря, пишет /rate_buttons и Mini App);
+    on по умолчанию. Выключатель не ломает отправку."""
+    try:
+        from proxy.core import _query
+        row = _query("SELECT value FROM kv_store WHERE key='rate_buttons'", fetch=True)
+        return not (row and str(row[0]["value"]).strip() == "off")
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _owner_rate_row(dept, kind="report", ref="", chat_id=None):
+    """Создать строку оценки (vote NULL) в reply_ratings; вернуть (rid, markup)
+    или (None, None) при rate_buttons=off/сбое. callback_data ≤ 64 байт:
+    rt:+:<id> / rt:-:<id> — текст ответа в callback_data не кладётся."""
+    if not _rate_buttons_enabled():
+        return None, None
+    try:
+        from proxy.core import _query
+        _query("INSERT INTO reply_ratings (dept, kind, ref, chat_id) VALUES (?,?,?,?)",
+               (dept, kind, str(ref or ""), str(chat_id or "")))
+        row = _query("SELECT id FROM reply_ratings ORDER BY id DESC LIMIT 1", fetch=True)
+        rid = row[0]["id"] if row else None
+        if rid is None:
+            return None, None
+        markup = {"inline_keyboard": [[
+            {"text": "+", "callback_data": f"rt:+:{rid}"},
+            {"text": "−", "callback_data": f"rt:-:{rid}"},
+        ]]}
+        return rid, markup
+    except Exception as e:  # noqa: BLE001 — оценка не ломает доставку
+        log.warning("rate row create failed: %s", e.__class__.__name__)
+        return None, None
+
+
+def owner_rate_markup(dept, kind="report", ref="", chat_id=None):
+    """reply_markup-ряд [+,−] для плановой отправки с известным отделом."""
+    return _owner_rate_row(dept, kind, ref, chat_id)[1]
+
+
+def _rate_note_message(rid, message_id):
+    """Привязать message_id отправленного сообщения к строке оценки."""
+    try:
+        from proxy.core import _query
+        _query("UPDATE reply_ratings SET message_id=? WHERE id=?", (message_id, rid))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def owner_rate_attach(chat_id, message_id, dept, kind="report", ref=""):
+    """№587 A.2: прикрепить ряд оценки к УЖЕ отправленному сообщению без своей
+    клавиатуры (editMessageReplyMarkup). Возврат rid или None."""
+    if not message_id or not _rate_buttons_enabled():
+        return None
+    rid, markup = _owner_rate_row(dept, kind, ref, chat_id)
+    if rid is None:
+        return None
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup"
+        resp = http_requests.post(url, json={"chat_id": chat_id, "message_id": message_id,
+                                             "reply_markup": markup}, timeout=30)
+        resp.raise_for_status()
+        _rate_note_message(rid, message_id)
+        return rid
+    except Exception as e:  # noqa: BLE001 — в лог без URL/токена (#567)
+        log.warning("rate attach failed: %s", e.__class__.__name__)
+        return None
+
+
+def _tg_send_one_with_button(chat_id, text, btn, extra_rows=None):
     """Один вызов sendMessage: текст + кнопка (reply_markup). Возврат message_id/None.
-    Наряд #567: в лог — status/desc/len, без {e} (URL содержит токен)."""
+    Наряд #567: в лог — status/desc/len, без {e} (URL содержит токен).
+    №587 A.2: extra_rows — дополнительные ряды клавиатуры (ряд оценки)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": [[btn]]}}
+    keyboard = [[btn]] + [r for r in (extra_rows or []) if r]
+    payload = {"chat_id": chat_id, "text": text, "reply_markup": {"inline_keyboard": keyboard}}
     resp = None
     try:
         resp = http_requests.post(url, json=payload, timeout=30)
@@ -204,7 +276,7 @@ def _tg_send_one_with_button(chat_id, text, btn):
     return None
 
 
-def _tg_send_report_with_button(chat_id, text, button_text="Otkryt otchet", button_url=None):
+def _tg_send_report_with_button(chat_id, text, button_text="Otkryt otchet", button_url=None, rate_dept=None):
     """Send text with an inline button via Telegram Bot API.
 
     Наряд #561: кнопка на /miniapp/<id> — web_app-кнопка (Telegram открывает
@@ -225,15 +297,22 @@ def _tg_send_report_with_button(chat_id, text, button_text="Otkryt otchet", butt
         btn = {"text": button_text, "web_app": {"url": button_url}}
     else:
         btn = {"text": button_text, "url": button_url or "https://t.me/FosvedMiniApp"}
+    # №587 A.2: ряд оценки — вторым рядом на последней части (если dept известен)
+    rate_rid, rate_markup = (None, None)
+    if rate_dept:
+        rate_rid, rate_markup = _owner_rate_row(rate_dept, "report")
+    rate_rows = [rate_markup["inline_keyboard"][0]] if rate_markup else []
     mid = None
     for i, part in enumerate(parts):
         if i < len(parts) - 1:
             mid = _tg_send_message(chat_id, part)  # части 1..n-1 — без кнопки
         else:
-            mid = _tg_send_one_with_button(chat_id, part, btn)  # последняя — с кнопкой
+            mid = _tg_send_one_with_button(chat_id, part, btn, extra_rows=rate_rows)  # последняя — с кнопкой
         if mid is None:
             log.error("Telegram sendReport: part %d/%d not delivered (len=%d)",
                       i + 1, len(parts), len(part))
+    if rate_rid is not None and mid is not None:
+        _rate_note_message(rate_rid, mid)
     return mid
 
 def _tg_get_file(file_id):
