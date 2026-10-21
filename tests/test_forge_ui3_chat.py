@@ -148,9 +148,9 @@ def test_mic_button_visual_only():
     assert '.yana-btn.active svg{stroke:#fff}' in INDEX
     btn_html = INDEX.split('id="micBtn"')[1].split("</button>")[0]
     assert "Яна" not in btn_html  # только иконка микрофона, без подписи
-    # .active — на удержании записи, не по клику
-    assert 'micBtn.addEventListener("pointerdown",function(){micBtn.classList.add("active")})' in INDEX
-    assert '["pointerup","pointercancel","pointerleave"].forEach' in INDEX
+    # №589 A.2: .active — на удержании ЗАПИСИ (micStart/micStop), не по клику
+    assert 'micBtn.addEventListener("pointerdown",function(e){e.preventDefault();micStart()})' in INDEX
+    assert '["pointerup","pointercancel","pointerleave"].forEach(function(ev){micBtn.addEventListener(ev,function(){micStop()})})' in INDEX
     assert 'micBtn.addEventListener("click"' not in INDEX
 
 
