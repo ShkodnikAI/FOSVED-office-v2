@@ -39,9 +39,9 @@ def _version(binary: str) -> str:
     return out.stdout.strip().splitlines()[0]
 
 
-def test_battle_binary_is_0331():
+def test_battle_binary_is_0332():
     v = _version("bin/mlog")
-    assert "0.33.1" in v, f"боевой бинарь должен быть 0.33.1 (релиз v0.33.1), получено: {v}"
+    assert "0.33.2" in v, f"боевой бинарь должен быть 0.33.2 (релиз v0.33.2), получено: {v}"
 
 
 def test_prev_good_binary_is_0271():
@@ -57,10 +57,10 @@ def test_old_binaries_are_out():
 
 
 def test_battle_binary_sha256_matches_artifact():
-    # целостность релиз-артефакта тега v0.33.1 (sha256 из SHA256SUMS релиза; наряд #571)
-    expected_prefix = "bef3e1b24e10aa909eb6250b71eb7b74911f8df6e8d758f029f991bd9131de98"
+    # целостность релиз-артефакта тега v0.33.2 (sha256 из SHA256SUMS релиза; переход 2026-10-21)
+    expected_prefix = "48b9816737665b8270bc268606926faba29d8094df838651a7e605b2ef4a7802"
     h = hashlib.sha256((REPO_ROOT / "bin" / "mlog").read_bytes()).hexdigest()
-    assert h == expected_prefix, f"bin/mlog sha256={h}, ожидание SHA256SUMS v0.33.1: {expected_prefix}"
+    assert h == expected_prefix, f"bin/mlog sha256={h}, ожидание SHA256SUMS v0.33.2: {expected_prefix}"
 
 
 def test_prev_good_binary_sha256_matches():

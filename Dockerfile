@@ -16,13 +16,16 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.33.1 — прод-бинарь (линия
-# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1, ADR-0009/0012/0015/0017/0018;
-# бинарь из официального релиза тега v0.33.1 (assets + SHA256SUMS), source commit 268cdde9,
-# sha256 артефакта bef3e1b24e10aa909eb6250b71eb7b74911f8df6e8d758f029f991bd9131de98 —
-# наряд #571: check-паритет с предыдущим пином на офисном корпусе (540 → 541 errors;
-# единственная новая находка [PII_EGRESS_OUTPUT] argument 0 of respond in route
-# GET /schedules/list — по запрету наряда НЕ чинится, зафиксирована в отчёте),
+# Metalogos v0.33.2 — прод-бинарь (линия
+# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2, ADR-0009/0012/0015/0017/0018;
+# бинарь из официального релиза тега v0.33.2 (assets + SHA256SUMS), source commit 693cf7dc,
+# sha256 артефакта 48b9816737665b8270bc268606926faba29d8094df838651a7e605b2ef4a7802 —
+# переход по приказу владельца 2026-10-21: check-паритет с предыдущим пином на офисном
+# корпусе — счёт находок идентичен (544 = 544), diff — ТОЛЬКО текст отказов
+# (Metalogos-#1350 Ask 3 (a2), gh#1355: шаблон ветвится по фактическому правилу —
+# №316-классификация вызова для не-ACTION синков вместо ложной цитаты моста №391);
+# известная находка [PII_EGRESS_OUTPUT] argument 0 of respond in route
+# GET /schedules/list ОСТАЁТСЯ — по запрету наряда НЕ чинится, зафиксирована в отчёте;
 # 0 parse errors app/dept; audit dept гейт №312 (mlog-0271) — 0 [ERROR];
 # grammar rev 1 — без смены ревизии грамматики; serve-подъём interpreter без отказа
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,

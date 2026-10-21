@@ -252,7 +252,7 @@ Reverse Proxy (Flask)
 ```
 .
 ├── app.mlog                  # Главный роутер (~4500 строк)
-├── bin/mlog                  # Metalogos v0.33.1 бинарник (x86-64, Rust, боевой, ADR-0018; 0.33.1 — апстрим-релиз (тег v0.33.1, source commit 268cdde9, SHA256SUMS verified bef3e1b2, наряд #571): check-паритет с предыдущим пином (540 → 541 errors, единственная новая находка [PII_EGRESS_OUTPUT] GET /schedules/list — не чинится по запрету наряда), 0 parse errors app/dept, фактическая версия bin/mlog)
+├── bin/mlog                  # Metalogos v0.33.2 бинарник (x86-64, Rust, боевой, ADR-0018; 0.33.2 — апстрим-релиз (тег v0.33.2, source commit 693cf7dc, SHA256SUMS verified 48b98167, переход по приказу владельца 2026-10-21): check-паритет с предыдущим пином — счёт находок идентичен на офисном корпусе (544 = 544; diff только в ТЕКСТЕ отказов — Metalogos-#1350 Ask 3 (a2): шаблон ветвится по фактическому правилу, №316-классификация для не-ACTION синков), известная находка [PII_EGRESS_OUTPUT] GET /schedules/list остаётся (не чинится по запрету наряда), 0 parse errors app/dept, фактическая версия bin/mlog)
 ├── bin/mlog-020              # Metalogos 0.20.0 wave-3 (main 29de25a) — стейджинг-догфуд (FO-050)
 ├── bin/mlog-0271             # Metalogos 0.27.1 (260a33a) — прошлый-хороший, тест-гвард (ADR-0015)
 ├── VERSION                   # runtime-генерируется при буте из RENDER_GIT_COMMIT; коммит в git — снимок последнего деплоя
