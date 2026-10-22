@@ -77,8 +77,13 @@ def shop_db(monkeypatch):
     conn.close()
     sup.ensure_schema()
     for t in ("shop_price_history", "shop_offers", "shop_sellers",
-              "shop_products", "shop_watches", "shop_supply_queue"):
+              "shop_products", "shop_watches", "shop_supply_queue",
+              "shop_supply_waves"):
         _query(f"DELETE FROM {t}")
+    # №598 A.1: supply-ключи (возможности/связь) — в БД, чистим, чтобы
+    # тесты файла шли в дефолтном фолбэке 7745 без утечки между тестами
+    _query("DELETE FROM system_settings WHERE key IN "
+           "('supply_platforms', 'supply_last_seen')")
     # сбор по неснабженческим площадкам подменён честной заглушкой-отказом:
     # сеть не трогается; площадки снабженца до collect() не доходят
     def fake_collect(platform, query, **kw):
@@ -87,8 +92,11 @@ def shop_db(monkeypatch):
     monkeypatch.setattr(sc, "collect", fake_collect)
     yield
     for t in ("shop_price_history", "shop_offers", "shop_sellers",
-              "shop_products", "shop_watches", "shop_supply_queue"):
+              "shop_products", "shop_watches", "shop_supply_queue",
+              "shop_supply_waves"):
         _query(f"DELETE FROM {t}")
+    _query("DELETE FROM system_settings WHERE key IN "
+           "('supply_platforms', 'supply_last_seen')")
 
 
 @pytest.fixture()
@@ -132,7 +140,13 @@ def test_next_empty_queue_task_null(client):
 
 def test_shop_product_returns_supply_pending(client, monkeypatch):
     """/shop/product с ozon → collect.ozon.kind == "supply_pending" +
-    строка в очереди status=pending (чек-лист наряда)."""
+    строка в очереди status=pending (чек-лист наряда).
+
+    Наряд #598 A.1: очередь — только интерсекция
+    SUPPLY_AGENT_PLATFORMS ∩ supply_platforms; ozon подводится через
+    supply_platforms в БД (как если бы снабженец прислал заголовок)."""
+    _query("INSERT OR REPLACE INTO system_settings (key, value) "
+           "VALUES ('supply_platforms', 'ozon')")
     monkeypatch.setattr(sw, "PLATFORMS_MVP", ("wb", "ozon", "onliner"))
     r = client.post("/shop/product", json={"query": "чайник xiaomi"})
     assert r.status_code == 200, r.get_data(as_text=True)
@@ -152,6 +166,22 @@ def test_shop_product_returns_supply_pending(client, monkeypatch):
     # регрессия внутри того же ответа: неснабженческие площадки — старый путь
     assert body["collect"]["wb"]["kind"] == "test_stub"
     assert body["collect"]["onliner"]["kind"] == "test_stub"
+
+
+def test_shop_product_not_ready_platform_skips_queue(client, monkeypatch):
+    """Наряд #598 A.1: снабженческая площадка ВНЕ supply_platforms →
+    collector_not_ready, задания в очереди НЕТ (честная метка вместо
+    «ждёт выполнения» и отказов снабженца collector_not_implemented)."""
+    monkeypatch.setattr(sw, "PLATFORMS_MVP", ("wb", "ozon", "onliner"))
+    r = client.post("/shop/product", json={"query": "чайник xiaomi"})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    body = r.get_json()
+    oz = body["collect"]["ozon"]
+    assert oz["kind"] == "collector_not_ready", oz
+    assert oz["ok"] is False
+    row = _query("SELECT COUNT(*) c FROM shop_supply_queue WHERE product_id=? "
+                 "AND platform='ozon'", (body["product_id"],), fetch=True)
+    assert row[0]["c"] == 0
 
 
 def test_dequeue_dispatch_once(client):

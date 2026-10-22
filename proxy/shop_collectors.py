@@ -1439,8 +1439,18 @@ def refresh_product(product_id, platform, query, **kw):
     # (антибот/GeoIP с датацентровых IP — recog. наряда) — задание ставится
     # в очередь /supply/*, офферы приложит снабженец с домашнего IP.
     # wb/onliner/ym не в SUPPLY_AGENT_PLATFORMS — путь ниже не меняется.
-    from proxy.shop_supply import SUPPLY_AGENT_PLATFORMS, enqueue_supply_task
+    # №598 A.1: задания — только площадкам из интерсекции
+    # SUPPLY_AGENT_PLATFORMS ∩ supply_platforms (что снабженец УМЕЕТ —
+    # заголовок X-Supply-Platforms / env-фолбэк). Остальные снабженческие
+    # площадки — честное collector_not_ready без задания в очереди:
+    # снабженец больше не отвечает отказами collector_not_implemented на
+    # задания, которые он в принципе не может исполнить.
+    from proxy.shop_supply import (SUPPLY_AGENT_PLATFORMS, enqueue_supply_task,
+                                   resolve_supplier_platforms)
     if platform in SUPPLY_AGENT_PLATFORMS:
+        if platform not in resolve_supplier_platforms():
+            return {"ok": False, "platform": platform,
+                    "kind": "collector_not_ready", "error": None}
         task_id = enqueue_supply_task(product_id, platform, query)
         return {"ok": False, "platform": platform,
                 "kind": "supply_pending", "task_id": task_id}

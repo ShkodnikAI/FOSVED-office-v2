@@ -32,10 +32,15 @@ ENTRYPOINT = (REPO_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
 
 # ── A.2: человеческие статусы ────────────────────────────────────────────────
 
-def test_supply_pending_is_human():
+def test_supply_pending_is_human(monkeypatch):
+    """№598 A.2: supply_pending — живой статус связи со снабженцем.
+    Детерминизм: связи не было (supplier_last_seen → None) → честное
+    «недоступен», не старое статичное «ждёт выполнения» (наряд #598)."""
+    monkeypatch.setattr("proxy.shop_supply.supplier_last_seen", lambda: None)
     out = humanize_source_status({"ok": False, "kind": "supply_pending",
                                   "task_id": "T1", "error": ""})
-    assert out == "передано снабженцу, ждёт выполнения", out
+    assert "снабженец недоступен" in out, out
+    assert "задание ждёт его" in out, out
 
 
 def test_source_disabled_wording():

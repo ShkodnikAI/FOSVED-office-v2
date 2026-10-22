@@ -45,7 +45,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from proxy.shop_collectors import canonical_url
 
@@ -115,9 +115,35 @@ SOURCE_KIND_LABELS = {
     "no_collector": "нет сборщика",
     "not_found": "не найдено",
     "disabled": "магазин выключен",
-    # #429 A.2: очередь снабженца — человеческий статус вместо сырого кода
-    "supply_pending": "передано снабженцу, ждёт выполнения",
+    # #429 A.2 → №598 A.2: статус снабженческой площадки теперь живой
+    # (см. humanize_source_status): supply_pending показывается по факту
+    # связи со снабженцем (supply_last_seen), метка ниже — фолбэк.
+    "supply_pending": "передано снабженцу",
+    # №598 A.1: площадка снабженца, для которой сбор ещё не реализован —
+    # задание в очередь НЕ ставится (честная метка вместо «ждёт выполнения»)
+    "collector_not_ready": "сбор по этой площадке ещё не реализован",
 }
+
+
+def _supply_connection_status():
+    """№598 A.2: живой статус связи со снабженцем (по supply_last_seen).
+
+    Контакт ≤5 минут → «передано снабженцу…»; старше → «снабженец
+    недоступен с <время МСК> — задание ждёт его»; связи не было вовсе →
+    честное «недоступен (связи не было)». Время МСК — из UTC-штампа
+    system_settings (+3, фиксированный пояс). Читается из system_settings
+    на каждый вызов — статус в досье всегда по факту, не на момент среза.
+    """
+    from proxy.shop_supply import SUPPLY_FRESH_SECS, supplier_last_seen
+    seen = supplier_last_seen()
+    if seen is None:
+        return "снабженец недоступен (связи не было) — задание ждёт его"
+    age = datetime.now(timezone.utc) - seen
+    if age <= timedelta(seconds=SUPPLY_FRESH_SECS):
+        return "передано снабженцу (домашний сервер), результат придёт отдельно"
+    msk = seen + timedelta(hours=3)
+    return (f"снабженец недоступен с {msk.strftime('%d.%m %H:%M')} МСК — "
+            "задание ждёт его")
 
 
 def humanize_source_status(status):
@@ -131,6 +157,10 @@ def humanize_source_status(status):
         n = status.get("offers")
         return f"{n} предложений" if n is not None else "ok"
     kind = status.get("kind") or "transport"
+    if kind == "supply_pending":
+        # №598 A.2: вместо статичного «ждёт выполнения» — живой статус
+        # связи со снабженцем: доступен (контакт ≤5 мин) / недоступен с <МСК>.
+        return _supply_connection_status()
     label = SOURCE_KIND_LABELS.get(kind, kind)
     err = str(status.get("error") or "")
     if "403" in err:
