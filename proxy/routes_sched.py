@@ -37,6 +37,10 @@ from proxy.telegram import (
     _tg_send_message, _tg_send_voice, _tg_send_report_with_button,
     _tg_get_file, _tg_download_file, _tg_send_photo, _tg_send_document,
     _safe_filename_part, _send_chat_action_loop, _tg_send_chat_action,
+    # №587 A.2 (мерж cc46eef): owner_rate_attach зовётся из 4 эндпоинтов этого
+    # файла, но нигде не импортировался — NameError на любом брифе/дайджесте;
+    # вскрыто B.2-тестами #588 после мержа main
+    owner_rate_attach,
 )
 from proxy.reports import (
     html_lib_escape, strip_html_for_archive, _html_base, _dept_header,

@@ -49,6 +49,13 @@ def _run_scenario():
         BINARY.chmod(0o755)
     except OSError:
         pass
+    # сценарий держит db в /tmp/n588-test (заголовок test_n588_night.mlog:
+    # «Запуск: rm -rf /tmp/n588-test && mkdir -p /tmp/n588-test») — на чистом
+    # раннере CI каталога нет, connect падает («unable to open database file»,
+    # прогон 39674738541). Готовим каталог честно и идемпотентно.
+    import shutil
+    shutil.rmtree("/tmp/n588-test", ignore_errors=True)
+    os.makedirs("/tmp/n588-test", exist_ok=True)
     return subprocess.run(
         [str(BINARY), "run", str(SCENARIO)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=180,
