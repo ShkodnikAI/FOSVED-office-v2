@@ -549,6 +549,13 @@ def init_db():
             ensure_profile_schema()
         except Exception as e:
             log.warning(f"[init] owner profile schema skipped (non-fatal): {e}")
+        # №597 A.1: реестр сообщённого (reported_items) — новая таблица РЯДОМ
+        # с существующими (news_cache/lz_github_updates не трогаются)
+        try:
+            from proxy.reported import init_reported_items
+            init_reported_items()
+        except Exception as e:
+            log.warning(f"[init] reported_items schema skipped (non-fatal): {e}")
 
 
 def _query(sql, params=(), fetch=False):
