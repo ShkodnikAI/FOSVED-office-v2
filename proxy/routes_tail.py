@@ -1475,10 +1475,16 @@ def supply_next_endpoint():
     задания без результата исключена до истечения timeout_s. Пустая
     очередь → 200 {"task": null} — п.9 контракта решён в JSON,
     единообразно с остальными эндпоинтами офиса (наряд #421).
+
+    №598 A.1: каждый авторизованный опрос = живой контакт снабженца
+    (supply_last_seen) + его возможности (X-Supply-Platforms, если
+    заголовок пришёл; фолбэк для старого снабженца без заголовка —
+    env SUPPLY_AGENT_COLLECTORS, дефолт 7745).
     """
     if not _supply_agent_ok():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    from proxy.shop_supply import dequeue_next_task
+    from proxy.shop_supply import dequeue_next_task, touch_supplier
+    touch_supplier(request.headers.get("X-Supply-Platforms", ""))
     return jsonify({"task": dequeue_next_task()})
 
 
