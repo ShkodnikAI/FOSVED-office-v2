@@ -75,7 +75,7 @@ def test_night_tick_chains_all_nightly_jobs():
     sched = (REPO_ROOT / "dept" / "scheduler.mlog").read_text(encoding="utf-8")
     slot_idx = sched.find("pattern NightTickSlot()")
     assert slot_idx > 0
-    slot_body = sched[slot_idx:slot_idx + 6000]  # #550/#588: тело выросло (outbox + прямые вызовы + resume-гварды)
+    slot_body = sched[slot_idx:slot_idx + 7000]  # #550/#588: тело выросло (outbox + прямые вызовы + resume-гварды); #596: evals-фаза async+поллинг — OutboxPut("night-tick" на ~6.2k)
     assert '"backup"' in slot_body
     # #550 A.3: indicator-reminders/golden-evals — маршруты mlog :10001, Flask :4000
     # отвечал 404 (факт 4 наряда) — слот зовёт Python-эндпоинты напрямую;

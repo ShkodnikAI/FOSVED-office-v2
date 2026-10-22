@@ -643,6 +643,42 @@ pattern NightPhaseBegin(name: String) -> String {
   return "acquired"
 }
 
+// №596 A.2: поллинг фонового задания (proxy/jobs.py, реестр в процессе
+// Python-прокси). Пауза 25 с между опросами, до 60 опросов (25 мин) на фазу —
+// по тексту наряда. while в бинаре — bounded fixpoint ≤8 проходов (REFERENCE),
+// для 25 минут его мало; each по синтетическому списку — data-driven, а
+// ранний return из паттерна внутри each надёжен (прецедент core/passport
+// fosved-acc, правило 1). http_get без второго аргумента — кастомного
+// таймаута у GET-формы нет, дефолт 30 с достаточен (статус отвечает сразу).
+// Итог: {"state":"done","result":<payload>} | {"state":"failed","error":…}
+// | {"state":"timeout",...}; «unknown» трактуется как failed (fail-closed).
+pattern PollJobStatus(base: String, query: String) -> String {
+  let polls = parse_json("[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59]")
+  each _p in polls {
+    let raw = TryVal(try http_get(base + "?" + query))
+    // Ответ http_get — недоверенный источник (UNTRUSTED_DECISION): решения —
+    // только через redact-fingerprint сравнение с литералом (идиома
+    // dept/utils.mlog:343-352, dept/dev.mlog:1932+, гвард №327-класса).
+    if redact(to_string(raw), "hash_only") == redact("()", "hash_only") {
+      sleep(25.0)
+    } else {
+      let st = TryVal(try parse_json(to_string(raw)))
+      let state = to_string(json_get(st, "status", ""))
+      if redact(state, "hash_only") == redact("done", "hash_only") {
+        return json_encode({state: "done", result: to_string(json_get(st, "result", "{}"))})
+      }
+      if redact(state, "hash_only") == redact("failed", "hash_only") {
+        return json_encode({state: "failed", error: to_string(json_get(st, "error", "job failed"))})
+      }
+      if redact(state, "hash_only") == redact("unknown", "hash_only") {
+        return json_encode({state: "failed", error: "job lost (unknown/pruned)"})
+      }
+      sleep(25.0)
+    }
+  }
+  return json_encode({state: "timeout", error: "job not done in 25 min"})
+}
+
 // Слот 07:15 MSK (dept/schedules.mlog: night-report) — единственная точка
 // доставки ночной почты. TryVal — сбой выгрузки не роняет крон-прогон,
 // причина уходит в audit_log.
@@ -724,8 +760,22 @@ pattern NightTickSlot() -> String {
     // GoldenEvalsSlot ниже): raw-секрет в http_post = private-egress
     // (Category-A гварда долга №327, CI run 39227678822); cron_secret_ok
     // принимает hash-form встречно (№425).
-    let r_evals = redact(to_string(TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals?secret=" + redact(env("CRON_SECRET"), "hash_only"), "{}", "application/json", 300.0))), "all")
-    if to_string(r_evals) == "()" then {
+    // #596 A.2: прогон evals честно работал дольше 300 с, но mlog-клиент
+    // обрывал ожидание по таймауту (прод 22.10: evals=FAIL при живом прогоне,
+    // алерт пришёл отдельно). Фоном: async=1 → job_id → поллинг статуса
+    // (PollJobStatus, до 25 мин); итог фазы — по статусу задания.
+    let mut evals_state = "FAIL"
+    let ge_start = TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals?secret=" + redact(env("CRON_SECRET"), "hash_only") + "&async=1", "{}", "application/json", 300.0))
+    let ge_job = to_string(json_get(TryVal(try parse_json(to_string(ge_start))), "job_id", ""))
+    // решения на недоверенных данных — через redact-fingerprint (№327-класс,
+    // идиома dept/utils.mlog:343-352; audit 0271: 0 errors)
+    if redact(ge_job, "hash_only") != redact("", "hash_only") and redact(ge_job, "hash_only") != redact("null", "hash_only") then {
+      let ge_poll = TryVal(try parse_json(PollJobStatus("http://127.0.0.1:4000/scheduler/golden-evals/status", "job=" + ge_job + "&secret=" + redact(env("CRON_SECRET"), "hash_only"))))
+      if redact(to_string(json_get(ge_poll, "state", "")), "hash_only") == redact("done", "hash_only") then {
+        evals_state = "ok"
+      }
+    }
+    if evals_state == "FAIL" then {
       report = report + " evals=FAIL"
     } else {
       // #569 A.4: см. комментарий выше — аудит не роняет слот.
