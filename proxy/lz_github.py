@@ -31,6 +31,7 @@ from proxy.telegram import (
     owner_rate_attach,
 )
 from proxy.reports import _evidence_badges_css, html_lib_escape
+from proxy import reported as rpt  # №597 A.1: реестр сообщённого
 from proxy.lz_sources import arxiv_search, hn_search, github_repo_search, lz_api_scan
 from proxy.news import (
     collect_tavily, collect_rss, collect_gdelt, get_fresh_news,
@@ -314,18 +315,21 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
         }
 
         # ── Phase 1.5: Collect world news from news_cache (RSS + Tavily + GDELT) ──
+        # №597 A.2: строки новостей сохраняются как есть (hash/url нужны для
+        # ключей реестра сообщённого) — источники сбора не меняются
         world_news_text = ""
+        news_rows = []
         try:
-            news_rows = _query("""SELECT source, title, summary, url, category, published
+            news_rows = _query("""SELECT source, title, summary, url, category, published, hash
                                   FROM news_cache
                                   WHERE collected > datetime('now', '-24 hours')
-                                  ORDER BY published DESC LIMIT 20""", fetch=True)
+                                  ORDER BY published DESC LIMIT 20""", fetch=True) or []
             if news_rows:
                 cats_order = {"tech": 0, "science": 1, "geopolitics": 2, "news_ru": 3, "news_en": 4, "finance": 5}
                 news_rows.sort(key=lambda r: (cats_order.get(r[4], 9), r[5] or ""))
                 world_news_text = f"=== МИРОВЫЕ НОВОСТИ И СОБЫТИЯ ({len(news_rows)} за 24ч) ===\n\n"
                 for nr in news_rows:
-                    src, title, summary, url, cat, pub = nr
+                    src, title, summary, url, cat, pub = nr[0], nr[1], nr[2], nr[3], nr[4], nr[5]
                     entry = f"[{src}] {title}\n"
                     if url:
                         entry += f"  Ссылка: {url}\n"
@@ -336,6 +340,7 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                     world_news_text += entry + "\n"
         except Exception as e:
             log.warning(f"LZ Daily: world news query failed: {e}")
+            news_rows = []
 
         # Count world news items
         news_count = len(world_news_text.split("[")) - 1 if world_news_text else 0
@@ -343,25 +348,63 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
         # Update scan_summary with news count
         scan_summary["world_news"] = news_count
 
+        # ── Phase 1.7: №597 A.2 — отбор нового ДО модели (реестр сообщённого) ──
+        # Элементы скана получают ключи реестра; в промпт попадают только
+        # те, что владелец ещё НЕ получал (или значимый рост звёзд — с
+        # пометкой «обновление»). Содержание источников не меняется.
+        lz_items = []
+        for r in all_repos:
+            lz_items.append({"key": rpt.norm_repo_key(r.get("name", "")), "kind": "repo",
+                             "stars": r.get("stars"), "title": r.get("name", ""),
+                             "url": r.get("url", ""), "item": r})
+        for r in all_releases:
+            lz_items.append({"key": rpt.norm_release_key(r.get("repo", ""), r.get("tag", "")), "kind": "release",
+                             "title": f"{r.get('repo', '')} {r.get('tag', '')}",
+                             "url": r.get("url", ""), "item": r})
+        for nr in news_rows:
+            lz_items.append({"key": rpt.norm_news_key(nr[6], nr[3]), "kind": "news",
+                             "title": nr[1], "url": nr[3] or ""})
+        try:
+            new_items, update_items = rpt.filter_lz_items("lz_daily", lz_items)
+        except Exception as e:
+            # сбой реестра не должен ломать ежедневный отчёт — деградация до
+            # прежнего поведения (все элементы в промпт)
+            log.warning(f"LZ Daily: reported_items filter failed (non-fatal): {e}")
+            new_items, update_items = list(lz_items), []
+        included_items = new_items + update_items
+
         # ── Phase 2: LLM Analysis ─────────────────────────────
         lz_prompt = get_dept_prompt("lz")
 
-        if github_ok or world_news_text:
-            # Direct API worked — analyze the data we collected
+        # №597 A.2: модели скармливаются ТОЛЬКО отобранные элементы; без
+        # нового — модель не вызывается вовсе (владельцу одна строка).
+        result = {"provider": "-", "tokens_in": 0, "tokens_out": 0}
+        analysis = ""
+        hidden_repeats = 0
+        if included_items:
+            inc_repos = [it for it in included_items if it["kind"] == "repo"]
+            inc_releases = [it for it in included_items if it["kind"] == "release"]
+            inc_news = [it for it in included_items if it["kind"] == "news"]
+            # формат пунктов — прежний; для обновлений — пометка роста звёзд
             repos_text = ""
-            for i, r in enumerate(all_repos[:15], 1):
-                repos_text += f"{i}. {r['name']} ({r['stars']}★, {r['lang']}) — {r['desc']}\n   {r['url']}\n"
+            for i, it in enumerate(inc_repos[:15], 1):
+                r = it["item"]
+                lbl = f" {it['update_label']}" if it.get("update_label") else ""
+                repos_text += f"{i}. {r['name']} ({r['stars']}★, {r['lang']}){lbl} — {r['desc']}\n   {r['url']}\n"
             releases_text = ""
-            for r in all_releases:
-                releases_text += f"- {r['repo']} {r['tag']}: {r['name']} ({r['date']})\n  {r['body']}\n  {r['url']}\n"
+            for it in inc_releases:
+                r = it["item"]
+                lbl = f" {it['update_label']}" if it.get("update_label") else ""
+                releases_text += f"- {r['repo']} {r['tag']}: {r['name']} ({r['date']}){lbl}\n  {r['body']}\n  {r['url']}\n"
+            news_section = ""
+            if inc_news:
+                news_section = f"=== МИРОВЫЕ НОВОСТИ И СОБЫТИЯ (новое, {len(inc_news)}) ===\n\n"
+                for it in inc_news:
+                    u = it.get("url", "")
+                    news_section += f"{u}\n" if u else "(без ссылки)\n"
             monitors_text = ""
             if monitor_topics:
                 monitors_text = "Custom monitors: " + ", ".join(monitor_topics)
-
-            # Build world news section for prompt
-            news_section = ""
-            if world_news_text:
-                news_section = f"\n{world_news_text}\n"
 
             analysis_messages = [
                 {"role": "system", "content": lz_prompt + "\n\n"
@@ -378,37 +421,24 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                  "Фильтруй: релевантное для AI-офиса, технологий, мировых событий.\n"
                  "Язык: русский."},
                 {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
-                 f"=== НОВЫЕ РЕПОЗИТОРИИ ({len(all_repos)} найдено) ===\n"
+                 f"=== НОВЫЕ РЕПОЗИТОРИИ ({len(inc_repos)} найдено) ===\n"
                  f"{repos_text}\n\n"
-                 f"=== НОВЫЕ РЕЛИЗЫ ({len(all_releases)}) ===\n"
+                 f"=== НОВЫЕ РЕЛИЗЫ ({len(inc_releases)}) ===\n"
                  f"{releases_text}\n\n"
                  f"{news_section}"
                  f"{monitors_text}"}
             ]
-        else:
-            # GitHub API failed — but we may have world news from news_cache
-            log.info("LZ Daily: GitHub API failed, using available data")
-            news_section = ""
-            if world_news_text:
-                news_section = f"\n{world_news_text}\n"
-            analysis_messages = [
-                {"role": "system", "content": lz_prompt + "\n\n"
-                 "Ты — Лаборатория знаний Фосвед Офиса. Проведи ежедневный обзор новинок и событий.\n\n"
-                 "Структура отчёта:\n"
-                 "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — с disrupting potential 1-10\n"
-                 "2. 🌍 Ключевые мировые события — экономика, политика, breakthrough\n"
-                 "3. 💡 Рекомендации Админу\n\n"
-                 "ПРАВИЛО ССЫЛОК: для КАЖДОГО упомянутого проекта/события ОБЯЗАТЕЛЬНО включай прямую ссылку на источник.\n"
-                 "Используй ТОЛЬКО ссылки из предоставленных данных. Если данных нет — укажи поисковый запрос.\n\n"
-                 "Язык: русский."},
-                {"role": "user", "content": f"Сделай ежедневный обзор новинок и событий за {datetime.utcnow().isoformat()[:10]}.\n\n"
-                 f"{news_section}"
-                 f"Фокус: AI, технологии, мировые события, breakthrough.\n\n"
-                 f"Для каждого пункта укажи: название, прямую ссылку на источник, что нового, почему важно."}
-            ]
 
-        result = call_llm("lz", analysis_messages)
-        analysis = result.get("reply", "Analysis failed.")
+            result = call_llm("lz", analysis_messages)
+            analysis = result.get("reply", "Analysis failed.")
+            # ── №597 A.3: страховка после модели — абзац, где вся(единственная)
+            # ссылка ведёт на уже сообщённый (≤14 дней) элемент, удаляется;
+            # число удалённых — в подвал отчёта.
+            try:
+                analysis, hidden_repeats = rpt.filter_stale_blocks(analysis, "lz_daily")
+            except Exception as e:
+                log.warning(f"LZ Daily: stale-block filter failed (non-fatal): {e}")
+                hidden_repeats = 0
 
         # ── Phase 3: Save to DB + Memory (with cross-run dedup) ───────────
         if not dry_run:
@@ -455,18 +485,27 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                         )
 
         # ── Phase 4: Build Report ─────────────────────────────
-        report = f"🔍 LZ DAILY REPORT — {datetime.utcnow().isoformat()[:10]}\n"
-        report += f"{'=' * 40}\n\n"
-        report += analysis
-        report += f"\n\n{'─' * 40}\n"
-        report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {news_count} новостей, {len(monitor_topics)} monitors\n"
-        report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
+        if not analysis:
+            # №597 A.2: нового нет — модель не вызывалась, владельцу одна строка
+            report = (f"🔍 ЛЗ: за сутки новых находок нет "
+                      f"(просмотрено {len(all_repos)} репозиториев, {len(all_releases)} релизов, {news_count} новостей)")
+        else:
+            report = f"🔍 LZ DAILY REPORT — {datetime.utcnow().isoformat()[:10]}\n"
+            report += f"{'=' * 40}\n\n"
+            report += analysis
+            report += f"\n\n{'─' * 40}\n"
+            report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {news_count} новостей, {len(monitor_topics)} monitors\n"
+            if hidden_repeats:
+                # №597 A.3: страховка после модели — сколько абзацев скрыто
+                report += f"скрыто повторов: {hidden_repeats}\n"
+            report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
 
         # ── Phase 5: Send to Owner (Admin) ────────────────────
         # #550 A.1: deliver="outbox" (ночной прогон из NightSlot Phase 1) —
         # отчёт пишется в owner_outbox; Telegram-доставку выполняет OutboxFlush
         # слота night-report в 07:15 MSK. Дефолт — немедленная отправка.
         msg_id = None
+        sent_ok = False
         if owner_id and not dry_run:
             if deliver == "none":
                 pass  # №588 B.1: ночная доставка запрещена — см. scheduler_lz_daily
@@ -475,13 +514,34 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                     "INSERT INTO owner_outbox (source, text) VALUES (?, ?)",
                     ("lz-daily", report),
                 )
+                sent_ok = True  # вставка в outbox прошла — этап доставки выполнен
             elif len(report) > 1500:
                 # №587 A.2: ряд оценки вторым рядом на последней части (dept=lz)
                 msg_id = _tg_send_report_with_button(owner_id, report, rate_dept="lz")
+                sent_ok = bool(msg_id)
             else:
                 msg_id = _tg_send_message(owner_id, report)
-                # №587 A.2: ряд оценки к короткому lz-daily
-                owner_rate_attach(owner_id, msg_id, "lz", kind="report")
+                sent_ok = bool(msg_id)
+                if sent_ok:
+                    # №587 A.2: ряд оценки к короткому lz-daily
+                    owner_rate_attach(owner_id, msg_id, "lz", kind="report")
+
+        if sent_ok and included_items:
+            # №597 A.1: запись в реестр — ТОЛЬКО после успешной отправки;
+            # сбой отправки = «не сообщено» (ключи остаются новыми для след. прогона)
+            last_values = {}
+            for it in included_items:
+                lv = {}
+                if it.get("stars") is not None:
+                    lv["stars"] = it["stars"]
+                if it.get("title"):
+                    lv["title"] = it["title"]
+                if lv:
+                    last_values[it["key"]] = lv
+            try:
+                rpt.mark_many("lz_daily", [it["key"] for it in included_items], last_values)
+            except Exception as e:
+                log.warning(f"LZ Daily: reported_items mark failed (non-fatal): {e}")
 
         _log_audit("lz_daily_report", {
             "repos": len(all_repos), "releases": len(all_releases),

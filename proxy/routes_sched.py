@@ -47,7 +47,7 @@ from proxy.reports import (
     _status_icon, _dept_kpis, _build_action_bar, ARCHIVE_MONTHS_RU,
     _browse_page, _evidence_badges_css,
 )
-from proxy.news import get_night_news_digest, get_fresh_news
+from proxy.news import get_night_news_digest, get_night_news_items, get_fresh_news
 # №596 A.3: scheduler_lz_daily_core из брифа удалён (обход «BRIEF-1 доп.»),
 # импорт больше не нужен — полный отчёт ЛЗ только в LzDailySlot 09:10.
 
@@ -389,7 +389,9 @@ def scheduler_morning_brief():
             _log_error(f"LZ memory recall failed: {e}", source="morning_brief", dept="yana", kind="memory")
 
         # ── 4. Night news (with explicit empty marker) ──
-        night_news = get_night_news_digest()
+        # №597 A.2: в бриф — только НЕ сообщённые события; keys — для пометки
+        # в реестре после успешной отправки
+        night_news, night_news_keys = get_night_news_items()
         if not night_news:
             night_news = "\n📰 Топ события за ночь: НЕТ ДАННЫХ (сборщик новостей не вернул результатов)\n"
 
@@ -476,6 +478,16 @@ def scheduler_morning_brief():
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         # №587 A.2: ряд оценки к брифу Яны (kind=brief)
         owner_rate_attach(owner_id, msg_id, "yana", kind="brief")
+        # №597 A.1/A.2: события брифа — в реестр сообщённого ТОЛЬКО после
+        # успешной отправки (сбой отправки = «не сообщено»)
+        if msg_id and night_news_keys:
+            try:
+                from proxy import reported as rpt
+                rpt.mark_many("brief_events", [it["key"] for it in night_news_keys],
+                              {it["key"]: {"title": it["title"]} for it in night_news_keys if it.get("title")})
+            except Exception as e:
+                _log_error(f"brief: reported_items mark failed: {e}",
+                           source="scheduler_morning_brief", dept="yana", kind="registry")
         # №588 B.2: бриф — в dialog_history (dept='yana', role='assistant',
         # chat_id=owner) тем же способом, каким пишутся обычные ответы Яны;
         # без этого ответ Админа 07:25 не находит бриф («не найден свежий отчёт»).

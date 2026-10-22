@@ -401,15 +401,47 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
     return news_text
 
 
-def get_night_news_digest():
-    """Top-5 events over last 12 hours for morning brief."""
-    rows = _query("""SELECT source, title, category FROM news_cache
+def get_night_news_items():
+    """№597 A.2: Топ события за ночь — только НЕ сообщённые владельцу.
+
+    Возвращает (text, items): text — дайджест новых новостей (или строка
+    «За ночь новых событий нет», если сбор есть, но всё уже сообщено; или
+    "" — сбор не вернул ничего); items — [{key, title}] для пометки в
+    реестре reported_items(channel='brief_events') ПОСЛЕ успешной отправки.
+    Сбор (news_cache, окна, лимиты) не меняется — фильтруется только выдача.
+    """
+    rows = _query("""SELECT source, title, category, url, hash FROM news_cache
                      WHERE collected > datetime('now', '-12 hours')
-                     ORDER BY relevance_score DESC, published DESC LIMIT 5""", fetch=True)
+                     ORDER BY relevance_score DESC, published DESC LIMIT 20""", fetch=True)
     if not rows:
-        return ""
+        return "", []
+    try:
+        from proxy import reported as rpt
+        fresh = []
+        for r in rows:
+            try:
+                key = rpt.norm_news_key(r["hash"], r["url"])
+                if rpt.is_reported("brief_events", key):
+                    continue
+            except Exception:  # noqa: BLE001 — сбой реестра не роняет бриф
+                pass
+            fresh.append((r, key))
+    except Exception:  # noqa: BLE001 — реестр недоступен → прежнее поведение
+        fresh = [(r, None) for r in rows]
+    if not fresh:
+        return "\n📰 За ночь новых событий нет.\n", []
     emoji = {"tech": "🔬", "finance": "💰", "geopolitics": "🌍", "science": "🧪", "news_ru": "📌", "news_en": "📌"}
+    # прежний формат выдачи (топ-5), но из неотмеченных
     digest = "\n📰 Топ события за ночь:\n"
-    for r in rows:
+    items = []
+    for r, key in fresh[:5]:
         digest += f"  {emoji.get(r[2], '📄')} [{r[0]}] {r[1][:80]}\n"
-    return digest
+        if key:
+            items.append({"key": key, "title": r[1]})
+    return digest, items
+
+
+def get_night_news_digest():
+    """Top-5 events over last 12 hours for morning brief (#597: только новые)."""
+    text, _items = get_night_news_items()
+    return text
