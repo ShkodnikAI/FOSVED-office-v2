@@ -58,9 +58,10 @@ def test_remaining_direct_sends_are_admin_service_only():
         assert "admin" in window, (
             f"прямая отправка вне админ-контекста (строка {i + 1}) — разобрать по A.2")
     mini_lines = MINIAPP.splitlines()
+    # №587 A.2: short-путь отправляет через SendTelegramReplyRatings (ряд оценки)
     m_direct = [i for i, l in enumerate(mini_lines)
-                if "SendTelegramReply(chat_id, reply)" in l]
-    assert len(m_direct) == 1, "в miniapp.mlog прямая отправка — только short-путь SendReport"
+                if "SendTelegramReplyRatings(chat_id, reply, dept)" in l]
+    assert len(m_direct) == 1, "в miniapp.mlog short-путь SendReport — один (через ряд оценки)"
     seg = "\n".join(mini_lines[max(0, m_direct[0] - 10):m_direct[0] + 1])
     assert "pattern SendReport" in MINIAPP and "Short reply" in seg, (
         "единственная прямая отправка в miniapp.mlog — short-путь SendReport")

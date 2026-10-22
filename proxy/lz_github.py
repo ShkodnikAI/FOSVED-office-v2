@@ -28,6 +28,7 @@ from proxy.providers import (
 from proxy.telegram import (
     _tg_send_formatted, _tg_send_message, _tg_send_document, _tg_send_photo,
     _safe_filename_part, _send_chat_action_loop, _tg_send_report_with_button,
+    owner_rate_attach,
 )
 from proxy.reports import _evidence_badges_css, html_lib_escape
 from proxy.lz_sources import arxiv_search, hn_search, github_repo_search, lz_api_scan
@@ -475,9 +476,12 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                     ("lz-daily", report),
                 )
             elif len(report) > 1500:
-                msg_id = _tg_send_report_with_button(owner_id, report)
+                # №587 A.2: ряд оценки вторым рядом на последней части (dept=lz)
+                msg_id = _tg_send_report_with_button(owner_id, report, rate_dept="lz")
             else:
                 msg_id = _tg_send_message(owner_id, report)
+                # №587 A.2: ряд оценки к короткому lz-daily
+                owner_rate_attach(owner_id, msg_id, "lz", kind="report")
 
         _log_audit("lz_daily_report", {
             "repos": len(all_repos), "releases": len(all_releases),

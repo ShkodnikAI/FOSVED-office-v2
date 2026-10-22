@@ -99,7 +99,8 @@ def test_post_writes_model_only_file():
     r = _client().post("/api/model/depts", headers=API_AUTH,
                        json={"dept": "lz", "models": ["glm-4.6", "deepseek-chat"]})
     assert r.status_code == 200
-    assert r.get_json() == {"status": "ok", "dept": "lz", "override": ["glm-4.6", "deepseek-chat"]}
+    # №586: в ответ добавлен only-флаг режима «только эти модели» (False по умолчанию)
+    assert r.get_json() == {"status": "ok", "dept": "lz", "override": ["glm-4.6", "deepseek-chat"], "only": False}
     content = (routes_admin.CFG_DIR / "override_lz.txt").read_text(encoding="utf-8")
     assert content == "glm-4.6\ndeepseek-chat\n"
     # GET видит назначенное

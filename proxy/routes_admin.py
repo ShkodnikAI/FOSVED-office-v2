@@ -315,14 +315,51 @@ def _read_override_raw(dept):
         return None
 
 
+
+# ── №587 A.2: выключатель кнопок оценки (kv rate_buttons) ────────────────
+@app.get("/api/rate_buttons")
+def api_rate_buttons_get():
+    try:
+        row = _query("SELECT value FROM kv_store WHERE key = 'rate_buttons' LIMIT 1", fetch=True)
+        enabled = not (row and str(row[0]["value"]).strip() == "off")
+        return jsonify({"status": "ok", "enabled": enabled})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/rate_buttons")
+def api_rate_buttons_set():
+    """№587 A.2: включить/выключить кнопки оценки (режим настройки офиса).
+    При off кнопки не добавляются к новым сообщениям; обработчик нажатий
+    по уже отправленным продолжает работать."""
+    d = request.get_json(force=True, silent=True) or {}
+    if "enabled" not in d:
+        return jsonify({"status": "error", "message": "enabled (bool) обязателен"}), 400
+    val = "on" if d.get("enabled") else "off"
+    try:
+        _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES ('rate_buttons', ?)", (val,))
+        _log_audit("rate_buttons_set", {"enabled": bool(d.get("enabled")), "source": "miniapp"})
+        return jsonify({"status": "ok", "enabled": bool(d.get("enabled"))})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.get("/api/model/depts")
 def api_model_depts_get():
     """MINIAPP-5 (#292) + MINIAPP-6 (#293): оверрайды моделей по отделам
     (+ сырой текст override-файла каждого отдела, read-only) + каталог моделей."""
     depts = [{"dept": d, "label": DEPT_NAMES[d], "override": _read_override_models(d),
-              "raw": _read_override_raw(d)}
+              "raw": _read_override_raw(d), "only": _override_only_flag(d)}
              for d in DEPT_NAMES]
     return jsonify({"status": "ok", "depts": depts, "catalog": _model_catalog()})
+
+
+def _override_only_flag(dept):
+    """№586 C.2: режим «только эти модели» — файл-флаг override_<dept>.only."""
+    try:
+        return (CFG_DIR / f"override_{dept}.only").exists()
+    except OSError:
+        return False
 
 
 @app.post("/api/model/depts")
@@ -332,7 +369,9 @@ def api_model_depts_set():
     body: {"dept": "lz", "models": ["glm-4.6", "deepseek-chat"]} — назначить
     (1..5 моделей, порядок = цепь fallback, провайдер выводится из префикса);
           {"dept": "lz", "models": []} — сброс: файл-плейсхолдер очищается,
-    отдел возвращается в auto-роутинг (как до назначения)."""
+    отдел возвращается в auto-роутинг (как до назначения), only-флаг снимается;
+          {"dept": "lz", "only": true|false} — №586 C.2: режим «только эти модели»
+    (без фолбэка в combo при недоступности назначенных)."""
     d = request.get_json(force=True, silent=True) or {}
     dept = str(d.get("dept") or "").strip()
     if dept not in DEPT_NAMES:
@@ -348,14 +387,24 @@ def api_model_depts_set():
             return jsonify({"status": "error", "message": f"некорректное имя модели: {m[:40]}"}), 400
     try:
         p = CFG_DIR / f"override_{dept}.txt"
+        only_path = CFG_DIR / f"override_{dept}.only"
+        only = d.get("only")
         if models:
             p.write_text("\n".join(models) + "\n", encoding="utf-8")
             _log_audit("model_override_set", {"dept": dept, "models": models, "source": "miniapp"})
         else:
             p.write_text("", encoding="utf-8")  # пустой плейсхолдер = auto (как в репо)
+            only = False  # №586 C.2: сброс назначения снимает и only-флаг
             _log_audit("model_override_reset", {"dept": dept, "source": "miniapp"})
+        # №586 C.2: файл-флаг «только эти модели»
+        if only is True:
+            only_path.write_text("1", encoding="utf-8")
+            _log_audit("model_override_only_set", {"dept": dept, "only": True, "source": "miniapp"})
+        elif only is False and only_path.exists():
+            only_path.unlink()
+            _log_audit("model_override_only_set", {"dept": dept, "only": False, "source": "miniapp"})
         _load_cfg()  # кэш провайдера обновляется сразу; mlog-цепь читает файл напрямую
-        return jsonify({"status": "ok", "dept": dept, "override": models})
+        return jsonify({"status": "ok", "dept": dept, "override": models, "only": bool(only)})
     except OSError as e:
         _log_error(f"model depts write failed: {e}", source="api_model_depts", kind="io")
         return jsonify({"status": "error", "message": "не удалось записать override"}), 500
@@ -538,6 +587,19 @@ def api_depts_chat():
         stale = [d for d in DEPT_COLORS if d != "yana" and act.get(d, ("", 0))[0] and act.get(d, ("", 0))[0] < cutoff]
         stale.sort(key=lambda d: act.get(d, ("", 0))[0], reverse=True)
         never = sorted(d for d in DEPT_COLORS if d != "yana" and not act.get(d, ("", 0))[0])
+        # №587 A.4: счётчики оценок владельца per dept (7 и 30 дней)
+        ratings = {}
+        try:
+            rrows = _query(
+                "SELECT dept, "
+                "COALESCE(SUM(CASE WHEN vote=1 AND voted_at > datetime('now','-7 days') THEN 1 ELSE 0 END),0) AS p7, "
+                "COALESCE(SUM(CASE WHEN vote=-1 AND voted_at > datetime('now','-7 days') THEN 1 ELSE 0 END),0) AS m7, "
+                "COALESCE(SUM(CASE WHEN vote=1 AND voted_at > datetime('now','-30 days') THEN 1 ELSE 0 END),0) AS p30, "
+                "COALESCE(SUM(CASE WHEN vote=-1 AND voted_at > datetime('now','-30 days') THEN 1 ELSE 0 END),0) AS m30 "
+                "FROM reply_ratings WHERE voted_at IS NOT NULL GROUP BY dept", fetch=True)
+            ratings = {r["dept"]: {"p7": r["p7"], "m7": r["m7"], "p30": r["p30"], "m30": r["m30"]} for r in rrows}
+        except Exception:  # noqa: BLE001 — нет таблицы: счётчики просто не показываются
+            ratings = {}
         depts = []
         for d in ["yana"] + fresh + stale + never:
             nm = DEPT_NAMES.get(d, d)
@@ -548,6 +610,7 @@ def api_depts_chat():
                 "color": c.get("start", ""), "color2": c.get("end", ""),
                 "last_used": act.get(d, ("", 0))[0], "uses": act.get(d, ("", 0))[1],
                 "last_msg_id": last_msg.get(d, 0), "unread": unread.get(d, 0),
+                "ratings": ratings.get(d),
             })
         return jsonify({"status": "ok", "depts": depts})
     except Exception as e:
@@ -566,9 +629,63 @@ def api_dept_dialog(dept):
             "WHERE dept=? AND chat_id=(SELECT chat_id FROM dialog_history "
             "WHERE dept=? ORDER BY id DESC LIMIT 1) ORDER BY id DESC LIMIT 50",
             (dept, dept), fetch=True)
-        msgs = [{"id": r["id"], "role": r["role"] or "assistant",
-                 "content": (r["content"] or "")[:800],
-                 "ts": r["created_at"] or ""} for r in reversed(rows)]
+
+        # №589 B.1: doc_id для assistant-сообщений — связь с miniapp_responses
+        # (id = doc_id). Схемы НЕ меняются, связь вычисляется: 1) точное
+        # совпадение raw_text; 2) ближайший отчёт по времени в пределах 120 с
+        # после created_at; 3) иначе null.
+        docs = []
+        try:
+            drows = _query("SELECT id, raw_text, created_at FROM miniapp_responses WHERE dept=?", (dept,), fetch=True)
+            for r in drows:
+                docs.append({"id": r["id"], "raw": r["raw_text"] or "", "ts": r["created_at"] or ""})
+        except Exception:  # noqa: BLE001 — нет таблицы: doc_id просто null
+            docs = []
+
+        def _ts_parse(v):
+            try:
+                return datetime.strptime(str(v)[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:  # noqa: BLE001
+                try:
+                    return datetime.fromisoformat(str(v)[:19])
+                except Exception:  # noqa: BLE001
+                    return None
+
+        # точные совпадения первыми: занятые doc_id не раздаются фолбэком
+        claimed = set()
+        exact = {}
+        for r in rows:
+            if (r["role"] or "assistant") != "assistant":
+                continue
+            for d in docs:
+                if d["raw"] and d["raw"] == (r["content"] or ""):
+                    exact[r["id"]] = d["id"]
+                    claimed.add(d["id"])
+                    break
+        msgs = []
+        for r in reversed(rows):
+            full_content = r["content"] or ""
+            doc_id = exact.get(r["id"])
+            if doc_id is None and (r["role"] or "assistant") == "assistant" and docs:
+                m_ts = _ts_parse(r["created_at"])
+                if m_ts is not None:
+                    best, best_delta = None, None
+                    for d in docs:
+                        if d["id"] in claimed:
+                            continue
+                        d_ts = _ts_parse(d["ts"])
+                        if d_ts is None:
+                            continue
+                        delta = (d_ts - m_ts).total_seconds()
+                        if 0 <= delta <= 120 and (best_delta is None or delta < best_delta):
+                            best, best_delta = d["id"], delta
+                    doc_id = best
+            entry = {"id": r["id"], "role": r["role"] or "assistant",
+                     "content": full_content[:800],
+                     "ts": r["created_at"] or ""}
+            if doc_id:
+                entry["doc_id"] = doc_id
+            msgs.append(entry)
         return jsonify({"status": "ok", "messages": msgs})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -2228,6 +2345,31 @@ def api_integrations_set(env_key):
         return jsonify({"status": "error", "message": "SECRETS_MASTER_KEY не настроен на сервере"}), 200
     _log_audit("integration_key_set", {"env_key": env_key})
     return jsonify({"status": "ok", "masked": secrets_crypto.mask_value(value)})
+
+
+@app.post("/api/integrations/<env_key>/check")
+def api_integrations_check(env_key):
+    """№586 B.1: синхронная проверка одного ключа (key_health) по запросу из Mini App.
+    Результат пишется в key_health_status (его читают утренний отчёт и список интеграций).
+    В ответе {status, http_code, detail, checked_at, models_sample}; значение ключа
+    НИКОГДА не возвращается. Таймаут проверки — 20 с."""
+    from proxy.key_health import KEY_MANIFEST, check_entry_detailed, save_result
+    entry = next((e for e in KEY_MANIFEST if e["env_key"] == env_key), None)
+    if entry is None:
+        return jsonify({"status": "error", "message": "неизвестная интеграция"}), 404
+    result = check_entry_detailed(entry, timeout=20.0)
+    try:
+        save_result(result, checked_at=result.get("checked_at"))
+    except Exception as e:  # noqa: BLE001 — сохранение не ломает ответ проверки
+        _log_error(f"key check save failed: {e}", source="api_integrations_check", kind="db_write")
+    _log_audit("integration_key_check", {"env_key": env_key, "status": result["status"]})
+    return jsonify({
+        "status": result["status"],
+        "http_code": result["http_code"],
+        "detail": result["detail"],
+        "checked_at": result["checked_at"],
+        "models_sample": result["models_sample"],
+    })
 
 
 @app.route("/api/integrations/<env_key>", methods=["DELETE"])

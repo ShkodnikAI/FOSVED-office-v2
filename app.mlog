@@ -113,6 +113,8 @@ pattern LZLlm(prompt: String) -> String {
 pattern InitDB() -> String {
   // Dialog & Memory
   db_execute("CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')))")
+  // №587 A.1: оценки владельца «+»/«−» к конкретным ответам/отчётам
+  db_execute("CREATE TABLE IF NOT EXISTS reply_ratings (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, kind TEXT DEFAULT 'reply', ref TEXT DEFAULT '', chat_id TEXT, message_id INTEGER, vote INTEGER, comment TEXT, prompt_message_id INTEGER, created_at TEXT DEFAULT (datetime('now')), voted_at TEXT)")
   // №588 A.3: resume-маркеры ночного цикла (NightPhaseDone/Mark/Begin, dept/scheduler.mlog)
   db_execute("CREATE TABLE IF NOT EXISTS night_run_state (day TEXT PRIMARY KEY, phases TEXT NOT NULL DEFAULT '', updated_at TEXT)")
   db_execute("CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original_query TEXT, original_response TEXT, correction TEXT, corr_type TEXT, created_at TEXT DEFAULT (datetime('now')))")
@@ -2731,6 +2733,32 @@ pattern WebhookBody() -> String {
     // FO-038 B.1: ответ владельца на сообщение гейта/показа = замечание
     let reply_id = redact(to_string(json_get(data, "message.reply_to_message.message_id", "0")), "all")
     if reply_id != "0" then {
+      // №587 A.3: ответ на force_reply-промпт оценки — комментарий к «−»
+      let rt_rows = query("SELECT id, dept, ref, chat_id FROM reply_ratings WHERE prompt_message_id = ?1 AND vote = -1 AND comment IS NULL", [reply_id])
+      if redact(to_string(rt_rows), "hash_only") != redact("()", "hash_only") and length(rt_rows) > 0.0 then {
+        let rt_r = get(rt_rows, 0)
+        let rt_rid = redact(to_string(json_get(rt_r, "id", "0")), "all")
+        let rt_dept = redact(to_string(json_get(rt_r, "dept", "global")), "all")
+        let rt_ref = redact(to_string(json_get(rt_r, "ref", "")), "all")
+        let rt_chat = redact(to_string(json_get(rt_r, "chat_id", "")), "all")
+        let rt_comment = ""
+        if text != "-" then { let rt_comment = substring(text, 0.0, 2000.0) }
+        let _ = db_execute("UPDATE reply_ratings SET comment = ?1, voted_at = datetime('now') WHERE id = ?2", [rt_comment, rt_rid])
+        // коррекция — как /fix, но привязанная к конкретному ответу (№587 A.3)
+        let rt_query = ""
+        if rt_ref != "" then {
+          let qrows = query("SELECT query FROM miniapp_responses WHERE id = ?1", [rt_ref])
+          each qr in qrows { let rt_query = redact(to_string(json_get(qr, "query", "")), "all") }
+        }
+        if rt_query == "" then {
+          let uq = query("SELECT content FROM dialog_history WHERE chat_id = ?1 AND role = 'user' ORDER BY id DESC LIMIT 1", [rt_chat])
+          each ur in uq { let rt_query = redact(to_string(json_get(ur, "content", "")), "all") }
+        }
+        let _ = db_execute("INSERT INTO adapt_corrections (dept, original_query, original_response, correction, corr_type) VALUES (?1, ?2, ?3, ?4, 'manual')", [rt_dept, substring(rt_query, 0.0, 2000.0), substring(rt_ref, 0.0, 200.0), substring(rt_comment, 0.0, 2000.0)])
+        let _ = AuditLog("rating_comment", rt_dept, "rating=" + rt_rid + " comment=" + substring(rt_comment, 0.0, 80.0))
+        let _ = SendTelegramReply(chat_id, "Коррекция записана для " + rt_dept + " (оценка №" + rt_rid + ").")
+        return respond("200 ok")
+      }
       let remark_check = TryVal(try query("SELECT id FROM forge_gates WHERE telegram_message_id = ? LIMIT 1", [reply_id]))
       // №421: remark_check (результат query) не моется целиком — List;
       // пустота проверяется hash-сравнением канонической формы "()" (то же
@@ -2763,6 +2791,64 @@ pattern WebhookBody() -> String {
           let fg_result = ForgeGateDecide(fg_gate, fg_idx, "owner")
           let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id, text: substring(fg_result, 0.0, 180.0), show_alert: false}), "application/json"))
           let _ = SendTelegramReply(cb_chat_id, substring(fg_result, 0.0, 3500.0))
+        }
+        return respond("200 ok")
+      }
+      // №587 A.3: оценка владельца «+»/«−» — rt:<vote>:<id>; жмёт только владелец
+      if starts_with(cb_data, "rt:") then {
+        let cb_user = redact(to_string(json_get(data, "callback_query.from.id", "0")), "all")
+        if cb_user != redact(env("OWNER_TELEGRAM_ID"), "all") then {
+          let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id, text: "Оценивать может только владелец офиса", show_alert: false}), "application/json"))
+          return respond("200 ok")
+        }
+        let rt_parts = split(substring(cb_data, 3.0, length(cb_data)), ":")
+        if length(rt_parts) == 2.0 then {
+          let rt_vote = trim(to_string(get(rt_parts, 0)))
+          let rt_id = trim(to_string(get(rt_parts, 1)))
+          let rt_rows = query("SELECT dept, ref, chat_id FROM reply_ratings WHERE id = ?1", [rt_id])
+          if length(rt_rows) > 0.0 then {
+            let rt_r = get(rt_rows, 0)
+            let rt_dept = redact(to_string(json_get(rt_r, "dept", "global")), "all")
+            let rt_ref = redact(to_string(json_get(rt_r, "ref", "")), "all")
+            let rt_chat = redact(to_string(json_get(rt_r, "chat_id", "")), "all")
+            let mut vote_val = "0"
+            if rt_vote == "+" then { let vote_val = "1" }
+            if rt_vote == "-" then { let vote_val = "-1" }
+            let _ = db_execute("UPDATE reply_ratings SET vote = ?1, voted_at = datetime('now') WHERE id = ?2", [vote_val, rt_id])
+            let _ = AuditLog("rating_vote", rt_dept, "rating=" + rt_id + " vote=" + vote_val)
+            let vote_txt = "Записано: −"
+            if rt_vote == "+" then { let vote_txt = "Записано: +" }
+            let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id, text: vote_txt, show_alert: false}), "application/json"))
+            // клавиатура → [✓ +][−] / [+][✓ −] (№587 A.3)
+            let cb_mid = redact(to_string(json_get(data, "callback_query.message.message_id", "0")), "all")
+            let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/editMessageReplyMarkup", json_encode({chat_id: to_float(rt_chat), message_id: to_float(cb_mid), reply_markup: RatingKeyboard(rt_id, rt_vote)}), "application/json"))
+            if rt_vote == "+" then {
+              // то же, что /good, но для конкретного ответа (№587 A.3)
+              let pos_query = ""
+              let pos_reply = ""
+              if rt_ref != "" then {
+                let drows = query("SELECT query, raw_text FROM miniapp_responses WHERE id = ?1", [rt_ref])
+                each dr in drows {
+                  let pos_query = redact(to_string(json_get(dr, "query", "")), "all")
+                  let pos_reply = redact(to_string(json_get(dr, "raw_text", "")), "all")
+                }
+              }
+              if pos_query == "" then {
+                let dq = query("SELECT content FROM dialog_history WHERE chat_id = ?1 AND role = 'user' ORDER BY id DESC LIMIT 1", [rt_chat])
+                each qr in dq { let pos_query = redact(to_string(json_get(qr, "content", "")), "all") }
+                let da = query("SELECT content FROM dialog_history WHERE chat_id = ?1 AND role = 'assistant' AND dept = ?2 ORDER BY id DESC LIMIT 1", [rt_chat, rt_dept])
+                each ar in da { let pos_reply = redact(to_string(json_get(ar, "content", "")), "all") }
+              }
+              let _ = RecordPositiveExample(rt_dept, pos_query, pos_reply)
+            }
+            if rt_vote == "-" then {
+              // force_reply: одна фраза «что не так» → коррекция (№587 A.3)
+              let prompt_body = json_encode({chat_id: to_float(rt_chat), text: "Что не так? Одной фразой (или «-» — без комментария)", reply_markup: {force_reply: true, input_field_placeholder: "Что не так?"}})
+              let prompt_res = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", prompt_body, "application/json"))
+              let prompt_mid = to_float(json_get(parse_json(to_string(prompt_res)), "result.message_id", "0"))
+              let _ = db_execute("UPDATE reply_ratings SET prompt_message_id = ?1 WHERE id = ?2", [prompt_mid, rt_id])
+            }
+          }
         }
         return respond("200 ok")
       }
@@ -2921,6 +3007,19 @@ pattern WebhookBody() -> String {
         let _ = SendTelegramReply(chat_id, "LOCKDOWN activated. Only /unlock available.")
       } else {
         let _ = SendTelegramReply(chat_id, "Wrong password.")
+      }
+      return respond("200 ok")
+    }
+
+    // №587 A.2: выключатель кнопок оценки — /rate_buttons on|off
+    if starts_with(text, "/rate_buttons") then {
+      let arg = trim(substring(text, 13.0, length(text)))
+      if arg == "off" then {
+        kv_set("rate_buttons", "off")
+        let _ = SendTelegramReply(chat_id, "Кнопки оценки выключены. Обработка уже отправленных продолжается.")
+      } else {
+        kv_set("rate_buttons", "on")
+        let _ = SendTelegramReply(chat_id, "Кнопки оценки включены (режим настройки офиса).")
       }
       return respond("200 ok")
     }

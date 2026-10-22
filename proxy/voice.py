@@ -179,54 +179,92 @@ def stt_endpoint():
             _log_audit("stt_error", {"error": "could not download file from Telegram", "file_path": file_path})
             return jsonify({"status": "error", "message": "Failed to download audio from Telegram"}), 400
 
-        # Step 3: Transcribe via Whisper
-        if provider == "groq":
-            api_key = os.environ.get("GROQ_API_KEY", WHISPER_API_KEY)
-            url = "https://api.groq.com/openai/v1/audio/transcriptions"
-            model = "whisper-large-v3"
-        else:
-            api_key = os.environ.get("OPENAI_API_KEY", WHISPER_API_KEY)
-            url = "https://api.openai.com/v1/audio/transcriptions"
-            model = "whisper-1"
+        # Step 3: Transcribe via Whisper (общий код с /api/stt/upload, №589 A.1)
+        transcribed_text, used_provider = _whisper_transcribe(audio_data)
 
-        # Prepare multipart form
-        files = {
-            "file": ("audio.ogg", bytes(audio_data), "audio/ogg"),
-        }
-        data = {"model": model}
-        headers = {"Authorization": f"Bearer {api_key}"}
+        _log_audit("stt", {"file_id": file_id, "provider": used_provider, "text_len": len(transcribed_text)})
 
-        resp = http_requests.post(url, headers=headers, files=files, data=data, timeout=60)
-        resp.raise_for_status()
-        resp_data = resp.json()
-        transcribed_text = resp_data.get("text", "")
-
-        _log_audit("stt", {"file_id": file_id, "provider": provider, "model": model, "text_len": len(transcribed_text)})
-
-        return jsonify({"status": "ok", "text": transcribed_text, "provider": provider})
+        return jsonify({"status": "ok", "text": transcribed_text, "provider": used_provider})
 
     except Exception as e:
         log.error(f"STT error (provider={provider}): {e}")
-        # Try fallback provider if primary failed
-        if provider == "groq" and audio_data:
-            try:
-                fallback_key = os.environ.get("OPENAI_API_KEY", "")
-                if not fallback_key:
-                    raise ValueError("No OpenAI API key for fallback")
-                files = {"file": ("audio.ogg", bytes(audio_data), "audio/ogg")}
-                data = {"model": "whisper-1"}
-                headers = {"Authorization": f"Bearer {fallback_key}"}
-                resp = http_requests.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=60)
-                resp.raise_for_status()
-                resp_data = resp.json()
-                transcribed_text = resp_data.get("text", "")
-                _log_audit("stt", {"file_id": file_id, "provider": "openai", "model": "whisper-1", "text_len": len(transcribed_text), "fallback": True})
-                return jsonify({"status": "ok", "text": transcribed_text, "provider": "openai"})
-            except Exception as fallback_err:
-                log.error(f"STT fallback also failed: {fallback_err}")
-
         _log_audit("stt_error", {"error": str(e)[:500], "file_id": file_id})
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def _whisper_transcribe(audio_data, filename="audio.ogg"):
+    """№589 A.1: общий код распознавания — Whisper (Groq preferred, OpenAI
+    fallback). Принимает байты аудио; возвращает (text, provider).
+    Поведение /stt (Telegram file_id → скачивание → сюда) не меняется."""
+    provider = WHISPER_PROVIDER
+    if provider == "groq":
+        api_key = os.environ.get("GROQ_API_KEY", WHISPER_API_KEY)
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        model = "whisper-large-v3"
+    else:
+        api_key = os.environ.get("OPENAI_API_KEY", WHISPER_API_KEY)
+        url = "https://api.openai.com/v1/audio/transcriptions"
+        model = "whisper-1"
+
+    # Prepare multipart form
+    files = {
+        "file": (filename, bytes(audio_data), "audio/ogg"),
+    }
+    data = {"model": model}
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    try:
+        resp = http_requests.post(url, headers=headers, files=files, data=data, timeout=60)
+        resp.raise_for_status()
+        resp_data = resp.json()
+        return resp_data.get("text", ""), provider
+    except Exception as e:
+        log.error(f"STT error (provider={provider}): {e}")
+        # Try fallback provider if primary failed
+        if provider == "groq":
+            fallback_key = os.environ.get("OPENAI_API_KEY", "")
+            if not fallback_key:
+                raise
+            files = {"file": (filename, bytes(audio_data), "audio/ogg")}
+            data = {"model": "whisper-1"}
+            headers = {"Authorization": f"Bearer {fallback_key}"}
+            resp = http_requests.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=60)
+            resp.raise_for_status()
+            resp_data = resp.json()
+            text = resp_data.get("text", "")
+            _log_audit("stt", {"provider": "openai", "model": "whisper-1", "text_len": len(text), "fallback": True})
+            return text, "openai"
+        raise
+
+
+# ── №589 A.1: голос из Mini App ─────────────────────────────────────────
+_STT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024  # 10 МБ
+_STT_UPLOAD_MIMES = ("audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav")
+
+
+@app.post("/api/stt/upload")
+def stt_upload_endpoint():
+    """№589 A.1: микрофон Mini App — multipart/form-data (поле audio) → тот же
+    Whisper, что /stt. Лимиты: 10 МБ; длительность (≤120 с) контролирует клиент
+    (MediaRecorder), сервер держит аудио только в памяти запроса — на диск
+    не пишет и в лог не пишет. Ответ {status, text}; ошибки {status, message}."""
+    f = request.files.get("audio")
+    if f is None or not f.filename and not f.mimetype:
+        return jsonify({"status": "error", "message": "audio file is required"}), 400
+    mime = (f.mimetype or "").split(";")[0].strip()
+    if mime and mime not in _STT_UPLOAD_MIMES:
+        return jsonify({"status": "error", "message": f"неподдерживаемый тип аудио: {mime}"}), 415
+    audio_data = f.read()
+    if not audio_data:
+        return jsonify({"status": "error", "message": "пустое аудио"}), 400
+    if len(audio_data) > _STT_UPLOAD_MAX_BYTES:
+        return jsonify({"status": "error", "message": "аудио больше 10 МБ"}), 413
+    try:
+        text, used_provider = _whisper_transcribe(audio_data, filename=f.filename or "audio.ogg")
+        return jsonify({"status": "ok", "text": text, "provider": used_provider})
+    except Exception as e:  # noqa: BLE001 — код ошибки без тела (№589 A.1)
+        log.error(f"STT upload error: {e.__class__.__name__}")
+        return jsonify({"status": "error", "message": "не удалось распознать аудио"}), 502
 
 def voice_render(text):
     """FO-013 фаза 3 (Astra-паттерн): переписать отчёт в устную речь лёгким LLM-вызовом.
