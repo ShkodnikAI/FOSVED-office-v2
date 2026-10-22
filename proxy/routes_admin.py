@@ -566,9 +566,63 @@ def api_dept_dialog(dept):
             "WHERE dept=? AND chat_id=(SELECT chat_id FROM dialog_history "
             "WHERE dept=? ORDER BY id DESC LIMIT 1) ORDER BY id DESC LIMIT 50",
             (dept, dept), fetch=True)
-        msgs = [{"id": r["id"], "role": r["role"] or "assistant",
-                 "content": (r["content"] or "")[:800],
-                 "ts": r["created_at"] or ""} for r in reversed(rows)]
+
+        # №589 B.1: doc_id для assistant-сообщений — связь с miniapp_responses
+        # (id = doc_id). Схемы НЕ меняются, связь вычисляется: 1) точное
+        # совпадение raw_text; 2) ближайший отчёт по времени в пределах 120 с
+        # после created_at; 3) иначе null.
+        docs = []
+        try:
+            drows = _query("SELECT id, raw_text, created_at FROM miniapp_responses WHERE dept=?", (dept,), fetch=True)
+            for r in drows:
+                docs.append({"id": r["id"], "raw": r["raw_text"] or "", "ts": r["created_at"] or ""})
+        except Exception:  # noqa: BLE001 — нет таблицы: doc_id просто null
+            docs = []
+
+        def _ts_parse(v):
+            try:
+                return datetime.strptime(str(v)[:19], "%Y-%m-%d %H:%M:%S")
+            except Exception:  # noqa: BLE001
+                try:
+                    return datetime.fromisoformat(str(v)[:19])
+                except Exception:  # noqa: BLE001
+                    return None
+
+        # точные совпадения первыми: занятые doc_id не раздаются фолбэком
+        claimed = set()
+        exact = {}
+        for r in rows:
+            if (r["role"] or "assistant") != "assistant":
+                continue
+            for d in docs:
+                if d["raw"] and d["raw"] == (r["content"] or ""):
+                    exact[r["id"]] = d["id"]
+                    claimed.add(d["id"])
+                    break
+        msgs = []
+        for r in reversed(rows):
+            full_content = r["content"] or ""
+            doc_id = exact.get(r["id"])
+            if doc_id is None and (r["role"] or "assistant") == "assistant" and docs:
+                m_ts = _ts_parse(r["created_at"])
+                if m_ts is not None:
+                    best, best_delta = None, None
+                    for d in docs:
+                        if d["id"] in claimed:
+                            continue
+                        d_ts = _ts_parse(d["ts"])
+                        if d_ts is None:
+                            continue
+                        delta = (d_ts - m_ts).total_seconds()
+                        if 0 <= delta <= 120 and (best_delta is None or delta < best_delta):
+                            best, best_delta = d["id"], delta
+                    doc_id = best
+            entry = {"id": r["id"], "role": r["role"] or "assistant",
+                     "content": full_content[:800],
+                     "ts": r["created_at"] or ""}
+            if doc_id:
+                entry["doc_id"] = doc_id
+            msgs.append(entry)
         return jsonify({"status": "ok", "messages": msgs})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
