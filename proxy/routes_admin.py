@@ -20,6 +20,7 @@ import requests as http_requests
 from flask import request, jsonify, Response, send_file
 
 from proxy.kg import kg_scan_rebuild, kg_active
+from proxy import jobs as n596_jobs  # №596 A.2: фоновые задания ночных фаз
 from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting, _db, db_lock,
@@ -1956,12 +1957,15 @@ def admin_ua_docs():
     return jsonify({'structure': structure, 'api': api})
 
 
-@app.post("/admin-ua/night-cycle")
-def admin_ua_night_cycle():
+def _ua_night_cycle_impl():
     """
     Full UA night cycle: Scanner → Analyzer → Grapher → Reviewer → Differ → Documenter.
     Saves results to admin_night_reports, updates knowledge graph.
     Called from /cron/night or /admin analyze.
+
+    №596 A.2: тело вынесено в impl — синхронный путь и фоновый (async=1)
+    используют один и тот же код; impl возвращает payload (dict, JSON-уемый)
+    и бросает исключения наружу — их ловит роут-обёртка/реестр заданий.
     """
     try:
         log.info("UA Night Cycle: Phase 1/6 — Scanner")
@@ -2095,12 +2099,37 @@ def admin_ua_night_cycle():
         _log_audit("ua_night_cycle", {"files": inventory['total_files'], "nodes": nodes_saved,
                                        "edges": edges_saved, "findings": len(findings), "health": health})
 
-        return jsonify({'status': 'ok', 'summary': summary, 'health_score': health,
-                        'findings_count': len(findings)})
+        return {'status': 'ok', 'summary': summary, 'health_score': health,
+                'findings_count': len(findings)}
 
     except Exception as e:
         log.error(f"ua_night_cycle error: {e}", exc_info=True)
+        raise
+
+
+@app.post("/admin-ua/night-cycle")
+def admin_ua_night_cycle():
+    """№596 A.2: async=1 — фоном (реестр proxy/jobs), сразу {"job_id"};
+    статус — GET /admin-ua/night-cycle/status?job=<id>. Без async=1 —
+    прежнее синхронное поведение (совместимость с /cron/night)."""
+    if request.args.get("async") == "1":
+        job_id = n596_jobs.start_job(_ua_night_cycle_impl)
+        return jsonify({"status": "accepted", "job_id": job_id})
+    try:
+        return jsonify(_ua_night_cycle_impl())
+    except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.get("/admin-ua/night-cycle/status")
+def admin_ua_night_cycle_status():
+    """№596 A.2: статус фонового UA-цикла. Гард /admin-ua/* (127.0.0.1 +
+    itok) применяется before_request'ом ко всему префиксу. Повторный
+    запрос после done — тот же итог (хранится в реестре)."""
+    job = n596_jobs.get_job(request.args.get("job", ""))
+    if job is None:
+        return jsonify({"status": "unknown", "error": "no such job"}), 404
+    return jsonify(job)
 
 
 @app.get("/admin-ua/tour")

@@ -48,7 +48,8 @@ from proxy.reports import (
     _browse_page, _evidence_badges_css,
 )
 from proxy.news import get_night_news_digest, get_fresh_news
-from proxy.lz_github import scheduler_lz_daily_core, _github_search, scan_osint
+# №596 A.3: scheduler_lz_daily_core из брифа удалён (обход «BRIEF-1 доп.»),
+# импорт больше не нужен — полный отчёт ЛЗ только в LzDailySlot 09:10.
 
 # ══════════════════════════════════════════════════════════════════════
 #  MEGA-3: ARCHIVE ENDPOINTS
@@ -216,15 +217,12 @@ def scheduler_morning_brief():
     if recent and recent[0]["c"] > 0:
         return jsonify({"status": "skipped", "message": "brief already sent within last 10 minutes"}), 200
 
-    # BRIEF-1 доп.: отдельный Render Cron Job 'lz-daily' ненадёжно подхватывает
-    # свежий код (подтверждено — ручной вызов на основном сервисе работает,
-    # плановый cron неделями не создавал новых записей). Раз утренний бриф
-    # уже надёжно срабатывает каждый день на этом же сервисе — используем
-    # его как единственную точку триггера, не полагаясь на отдельный cron.
-    try:
-        scheduler_lz_daily_core(dry_run=False, owner_id=owner_id)
-    except Exception as e:
-        log.warning(f"lz-daily scan inside morning-brief failed (non-fatal): {e}")
+    # №596 A.3: обход «BRIEF-1 доп.» (запуск lz-daily из брифа) УДАЛЁН —
+    # с нативным расписанием (#546: LzDailySlot 09:10 в dept/schedules.mlog)
+    # он давал второй полный отчёт за сутки («LZ DAILY REPORT» в 07:20 перед
+    # брифом, поверх ночного и слота 09:10). Ночной прогон (#588 B.1) данные
+    # собирает и пишет в память, владельцу не шлёт; в брифе остаётся раздел
+    # «Ключевые находки ЛЗ» из уже сохранённой памяти (memory.recall ниже).
 
     # FO-042 (наряд #149): резервный контур FORGE — bundle-бэкап bare-репозиториев
     # + выгрузка forge_* документом. Запуск рядом с брифом — триггер BRIEF-1

@@ -70,6 +70,7 @@ from proxy.telegram import (
     _safe_filename_part, _send_chat_action_loop, _tg_send_chat_action,
 )
 from proxy.voice import _clean_text_for_tts, tts_endpoint, stt_endpoint
+from proxy import jobs as n596_jobs  # №596 A.2: фоновые задания ночных фаз
 from proxy.reports import (
     html_lib_escape, strip_html_for_archive, _html_base, _dept_header,
     _status_icon, _dept_kpis, _build_action_bar, ARCHIVE_MONTHS_RU,
@@ -2069,7 +2070,18 @@ def scheduler_golden_evals():
     dept_list = d.get("depts") or sorted(p.stem for p in _GOLDEN_DIR.glob("*.json"))
     if not dept_list:
         return jsonify({"status": "ok", "message": "no golden sets found", "results": []})
+    # №596 A.2: async=1 — фоном (реестр proxy/jobs), сразу {"job_id"};
+    # статус — GET /scheduler/golden-evals/status?job=<id>. Прогон длиннее
+    # 300 с больше не обрывается таймаутом mlog-клиента — итог по статусу.
+    if request.args.get("async") == "1":
+        job_id = n596_jobs.start_job(_golden_evals_impl, dept_list)
+        return jsonify({"status": "accepted", "job_id": job_id})
+    return jsonify(_golden_evals_impl(dept_list))
 
+
+def _golden_evals_impl(dept_list):
+    """№596 A.2: тело golden-evals (единое для синхронного и фонового путей).
+    Возвращает JSON-уемый dict; исключения уходят в реестр заданий (failed)."""
     alerts = []
     results = []
     for dept in dept_list:
@@ -2129,8 +2141,20 @@ def scheduler_golden_evals():
                          max(1, sum(1 for r in results if "avg_score" in r)), 3),
     }
     _log_audit("golden_evals", {"totals": totals, "alerts": [s["dept"] for s in alerts]}, "quality")
-    return jsonify({"status": "ok", "totals": totals, "thresholds": {
-        "min_score": _GOLDEN_MIN_SCORE, "regression_drop": _GOLDEN_REGRESSION_DROP}, "results": results})
+    return {"status": "ok", "totals": totals, "thresholds": {
+        "min_score": _GOLDEN_MIN_SCORE, "regression_drop": _GOLDEN_REGRESSION_DROP}, "results": results}
+
+
+@app.get("/scheduler/golden-evals/status")
+def scheduler_golden_evals_status():
+    """№596 A.2: статус фонового golden-evals. Гард — cron_secret_ok (как у
+    POST). Повторный запрос после done — тот же итог (хранится в реестре)."""
+    if not cron_secret_ok():
+        return "Forbidden", 403
+    job = n596_jobs.get_job(request.args.get("job", ""))
+    if job is None:
+        return jsonify({"status": "unknown", "error": "no such job"}), 404
+    return jsonify(job)
 
 
 

@@ -1765,15 +1765,29 @@ pattern NightSlot() -> String {
   // #569 A.3: явный таймаут. Замер (бенч на клоне дерева, scripts вне репо):
   // Phase 1-4 ≈ 34 с локально (доминирует cross-file calls-скан фазы 3 —
   // тысячи read_text); прод-наблюдение 19.10: Phase 3 шла 02:00:10→02:03:14
-  // (~3 мин, Render CPU + INSERT'ы в транзакции). Итог: 600 с = запас x2 от
-  // прод-верхней оценки; требование наряда (>= 300) выполнено. Прежний
-  // дефолт 30 с обрывал mlog-клиент, пока Python-цикл ещё писал — mlog шёл
-  // к своим записям под чужим локом (02:00:39 database is locked, слот упал).
+  // (~3 мин, Render CPU + INSERT'ы в транзакции). Прежний дефолт 30 с обрывал
+  // mlog-клиент, пока Python-цикл ещё писал — mlog шёл к своим записям под
+  // чужим локом (02:00:39 database is locked, слот упал).
+  // #596 A.1: числовые таймауты http_* ограничены бинарем 1..300 с
+  // (HTTP_TIMEOUT_RANGE на 600 — фаза честно падала в проде 22.10).
+  // #596 A.2: UA-цикл длиннее 300 с — фоном: async=1 отвечает {"job_id"}
+  // сразу, итог фазы — по статусу задания (поллинг до 25 мин), не по таймауту.
   let mut phase_fail = 0.0
   let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
   let ua_body = "{}"
-  let mut ua_result = TryVal(try http_post("http://127.0.0.1:4000/admin-ua/night-cycle?itok=" + AdminUaToken(), ua_body, "application/json", 600.0))
-  if to_string(ua_result) == "()" then { ua_result = "{}" }
+  let mut ua_result = "{}"
+  let ua_start = TryVal(try http_post("http://127.0.0.1:4000/admin-ua/night-cycle?itok=" + AdminUaToken() + "&async=1", ua_body, "application/json", 300.0))
+  let ua_job = to_string(json_get(TryVal(try parse_json(to_string(ua_start))), "job_id", ""))
+  // решения на недоверенных данных — через redact-fingerprint (№327-класс,
+  // идиома dept/utils.mlog:343-352; унифицировано с PollJobStatus)
+  if redact(ua_job, "hash_only") != redact("", "hash_only") and redact(ua_job, "hash_only") != redact("null", "hash_only") then {
+    let ua_poll = PollJobStatus("http://127.0.0.1:4000/admin-ua/night-cycle/status", "job=" + ua_job + "&itok=" + AdminUaToken())
+    let ua_state = to_string(json_get(TryVal(try parse_json(ua_poll)), "state", ""))
+    if redact(ua_state, "hash_only") == redact("done", "hash_only") then {
+      ua_result = to_string(json_get(TryVal(try parse_json(ua_poll)), "result", "{}"))
+      if redact(ua_result, "hash_only") == redact("()", "hash_only") or redact(ua_result, "hash_only") == redact("null", "hash_only") then { ua_result = "{}" }
+    }
+  }
   if to_string(ua_result) == "{}" then { phase_fail = phase_fail + 1.0 }
   let ua_summary = redact(to_string(json_get(parse_json(ua_result), "summary", "UA cycle failed")), "all")
 
@@ -4170,7 +4184,11 @@ pattern WebhookBody() -> String {
           let _ = AuditLog("chain_start", "system", "chain " + mode + ": " + dept_list)
           let body_fo = "{\"mode\":\"" + mode + "\",\"chat_id\":\"" + chat_id + "\",\"depts\":" + arr + ",\"query\":\"" + JsonEscapeText(query_fo) + "\"}"
           // Таймаут группы: debate ≤ 2 раунда × шаг + судья
-          let resp_fo = TryVal(try http_post("http://127.0.0.1:4000/chain/fanout", body_fo, "application/json", 540.0))
+          // #596 A.1: лимит бинаря — 1..300 с (HTTP_TIMEOUT_RANGE): 540.0
+          // отвергался ДО запроса, fan-out всегда падал в «недоступна».
+          // 300.0 — максимум легала; для длинных групп — фоновый режим
+          // (как #596 A.2), обходов лимита нет.
+          let resp_fo = TryVal(try http_post("http://127.0.0.1:4000/chain/fanout", body_fo, "application/json", 300.0))
           if to_string(resp_fo) == "()" then {
             let _ = SendTelegramReply(chat_id, "Chain " + mode + ": плоскость fan-out недоступна (proxy не отвечает). Fallback: /chain " + dept_list + " <query> — последовательно.")
           } else {

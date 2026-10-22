@@ -82,8 +82,9 @@ def test_scenario_all_marks_pass():
 def clean_dialog(monkeypatch):
     _query("DELETE FROM dialog_history WHERE dept='yana' AND role='assistant' AND content LIKE '%ТЕСТ-БРИФ%'")
     _query("DELETE FROM audit_log WHERE action='scheduler_morning_brief'")
-    # внутри брифа живёт реальный lz-скан (GitHub/LLM) — в тестах не нужен
-    monkeypatch.setattr(routes_sched, "scheduler_lz_daily_core", lambda **kw: {"status": "ok", "report": "стаб"})
+    # №596 A.3: обход «BRIEF-1 доп.» удалён из брифа — scheduler_lz_daily_core
+    # больше не импортируется в routes_sched, реальный lz-скан из брифа
+    # больше не достижим (гвард — tests/test_n596_timeouts_lz_once.py)
     yield
     _query("DELETE FROM dialog_history WHERE dept='yana' AND role='assistant' AND content LIKE '%ТЕСТ-БРИФ%'")
     _query("DELETE FROM audit_log WHERE action='scheduler_morning_brief'")
