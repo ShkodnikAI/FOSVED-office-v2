@@ -58,6 +58,7 @@ PROVIDER_CONTEXT_LIMITS = {
     "nvidia": 131072,      # nemotron-super-49b — 128k+
     "grok": 131072,
     "deepseek": 65536,     # deepseek-chat — консервативно 64k
+    "qwen": 128000,        # №586 A.1: qwen-plus/max (DashScope) — 128k
 }
 _UNKNOWN_PROVIDER_LIMIT = 32768
 

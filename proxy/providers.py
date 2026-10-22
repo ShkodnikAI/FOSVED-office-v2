@@ -48,6 +48,13 @@ from proxy.compaction import (  # noqa: F401
     estimate_tokens as _estimate_tokens,
 )
 
+def _qwen_base_url():
+    """№586 A.1: база Qwen (OpenAI-совместимый режим DashScope).
+    Международный регион по умолчанию; китайский — через QWEN_BASE_URL
+    (Render env: https://dashscope.aliyuncs.com/compatible-mode/v1)."""
+    return os.environ.get("QWEN_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+
+
 # ──────────────────────────── PROVIDERS ────────────────────────────
 PROVIDERS = {
     "zai": {"url": "https://api.z.ai/api/paas/v4/chat/completions", "env_key": "ZAI_API_KEY", "format": "openai", "timeout": 120},
@@ -59,6 +66,8 @@ PROVIDERS = {
     "nvidia": {"url": "https://integrate.api.nvidia.com/v1/chat/completions", "env_key": "NVIDIA_API_KEY", "format": "openai", "timeout": 120},
     "cerebras": {"url": "https://api.cerebras.ai/v1/chat/completions", "env_key": "CEREBRAS_API_KEY", "format": "openai", "timeout": 120},
     "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
+    # №586 A.1: Qwen (Alibaba DashScope, OpenAI-совместимый режим); регион — QWEN_BASE_URL
+    "qwen": {"url": _qwen_base_url() + "/chat/completions", "env_key": "QWEN_API_KEY", "format": "openai", "timeout": 120},
 }
 
 TOKEN_COSTS = {
@@ -68,6 +77,8 @@ TOKEN_COSTS = {
     "nvidia": {"input": 0.0, "output": 0.0},
     "cerebras": {"input": 0.0, "output": 0.0},
     "kimi": {"input": 0.6, "output": 2.5},
+    # №586 A.1: оценка по публичному прайсу DashScope intl (qwen-plus class) — уточнить по тарифу
+    "qwen": {"input": 0.4, "output": 1.2},
 }
 
 # Some providers count prompt + max_tokens against a per-minute token budget
@@ -461,30 +472,96 @@ def _load_cfg():
                 if val:
                     _cfg_cache["overrides"][dept] = val
         except Exception as e: log.warning(f"[config] override_{dept} read failed: {e}")
+    _cfg_cache["_mtimes"] = _cfg_files_mtime_snapshot()
 
-_load_cfg()
+# №586 C.3: mtime-кэш override_*/priority_* — запись /model из бота (файл пишет
+# mlog напрямую) действует без рестарта; проверка не чаще раза в 5 с.
+_CFG_RELOAD_INTERVAL_S = 5.0
+
+
+def _cfg_files_mtime_snapshot():
+    """№586 C.3: mtime-снимок override_*/priority_* (None = файла нет)."""
+    snap = {}
+    names = ["priority_provider.txt", "priority_model.txt"] + [f"override_{d}.txt" for d in DEPT_NAMES]
+    for n in names:
+        try:
+            p = CFG_DIR / n
+            snap[n] = p.stat().st_mtime_ns if p.exists() else None
+        except OSError:
+            snap[n] = None
+    return snap
+
+
+def _maybe_reload_cfg():
+    """№586 C.3: перечитать конфиг, если mtime override_*/priority_* изменился.
+    Проверка не чаще раза в _CFG_RELOAD_INTERVAL_S (5 с)."""
+    now = time.monotonic()
+    if now - _cfg_cache.get("_last_check", 0.0) < _CFG_RELOAD_INTERVAL_S:
+        return
+    _cfg_cache["_last_check"] = now
+    if _cfg_files_mtime_snapshot() != _cfg_cache.get("_mtimes"):
+        _load_cfg()
+
+
+_load_cfg()  # стартовый прогон — после объявления всех хелперов кэша
+
+
+def _dept_override_models(dept):
+    """№586 C.1: назначенные модели отдела из override_<dept>.txt (построчно).
+    Формат файла НЕ меняется — его читает и mlog-цепь (GetModelFallbackChain)."""
+    raw = _cfg_cache["overrides"].get(dept)
+    if not raw:
+        return []
+    return [ln.strip() for ln in str(raw).splitlines() if ln.strip() and not ln.strip().startswith("#")]
+
+
+def _split_explicit_model(model):
+    """№586 A.2: явная форма «провайдер:модель» (например qwen:qwen-plus) →
+    (провайдер, модель без префикса). Если провайдер не из PROVIDERS или
+    модель после двоеточия пуста — (None, model) без изменений."""
+    if ":" in model:
+        prov, rest = model.split(":", 1)
+        if prov in PROVIDERS and rest:
+            return prov, rest
+    return None, model
+
 
 def _provider_for_model(model):
     """FO-025: детекция провайдера по алиасу модели (единая точка —
-    используется прямым вызовом call_llm и shadow-зеркалом)."""
+    используется прямым вызовом call_llm и shadow-зеркалом).
+    №586 A.2: сначала явная форма «провайдер:модель» (если провайдер из
+    PROVIDERS); затем префиксы в порядке, где gpt-oss проверяется РАНЬШЕ gpt
+    (gpt-oss-* — cerebras, openai/gpt-oss-* — groq; прежний порядок отправлял
+    gpt-oss в OpenAI), добавлены qwen и kimi/moonshot."""
+    explicit, rest = _split_explicit_model(model)
+    if explicit:
+        return explicit
     provider = _cfg_cache["priority_provider"]
-    for prov_name in PROVIDERS:
-        if model.startswith("claude"):
-            provider = "anthropic"; break
-        elif model.startswith("deepseek"):
-            provider = "deepseek"; break
-        elif model.startswith("grok"):
-            provider = "grok"; break
-        elif model.startswith("gpt"):
-            provider = "openai"; break
-        elif model.startswith("glm"):
-            provider = "zai"; break
-        elif model.startswith("llama") or model.startswith("mixtral") or model.startswith("gemma"):
-            provider = "groq"; break
-        elif model.startswith("nvidia/"):
-            provider = "nvidia"; break
-        elif model.startswith("gpt-oss") or model.startswith("zai-glm"):
-            provider = "cerebras"; break
+    # порядок важен (№586 A.2): gpt-oss и openai/gpt-oss раньше gpt
+    if model.startswith("gpt-oss"):
+        provider = "cerebras"
+    elif model.startswith("openai/gpt-oss"):
+        provider = "groq"
+    elif model.startswith("gpt"):
+        provider = "openai"
+    elif model.startswith("qwen"):
+        provider = "qwen"
+    elif model.startswith("kimi") or model.startswith("moonshot"):
+        provider = "kimi"
+    elif model.startswith("claude"):
+        provider = "anthropic"
+    elif model.startswith("deepseek"):
+        provider = "deepseek"
+    elif model.startswith("grok"):
+        provider = "grok"
+    elif model.startswith("glm"):
+        provider = "zai"
+    elif model.startswith("llama") or model.startswith("mixtral") or model.startswith("gemma"):
+        provider = "groq"
+    elif model.startswith("nvidia/"):
+        provider = "nvidia"
+    elif model.startswith("zai-glm"):
+        provider = "cerebras"
     return provider
 
 
@@ -503,6 +580,12 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
     """
     # 0. FO-024: enforcement бюджета ДО любой точки расхода. admin и аварийные
     # команды не стопятся (см. proxy/budget.py). stop → честный отказ департаменту.
+    # №586 C.3: перед этим — mtime-перечитка override_*/priority_* (запись /model
+    # из бота пишет файл напрямую, кэш Python обязан обновиться без рестарта).
+    try:
+        _maybe_reload_cfg()
+    except Exception as e:  # noqa: BLE001 — перечитка не должна ронять вызов
+        _log_error(f"cfg mtime reload failed: {e}", dept=dept, kind="cfg_reload")
     try:
         from proxy.budget import enforce as budget_enforce
         bstate = budget_enforce(dept, command=command)
@@ -527,6 +610,38 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
     compression_saved = max(comp_stats["tokens_before"] - comp_stats["tokens_after"], 0)
 
     # FO-018: модель департамента из departments/<dept>.md (если не задан явный override)
+    # №586 C.1: НО раньше неё — назначенные отделу модели (Mini App / TG /model):
+    # иерархия — назначение из Mini App/бота → model: из departments/<dept>.md → combo.
+    # FO-024 (запрет прохода №586): при hard ≥100% эконом-модель важнее назначения —
+    # обход назначенных не выполняется (hard-блок ниже уже подменил model_override).
+    _override_models = _dept_override_models(dept) if model_override is None else []
+    if _override_models and bstate.get("state") != "hard":
+        _ov_fails = []
+        for _m in _override_models:
+            _eprov, _mmodel = _split_explicit_model(_m)
+            _prov = _eprov or _provider_for_model(_mmodel)
+            _res = _call_single_provider(_prov, _mmodel, messages, dept=dept)
+            if _res and _res.get("reply"):
+                if compression_saved > 0:
+                    _res["compression_saved"] = compression_saved
+                log.info(f"[override] dept={dept}: ответ от {_prov}/{_mmodel} (назначение отдела, №586 C.1)")
+                return _res
+            _ov_fails.append(f"{_prov}/{_mmodel}")
+        # №586 C.2: режим «только эти модели» — фолбэк в combo запрещён
+        _only = False
+        try:
+            _only = (CFG_DIR / f"override_{dept}.only").exists()
+        except Exception:  # noqa: BLE001
+            _only = False
+        if _only:
+            _detail = ", ".join(_ov_fails)
+            log.warning(f"[override] dept={dept}: only-режим, назначенные недоступны: {_detail}")
+            return {"reply": (f"Назначенные модели отдела {dept} недоступны: {_detail}. "
+                              "Фолбэк на общие цепи отключён (режим «только эти модели»)."),
+                    "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0,
+                    "override_only": True}
+        log.warning(f"[override] dept={dept}: назначенные недоступны ({', '.join(_ov_fails)}), прежний маршрут")
+
     if model_override is None:
         try:
             from proxy.departments import model_for
@@ -542,9 +657,11 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
 
     # 2. If model_override is set, do direct single-provider call
     if model_override:
-        # Единая детекция провайдера (FO-025: helper переиспользует shadow)
-        provider = _provider_for_model(model_override)
-        result = _call_single_provider(provider, model_override, messages, dept=dept)
+        # Единая детекция провайдера (FO-025: helper переиспользует shadow).
+        # №586 A.2: явная форма «провайдер:модель» уходит провайдеру БЕЗ префикса.
+        _eprov, _mmodel = _split_explicit_model(model_override)
+        provider = _eprov or _provider_for_model(_mmodel)
+        result = _call_single_provider(provider, _mmodel, messages, dept=dept)
         if result and result.get("reply"):
             if compression_saved > 0:
                 result["compression_saved"] = compression_saved
