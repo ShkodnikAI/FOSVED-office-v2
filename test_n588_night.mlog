@@ -1,0 +1,217 @@
+// test_n588_night.mlog — Наряд #588: ночная доставка (A.3 resume-гварды, B.1 пустые части/резка).
+// Легенда:
+//   c1 OutboxSplitChunks: ASCII-абзац 9000 символов → ровно 3 куска (3400+3400+2200);
+//   c2 каждый кусок не пуст и ≤ 3400; суммарная длина кусков = 9000 (потерь нет);
+//   c3 абзацы уважаются: 5 абзацев по 1000 символов → 2 куска, склейка по "\n\n";
+//   c4 пустой текст → "[]";
+//   d1 NightPhaseBegin("lz") → "acquired", повторно в ту же дату → "done" (at-most-once);
+//   d2 NightPhaseDone до маркировки → "new"; после NightPhaseMark → "done";
+//   f1 OutboxFlush с гигантским блоком (6000) + обычным: ровно 2 части,
+//      каждая длиннее заголовка (пустых частей нет), каждая ≤ 3600;
+//   f2 повторный NightReportSlot в тот же день → "already delivered today";
+//   f3 все строки outbox помечены sent_at.
+// NB: мок Telegram — через шов SendTelegramReply (конвенция тест-стабов #519,
+// как в test_n550v3.mlog: app.mlog не импортируется, имена резолвятся стабами).
+// Запуск: rm -rf /tmp/n588-test && mkdir -p /tmp/n588-test, затем
+//   ./bin/mlog run test_n588_night.mlog
+db { url: "sqlite:/tmp/n588-test/night.db" }
+import dept/scheduler
+
+// ── тест-стабы app-слоя (#519) ──────────────────────────────────────────
+pattern InitDB() -> String {
+  return "ok"
+}
+pattern AuditLog(action: String, dept: String, details: String) -> String {
+  return "ok"
+}
+// Мок Telegram-шва: прод-SendTelegramReply уходит в api.telegram.org, тест —
+// пишет «отправленное» в таблицу test_sent (приём test_n550v3.mlog).
+pattern SendTelegramReply(chat_id: String, text: String) -> String {
+  let _ = db_execute("INSERT INTO test_sent (chat_id, text) VALUES (?1, ?2)", [chat_id, text])
+  return "mock-ok"
+}
+// Стабы transitively-imported dept-модулей — только для компиляции (run-гейт №523).
+pattern RecordAssistantMessage(chat_id: String, dept: String, text: String) -> String {
+  return "ok"
+}
+pattern BuildContext(dept: String, query: String, chat_id: String) -> String {
+  return ""
+}
+pattern ReadDeptProfile(dept: String) -> String {
+  return ""
+}
+pattern YanaRecallMemories(query: String) -> String {
+  return "[]"
+}
+pattern YanaNowInfo() -> String {
+  return ""
+}
+pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
+  return "ok"
+}
+pattern TeamAskBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamBoardBlock(dept: String) -> String {
+  return ""
+}
+pattern TeamPublish(from_dept: String, kind: String, topic: String, tags: String, payload: String, src_urls: String, ttl_hours: Float) -> String {
+  return ""
+}
+pattern TeamSecondPass(dept: String, query: String, context: String, draft: String) -> String {
+  return draft
+}
+pattern McpMediaCall(tool: String, args_json: String, purpose: String) -> Dict {
+  return parse_json("{}")
+}
+pattern call_python(module: String, function: String, args_json: String) -> String {
+  return "{\"error\": \"stub\"}"
+}
+pattern LZLlm(prompt: String) -> String {
+  return ""
+}
+
+pattern TestDbInit() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS owner_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), source TEXT NOT NULL, text TEXT NOT NULL, sent_at TEXT)")
+  let _ = db_execute("CREATE INDEX IF NOT EXISTS idx_owner_outbox_sent ON owner_outbox(sent_at)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS night_run_state (day TEXT PRIMARY KEY, phases TEXT NOT NULL DEFAULT '', updated_at TEXT)")
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS test_sent (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, text TEXT)")
+  // #519: очистка тестовой БД — деструктивный SQL под грантом (ADR-0155)
+  let g1 = grant_issue("db:delete:owner_outbox", 3600, "n", 2)
+  let g2 = grant_issue("db:delete:test_sent", 3600, "n", 2)
+  let g3 = grant_issue("db:delete:night_run_state", 3600, "n", 2)
+  let _ = db_execute_with_grant(g1, "DELETE FROM owner_outbox")
+  let _ = db_execute_with_grant(g2, "DELETE FROM test_sent")
+  let _ = db_execute_with_grant(g3, "DELETE FROM night_run_state")
+  return "ok"
+}
+
+pattern _Mark(name: String, ok: Bool) -> String {
+  if ok then { return name + "=true;" }
+  return name + "=false;"
+}
+
+pattern _Sixty() -> String {
+  return "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij"
+}
+
+pattern _Hundred() -> String {
+  return "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
+}
+
+pattern _Big9000() -> String {
+  let mut big = ""
+  let mut i = 0.0
+  while i < 150.0 {
+    let big = big + _Sixty()
+    let i = i + 1.0
+  }
+  return big
+}
+
+pattern _Big6000() -> String {
+  let mut big = ""
+  let mut i = 0.0
+  while i < 100.0 {
+    let big = big + _Sixty()
+    let i = i + 1.0
+  }
+  return big
+}
+
+pattern _CountSent() -> Float {
+  let rows = query("SELECT COUNT(*) AS cnt FROM test_sent", [])
+  return to_float(json_get(get(rows, 0), "cnt", "0"))
+}
+
+pattern _SentParts() -> List {
+  return query("SELECT text FROM test_sent ORDER BY id", [])
+}
+
+pattern Run(x: String) -> String {
+  let _ = TestDbInit()
+  let mut out = ""
+
+  // ── c1: ASCII-абзац 9000 → ровно 3 куска ──────────────────────────────
+  let big = _Big9000()
+  let out = out + _Mark("c1_len_9000", length(big) == 9000.0)
+  let arr = parse_json(OutboxSplitChunks(big, 3400.0))
+  let out = out + _Mark("c1_three_chunks", length(arr) == 3.0)
+
+  // ── c2: куски не пусты, ≤3400, без потерь ────────────────────────────
+  let mut ok_nonempty = true
+  let mut ok_lens = true
+  let mut total = 0.0
+  let mut j = 0.0
+  while j < length(arr) {
+    let piece = to_string(get(arr, j))
+    if length(piece) == 0.0 then { let ok_nonempty = false }
+    if length(piece) > 3400.0 then { let ok_lens = false }
+    let total = total + length(piece)
+    let j = j + 1.0
+  }
+  let out = out + _Mark("c2_nonempty_le3400", ok_nonempty and ok_lens)
+  let out = out + _Mark("c2_no_loss_9000", total == 9000.0)
+
+  // ── c3: абзацы уважаются (абзац ровно 1000 ASCII-символов) ──────────
+  let mut par = ""
+  let mut pi = 0.0
+  while pi < 10.0 {
+    let par = par + _Hundred()
+    let pi = pi + 1.0
+  }
+  let paras = par + "\n\n" + par + "\n\n" + par + "\n\n" + par + "\n\n" + par
+  let arr2 = parse_json(OutboxSplitChunks(paras, 3400.0))
+  let out = out + _Mark("c3_two_chunks", length(arr2) == 2.0)
+
+  // ── c4: пустой текст → "[]" ──────────────────────────────────────────
+  let out = out + _Mark("c4_empty", OutboxSplitChunks("", 3400.0) == "[]")
+
+  // ── d1: NightPhaseBegin at-most-once ─────────────────────────────────
+  let b1 = NightPhaseBegin("lz")
+  let b2 = NightPhaseBegin("lz")
+  let out = out + _Mark("d1_begin_acquired_then_done", b1 == "acquired" and b2 == "done")
+
+  // ── d2: NightPhaseDone/Mark (resume, mark-after-run) ─────────────────
+  let d1 = NightPhaseDone("evals")
+  let _ = NightPhaseMark("evals")
+  let d2 = NightPhaseDone("evals")
+  let out = out + _Mark("d2_new_then_done", d1 == "new" and d2 == "done")
+
+  // ── f1: flush с гигантским блоком — пустых частей нет ────────────────
+  let _ = OutboxPut("night", _Big6000())
+  let _ = OutboxPut("fo027", "FO-027: цепочка zz9 истекла (2 степа)")
+  let r1 = NightReportSlot()
+  let out = out + _Mark("f1_delivered", contains(r1, "outbox: delivered"))
+  let out = out + _Mark("f1_two_parts", _CountSent() == 2.0)
+  let sent = _SentParts()
+  let mut ok_parts = true
+  let mut k = 0.0
+  while k < length(sent) {
+    let t = to_string(json_get(get(sent, k), "text", ""))
+    // часть длиннее заголовка → в ней есть текст блока (пустых частей нет)
+    if length(t) < 60.0 then { let ok_parts = false }
+    // часть не может превышать заголовок + 3500 контента
+    if length(t) > 3600.0 then { let ok_parts = false }
+    let k = k + 1.0
+  }
+  let out = out + _Mark("f1_no_empty_parts", ok_parts)
+
+  // ── f2: повторная доставка в тот же день — dedup ─────────────────────
+  let r2 = NightReportSlot()
+  let out = out + _Mark("f2_dup_guard", contains(r2, "already delivered today"))
+  let out = out + _Mark("f2_no_new_sends", _CountSent() == 2.0)
+
+  // ── f3: sent_at проставлен всем ──────────────────────────────────────
+  let pend = query("SELECT COUNT(*) AS cnt FROM owner_outbox WHERE sent_at IS NULL", [])
+  let out = out + _Mark("f3_all_sent", to_float(json_get(get(pend, 0), "cnt", "0")) == 0.0)
+
+  let fails = split(out, "=false")
+  let n_fails = length(fails) - 1.0
+  if n_fails == 0.0 then { return "ALL PASS (" + to_string(length(split(out, "=true")) - 1.0) + " проверок): " + out }
+  return "ЕСТЬ ПРОВАЛЫ: " + to_string(n_fails) + ": " + out
+}
+
+flow Main {
+  input: String = "" -> Run -> output
+}

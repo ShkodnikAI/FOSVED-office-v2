@@ -133,6 +133,9 @@ class TestRegression:
         monkeypatch.setattr(_rt, "_golden_load", lambda dept: {
             "osp": osp_tasks, "yana": yana_tasks}.get(dept))
         monkeypatch.setattr(_rt, "_golden_previous_avg", lambda dept: 0.9)
+        # №588 B.3: доставка зависит от времени суток — тест фиксирует день
+        # (иначе алерт честно уходит в owner_outbox по тишине #550)
+        monkeypatch.setattr(_rt, "_is_night_msk", lambda: False)
 
         r = client.post("/scheduler/golden-evals?secret=cron-test-secret", json={"depts": ["osp", "yana"]})
         assert r.status_code == 200

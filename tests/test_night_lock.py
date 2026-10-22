@@ -161,9 +161,24 @@ TOKEN_N569 = "tok-n569-mlog-12345678"
 
 
 def _extract(pattern_name, src, extra_assert=None, path="app.mlog"):
-    m = re.search(r"pattern %s\(.*?\n\}" % pattern_name, src, re.S)
+    # №588: тело паттерна может содержать вложенные if/while-блоки на отдельных
+    # строках — режем по балансу фигурных скобок, а не по первому "\n}"
+    m = re.search(r"pattern %s\(" % pattern_name, src)
     assert m, f"pattern {pattern_name} не найден в {path}"
-    text = m.group(0)
+    depth = 0
+    started = False
+    for i in range(m.start(), len(src)):
+        ch = src[i]
+        if ch == "{":
+            depth += 1
+            started = True
+        elif ch == "}":
+            depth -= 1
+            if started and depth == 0:
+                text = src[m.start():i + 1]
+                break
+    else:
+        raise AssertionError(f"pattern {pattern_name}: несбалансированные скобки в {path}")
     if extra_assert:
         assert extra_assert in text, f"{pattern_name}: нет {extra_assert!r}"
     return text
@@ -180,7 +195,16 @@ def _harness_mlog(port):
     init_db_text = _extract("InitDB", app_src,
                             "CREATE TABLE IF NOT EXISTS audit_log")
     outbox_text = _extract("OutboxPut", sched_src, "owner_outbox")
-    tick_text = _extract("NightTickSlot", sched_src, 'OutboxPut("night-tick"')
+    tick_text = _extract("NightTickSlot", sched_src, 'OutboxPut("night-tick"', path="dept/scheduler.mlog")
+    # №588 A.3: resume-гварды NightTickSlot зовут NightPhaseMark —
+    # харнесс включает настоящие паттерны из dept/scheduler.mlog
+    guard_text = (
+        _extract("NightPhaseDone", sched_src, 'return "new"', path="dept/scheduler.mlog")
+        + "\n\n"
+        + _extract("NightPhaseMark", sched_src, "UPDATE night_run_state", path="dept/scheduler.mlog")
+        + "\n\n"
+        + _extract("NightPhaseBegin", sched_src, 'return "acquired"', path="dept/scheduler.mlog")
+    )
     tryval_text = _extract("TryVal", utils_src, "return")  # офисный, не builtin
     # хвост InitDB вызывает LZDataMaintain и LZWatchSeedCategory (dept/lz.mlog,
     # #566) — стабы для харнесса
@@ -205,6 +229,7 @@ def _harness_mlog(port):
         + tryval_text + "\n\n"
         + init_db_text + "\n\n"
         + outbox_text + "\n\n"
+        + guard_text + "\n\n"
         + tick_text + "\n\n"
         + "pattern NightSlotStub() -> String {\n"
         + "  let _ = db_execute(\"UPDATE no_such_table_n569 SET x = 1\", [])\n"

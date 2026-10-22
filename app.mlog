@@ -115,6 +115,8 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')))")
   // №587 A.1: оценки владельца «+»/«−» к конкретным ответам/отчётам
   db_execute("CREATE TABLE IF NOT EXISTS reply_ratings (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, kind TEXT DEFAULT 'reply', ref TEXT DEFAULT '', chat_id TEXT, message_id INTEGER, vote INTEGER, comment TEXT, prompt_message_id INTEGER, created_at TEXT DEFAULT (datetime('now')), voted_at TEXT)")
+  // №588 A.3: resume-маркеры ночного цикла (NightPhaseDone/Mark/Begin, dept/scheduler.mlog)
+  db_execute("CREATE TABLE IF NOT EXISTS night_run_state (day TEXT PRIMARY KEY, phases TEXT NOT NULL DEFAULT '', updated_at TEXT)")
   db_execute("CREATE TABLE IF NOT EXISTS adapt_corrections (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, original_query TEXT, original_response TEXT, correction TEXT, corr_type TEXT, created_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')))")
 
@@ -1716,6 +1718,31 @@ pattern call_python(module: String, function: String, args_json: String) -> Stri
 // источник для HTTP-роута (ручной/аварийный триггер) и нативного файра.
 // ВНИМАНИЕ: тело содержит деструктивный SQL (chain_steps TTL/expired) —
 // на 0.21 это объект грант-миграции (ценз в отчёте №419); на 0.19 легально.
+pattern NightLzPhase() -> String {
+  // №588 A.3/B.1: ночная фаза ЛЗ — at-most-once за дату, без доставки.
+  // Ранние return вместо присваиваний в no-else if (не пробрасываются).
+  // Возвращает json {line: String, failed: Float}.
+  let begin = NightPhaseBegin("lz")
+  if begin == "done" then {
+    return json_encode({line: "ЛЗ: уже выполнялась ночью — полный отчёт в 09:10", failed: 0.0})
+  }
+  let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
+  let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID"), deliver: "none"})
+  let lz_raw = TryVal(try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0))
+  let _ = NightPhaseMark("lz")
+  let lz_val = to_string(lz_raw)
+  if lz_val == "()" then {
+    return json_encode({line: "ЛЗ: скан недоступен — полный отчёт в 09:10", failed: 1.0})
+  }
+  if lz_val == "{}" then {
+    return json_encode({line: "ЛЗ: скан недоступен — полный отчёт в 09:10", failed: 1.0})
+  }
+  let lz_scan = parse_json(to_string(json_get(parse_json(lz_val), "scan", "{}")))
+  let lz_n = to_string(json_get(lz_scan, "repos_found", "?"))
+  let lz_m = to_string(json_get(lz_scan, "releases_found", "?"))
+  return json_encode({line: "ЛЗ: " + lz_n + " репозиториев, " + lz_m + " релизов — полный отчёт в 09:10", failed: 0.0})
+}
+
 pattern NightSlot() -> String {
   let _ = InitDB()
 
@@ -1751,14 +1778,18 @@ pattern NightSlot() -> String {
   let ua_summary = redact(to_string(json_get(parse_json(ua_result), "summary", "UA cycle failed")), "all")
 
   // Phase 1: LZ Daily Report (GitHub scan → Admin)
-  // #550 A.1: ночной прогон LZ DAILY шлёт в outbox (deliver: "outbox"),
-  // утренний слот lz-daily (09:10) и ручные прогоны — как раньше, в Telegram.
-  let _ = AuditLog("night_lz_daily", "lz", "triggering lz-daily from night cycle")
-  let lz_body = json_encode({owner_id: env("OWNER_TELEGRAM_ID"), deliver: "outbox"})
-  let mut lz_result = TryVal(try http_post("http://127.0.0.1:4000/scheduler/lz-daily", lz_body, "application/json", 240.0))
-  if to_string(lz_result) == "()" then { lz_result = "{}" }
-  if to_string(lz_result) == "{}" then { phase_fail = phase_fail + 1.0 }
-  let lz_summary = redact(to_string(json_get(parse_json(lz_result), "report", "LZ daily failed")), "all")
+  // №588 A.3: ЛЗ в ночи — НЕ БОЛЬШЕ ОДНОГО РАЗА за дату (NightPhaseBegin,
+  // at-most-once: даже при сбое повторной попытки до завтра не будет —
+  // полный отчёт всё равно приходит слотом 09:10).
+  // №588 B.1: ночной прогон НЕ доставляет отчёт вообще (deliver:"none" —
+  // ни outbox, ни Telegram): в ночном блоке — одна строка со счётчиками
+  // скана, полный текст ЛЗ остаётся слоту 09:10 (LzDailySlot).
+  // Фаза вынесена в паттерн NightLzPhase с ранними return: присваивание в
+  // no-else if на уровне паттерна НЕ пробрасывает связку (семантика бинаря
+  // 0.33.2, проба n588) — json-результат паттерна пробрасывается надёжно.
+  let lz_phase = parse_json(NightLzPhase())
+  let lz_line = to_string(json_get(lz_phase, "line", "ЛЗ: скан недоступен — полный отчёт в 09:10"))
+  let phase_fail = phase_fail + to_float(json_get(lz_phase, "failed", "0"))
 
   // Phase 2: Memory Maintenance
   let mem_body = "{}"
@@ -1797,7 +1828,7 @@ pattern NightSlot() -> String {
       keys_summary = keys_line + " — ok " + keys_ok + "/" + keys_total
     }
   }
-  let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + substring(lz_summary, 0, 800) + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result + "\n\nPhase 5: Ключи и провайдеры\n" + keys_summary
+  let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + lz_line + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result + "\n\nPhase 5: Ключи и провайдеры\n" + keys_summary
 
   // ── #485 A.3: итог ночного цикла — сохранение, аудит и Telegram ──
   // Статус честный: "ok" только если все фазы ответили; иначе partial с числом.

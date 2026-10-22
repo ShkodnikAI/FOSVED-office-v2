@@ -37,6 +37,10 @@ from proxy.telegram import (
     _tg_send_message, _tg_send_voice, _tg_send_report_with_button,
     _tg_get_file, _tg_download_file, _tg_send_photo, _tg_send_document,
     _safe_filename_part, _send_chat_action_loop, _tg_send_chat_action,
+    # №587 A.2 (мерж cc46eef): owner_rate_attach зовётся из 4 эндпоинтов этого
+    # файла, но нигде не импортировался — NameError на любом брифе/дайджесте;
+    # вскрыто B.2-тестами #588 после мержа main
+    owner_rate_attach,
 )
 from proxy.reports import (
     html_lib_escape, strip_html_for_archive, _html_base, _dept_header,
@@ -474,6 +478,15 @@ def scheduler_morning_brief():
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         # №587 A.2: ряд оценки к брифу Яны (kind=brief)
         owner_rate_attach(owner_id, msg_id, "yana", kind="brief")
+        # №588 B.2: бриф — в dialog_history (dept='yana', role='assistant',
+        # chat_id=owner) тем же способом, каким пишутся обычные ответы Яны;
+        # без этого ответ Админа 07:25 не находит бриф («не найден свежий отчёт»).
+        try:
+            _query("INSERT INTO dialog_history (dept, chat_id, role, content) VALUES ('yana', ?, 'assistant', ?)",
+                   (str(owner_id), brief))
+        except Exception as e:
+            _log_error(f"morning brief dialog_history write failed: {e}",
+                       source="scheduler_morning_brief", dept="yana", kind="db_write")
         _log_audit("scheduler_morning_brief", {"owner_id": owner_id, "provider": result["provider"], "msg_id": msg_id})
 
         return jsonify({"status": "ok", "brief": brief, "msg_id": msg_id})
