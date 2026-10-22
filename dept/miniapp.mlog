@@ -114,6 +114,72 @@ pattern DeptDisclaimer(dept: String) -> String {
 
 // ── Router: plain text vs Mini App + AUTO-ARCHIVE ──────────────────
 // Yana NEVER goes through miniapp — she sends plain text + voice directly
+
+// №587 A.1/A.2: выключатель кнопок оценки (kv rate_buttons, on по умолчанию)
+pattern RateButtonsEnabled() -> String {
+  let v = to_string(kv_get("rate_buttons"))
+  if v == "off" then { return "off" }
+  return "on"
+}
+
+// №587 A.1: строка оценки создаётся на отправке (vote NULL)
+pattern RatingRowCreate(dept: String, kind: String, ref_id: String, chat_id: String) -> String {
+  let _ = db_execute("INSERT INTO reply_ratings (dept, kind, ref, chat_id) VALUES (?1, ?2, ?3, ?4)", [dept, kind, ref_id, chat_id])
+  let rows = query("SELECT id FROM reply_ratings ORDER BY id DESC LIMIT 1", [])
+  let mut rid = "0"
+  each r in rows { let rid = to_string(json_get(r, "id", "0")) }
+  return rid
+}
+
+// №587 A.2/A.3: ряд кнопок [+,−]; voted — какая кнопка отмечена (пусто — никакая)
+pattern RatingKeyboard(rid: String, voted: String) -> String {
+  let plus_label = "+"
+  let minus_label = "−"
+  if voted == "+" then { let plus_label = "✓ +" }
+  if voted == "−" then { let minus_label = "✓ −" }
+  if voted == "-" then { let minus_label = "✓ −" }
+  return json_encode({inline_keyboard: [[{text: plus_label, callback_data: "rt:+:" + rid}, {text: minus_label, callback_data: "rt:-:" + rid}]]})
+}
+
+// №587 A.2: короткий ответ отдела с кнопками оценки (dept известен)
+pattern SendTelegramReplyRatings(chat_id: String, text: String, dept: String) -> String {
+  let _ = InitDB()
+  let enabled = RateButtonsEnabled()
+  if enabled == "off" then { return SendTelegramReply(chat_id, text) }
+  let rid = RatingRowCreate(dept, "reply", "", chat_id)
+  let body = json_encode({chat_id: to_float(chat_id), text: text, reply_markup: RatingKeyboard(rid, "")})
+  let token = TgToken()
+  let result = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
+  let mid = to_float(json_get(parse_json(to_string(result)), "result.message_id", "0"))
+  let _ = db_execute("UPDATE reply_ratings SET message_id = ?1 WHERE id = ?2", [mid, rid])
+  return result
+}
+
+// №587 A.2: прикрепить ряд оценки к уже отправленному сообщению (yana/admin)
+pattern AttachRatingRow(chat_id: String, message_id: String, dept: String, kind: String, ref_id: String) -> String {
+  let enabled = RateButtonsEnabled()
+  if enabled == "off" then { return "off" }
+  let rid = RatingRowCreate(dept, kind, ref_id, chat_id)
+  let body = json_encode({chat_id: to_float(chat_id), message_id: to_float(message_id), reply_markup: RatingKeyboard(rid, "")})
+  let token = TgToken()
+  let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/editMessageReplyMarkup", body, "application/json"))
+  return rid
+}
+
+// №587 A.2: сообщение с кнопкой отчёта + ряд оценки вторым рядом (если включено)
+pattern SendReportMiniAppMessage(token: String, chat_id: String, text: String, miniapp_url: String, dept: String, doc_id: String) -> String {
+  if RateButtonsEnabled() == "off" then {
+    let body = json_encode({chat_id: to_float(chat_id), text: text, reply_markup: {inline_keyboard: [[{text: "Открыть отчёт", web_app: { url: miniapp_url }}]]}})
+    return TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
+  }
+  let rt_rid = RatingRowCreate(dept, "report", doc_id, chat_id)
+  let body = json_encode({chat_id: to_float(chat_id), text: text, reply_markup: {inline_keyboard: [[{text: "Открыть отчёт", web_app: { url: miniapp_url }}], [{text: "+", callback_data: "rt:+:" + rt_rid}, {text: "−", callback_data: "rt:-:" + rt_rid}]]}})
+  let result = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
+  let mid = to_float(json_get(parse_json(to_string(result)), "result.message_id", "0"))
+  let _ = db_execute("UPDATE reply_ratings SET message_id = ?1 WHERE id = ?2", [mid, rt_rid])
+  return result
+}
+
 pattern SendReport(reply: String, dept: String, query: String, confidence: String, chat_id: String) -> String {
   // #399 A.2 (Metalogos-#757, бинарь 0.27.1): обрезанный по лимиту ответ не
   // уходит владельцу молча. Билтин llm_last_finish_reason() возвращает
@@ -128,7 +194,12 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
   }
   let reply = reply + trunc_note
   if dept == "yana" or dept == "admin" then {
-    let _ = SendTelegramReplyMDV2(chat_id, reply)
+    let mdv2_res = SendTelegramReplyMDV2(chat_id, reply)
+    // №587 A.2: ряд оценки прикрепляется к отправленному сообщению (если оно ушло)
+    let mdv2_mid = to_string(json_get(parse_json(to_string(mdv2_res)), "result.message_id", "0"))
+    if mdv2_mid != "0" then {
+      let _ = AttachRatingRow(chat_id, mdv2_mid, dept, "reply", "")
+    }
     return reply
   }
   let reply_len = length(reply)
@@ -190,17 +261,8 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
       let render_url = RenderUrl()
       let miniapp_url = render_url + "/miniapp/" + doc_id
       let token = TgToken()
-      let body = json_encode({
-        chat_id: to_float(chat_id),
-        text: short_with_dept,
-        reply_markup: {
-          inline_keyboard: [[{
-            text: "Открыть отчёт",
-            web_app: { url: miniapp_url }
-          }]]
-        }
-      })
-      let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
+      // №587 A.2: ряд оценки вторым рядом под кнопкой отчёта (если rate_buttons on)
+      let _ = SendReportMiniAppMessage(token, chat_id, short_with_dept, miniapp_url, dept, doc_id)
     } else {
       let file_body = json_encode({doc_id: doc_id, chat_id: chat_id, caption: short_with_dept})
       let file_res = TryVal(try http_post("http://127.0.0.1:4000/tg-send-report-file", file_body, "application/json"))
@@ -225,7 +287,8 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
     return short
   }
   // Short reply: just send as text
-  let _ = SendTelegramReply(chat_id, reply)
+  // №587 A.2: короткий ответ отдела — с кнопками оценки (dept известен)
+  let _ = SendTelegramReplyRatings(chat_id, reply, dept)
   return reply
 }
 

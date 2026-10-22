@@ -315,6 +315,35 @@ def _read_override_raw(dept):
         return None
 
 
+
+# ── №587 A.2: выключатель кнопок оценки (kv rate_buttons) ────────────────
+@app.get("/api/rate_buttons")
+def api_rate_buttons_get():
+    try:
+        row = _query("SELECT value FROM kv_store WHERE key = 'rate_buttons' LIMIT 1", fetch=True)
+        enabled = not (row and str(row[0]["value"]).strip() == "off")
+        return jsonify({"status": "ok", "enabled": enabled})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/rate_buttons")
+def api_rate_buttons_set():
+    """№587 A.2: включить/выключить кнопки оценки (режим настройки офиса).
+    При off кнопки не добавляются к новым сообщениям; обработчик нажатий
+    по уже отправленным продолжает работать."""
+    d = request.get_json(force=True, silent=True) or {}
+    if "enabled" not in d:
+        return jsonify({"status": "error", "message": "enabled (bool) обязателен"}), 400
+    val = "on" if d.get("enabled") else "off"
+    try:
+        _query("INSERT OR REPLACE INTO kv_store (key, value) VALUES ('rate_buttons', ?)", (val,))
+        _log_audit("rate_buttons_set", {"enabled": bool(d.get("enabled")), "source": "miniapp"})
+        return jsonify({"status": "ok", "enabled": bool(d.get("enabled"))})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.get("/api/model/depts")
 def api_model_depts_get():
     """MINIAPP-5 (#292) + MINIAPP-6 (#293): оверрайды моделей по отделам
@@ -538,6 +567,19 @@ def api_depts_chat():
         stale = [d for d in DEPT_COLORS if d != "yana" and act.get(d, ("", 0))[0] and act.get(d, ("", 0))[0] < cutoff]
         stale.sort(key=lambda d: act.get(d, ("", 0))[0], reverse=True)
         never = sorted(d for d in DEPT_COLORS if d != "yana" and not act.get(d, ("", 0))[0])
+        # №587 A.4: счётчики оценок владельца per dept (7 и 30 дней)
+        ratings = {}
+        try:
+            rrows = _query(
+                "SELECT dept, "
+                "COALESCE(SUM(CASE WHEN vote=1 AND voted_at > datetime('now','-7 days') THEN 1 ELSE 0 END),0) AS p7, "
+                "COALESCE(SUM(CASE WHEN vote=-1 AND voted_at > datetime('now','-7 days') THEN 1 ELSE 0 END),0) AS m7, "
+                "COALESCE(SUM(CASE WHEN vote=1 AND voted_at > datetime('now','-30 days') THEN 1 ELSE 0 END),0) AS p30, "
+                "COALESCE(SUM(CASE WHEN vote=-1 AND voted_at > datetime('now','-30 days') THEN 1 ELSE 0 END),0) AS m30 "
+                "FROM reply_ratings WHERE voted_at IS NOT NULL GROUP BY dept", fetch=True)
+            ratings = {r["dept"]: {"p7": r["p7"], "m7": r["m7"], "p30": r["p30"], "m30": r["m30"]} for r in rrows}
+        except Exception:  # noqa: BLE001 — нет таблицы: счётчики просто не показываются
+            ratings = {}
         depts = []
         for d in ["yana"] + fresh + stale + never:
             nm = DEPT_NAMES.get(d, d)
@@ -548,6 +590,7 @@ def api_depts_chat():
                 "color": c.get("start", ""), "color2": c.get("end", ""),
                 "last_used": act.get(d, ("", 0))[0], "uses": act.get(d, ("", 0))[1],
                 "last_msg_id": last_msg.get(d, 0), "unread": unread.get(d, 0),
+                "ratings": ratings.get(d),
             })
         return jsonify({"status": "ok", "depts": depts})
     except Exception as e:
