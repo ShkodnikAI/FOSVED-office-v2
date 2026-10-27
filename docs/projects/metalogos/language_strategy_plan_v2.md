@@ -1693,3 +1693,34 @@ gh#1135, gh#1304 (verified-wait), gh#1302 (N15 — владелец).
 
 
 **Гейт-исключение (2026-09-25):** решения гейта gh#680 (7 стратегических) внесены в план как гейт-решение владельца (чат ветки) — стратегическая ревизия раздел 13.10 + ADR-0177/0178 нарядами №461/№464 — без отдельного выпуска аудита актуальности. Выпуск №2 (2026-10-01) — первая регулярная сверка после ревизии, включая пере-фактчек рыночного ландшафта раздела 3.
+
+## 23. Phase 8 — Verifiable Compliance & Trust (MASTER-PLAN 2026-10-28; план принят владельцем «устроивай в план развития», верифицирован Super Z R36)
+
+**Статус:** сквозная линия Phase 8 принята как линия развития (не новый домен; вне доменной квоты ADR-0177 — все 13 возможностей являются продолжениями исполненных подсистем). Рыночная часть (13 ниш, экономика, прогноз ограничений R1–R13) живёт в каноне §16.0-7 — НЕ публикуется; наружу уходит только санитированная фазовая строка в PLAN-SUMMARY (через волновой docs-наряд, не издателем).
+
+**Точка синхронизации (верификация R36, 2026-10-28):** Metalogos- main 28cca0a — Волна 68 в исполнении (№823 в main; В66 EXECUTED dispatch gh#1569; №817 = 0.34.0 prep, wave 67), max ADR = 0200 (provable-lowering), ~2052 коммитов. План составлялся от В66/№817 — дрейф точки синхронизации не влияет на архитектуру плана.
+
+**13 возможностей → родители (верифицировано на main):**
+- C1 Compliance Evidence Compiler ← Wave 0 №320 (C2PA/Art 50 slice), Ledger v1 (Phase 3);
+- C2 Capability/Grant Runtime ← Phase 3 (grants, DenyEvent, Ledger v1 — CHANGELOG grant×12/ledger×14);
+- C3 Provenance-Native I/O ← №320 C2PA mini-slice;
+- C4 License-Typed Model Layer ← distill-механика языка: поля `distill_to`/`distill_after` у `learnable pattern` (наряд №495 v0.27.1, e2e-пин naryad_496_distill_serve_e2e.rs — limitations-archive, вербатим);
+- C5 Provider-Agnostic Local-First ← `llm { providers, failover }` (CHANGELOG failover×3); circuit_breaker на main НЕ верифицирован — факт-база W-E перепроверяет;
+- C6 Portable Refusal Algebra ← Phase 1 решётка + crate split stage 2 (metalogos-server вынесен);
+- C7 Reproducible Build ← подписанные релизы + SHA256SUMS (CHANGELOG) + SBOM в release.yml (верифицировано R36);
+- C8 Deterministic Replay & Forensic Ledger ← Ledger v1 + ledger verify hook + AAD binding (Wave 22);
+- C9 Формальные гарантии ← differential fuzzer №585, LIVENESS ratchet №621, nesting-pairs 36/36;
+- C10 Jurisdiction-Aware Policy Compilation ← feature-gates (docs/feature-gates.md) + MCP policy (ADR-0196);
+- C11 Typed Consent & Human Oversight ← route requires=[admin], Degraded(t), honest-limits №588;
+- C12 Signed Package Registry ← mlogpkg (крейс + ADR-0019, advisory-db);
+- C13 Вертикали + Governance-щит ← домен-гейты ADR-0177/0178 + second-maintainer lane (№774 CODEOWNERS, verified-wait). [Коррекция R36: план ссылался на «ADR-0181 owner fixation» — фактически ADR-0181 = release-gate-029-criteria.]
+
+**Подфазы и релизный поезд** (каждый minor = одна подфаза + её машинный факт; подфаза не открывается до GREEN предыдущего — №630-паттерн): 0.35=8D-1(C4, LICENSED_FLOOR) → 0.36=8B-1(C2, GRANT_COVERAGE 10000bp) → 0.37=8A-1(C1, ATTEST_MAP ≥30) → 0.38=8C(C3, PROVENANCE_SHARE 10000bp) → 0.39=8E-1(C5, OFFLINE_SUITE ≥8000bp) → 0.40=8D-2(C10, JURISDICTION_MATRIX ≥3) → 0.41=8F-1(C6, SEMA_EXTERNAL ≥1) → 0.42=8G(C8, REPLAY_PARITY 10000bp) → 0.43=8B-2(C11, APPROVAL_COVERAGE 10000bp) → 0.44=8F-2(C9, TAINT_SATURATION ≥10⁹ + отчёт аудита) → 0.45=8E-2(C7+C12, REPRO_BITFORBIT 10000bp) → 0.50=8H(C13, вертикальный профиль + ТМ в нейтральной структуре) → 1.0 = все 13 фактов GREEN + внешний аудит + ≥1 платящий пилот. Счётчики — в scripts/gen_metrics.py по образцу существующих (факт вместе со своим чекистом, №735; полы only-up).
+
+**Реестр ADR — РЕНУМЕРАЦИЯ R36 (критическая коррекция):** план предлагал 0192–0206; все 15 номеров на main заняты (0192 html-xml-gates, 0193 0.32-typed-source-goal, 0194 query-parity, 0195 release-034-gate, 0196 **mcp-policy-gateway ACCEPTED**, 0197 vm-single-executor, 0198 error-model, 0199 typed-share-by-tier, 0200 provable-lowering). Окончательная бронь Phase 8: **0201** Phase 8 сквозная линия → **0202** ModelPassport → **0203** capability-токен → **0204** attest-бандл → **0205** провенанс артефактов → **0206** Provider-контракт → **0207** mlog-sema → **0208** воспроизводимая сборка → **0209** форензик-журнал → **0210** непроницаемость решётки → **0211** политика-как-данные → **0212** typed approval → **0213** подписанный реестр → **0214** вертикальные профили → **0215** институциональный контур. Правило: ADR публикуется до первого кода подфазы (N1).
+
+**Волны W-A…W-L (64 наряда):** W-A 8D-1·C4 (6) → W-B 8B-1·C2 (6) → W-C 8A-1·C1 (6) → W-D 8C·C3 (5) → W-E 8E-1·C5 (5) → W-F 8D-2·C10 (5) → W-G 8F-1·C6 (6) → W-H 8G·C8 (5) → W-I 8B-2·C11 (4) → W-J 8F-2·C9 (6) → W-K 8E-2·C7+C12 (6) → W-L 8H·C13 (4). Номера №A1… условные — издатель присваивает сквозные по счётчику (продолжение от фактического max) и пишет тексты по фактам живого main (AGENTS.md §1 — план это же требует); форма .github/ISSUE_TEMPLATE/naryad_form.yml; доки-наряд строго последним; диспатч издан последним. Файл naryads.yaml в представленном пакете отсутствует — не блокер, тексты нарядов составляются издателем при издании волны.
+
+**Коррекции верификации R36 (все механические, архитектуру плана не меняют):** (1) ADR-ренумерация 0201–0215; (2) родитель C13 — ADR-0177/0178+№774 вместо «ADR-0181»; (3) скрипт unfreeze_gate.py на main отсутствует — гейт-механика = scripts/ci/gate_0NN_goals.txt + факт-чекеры №735; (4) circuit_breaker не верифицирован (failover верифицирован) — перепроверка в W-E; (5) точка синхронизации обновлена до В68; (6) «блокирующие ячейки 32–44» не подтверждены — goal032-положение фиксирует gen_classification --check (№735-гейт, №777); (7) отрицательное подтверждение: distill_to/distill_after подтверждены через limitations-archive/№495 (не через tools.md).
+
+**Гейты владельца (5):** (1) ADR-0201 (Phase 8) издаётся нарядом W-A — решение о линии зафиксировано настоящей секцией; (2) порядок подфаз 8D→8B→8A→8C→8E→8D-2→8F→8G→8B-2→8F-2→8E-2→8H — принят; (3) бюджет внешнего аудита W-J 15–40 тыс. $ (Open Collective) — ОТКРЫТ; (4) юр. контур (ТМ + нейтральная структура + преемственность) до первых платящих — ОТКРЫТ; (5) вертикали: 2 из {платежи, медицина, госсектор}, рекомендация платежи+госсектор — ОТКРЫТ.
