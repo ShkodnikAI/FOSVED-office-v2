@@ -16,18 +16,23 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.33.2 — прод-бинарь (линия
-# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2, ADR-0009/0012/0015/0017/0018;
-# бинарь из официального релиза тега v0.33.2 (assets + SHA256SUMS), source commit 693cf7dc,
-# sha256 артефакта 48b9816737665b8270bc268606926faba29d8094df838651a7e605b2ef4a7802 —
-# переход по приказу владельца 2026-10-21: check-паритет с предыдущим пином на офисном
-# корпусе — счёт находок идентичен (544 = 544), diff — ТОЛЬКО текст отказов
-# (Metalogos-#1350 Ask 3 (a2), gh#1355: шаблон ветвится по фактическому правилу —
-# №316-классификация вызова для не-ACTION синков вместо ложной цитаты моста №391);
-# известная находка [PII_EGRESS_OUTPUT] argument 0 of respond in route
-# GET /schedules/list ОСТАЁТСЯ — по запрету наряда НЕ чинится, зафиксирована в отчёте;
-# 0 parse errors app/dept; audit dept гейт №312 (mlog-0271) — 0 [ERROR];
-# grammar rev 1 — без смены ревизии грамматики; serve-подъём interpreter без отказа
+# Metalogos v0.34.0 — прод-бинарь (линия
+# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2→0.34.0, ADR-0009/0012/0015/0017/0018/0197;
+# бинарь из официального релиза тега v0.34.0 (assets + SHA256SUMS), source commit 6d84951d,
+# sha256 артефакта 035d7e15c84145401593c66ac60e71e73ac259b9be19bedb2d62b53e0d16e799 —
+# переход по приказу владельца 2026-10-28: serve-подъём interpreter обоих входов без отказа
+# (dogfood /health 200; prod байт-идентичен 0.33.2 — 21 SQL_ERROR = 21, шум 59 ALTER-сайтов,
+# остаток #604); check-паритет на офисном корпусе: ИЗВЕСТНЫЕ семейства на месте, добавлены
+# новые информационные классы — [BUILTIN_EXPERIMENTAL] db_insert (тир-разметка №796) и
+# +9 [SECRET_EGRESS_NETWORK] (№781: метки redact-hash URL не деактивируются — под legacy-профилем
+# это audit-события, как и прежние 2); [PII_EGRESS_OUTPUT] GET /schedules/list ОСТАЁТСЯ
+# (запрет чинить); 0 parse errors app/dept; audit dept гейт №312 (mlog-0271) — 0 [ERROR];
+# grammar rev 1 — без смены ревизии грамматики.
+# №800 (V3): run/eval/REPL исполняются на VM — CI-батарея v3 переведена на --reference
+# (переходный TW-оракул ADR-0197, два релизных окна): класс дивергенции VM «pattern _Mark
+# expects 2 args, got 0» на харнессах батареи; №802: run-гейт enforce'ит sink-clearance —
+# test_n550v3/test_n588_night получили profile legacy; №799/№800: undefined call_python
+# refusal на компиляции — стаб в forge1-9v3 (канонка n550v3/n556v3).
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
 # грузит сырой app.mlog). bin/mlog-0271 (0.27.1) вендорен как прошлый-хороший
 # тест-гвард (ADR-0015; было mlog-027 = 0.27.0 — выведен; было mlog-025 —
