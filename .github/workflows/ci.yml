@@ -166,6 +166,32 @@ jobs:
           fi
           echo "OK: dogfood_staging.mlog parses under 0.20 (exit code: $RC)"
 
+      # ── #604 (задача 2): гвард замкнутости точек входа (класс UNDEFINED_FUNCTION) ──
+      # check с --root резолвит импорты: модуль может звать паттерн, определённый
+      # только в одной из точек входа (класс #604: dept/lz зовёт LZLlm, шов жил
+      # только в app.mlog — стенд FO-050 не стартовал). Гейт: во флэттене КАЖДОГО
+      # входа ноль "undefined: function"; rc не гейтится — семантические находки
+      # известных семейств (PII_EGRESS_OUTPUT и др.) вне области этого шага.
+      - name: Entry-point closure guard (naryad #604)
+        run: |
+          chmod +x bin/mlog
+          FAIL=0
+          for ENTRY in app.mlog dogfood_staging.mlog; do
+            set +e
+            OUTPUT=$(./bin/mlog check "$ENTRY" --root "$ENTRY" 2>&1)
+            RC=$?
+            set -e
+            HITS=$(echo "$OUTPUT" | grep -c "undefined: function" || true)
+            echo "$ENTRY: rc=$RC, undefined-function hits: $HITS"
+            if [ "$HITS" -ne 0 ]; then
+              echo "FAIL: undefined functions in flattened $ENTRY (класс #604):"
+              echo "$OUTPUT" | grep "undefined: function" | head -10
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" -ne 0 ]; then exit 1; fi
+          echo "OK: обе точки входа замкнуты (0 undefined functions во флэттене)"
+
       # ── №312: Category-A аудит dept-файлов — гвард «долг не растёт» ──
       # Контракт: audit rc=0 — чисто; rc=2 — только warnings (легально);
       # rc=1 ИЛИ наличие [ERROR] — провал. Бинарь 0.27.1 (vendored

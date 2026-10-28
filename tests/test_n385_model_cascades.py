@@ -74,8 +74,8 @@ def test_tier_set_reset_lifecycle():
 
 def test_config_inventory_complete():
     """Инвентарь: все файлы config/ имеют живого читателя (mlog или python).
-    waker_windows.txt — осознанное исключение: конфиг внешнего waker'а (FO-052,
-    «конфиг по месту исполнения»), кодом офиса не читается."""
+    (#604: waker_windows.txt удалён — FO-052 waker-контур снят решением
+    владельца 27.10, waker.yml удалён в Metalogos №827; исключений нет.)"""
     providers_py = (REPO_ROOT / "proxy" / "providers.py").read_text(encoding="utf-8")
     eng = (REPO_ROOT / "dept" / "engineering.mlog").read_text(encoding="utf-8")
     # tier-файлы читаются динамическим путём "config/tier_" + tier + ".txt"
@@ -88,7 +88,6 @@ def test_config_inventory_complete():
         "engineering_normbase.txt": [eng],
         "engineering_min_safety_factor.txt": [eng],
     }
-    KNOWN_EXTERNAL = {"waker_windows.txt"}
     orphans = []
     for f in (REPO_ROOT / "config").iterdir():
         if f.name in readers:
@@ -96,8 +95,6 @@ def test_config_inventory_complete():
                 orphans.append(f.name)
         elif f.name.startswith("override_"):
             continue  # динамический путь ("config/override_" + dept) — app.mlog:676
-        elif f.name in KNOWN_EXTERNAL:
-            continue
         else:
             orphans.append(f"{f.name} (читатель не найден)")
     assert not orphans, f"config-файлы без читателей: {orphans}"

@@ -17,7 +17,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LZ = (REPO_ROOT / "dept" / "lz.mlog").read_text(encoding="utf-8")
+SEAM = (REPO_ROOT / "dept" / "lz_seam.mlog").read_text(encoding="utf-8")
 APP = (REPO_ROOT / "app.mlog").read_text(encoding="utf-8")
+DOGFOOD = (REPO_ROOT / "dogfood_staging.mlog").read_text(encoding="utf-8")
 CI = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
 
@@ -93,12 +95,24 @@ def test_a5_migration_in_initdb_idempotent_no_delete():
     assert "WHERE status != 'archived' ORDER BY id" in LZ
 
 
-def test_llm_seam_lives_in_app_layer():
-    # шов определён в app.mlog (прод-замыкание), в lz.mlog — только вызовы:
-    # импортированные определения сильнее локальных, стаб батареи иначе не работает
-    assert "pattern LZLlm(prompt: String) -> String" in APP
+def test_llm_seam_lives_in_shared_module():
+    # #604: шов в dept/lz_seam.mlog — ОБЕ точки входа импортируют модуль.
+    # До #604 определение жило только в app.mlog: стенд FO-050
+    # (dogfood_staging.mlog импортирует dept/lz, шов не определяла) падал
+    # при старте — [UNDEFINED_FUNCTION] LZLlm ×6.
+    assert "pattern LZLlm(prompt: String) -> String" in SEAM
+    assert "import dept/lz_seam" in APP
+    assert "import dept/lz_seam" in DOGFOOD
+    # dept/lz.mlog шов не определяет и не импортирует: стаб батареи v3 —
+    # локальное определение тестового замыкания (проба #604, bin/mlog
+    # 0.33.2: локаль входа сильнее импорта; dept/lz дыры не имеет —
+    # стаб её заполняет).
     assert "pattern LZLlm" not in LZ
+    assert "import dept/lz_seam" not in LZ
     assert "LZLlm(" in LZ
+    # локальные определения шва в точках входа запрещены (ровно одно — в модуле)
+    assert "pattern LZLlm" not in APP
+    assert "pattern LZLlm" not in DOGFOOD
 
 
 def test_battery_in_ci_loop():

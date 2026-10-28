@@ -84,6 +84,9 @@ import dept/quest
 // import dept/yana — REMOVED: HandleYana inlined below to bypass binary import caching
 import dept/osp
 import dept/lz
+// #604: шов LLM-вызовов ЛЗ — модуль для ОБЕИХ точек входа (без него стенд
+// FO-050 падал при старте: [UNDEFINED_FUNCTION] LZLlm ×6)
+import dept/lz_seam
 import dept/expert
 import dept/marketing
 import dept/finance
@@ -152,17 +155,19 @@ pattern InitDB() -> String {
   // по числу ALTER в InitDB; при добавлении миграции нарастить квоту.
   // ALTER, отклонённый из-за дубля колонки, грант НЕ консюмирует).
   let mig = grant_issue("db:alter:*", 120, "n", 25)
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN dept TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN plan TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN acceptance TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN test_log TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN report TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN in_work_at TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE narads ADD COLUMN testing_at TEXT")
+  // #604 (задача 3): ALTER — только при отсутствующей колонке (AlterColIfMissing:
+  // чистый старт без [SQL_ERROR] «duplicate column», грант не консюмируется).
+  let _ = AlterColIfMissing(mig, "narads", "dept", "ALTER TABLE narads ADD COLUMN dept TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "priority", "ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
+  let _ = AlterColIfMissing(mig, "narads", "plan", "ALTER TABLE narads ADD COLUMN plan TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "acceptance", "ALTER TABLE narads ADD COLUMN acceptance TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "test_status", "ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
+  let _ = AlterColIfMissing(mig, "narads", "test_log", "ALTER TABLE narads ADD COLUMN test_log TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "report", "ALTER TABLE narads ADD COLUMN report TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "dispatch_id", "ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "rework_count", "ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
+  let _ = AlterColIfMissing(mig, "narads", "in_work_at", "ALTER TABLE narads ADD COLUMN in_work_at TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "testing_at", "ALTER TABLE narads ADD COLUMN testing_at TEXT")
   // FO-049 (#161): метрики нарядной дисциплины — строка на каждый закрытый наряд
   db_execute("CREATE TABLE IF NOT EXISTS narad_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, narad_id TEXT, dept TEXT, first_try INTEGER DEFAULT 0, rework_count INTEGER DEFAULT 0, lead_seconds INTEGER, accepted_by TEXT, created_at TEXT DEFAULT (datetime('now')))")
   let _ = try db_execute("CREATE INDEX IF NOT EXISTS idx_narad_stats_created ON narad_stats(created_at)")
@@ -178,7 +183,7 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS shop_price_history (id INTEGER PRIMARY KEY AUTOINCREMENT, offer_id INTEGER NOT NULL, price_byn REAL NOT NULL, old_price_byn REAL, in_stock INTEGER, ts TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE INDEX IF NOT EXISTS idx_shop_ph_offer_ts ON shop_price_history(offer_id, ts)")
   db_execute("CREATE TABLE IF NOT EXISTS shop_watches (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, target_price_byn REAL, discount_pct REAL, alert_in_stock INTEGER DEFAULT 0, status TEXT DEFAULT 'active', last_checked_at TEXT, last_alert_json TEXT, created_at TEXT DEFAULT (datetime('now')))")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT")
+  let _ = AlterColIfMissing(mig, "shop_watches", "last_alert_json", "ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT")
   db_execute("CREATE TABLE IF NOT EXISTS shop_dossiers (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, format TEXT NOT NULL, payload TEXT, snapshot_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))")
 
   // Admin
@@ -197,11 +202,13 @@ pattern InitDB() -> String {
   // LZ
   db_execute("CREATE TABLE IF NOT EXISTS lz_telegram_channels (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, channel_name TEXT, category TEXT, added_at TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE TABLE IF NOT EXISTS lz_github_updates (id INTEGER PRIMARY KEY AUTOINCREMENT, update_id TEXT UNIQUE, channel_id TEXT, channel_name TEXT, text TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')))")
-  // #252: миграция lz_telegram_posts → lz_github_updates (идемпотентна: копия+DROP
-  // только пока старая таблица существует в sqlite_master; после первого прогона no-op)
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
+  // #252: миграция lz_telegram_posts → lz_github_updates. #604: блок целиком
+  // под гвардом существования таблицы (форма #428 A.4 из app.mlog): на чистой
+  // БД стенда lz_telegram_posts нет, безусловный ALTER до гварда давал
+  // [SQL_ERROR] «no such table» на каждом старте.
   let lz_old_posts = query("SELECT name FROM sqlite_master WHERE type='table' AND name='lz_telegram_posts'", [])
-  if to_string(lz_old_posts) != "()" then {
+  if length(lz_old_posts) > 0.0 then {
+    let _ = try db_execute_with_grant(mig, "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
     let _ = try db_execute("INSERT OR IGNORE INTO lz_github_updates (update_id, channel_id, channel_name, text, date, scanned_at) SELECT update_id, channel_id, channel_name, text, date, scanned_at FROM lz_telegram_posts")
     let _ = try db_execute("DROP TABLE lz_telegram_posts")
   }
@@ -216,16 +223,16 @@ pattern InitDB() -> String {
 
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
-  // Yana events - alter table extensions
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN until_date TEXT")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
+  // Yana events - alter table extensions (#604: гварды колонок)
+  let _ = AlterColIfMissing(mig, "yana_events", "reminded_at", "ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "rrule_kind", "ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "fire_time", "ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "fire_weekday", "ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "fire_monthday", "ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "next_fire_at", "ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "until_date", "ALTER TABLE yana_events ADD COLUMN until_date TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "active", "ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
+  let _ = AlterColIfMissing(mig, "yana_events", "chat_id", "ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
 
   // Yana metrics — delegation accuracy & forgetting incidents
   db_execute("CREATE TABLE IF NOT EXISTS yana_delegation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, query TEXT, delegated_to TEXT, dept_response_summary TEXT, was_correct INTEGER, feedback_source TEXT, delegated_at TEXT DEFAULT (datetime('now')), verified_at TEXT)")
@@ -266,9 +273,9 @@ pattern InitDB() -> String {
   // dept_archive.forecast_value: numeric forecast at creation time (Finance only)
   // dept_verification.actual_value: numeric actual post-factum (Finance only)
   // dept_verification.outcome_flag: categorical flag (Legal: "clean" / "rewrite_required")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
-  let _ = try db_execute_with_grant(mig, "ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
+  let _ = AlterColIfMissing(mig, "dept_archive", "forecast_value", "ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
+  let _ = AlterColIfMissing(mig, "dept_verification", "actual_value", "ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
+  let _ = AlterColIfMissing(mig, "dept_verification", "outcome_flag", "ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
 
   // Webhook dedup — time-windowed (WH-3): replaces eternal kv-flag
   db_execute("CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT DEFAULT (datetime('now')))")

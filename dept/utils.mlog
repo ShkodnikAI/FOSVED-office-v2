@@ -372,6 +372,28 @@ pattern TryVal(x: String) -> String {
   return x.value
 }
 
+// ── #604 (задача 3): миграционные гварды ────────────────────────────────────
+// ALTER TABLE … ADD COLUMN исполняется только если колонки нет: чистый старт
+// стенда FO-050 без [SQL_ERROR] (класс: no such table / duplicate column —
+// логи Render 26-27.10). Запрос параметризованный (склейка строк отвергается
+// Category-A [SQL_DYNAMIC]); pragma_table_info — проба #604 bin/mlog 0.33.2:
+// has=1 / missing=0 / ghost-таблица=0. Повторный старт: попытки ALTER нет —
+// грант не консюмируется (раньше «duplicate column» отсекалось уже движком).
+pattern ColumnExists(table: String, column: String) -> Bool {
+  let rows = query("SELECT name FROM pragma_table_info(?) WHERE name = ?", [table, column])
+  return length(rows) > 0.0
+}
+
+// Гвардованный ALTER под грантом (№395): DDL литералом на месте вызова,
+// исполнение — только при отсутствующей колонке. mig: Grant — непрозрачный
+// хендл (REFERENCE §4.15.1), проходит через параметр (проба #604: altered →
+// skip при повторе; audit 0271 — 0 Category-A).
+pattern AlterColIfMissing(mig: Grant, table: String, column: String, ddl: String) -> String {
+  if ColumnExists(table, column) == true then { return "skip " + table + "." + column }
+  let _ = TryVal(try db_execute_with_grant(mig, ddl))
+  return "altered " + table + "." + column
+}
+
 pattern TgToken() -> String {
   return env("TELEGRAM_BOT_TOKEN")
 }
