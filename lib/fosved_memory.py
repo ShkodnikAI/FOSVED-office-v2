@@ -50,12 +50,20 @@ class FosvedMemory:
         'commitment': (0.01, 0.3),
     }
 
+    # №850: пороги retention ночного цикла (механика прежняя, не политика).
+    # Строки не удаляются физически — переводятся в purged (восстановимо).
+    RETENTION_OBSERVATION_DAYS = 30   # observations: 30+ дней
+    RETENTION_OBSERVATION_CONF = 0.5  # и confidence < 0.5
+    RETENTION_PATTERN_DAYS = 60       # patterns: 60+ дней
+    RETENTION_PATTERN_CONF = 0.3      # и confidence < 0.3
+
     def __init__(self, db_path: str = 'data/memory.db'):
         self.db_path = db_path
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self._ensure_tables()
         self._migrate_review_columns()
+        self._migrate_purged_column()
 
     def _migrate_review_columns(self):
         """FO-020: inference-review колонки для уже существующих БД.
@@ -70,6 +78,16 @@ class FosvedMemory:
                 self.db.commit()
             except sqlite3.OperationalError:
                 pass  # колонка уже существует — ожидаемо
+
+    def _migrate_purged_column(self):
+        """№850: soft-delete колонка для уже существующих БД.
+        Новые БД получают её в CREATE; старые — ALTER (expected-if-exists)."""
+        try:
+            self.db.execute(
+                'ALTER TABLE typed_memories ADD COLUMN purged_at REAL DEFAULT NULL')
+            self.db.commit()
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует — ожидаемо
 
     # FO-020: вес выдачи по статусу ревью. Невыверенное (pending) — 0.5,
     # одобренное/legacy — 1.0; declined исключается на уровне SQL.
@@ -87,7 +105,8 @@ class FosvedMemory:
                 version INTEGER DEFAULT 1,
                 created_at REAL,
                 superseded_by INTEGER DEFAULT NULL,
-                metadata_json TEXT DEFAULT NULL
+                metadata_json TEXT DEFAULT NULL,
+                purged_at REAL DEFAULT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_mem_type ON typed_memories(type);
@@ -166,7 +185,8 @@ class FosvedMemory:
         type_filter: Optional[str] = None,
         min_confidence: float = 0.3,
         limit: int = 10,
-        include_superseded: bool = False
+        include_superseded: bool = False,
+        include_purged: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Recall memories matching query. Uses substring matching (case-insensitive).
@@ -178,6 +198,7 @@ class FosvedMemory:
             min_confidence: Minimum confidence threshold
             limit: Max results
             include_superseded: If True, include superseded memories
+            include_purged: If True, include soft-deleted (№850) — по умолчанию исключены
         """
         if type_filter and type_filter not in self.TYPES:
             logger.warning(f"Unknown type_filter '{type_filter}', ignoring")
@@ -188,6 +209,10 @@ class FosvedMemory:
 
         if not include_superseded:
             sql += ' AND superseded_by IS NULL'
+
+        # №850: purged (soft-delete корзина) исключён из выдачи по умолчанию
+        if not include_purged:
+            sql += ' AND purged_at IS NULL'
 
         # FO-020: declined — soft-delete, из выдачи исключается
         sql += " AND (review_status IS NULL OR review_status != 'declined')"
@@ -237,11 +262,29 @@ class FosvedMemory:
         """Recall all memories from a specific source."""
         rows = self.db.execute(
             '''SELECT * FROM typed_memories
-               WHERE source = ? AND superseded_by IS NULL
+               WHERE source = ? AND superseded_by IS NULL AND purged_at IS NULL
                ORDER BY created_at DESC LIMIT ?''',
             (source, limit)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ─── RESTORE (№850) ──────────────────────────────────────────────────
+
+    def restore(self, memory_id: int) -> bool:
+        """№850: вернуть purged-запись в активную выдачу (откат ночного цикла).
+
+        Знание, которое гибнет скриптом без корзины, — потеря, не гигиена.
+        Возвращает True, если запись найдена и восстановлена."""
+        cur = self.db.execute(
+            'UPDATE typed_memories SET purged_at = NULL WHERE id = ?',
+            (memory_id,)
+        )
+        self.db.commit()
+        if cur.rowcount:
+            logger.info(f"Restored memory #{memory_id} from purge (№850)")
+            return True
+        logger.warning(f"restore: memory #{memory_id} not found")
+        return False
 
     # ─── ANSWER ─────────────────────────────────────────────────────────────
 
@@ -271,7 +314,7 @@ class FosvedMemory:
         Find contradictions between active memories of the same type.
         Returns list of conflict dicts with both memories and resolution hint.
         """
-        sql = 'SELECT * FROM typed_memories WHERE superseded_by IS NULL'
+        sql = 'SELECT * FROM typed_memories WHERE superseded_by IS NULL AND purged_at IS NULL'
         params: list = []
         if type_filter:
             sql += ' AND type = ?'
@@ -363,44 +406,51 @@ class FosvedMemory:
             'conflicts_count': len(conflicts),
             'conflicts': conflicts[:5],  # top 5
             'total_active': self.db.execute(
-                'SELECT COUNT(*) FROM typed_memories WHERE superseded_by IS NULL'
+                'SELECT COUNT(*) FROM typed_memories WHERE superseded_by IS NULL AND purged_at IS NULL'
             ).fetchone()[0]
         }
 
     def nightly_maintenance(self) -> str:
         """
-        Nightly cleanup:
+        Nightly maintenance (№850: восстановимо — физического DELETE нет):
         1. Detect and log conflicts
-        2. Clean stale observations (30+ days, confidence < 0.5)
+        2. Soft-purge stale observations/patterns (purged_at, restorable)
         3. Return summary for admin
         """
         summary = self.daily_summary()
 
-        # Clean stale observations
-        cutoff = time.time() - 30 * 86400
+        # Soft-purge stale observations: 30+ дней, confidence < 0.5 (№850 — не DELETE)
+        cutoff = time.time() - self.RETENTION_OBSERVATION_DAYS * 86400
         deleted = self.db.execute(
-            '''DELETE FROM typed_memories
-               WHERE type = 'observation' AND confidence < 0.5 AND created_at < ?''',
-            (cutoff,)
+            '''UPDATE typed_memories SET purged_at = ?
+               WHERE type = 'observation' AND confidence < ? AND created_at < ?
+               AND purged_at IS NULL''',
+            (time.time(), self.RETENTION_OBSERVATION_CONF, cutoff)
         ).rowcount
         self.db.commit()
 
-        # Clean stale patterns (60+ days, confidence < 0.3)
-        cutoff_p = time.time() - 60 * 86400
+        # Soft-purge stale patterns: 60+ дней, confidence < 0.3 (№850 — не DELETE)
+        cutoff_p = time.time() - self.RETENTION_PATTERN_DAYS * 86400
         deleted_p = self.db.execute(
-            '''DELETE FROM typed_memories
-               WHERE type = 'pattern' AND confidence < 0.3 AND created_at < ?''',
-            (cutoff_p,)
+            '''UPDATE typed_memories SET purged_at = ?
+               WHERE type = 'pattern' AND confidence < ? AND created_at < ?
+               AND purged_at IS NULL''',
+            (time.time(), self.RETENTION_PATTERN_CONF, cutoff_p)
         ).rowcount
         self.db.commit()
+
+        restorable = self.db.execute(
+            'SELECT COUNT(*) FROM typed_memories WHERE purged_at IS NOT NULL'
+        ).fetchone()[0]
 
         lines = [
             f"=== Fosved Memory Nightly Maintenance ===",
             f"Active memories: {summary['total_active']}",
             f"New today: {summary['new_memories']}",
             f"Conflicts: {summary['conflicts_count']}",
-            f"Cleaned stale observations: {deleted}",
-            f"Cleaned stale patterns: {deleted_p}",
+            f"Purged stale observations: {deleted} (soft, restorable)",
+            f"Purged stale patterns: {deleted_p} (soft, restorable)",
+            f"Purged restorable: {restorable}",
         ]
 
         if summary['conflicts']:
@@ -451,26 +501,32 @@ class FosvedMemory:
     def stats(self) -> Dict[str, Any]:
         """Memory statistics."""
         total = self.db.execute(
-            'SELECT COUNT(*) FROM typed_memories WHERE superseded_by IS NULL'
+            'SELECT COUNT(*) FROM typed_memories WHERE superseded_by IS NULL AND purged_at IS NULL'
         ).fetchone()[0]
 
         by_type = self.db.execute(
             '''SELECT type, COUNT(*) as cnt, AVG(confidence) as avg_conf
-               FROM typed_memories WHERE superseded_by IS NULL
+               FROM typed_memories WHERE superseded_by IS NULL AND purged_at IS NULL
                GROUP BY type ORDER BY cnt DESC'''
         ).fetchall()
 
         legacy = self.db.execute(
             '''SELECT COUNT(*) FROM typed_memories
-               WHERE superseded_by IS NULL
+               WHERE superseded_by IS NULL AND purged_at IS NULL
                AND (source IS NULL OR source IN ('manual', 'yana_auto', 'mcp'))'''
+        ).fetchone()[0]
+
+        purged = self.db.execute(
+            'SELECT COUNT(*) FROM typed_memories WHERE purged_at IS NOT NULL'
         ).fetchone()[0]
 
         return {
             'total_active': total,
             'by_type': {r['type']: {'count': r['cnt'], 'avg_confidence': round(r['avg_conf'], 2)} for r in by_type},
             # №849: счётчик legacy-записей — гейт провенанса видим потребителю
-            'legacy_unverified': legacy
+            'legacy_unverified': legacy,
+            # №850: корзина видима в статистике — restore доступен
+            'purged': purged
         }
 
     # ─── INTERNAL HELPERS ──────────────────────────────────────────────────
