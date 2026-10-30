@@ -110,7 +110,7 @@ def test_live_mlog_to_proxy_render_full_card_cyrillic(tmp_path, stub_server):
         encoding="utf-8")
     env = dict(os.environ)
     env["METALOGOS_HTTP_ALLOW_PRIVATE"] = "1"  # штатный внутренний канал mlog→:4000
-    r = subprocess.run([mlog, "run", "--reference", str(probe)], cwd=str(tmp_path),  # 0.34.0 №800: TW-оракул (дивергенция VM-аргументов)
+    r = subprocess.run([mlog, "run", str(probe)], cwd=str(tmp_path),  # 0.34.1 №829: возврат на VM (--reference снят)
                        capture_output=True, text=True, timeout=300, env=env)
     out = r.stdout + r.stderr
     assert "R1=" in out and "R2=" in out, f"проба не отработала: {out[-600:]}"
@@ -147,7 +147,7 @@ def test_live_mlog_without_proxy_honest_no_card(tmp_path):
         encoding="utf-8")
     env = dict(os.environ)
     env["METALOGOS_HTTP_ALLOW_PRIVATE"] = "1"
-    r = subprocess.run([mlog, "run", "--reference", str(probe)], cwd=str(tmp_path),  # 0.34.0 №800: TW-оракул (дивергенция VM-аргументов)
+    r = subprocess.run([mlog, "run", str(probe)], cwd=str(tmp_path),  # 0.34.1 №829: возврат на VM (--reference снят)
                        capture_output=True, text=True, timeout=300, env=env)
     out = r.stdout + r.stderr
     assert "R1= | R2=\n" in out, f"без сервера карточка не должна создаваться: {out[-600:]}"

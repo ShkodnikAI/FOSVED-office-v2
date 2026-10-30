@@ -35,13 +35,10 @@ MARKS = [
 
 
 def _run(binary: str):
-    # 0.34.0 (№800, ADR-0197): run исполняется на VM — дивергенция аргументов
-    # паттерн-вызовов («pattern X expects N args, got 0») на харнессе _Mark;
-    # боевой бинарь — на переходном TW-оракуле --reference. 0.27.1 флага не
-    # знает — его run и есть TW.
+    # 0.34.1 (№829, exit п.6 №833): фикс мис-диспетчеризации VM — --reference снят
+    # (был: 0.34.0 №800/ADR-0197, дивергенция аргументов на харнессе _Mark).
+    # 0.27.1 флага не знает — его run и есть TW.
     args = [str(REPO_ROOT / binary), "run"]
-    if binary == "bin/mlog":
-        args.append("--reference")
     return subprocess.run(
         args + [str(SCENARIO)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=180,

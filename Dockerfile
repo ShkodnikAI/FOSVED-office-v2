@@ -16,23 +16,25 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.34.0 — прод-бинарь (линия
-# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2→0.34.0, ADR-0009/0012/0015/0017/0018/0197;
-# бинарь из официального релиза тега v0.34.0 (assets + SHA256SUMS), source commit 6d84951d,
-# sha256 артефакта 035d7e15c84145401593c66ac60e71e73ac259b9be19bedb2d62b53e0d16e799 —
-# переход по приказу владельца 2026-10-28: serve-подъём interpreter обоих входов без отказа
-# (dogfood /health 200; prod байт-идентичен 0.33.2 — 21 SQL_ERROR = 21, шум 59 ALTER-сайтов,
-# остаток #604); check-паритет на офисном корпусе: ИЗВЕСТНЫЕ семейства на месте, добавлены
-# новые информационные классы — [BUILTIN_EXPERIMENTAL] db_insert (тир-разметка №796) и
-# +9 [SECRET_EGRESS_NETWORK] (№781: метки redact-hash URL не деактивируются — под legacy-профилем
-# это audit-события, как и прежние 2); [PII_EGRESS_OUTPUT] GET /schedules/list ОСТАЁТСЯ
-# (запрет чинить); 0 parse errors app/dept; audit dept гейт №312 (mlog-0271) — 0 [ERROR];
-# grammar rev 1 — без смены ревизии грамматики.
-# №800 (V3): run/eval/REPL исполняются на VM — CI-батарея v3 переведена на --reference
-# (переходный TW-оракул ADR-0197, два релизных окна): класс дивергенции VM «pattern _Mark
-# expects 2 args, got 0» на харнессах батареи; №802: run-гейт enforce'ит sink-clearance —
-# test_n550v3/test_n588_night получили profile legacy; №799/№800: undefined call_python
-# refusal на компиляции — стаб в forge1-9v3 (канонка n550v3/n556v3).
+# Metalogos v0.34.1 — прод-бинарь (линия
+# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2→0.34.0→0.34.1, ADR-0009/0012/0015/0017/0018/0189/0197;
+# бинарь из официального релиза тега v0.34.1 (assets + SHA256SUMS), source commit 0f0f1293,
+# sha256 артефакта fdac4152f073de38566ad6dff87f5e82ea58cd21a12bb9d845abff8b0d670852 —
+# внеплановый fix-релиз (ADR-0189 §2.6, наряд №833; переход по приказу владельца 2026-10-30):
+# №829 — фикс мис-диспетчеризации VM при profile legacy (Metalogos-#1616/#1618: чужой паттерн
+# / потеря аргументов вызовов, молчаливый режим коррупции); №831 — SQL_DYNAMIC-гейт 5/5
+# по классификации (query/query_row/query_scalar/db_execute арг-0, db_execute_with_grant арг-1)
+# + гвард идентификаторов db_insert (fail-closed: нелитеральный SQL — громкий отказ на check;
+# офисные 58 db_execute_with_grant и 8 db_insert литеральны — check обоих входов 0 новых
+# находок, известные семейства на месте: [PII_EGRESS_OUTPUT] GET /schedules/list — запрет
+# чинить; [BUILTIN_EXPERIMENTAL] db_insert; [SECRET_EGRESS_NETWORK] №781 — audit-события);
+# 0 parse errors app/dept; grammar rev 1 — без смены ревизии грамматики.
+# №829 exit (п.6 №833): CI-батарея v3 ВОЗВРАЩЕНА на боевой VM-лэйн — --reference снят
+# (был: переходный TW-оракул ADR-0197, окна 0.34.0–0.34.1); 19/19 на VM. n550v3 получил
+# NightSlot-стаб (класс #604 — символ app-слоя; пробел вскрылся возвратом на VM, канонка
+# test_n588_night). №802: run-гейт enforce'ит sink-clearance — profile legacy в
+# test_n550v3/test_n588_night ОСТАЁТСЯ (это не обходной путь, а канонка); стаб call_python
+# в forge1-9v3 ОСТАЁТСЯ (№799/№800 — undefined refusal на компиляции).
 # bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
 # грузит сырой app.mlog). bin/mlog-0271 (0.27.1) вендорен как прошлый-хороший
 # тест-гвард (ADR-0015; было mlog-027 = 0.27.0 — выведен; было mlog-025 —
