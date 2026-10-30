@@ -20,6 +20,11 @@ from typing import Optional, List, Dict, Any
 logger = logging.getLogger("fosved.memory")
 
 
+def now_ts() -> float:
+    """Момент «сейчас» (epoch seconds) — единая точка оси времени (№851)."""
+    return time.time()
+
+
 class FosvedMemory:
     """Typed persistent memory with 13 types, temporal decay, conflict detection."""
 
@@ -64,6 +69,7 @@ class FosvedMemory:
         self._ensure_tables()
         self._migrate_review_columns()
         self._migrate_purged_column()
+        self._migrate_superseded_column()
 
     def _migrate_review_columns(self):
         """FO-020: inference-review колонки для уже существующих БД.
@@ -89,6 +95,20 @@ class FosvedMemory:
         except sqlite3.OperationalError:
             pass  # колонка уже существует — ожидаемо
 
+    def _migrate_superseded_column(self):
+        """№851: момент supersede для уже существующих БД.
+
+        Бэкфорис честный: старым строкам superseded_at = NULL — момент их
+        supersede не зафиксирован и выдумываться не будет. Срезы as_of глубже
+        бэкфориса аппроксимируются (строка включается по created_at, помечается
+        as_of_quality: approx) — деградация видна потребителю."""
+        try:
+            self.db.execute(
+                'ALTER TABLE typed_memories ADD COLUMN superseded_at REAL DEFAULT NULL')
+            self.db.commit()
+        except sqlite3.OperationalError:
+            pass  # колонка уже существует — ожидаемо
+
     # FO-020: вес выдачи по статусу ревью. Невыверенное (pending) — 0.5,
     # одобренное/legacy — 1.0; declined исключается на уровне SQL.
     REVIEW_WEIGHTS = {'approved': 1.0, 'pending': 0.5, 'declined': 0.0}
@@ -105,6 +125,7 @@ class FosvedMemory:
                 version INTEGER DEFAULT 1,
                 created_at REAL,
                 superseded_by INTEGER DEFAULT NULL,
+                superseded_at REAL DEFAULT NULL,
                 metadata_json TEXT DEFAULT NULL,
                 purged_at REAL DEFAULT NULL
             );
@@ -152,10 +173,11 @@ class FosvedMemory:
         existing = self.recall(content, type_filter=mem_type, limit=5)
         for m in existing:
             if self._contradicts(m['content'], content):
-                # Version the old one: mark as superseded
+                # Version the old one: mark as superseded (момент фиксируется, №851)
                 self.db.execute(
-                    'UPDATE typed_memories SET superseded_by = -1 WHERE id = ?',
-                    (m['id'],)
+                    'UPDATE typed_memories SET superseded_by = -1, superseded_at = ? '
+                    'WHERE id = ?',
+                    (now_ts(), m['id'])
                 )
                 logger.info(
                     f"Superseded memory #{m['id']} (type={mem_type}) "
@@ -343,13 +365,103 @@ class FosvedMemory:
         return conflicts
 
     def resolve_conflict(self, keep_id: int, supersede_id: int):
-        """Manually resolve a conflict: supersede one memory in favor of another."""
+        """Manually resolve a conflict: supersede one memory in favor of another
+        (момент supersede фиксируется, №851)."""
         self.db.execute(
-            'UPDATE typed_memories SET superseded_by = ? WHERE id = ?',
-            (keep_id, supersede_id)
+            'UPDATE typed_memories SET superseded_by = ?, superseded_at = ? WHERE id = ?',
+            (keep_id, now_ts(), supersede_id)
         )
         self.db.commit()
         logger.info(f"Resolved conflict: kept #{keep_id}, superseded #{supersede_id}")
+
+    # ─── TEMPORAL SLICES (№851) ──────────────────────────────────────────
+
+    def recall_as_of(
+        self,
+        query: str,
+        as_of_ts: float,
+        type_filter: Optional[str] = None,
+        min_confidence: float = 0.3,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """№851: срез «что память знала на момент as_of_ts».
+
+        Формула наряда: создано ≤ ts И (не superseded ИЛИ superseded_at > ts).
+        Purge (№850) тоже часть оси времени: запись, purged ПОСЛЕ среза,
+        на срезе видна; purged ДО — нет.
+
+        Качество среза честно (бэкфорис): строка с supersede-моментом NULL
+        (legacy, до миграции) включается по created_at с пометкой
+        as_of_quality: approx — срезы глубже бэкфориса аппроксимированы;
+        всё остальное — exact."""
+        if type_filter and type_filter not in self.TYPES:
+            type_filter = None
+        sql = '''SELECT * FROM typed_memories
+                 WHERE created_at <= ?
+                   AND confidence >= ?
+                   AND (purged_at IS NULL OR purged_at > ?)
+                   AND (superseded_by IS NULL OR superseded_at IS NULL
+                        OR superseded_at > ?)'''
+        params: list = [as_of_ts, min_confidence, as_of_ts, as_of_ts]
+        if type_filter:
+            sql += ' AND type = ?'
+            params.append(type_filter)
+        sql += ' AND lower(content) LIKE ?'
+        params.append(f'%{query.lower()}%')
+        sql += ' ORDER BY created_at DESC LIMIT ?'
+        params.append(limit)
+        rows = self.db.execute(sql, params).fetchall()
+        results = [dict(r) for r in rows]
+        for m in results:
+            # деградация бэкфориса видна потребителю
+            m['as_of_quality'] = ('approx'
+                                  if m.get('superseded_by') is not None
+                                  and m.get('superseded_at') is None
+                                  else 'exact')
+            m['source_display'] = self._display_source(m.get('source'))
+        return results
+
+    def recall_changed_since(
+        self,
+        query: str,
+        since_ts: float,
+        type_filter: Optional[str] = None,
+        min_confidence: float = 0.3,
+        limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """№851: срез «что изменилось с момента since_ts».
+
+        Формула наряда: созданные после метки ИЛИ superseded после метки.
+        Каждая строка несёт change_kind (created|superseded) и change_at —
+        момент события. Purged исключены по умолчанию (поверхность №850)."""
+        if type_filter and type_filter not in self.TYPES:
+            type_filter = None
+        sql = '''SELECT * FROM typed_memories
+                 WHERE confidence >= ?
+                   AND purged_at IS NULL
+                   AND (created_at > ?
+                        OR (superseded_at IS NOT NULL AND superseded_at > ?))'''
+        params: list = [min_confidence, since_ts, since_ts]
+        if type_filter:
+            sql += ' AND type = ?'
+            params.append(type_filter)
+        sql += ' AND lower(content) LIKE ?'
+        params.append(f'%{query.lower()}%')
+        sql += ' ORDER BY created_at DESC LIMIT ?'
+        params.append(limit)
+        rows = self.db.execute(sql, params).fetchall()
+        results = [dict(r) for r in rows]
+        for m in results:
+            sup_at = m.get('superseded_at')
+            if sup_at is not None and sup_at > since_ts:
+                m['change_kind'] = 'superseded'
+                m['change_at'] = sup_at
+            else:
+                m['change_kind'] = 'created'
+                m['change_at'] = m['created_at']
+            m['source_display'] = self._display_source(m.get('source'))
+        results.sort(key=lambda x: x['change_at'], reverse=True)
+        return results
 
     # ─── TEMPORAL DECAY ────────────────────────────────────────────────────
 
