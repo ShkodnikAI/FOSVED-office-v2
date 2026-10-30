@@ -32,6 +32,10 @@ class FosvedMemory:
     # Types that should NOT decay — owner decisions, instructions, preferences are permanent
     ETERNAL_TYPES = {'decision', 'instruction', 'preference'}
 
+    # №849: legacy-источники fail-open эпохи (в т.ч. NULL) — не переписываются,
+    # в выдаче честно помечаются как непроверенные (форма №468).
+    LEGACY_SOURCES = {'manual', 'yana_auto', 'mcp'}
+
     # Decay rates: type -> (decay_per_day, floor)
     DECAY_RATES = {
         'error': (0.005, 0.5),
@@ -108,7 +112,17 @@ class FosvedMemory:
 
         If a conflicting memory exists of the same type, the old one is
         marked as superseded (versioned, not deleted).
+
+        №849: fail-closed source-атрибуция — запись без явного источника
+        запрещена (кто извлёк: отдел, агент, наряд или клиент; конвенция
+        dept:<имя> / agent:<имя> / mcp:<client_id>). Молчаливые дефолты
+        'manual'/'yana_auto' удалены — вызывающий передаёт источник сам.
         """
+        if not source or not str(source).strip():
+            raise ValueError(
+                "remember: source обязателен (fail-closed атрибуция, №849) — "
+                "передай явный источник: dept:<имя>, agent:<имя>, mcp:<client_id>, наряд"
+            )
         if mem_type not in self.TYPES:
             logger.warning(f"Unknown memory type '{mem_type}', using 'fact'")
             mem_type = 'fact'
@@ -192,6 +206,10 @@ class FosvedMemory:
         rows = self.db.execute(sql, params).fetchall()
         results = [dict(r) for r in rows]
 
+        # №849: выдача честно помечает legacy-источники (NULL/'manual'/'yana_auto'/'mcp')
+        for m in results:
+            m['source_display'] = self._display_source(m.get('source'))
+
         # Apply temporal decay scoring
         now = time.time()
         for m in results:
@@ -207,6 +225,13 @@ class FosvedMemory:
     def recall_all_types(self, query: str, min_confidence: float = 0.3, limit: int = 20) -> List[Dict[str, Any]]:
         """Recall across ALL types, grouped."""
         return self.recall(query, type_filter=None, min_confidence=min_confidence, limit=limit)
+
+    @classmethod
+    def _display_source(cls, source: Optional[str]) -> str:
+        """№849: честная метка источника в выдаче — legacy помечен, явный проходит."""
+        if not source or str(source) in cls.LEGACY_SOURCES:
+            return 'legacy-unverified'
+        return str(source)
 
     def recall_by_source(self, source: str, limit: int = 50) -> List[Dict[str, Any]]:
         """Recall all memories from a specific source."""
@@ -232,8 +257,9 @@ class FosvedMemory:
         lines = []
         for m in memories:
             ts = time.strftime('%Y-%m-%d %H:%M', time.localtime(m['created_at']))
+            # №849: legacy-записи помечены legacy-unverified вместо src:?
             lines.append(
-                f"[{m['type']}, conf:{m['confidence']:.1f}, {ts}, src:{m['source'] or '?'}] "
+                f"[{m['type']}, conf:{m['confidence']:.1f}, {ts}, src:{self._display_source(m.get('source'))}] "
                 f"{m['content']}"
             )
         return '\n'.join(lines)
@@ -394,9 +420,15 @@ class FosvedMemory:
         Bulk import memories. Each dict needs: content, type, confidence, source.
         Skips if a very similar memory already exists.
         Returns count of actually inserted memories.
+
+        №849: fail-closed — каждая запись несёт явный source, дефолт 'seed' удалён.
         """
         inserted = 0
         for m in memories:
+            if not m.get('source') or not str(m['source']).strip():
+                raise ValueError(
+                    "seed: каждая запись требует явный source (fail-closed атрибуция, №849)"
+                )
             # Skip if very similar content already exists
             existing = self.recall(m['content'][:30], type_filter=m['type'], limit=1)
             if existing and self._similar_topic(existing[0]['content'], m['content']):
@@ -407,7 +439,7 @@ class FosvedMemory:
                 content=m['content'],
                 mem_type=m['type'],
                 confidence=m.get('confidence', 0.8),
-                source=m.get('source', 'seed')
+                source=m['source']
             )
             inserted += 1
 
@@ -428,9 +460,17 @@ class FosvedMemory:
                GROUP BY type ORDER BY cnt DESC'''
         ).fetchall()
 
+        legacy = self.db.execute(
+            '''SELECT COUNT(*) FROM typed_memories
+               WHERE superseded_by IS NULL
+               AND (source IS NULL OR source IN ('manual', 'yana_auto', 'mcp'))'''
+        ).fetchone()[0]
+
         return {
             'total_active': total,
-            'by_type': {r['type']: {'count': r['cnt'], 'avg_confidence': round(r['avg_conf'], 2)} for r in by_type}
+            'by_type': {r['type']: {'count': r['cnt'], 'avg_confidence': round(r['avg_conf'], 2)} for r in by_type},
+            # №849: счётчик legacy-записей — гейт провенанса видим потребителю
+            'legacy_unverified': legacy
         }
 
     # ─── INTERNAL HELPERS ──────────────────────────────────────────────────
