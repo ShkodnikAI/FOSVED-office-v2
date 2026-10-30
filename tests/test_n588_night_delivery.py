@@ -56,11 +56,11 @@ def _run_scenario():
     import shutil
     shutil.rmtree("/tmp/n588-test", ignore_errors=True)
     os.makedirs("/tmp/n588-test", exist_ok=True)
-    # 0.34.0 (№800, ADR-0197): run исполняется на VM — класс дивергенции
-    # «pattern X expects N args, got 0» (LZLlm/_Mark на харнессах); сценарий —
-    # на переходном TW-оракуле --reference (два релизных окна).
+    # 0.34.1 (№829, exit п.6 №833): фикс мис-диспетчеризации VM — --reference снят
+    # (был: 0.34.0 №800/ADR-0197, класс «pattern X expects N args, got 0» на
+    # LZLlm/_Mark на харнессах); сценарий снова на боевом VM-лэйне.
     return subprocess.run(
-        [str(BINARY), "run", "--reference", str(SCENARIO)],
+        [str(BINARY), "run", str(SCENARIO)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=180,
         env={**os.environ, "OWNER_TELEGRAM_ID": "1", "CRON_SECRET": "x"},
     )
