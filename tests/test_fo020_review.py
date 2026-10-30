@@ -209,7 +209,7 @@ class TestRanking:
 
     def test_declined_excluded_from_recall(self, tmp_path):
         mem = self._mem(tmp_path)
-        mem.remember("отклонённая запись проекта бета", mem_type="fact", confidence=0.9)
+        mem.remember("отклонённая запись проекта бета", mem_type="fact", confidence=0.9, source="test:fo020")
         mem.db.execute("UPDATE typed_memories SET review_status='declined' "
                        "WHERE content LIKE 'отклонённая%'")
         mem.db.commit()
@@ -219,7 +219,7 @@ class TestRanking:
     def test_legacy_rows_full_weight(self, tmp_path):
         """Строки до FO-020 (review_status NULL/default) — полный вес."""
         mem = self._mem(tmp_path)
-        mem.remember("легаси-вывод: проект гамма заморожен", mem_type="fact", confidence=0.9)
+        mem.remember("легаси-вывод: проект гамма заморожен", mem_type="fact", confidence=0.9, source="test:fo020")
         row = mem.recall("проект гамма", limit=1)[0]
         assert (row["review_status"] or "approved") in ("approved", None)
         assert row["relevance"] > 0

@@ -80,7 +80,7 @@ def ensure_tables():
         """)
         c.execute("""CREATE TABLE IF NOT EXISTS mcp_memory (
             id INTEGER PRIMARY KEY AUTOINCREMENT, space TEXT NOT NULL, content TEXT NOT NULL,
-            tags TEXT DEFAULT '[]', source TEXT DEFAULT 'mcp',
+            tags TEXT DEFAULT '[]', source TEXT DEFAULT NULL,
             created_at TEXT DEFAULT (datetime('now')))
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_mcp_memory_space ON mcp_memory(space)")
@@ -208,19 +208,28 @@ def tool_graph(args):
     return {"space": space, "entity": entity, "degree": len(links), "linked": links[:30]}
 
 
-def tool_add_memory(args):
+def tool_add_memory(args, client_id=None):
     if not _allow_write():
         raise PermissionError("add_memory: сервер в read-only (FOSVED_MCP_ALLOW_WRITE=1 чтобы включить)")
     space = args.get("space") or OWNER_SPACE
     text = (args.get("text") or "").strip()
     if not text:
         raise ValueError("text пуст")
+    # №849: fail-closed source-атрибуция — нет client_id, нет записи.
+    # Молчаливая константа "mcp" удалена: источник — реальный клиент хендшейка.
+    if not client_id or not str(client_id).strip():
+        raise ValueError(
+            "add_memory: client_id обязателен (fail-closed source-атрибуция, №849) — "
+            "клиент передаётся в хендшейке (X-MCP-Client / _client_id)"
+        )
     _check_space(space)
     tags = json.dumps(args.get("tags") or [], ensure_ascii=False)
+    source = f"mcp:{client_id}"
     with _conn() as c:
         c.execute("INSERT INTO mcp_memory (space, content, tags, source) VALUES (?,?,?,?)",
-                  [space, text, tags, "mcp"])
-    return {"ok": True, "space": space, "bytes": len(text)}
+                  [space, text, tags, source])
+    _audit_memory_write("mcp_memory", source, space=space, client=client_id)
+    return {"ok": True, "space": space, "bytes": len(text), "source": source}
 
 
 TOOLS = [
@@ -283,7 +292,11 @@ def handle_request(payload, client_id=None):
             func = TOOL_FUNCS.get(name)
             if not func:
                 return err(-32602, f"unknown tool: {name}")
-            result = func(args)
+            # №849: write-тулзы получают client_id хендшейка для source-атрибуции
+            import inspect
+            result = (func(args, client_id=client_id)
+                      if "client_id" in inspect.signature(func).parameters
+                      else func(args))
             # Taint-контур: ничего секретного наружу (env-redact, общий модуль с FO-022)
             return ok({"content": [{"type": "text", "text": json.dumps(
                 json.loads(redact_text(json.dumps(result, ensure_ascii=False))), ensure_ascii=False)}]})
@@ -309,6 +322,16 @@ def _audit_mcp_call(client_id, what, details, denied=False):
                                 "denied": denied}, "mcp")
     except Exception:
         pass  # аудит не должен ронять транспорт; дублирующий след — в _CONNECTIONS
+
+
+def _audit_memory_write(store, source, **extra):
+    """№849: activity-лог атрибуции записи — двойная атрибуция по memanto-форме
+    (роль записи = source, конкретный клиент = client)."""
+    try:
+        from proxy.core import _log_audit
+        _log_audit("memory_write", {"store": store, "source": source, **extra}, "mcp")
+    except Exception:
+        pass  # аудит не должен ронять запись; источник уже в колонке
 
 
 def connections_status():

@@ -103,7 +103,8 @@ class TestReadOnly:
         assert "read-only" in res["error"]["message"]
 
     def test_add_memory_works_when_enabled(self):
-        res = rpc("tools/call", {"name": "add_memory", "arguments": {"text": f"заметка {uuid.uuid4().hex}", "space": "owner"}})
+        # №849: fail-closed атрибуция — клиент хендшейка обязателен
+        res = rpc("tools/call", {"name": "add_memory", "arguments": {"text": f"заметка {uuid.uuid4().hex}", "space": "owner"}}, client="test-agent")
         assert "result" in res, f"unexpected response: {res}"
         assert res["result"]["content"][0]["text"]
 

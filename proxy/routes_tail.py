@@ -114,12 +114,21 @@ def memory_remember_endpoint():
     data = request.get_json(force=True) or {}
     if 'content' not in data:
         return jsonify({'error': 'content required'}), 400
+    # №849: fail-closed source-атрибуция — молчаливый дефолт 'manual' удалён;
+    # источник обязателен (кто извлёк: отдел, агент, наряд или клиент).
+    source = data.get('source')
+    if not source or not str(source).strip():
+        return jsonify({'error': 'source required (fail-closed attribution, №849)'}), 400
     mem_id = memory.remember(
         content=data['content'],
         mem_type=data.get('type', 'fact'),
         confidence=float(data.get('confidence', 0.8)),
-        source=data.get('source', 'manual')
+        source=source
     )
+    # №849: activity-лог атрибуции — роль (source) + точка входа (route)
+    _log_audit('memory_write', {'store': 'typed_memories', 'id': mem_id,
+                                'source': source, 'type': data.get('type', 'fact'),
+                                'entry': 'route:/memory/remember'}, 'proxy')
     return jsonify({'id': mem_id, 'status': 'remembered'})
 
 
@@ -187,15 +196,22 @@ def yana_auto_memorize():
                 text = text.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
             facts = _json.loads(text)
             saved = 0
+            # №849: явная атрибуция вместо молчаливой константы 'yana_auto' —
+            # кто извлёк (отдел yana, механизм auto-memorize) + клиент-чат.
+            auto_source = f"yana:auto-memorize:{chat_id}" if chat_id else "yana:auto-memorize"
             for f in facts[:3]:
                 if isinstance(f, dict) and f.get('content'):
                     memory.remember(
                         content=f['content'][:500],
                         mem_type=f.get('type', 'fact'),
                         confidence=float(f.get('confidence', 0.8)),
-                        source='yana_auto'
+                        source=auto_source
                     )
                     saved += 1
+            if saved:
+                _log_audit('memory_write', {'store': 'typed_memories', 'count': saved,
+                                            'source': auto_source, 'chat_id': chat_id,
+                                            'entry': 'route:/yana/auto-memorize'}, 'proxy')
             log.info(f"Yana auto-memorize: extracted {saved} facts from chat {chat_id}")
 
             # Also check for dated reminders — store in yana_events for scheduler
