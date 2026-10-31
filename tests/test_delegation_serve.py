@@ -34,12 +34,14 @@ import re
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -221,12 +223,18 @@ class _OfficeServe:
 
 
 @pytest.fixture(scope="module")
-def office():
-    if _port_busy(PORT_MLOG):
-        pytest.skip(f"порт {PORT_MLOG} занят — сервер уже запущен в этом окружении")
+def stub():
     if _port_busy(PROXY_PORT):
         pytest.skip(f"порт {PROXY_PORT} занят — прокси уже запущен в этом окружении")
-    stub = _Stub()
+    s = _Stub()
+    yield s
+    s.stop()
+
+
+@pytest.fixture(scope="module")
+def office(stub):
+    if _port_busy(PORT_MLOG):
+        pytest.skip(f"порт {PORT_MLOG} занят — сервер уже запущен в этом окружении")
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="n603-serve-"))
     version = ROOT / "VERSION"
     created = not version.exists()
@@ -235,14 +243,27 @@ def office():
     serve = None
     try:
         serve = _OfficeServe(_augmented(tmp), tmp)
-        yield stub, serve
+        yield SimpleNamespace(stub=stub, serve=serve, db=tmp / "office.db", tmp=tmp)
     finally:
         if serve is not None:
             serve.stop()
-        stub.stop()
         if created:
             version.unlink(missing_ok=True)
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _seed_owner_injection(db_path, dept="design"):
+    """Инъекция владельца в team_board (from_dept='owner', delivered=0) —
+    путь GetInjectedContext с НЕпустым результатом query()."""
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute(
+            "INSERT INTO team_board (from_dept, kind, topic, tags, payload, sources, delivered) "
+            "VALUES ('owner', 'fact', 'n603 inject test', ?, 'Пост про запуск: синий бренд-бук.', '', 0)",
+            (f'["{dept}"]',))
+        con.commit()
+    finally:
+        con.close()
 
 
 def _assert_no_handler_error(resp):
@@ -252,7 +273,7 @@ def _assert_no_handler_error(resp):
 
 
 def test_case3_webhook_answers_clean(office):
-    stub, serve = office
+    stub, serve = office.stub, office.serve
     stub.reset_calls()
     stub.detect = ""
     r = serve.webhook(9100001)
@@ -260,7 +281,7 @@ def test_case3_webhook_answers_clean(office):
 
 
 def test_case1_yana_delegation_reaches_design(office):
-    stub, serve = office
+    stub, serve = office.stub, office.serve
     stub.reset_calls()
     stub.detect = "yana"
     r = serve.webhook(9100002)
@@ -272,7 +293,7 @@ def test_case1_yana_delegation_reaches_design(office):
 
 
 def test_case2_default_branch_delegates_without_slug_leak(office):
-    stub, serve = office
+    stub, serve = office.stub, office.serve
     stub.reset_calls()
     stub.detect = ""  # detect-dept вернул пусто → ветка по умолчанию
     r = serve.webhook(9100003)
@@ -283,6 +304,20 @@ def test_case2_default_branch_delegates_without_slug_leak(office):
     leaked = [b for b in stub.tg_sends() if str(b.get("text", "")) == "design"]
     assert not leaked, (
         f"голый slug ушёл владельцу в /tg-send (F3): {leaked[:2]}")
+
+
+def test_case4_owner_injection_reaches_context(office):
+    """Сеянная инъекция владельца: GetInjectedContext читает НЕпустые строки
+    query() напрямую (фикс B.1) — контекст отдела получает payload, обрывов нет."""
+    stub, serve = office.stub, office.serve
+    _seed_owner_injection(office.db)
+    stub.reset_calls()
+    stub.detect = "yana"
+    r = serve.webhook(9100006)
+    _assert_no_handler_error(r)
+    depts = [d for d, _ in stub.asks()]
+    assert "design" in depts, (
+        f"с сеянной инъекцией делегирование оборвалось (класс F2 на непустых rows); asks={depts}")
 
 
 # ── Мутации: обе обязаны ловиться кейсами ─────────────────────────────────
@@ -310,8 +345,11 @@ def _mutant_office(tmp: pathlib.Path, kind: str):
     return _OfficeServe(out, tmp)
 
 
-def test_mutation_revert_1149_is_killed_by_case1(office):
-    stub, _ = office
+def test_mutation_revert_1149_is_killed_by_case1(stub):
+    """Мутант :1149 + НЕпустые строки query() (сеянная инъекция) — кейс ловит.
+
+    Результат мутации: ПОЙМАНА — parse_json(to_string(Row)) рвёт BuildContext,
+    /ask dept=design не происходит (Handler error или обрыв делегирования)."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="n603-mutA-"))
     version = ROOT / "VERSION"
     created = not version.exists()
@@ -320,6 +358,7 @@ def test_mutation_revert_1149_is_killed_by_case1(office):
     serve = None
     try:
         serve = _mutant_office(tmp, "revert_1149")
+        _seed_owner_injection(tmp / "office.db")  # НЕпустые rows — иначе парс не достигается
         stub.reset_calls()
         stub.detect = "yana"
         r = serve.webhook(9100004)
@@ -339,8 +378,10 @@ def test_mutation_revert_1149_is_killed_by_case1(office):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_mutation_drop_default_dispatch_is_killed_by_case2(office):
-    stub, _ = office
+def test_mutation_drop_default_dispatch_is_killed_by_case2(stub):
+    """Мутант «убрать DispatchYanaDelegation из ветки по умолчанию» — кейс ловит.
+
+    Результат мутации: ПОЙМАНА — голый slug "design" уходит владельцу в /tg-send (F3)."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="n603-mutB-"))
     version = ROOT / "VERSION"
     created = not version.exists()
