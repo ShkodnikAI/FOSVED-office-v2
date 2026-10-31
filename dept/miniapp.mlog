@@ -150,6 +150,9 @@ pattern SendTelegramReplyRatings(chat_id: String, text: String, dept: String) ->
   let body = json_encode({chat_id: to_float(chat_id), text: text, reply_markup: RatingKeyboard(rid, "")})
   let token = TgToken()
   let result = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
+  // №603 (слой 3): отказ Telegram (сеть/лимиты) давал parse_json("()") → Handler
+  // error — ответ отдела терялся после успешной генерации. Ряд оценки — best-effort.
+  if to_string(result) == "()" then { return "()" }
   let mid = to_float(json_get(parse_json(to_string(result)), "result.message_id", "0"))
   let _ = db_execute("UPDATE reply_ratings SET message_id = ?1 WHERE id = ?2", [mid, rid])
   return result
@@ -175,6 +178,8 @@ pattern SendReportMiniAppMessage(token: String, chat_id: String, text: String, m
   let rt_rid = RatingRowCreate(dept, "report", doc_id, chat_id)
   let body = json_encode({chat_id: to_float(chat_id), text: text, reply_markup: {inline_keyboard: [[{text: "Открыть отчёт", web_app: { url: miniapp_url }}], [{text: "+", callback_data: "rt:+:" + rt_rid}, {text: "−", callback_data: "rt:-:" + rt_rid}]]}})
   let result = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
+  // №603 (слой 3): отказ Telegram — ряд оценки не прикрепляется, без crash
+  if to_string(result) == "()" then { return "()" }
   let mid = to_float(json_get(parse_json(to_string(result)), "result.message_id", "0"))
   let _ = db_execute("UPDATE reply_ratings SET message_id = ?1 WHERE id = ?2", [mid, rt_rid])
   return result
@@ -195,8 +200,9 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
   let reply = reply + trunc_note
   if dept == "yana" or dept == "admin" then {
     let mdv2_res = SendTelegramReplyMDV2(chat_id, reply)
-    // №587 A.2: ряд оценки прикрепляется к отправленному сообщению (если оно ушло)
-    let mdv2_mid = to_string(json_get(parse_json(to_string(mdv2_res)), "result.message_id", "0"))
+    // №603 (слой 3): отказ Telegram не должен рвать отправку отчёта (№587 A.2 — best-effort)
+    let mdv2_mid = "0"
+    if to_string(mdv2_res) != "()" then { let mdv2_mid = to_string(json_get(parse_json(to_string(mdv2_res)), "result.message_id", "0")) }
     if mdv2_mid != "0" then {
       let _ = AttachRatingRow(chat_id, mdv2_mid, dept, "reply", "")
     }
