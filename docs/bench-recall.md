@@ -1,12 +1,12 @@
 # Наряд №852 — бенчмарк recall на golden-наборе офиса: LIKE vs морфология vs sqlite-vec
 
 **Мета:** волна 73 (W-M), P2, класс [office]emory][benchmark]. Диспатч волны: Metalogos gh#1677. Наряд: gh#1676.
-**Харнесс:** `scripts/bench_recall.py`. **Golden-набор:** `tests/golden/recall_golden.json` (62 запроса).
+**Харнесс:** `scripts/bench_recall.py`. **Golden-набор:** `tests/recall_golden.json` (62 запроса).
 **Дата замера:** 2026-10-31. Среда замера: python 3.12, sqlite-vec 0.1.9, model2vec 0.10.0 (статические эмбеддинги `minishlab/potion-multilingual-128M`, 256 dim), всё локально — данные офиса не покидают контур, внешние API не используются (граница наряда).
 
 ## Методика
 
-- **Корпус** — реальные офисные артефакты репо (не синтетика): `docs/*.md`, `docs/adr/*.md`, `docs/departments/*.md`, `docs/projects/**/*.md`, отчёты нарядов в корне (`report_*.md`), `library/*.md`. Экстракция детерминированная: одна строка = одна запись, чистка markdown, дедупликация, эвристика 13 типов FosvedMemory, явный fail-closed source `doc:<путь>` (№849). Итог: **4666 записей**.
+- **Корпус** — реальные офисные артефакты репо (не синтетика): `docs/*.md`, `docs/adr/*.md`, `docs/departments/*.md`, `docs/projects/**/*.md`, отчёты нарядов в корне (`report_*.md`), `library/*.md`. Экстракция детерминированная: одна строка = одна запись, чистка markdown, дедупликация, эвристика 13 типов FosvedMemory, явный fail-closed source `doc:<путь>` (№849). Итог: **4695 записей**.
 - **Посев** — через прод-поверхность `FosvedMemory.remember()` (не мимо неё). Конфликт-детектор при севе: **0 superseded** — целостность разметки не нарушена, все релевантные записи остались видимыми.
 - **Golden-набор** — 62 запроса трёх видов, сформулированных как реальные брифинговые запросы к памяти офиса: keyword (26), question (20), paraphrase (16). Каждый запрос размечен на релевантную запись через `{file, needle}` — уникальная подстрока строки артефакта; разрешение детерминированное и проверяемое тестом. Разметка «найдено/пропущено» считается харнессом **по фактической выдаче**, не по памяти составителя.
 - **Метрики:** hit@5 (релевантная запись в топ-5), MRR@5, доля пустых выдач.
@@ -66,4 +66,4 @@ python3 scripts/bench_recall.py --json data/bench_recall_report.json
 python3 scripts/bench_recall.py --skip vec   # без эмбеддинг-зависимостей
 ```
 
-Golden: `tests/golden/recall_golden.json` (62 запроса, разметка `{file, needle}` — детерминированная и проверяемая `tests/test_n852_bench_recall.py`).
+Golden: `tests/recall_golden.json` (62 запроса, разметка `{file, needle}` — детерминированная и проверяемая `tests/test_n852_bench_recall.py`).

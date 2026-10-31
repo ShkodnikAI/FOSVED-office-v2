@@ -30,7 +30,7 @@ import bench_recall as br  # noqa: E402
 from lib.fosved_memory import FosvedMemory  # noqa: E402
 
 GOLDEN = json.loads(
-    (REPO_ROOT / "tests" / "golden" / "recall_golden.json").read_text(encoding="utf-8")
+    (REPO_ROOT / "tests" / "recall_golden.json").read_text(encoding="utf-8")
 )
 
 
