@@ -12,6 +12,7 @@ module-scoped и держит порт боя, пока идут кейсы; м�
   умолчанию) → голый slug "design" уходит владельцу в /tg-send (F3).
 """
 import pathlib
+import re
 import shutil
 import tempfile
 
@@ -21,14 +22,32 @@ from tests.test_delegation_serve import (  # noqa: E402
     ROOT,
     _OfficeServe,
     _Stub,
-    _augmented,
-    _mutant_office,
-    _env,
     _port_busy,
     _seed_owner_injection,
-    PORT_MLOG,
     PROXY_PORT,
 )
+
+
+def _mutant_office(tmp: pathlib.Path, kind: str):
+    """Сервер на мутантной копии app.mlog."""
+    src = (ROOT / "app.mlog").read_text(encoding="utf-8")
+    if kind == "revert_1149":
+        fixed = 'let merged = to_string(json_get(get(rows, 0), "merged", ""))'
+        mutant = src.replace(
+            fixed,
+            'let merged = to_string(json_get(parse_json(to_string(rows)), "[0].merged", ""))')
+    elif kind == "drop_default_dispatch":
+        block = ('      let del = DispatchYanaDelegation(reply, text, chat_id)\n'
+                 '      if del != "1" then {')
+        mutant = src.replace(block, '      if 1.0 > 0.0 then {')
+    else:
+        raise AssertionError(kind)
+    assert mutant != src, f"мутация {kind} не применилась"
+    out = tmp / f"app_mutant_{kind}.mlog"
+    out.write_text(("profile legacy { egress: permissive_with_audit }\n"
+                    if not re.search(r"^profile legacy", src, re.M) else "") + mutant,
+                   encoding="utf-8")
+    return _OfficeServe(out, tmp)
 
 
 @pytest.fixture(scope="module")
