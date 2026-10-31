@@ -150,6 +150,9 @@ pattern SendTelegramReplyRatings(chat_id: String, text: String, dept: String) ->
   let body = json_encode({chat_id: to_float(chat_id), text: text, reply_markup: RatingKeyboard(rid, "")})
   let token = TgToken()
   let result = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
+  // №603 (слой 3): отказ Telegram (сеть/лимиты) давал parse_json("()") → Handler
+  // error — ответ отдела терялся после успешной генерации. Ряд оценки — best-effort.
+  if to_string(result) == "()" then { return "()" }
   let mid = to_float(json_get(parse_json(to_string(result)), "result.message_id", "0"))
   let _ = db_execute("UPDATE reply_ratings SET message_id = ?1 WHERE id = ?2", [mid, rid])
   return result
@@ -175,6 +178,8 @@ pattern SendReportMiniAppMessage(token: String, chat_id: String, text: String, m
   let rt_rid = RatingRowCreate(dept, "report", doc_id, chat_id)
   let body = json_encode({chat_id: to_float(chat_id), text: text, reply_markup: {inline_keyboard: [[{text: "Открыть отчёт", web_app: { url: miniapp_url }}], [{text: "+", callback_data: "rt:+:" + rt_rid}, {text: "−", callback_data: "rt:-:" + rt_rid}]]}})
   let result = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", body, "application/json"))
+  // №603 (слой 3): отказ Telegram — ряд оценки не прикрепляется, без crash
+  if to_string(result) == "()" then { return "()" }
   let mid = to_float(json_get(parse_json(to_string(result)), "result.message_id", "0"))
   let _ = db_execute("UPDATE reply_ratings SET message_id = ?1 WHERE id = ?2", [mid, rt_rid])
   return result
@@ -195,8 +200,9 @@ pattern SendReport(reply: String, dept: String, query: String, confidence: Strin
   let reply = reply + trunc_note
   if dept == "yana" or dept == "admin" then {
     let mdv2_res = SendTelegramReplyMDV2(chat_id, reply)
-    // №587 A.2: ряд оценки прикрепляется к отправленному сообщению (если оно ушло)
-    let mdv2_mid = to_string(json_get(parse_json(to_string(mdv2_res)), "result.message_id", "0"))
+    // №603 (слой 3): отказ Telegram не должен рвать отправку отчёта (№587 A.2 — best-effort)
+    let mdv2_mid = "0"
+    if to_string(mdv2_res) != "()" then { let mdv2_mid = to_string(json_get(parse_json(to_string(mdv2_res)), "result.message_id", "0")) }
     if mdv2_mid != "0" then {
       let _ = AttachRatingRow(chat_id, mdv2_mid, dept, "reply", "")
     }
@@ -300,9 +306,12 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
   if action == "archive" then {
     if doc_id != "" then {
       let rows = query("SELECT dept, title, raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
-      let dept = redact(to_string(json_get(parse_json(to_string(rows)), "[0].dept", "")), "all")
-      let title = redact(to_string(json_get(parse_json(to_string(rows)), "[0].title", "")), "all")
-      let content = redact(to_string(json_get(parse_json(to_string(rows)), "[0].raw_text", "")), "all")
+      // №603 B.2: прямое чтение полей записи (json_get(get(rows, 0), …)) —
+      // parse_json(to_string(query())) падал на 0.34.x (to_string(Row) не JSON)
+      if length(rows) == 0.0 then { return "ok" }
+      let dept = redact(to_string(json_get(get(rows, 0), "dept", "")), "all")
+      let title = redact(to_string(json_get(get(rows, 0), "title", "")), "all")
+      let content = redact(to_string(json_get(get(rows, 0), "raw_text", "")), "all")
       if dept != "" then {
         let _ = PublishToArchive(doc_id, dept, title, content)
         send_message(chat_id, "Published to archive: " + title)
@@ -328,12 +337,12 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
       send_message(chat_id, "Доска команды пуста.")
       return "ok"
     }
-    let arr = parse_json(to_string(rows))
     let out = "=== Доска команды ==="
     let i = 0.0
-    let count = length(arr)
+    // №603 B.2: итерация по rows напрямую, без parse_json(to_string(…))
+    let count = length(rows)
     while i < count {
-      let row = get(arr, i)
+      let row = get(rows, i)
       let fd = to_string(json_get(row, "from_dept", ""))
       if fdept == "" or fd == fdept then {
         let src = to_string(json_get(row, "sources", ""))
@@ -360,8 +369,10 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
   if action == "journalist" then {
     if doc_id != "" then {
       let rows = query("SELECT title, raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
-      let title = redact(to_string(json_get(parse_json(to_string(rows)), "[0].title", "")), "all")
-      let raw = redact(to_string(json_get(parse_json(to_string(rows)), "[0].raw_text", "")), "all")
+      // №603 B.2: прямое чтение полей записи (parse_json(to_string(query())) падал)
+      if length(rows) == 0.0 then { return "ok" }
+      let title = redact(to_string(json_get(get(rows, 0), "title", "")), "all")
+      let raw = redact(to_string(json_get(get(rows, 0), "raw_text", "")), "all")
       let ctx = BuildContext("osp", to_string(title), chat_id)
       let jprompt = "Ты — журналист-аналитик. Перепиши отчёт в журналистскую статью: без служебных реквизитов (ID, confidence, методология), без бейджей [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ], живой язык, лид-абзац, структура лид→контекст→основа→вывод, 1000-1500 слов."
       let _pr = redact(to_string(TryVal(try call_llm(ctx + "\n\n" + jprompt, raw))), "all")
@@ -377,8 +388,10 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
     if doc_id != "" then {
       let level = substring(action, 10.0, length(action))
       let rows = query("SELECT title, raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
-      let title = redact(to_string(json_get(parse_json(to_string(rows)), "[0].title", "")), "all")
-      let raw = redact(to_string(json_get(parse_json(to_string(rows)), "[0].raw_text", "")), "all")
+      // №603 B.2: прямое чтение полей записи (parse_json(to_string(query())) падал)
+      if length(rows) == 0.0 then { return "ok" }
+      let title = redact(to_string(json_get(get(rows, 0), "title", "")), "all")
+      let raw = redact(to_string(json_get(get(rows, 0), "raw_text", "")), "all")
       let instr = "Стандартный анализ. 5-7 слоёв. ACH 3 гипотезы."
       if level == "1" then { let instr = "Быстрая оценка. 2-3 слоя. Кратко." }
       if level == "3" then { let instr = "Глубокое препарирование. 8-10 слоёв. ACH 5 гипотез. Premortem. Кантильон." }
@@ -397,7 +410,9 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
     if doc_id != "" then {
       let freq = substring(action, 8.0, length(action))
       let rows = query("SELECT title FROM miniapp_responses WHERE id = ?", [doc_id])
-      let title = redact(to_string(json_get(parse_json(to_string(rows)), "[0].title", "")), "all")
+      // №603 B.2: прямое чтение поля записи (parse_json(to_string(query())) падал)
+      if length(rows) == 0.0 then { return "ok" }
+      let title = redact(to_string(json_get(get(rows, 0), "title", "")), "all")
       kv_set("control_" + doc_id, freq + "|" + to_string(title))
       send_message(chat_id, "На контроле (" + freq + "): " + to_string(title))
     }
@@ -407,8 +422,10 @@ pattern HandleMiniAppAction(payload: String, chat_id: String) -> String {
   if action == "counter_forecast" then {
     if doc_id != "" then {
       let rows = query("SELECT title, raw_text FROM miniapp_responses WHERE id = ?", [doc_id])
-      let title = redact(to_string(json_get(parse_json(to_string(rows)), "[0].title", "")), "all")
-      let raw = redact(to_string(json_get(parse_json(to_string(rows)), "[0].raw_text", "")), "all")
+      // №603 B.2: прямое чтение полей записи (parse_json(to_string(query())) падал)
+      if length(rows) == 0.0 then { return "ok" }
+      let title = redact(to_string(json_get(get(rows, 0), "title", "")), "all")
+      let raw = redact(to_string(json_get(get(rows, 0), "raw_text", "")), "all")
       let cprompt = "Ты — контр-аналитик. Построй максимально противоположный прогноз: найди слабые места исходного, альтернативный сценарий, те же факты с противоположной интерпретацией, оцени вероятность контр-сценария, индикаторы его реализации. Формат: ACH, минимум 3 контр-гипотезы."
       let ctx = BuildContext("osp", to_string(title), chat_id)
       let _pr = redact(to_string(TryVal(try call_llm(ctx + "\n\n" + cprompt, raw))), "all")
