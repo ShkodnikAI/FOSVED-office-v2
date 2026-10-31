@@ -787,7 +787,8 @@ pattern TeamBoardInsert(from_dept: String, kind: String, topic: String, tags: St
   if dedupe == 1.0 then {
     let dup = TryVal(try query("SELECT id FROM team_board WHERE from_dept = ?1 AND topic = ?2 AND date(created_at) = date('now') LIMIT 1", [from_dept, topic]))
     if to_string(dup) != "()" then {
-      if length(parse_json(to_string(dup))) > 0.0 then {
+      // №603 B.2: length(dup) напрямую — parse_json(to_string(query())) падал
+      if length(dup) > 0.0 then {
         let dup_head = substring(topic, 0.0, 60.0)
         let dup_msg = "duplicate: уже опубликовано сегодня (from=" + from_dept + ", topic=" + dup_head + ") — вторая запись за день не создаётся"
         return dup_msg
@@ -842,13 +843,13 @@ pattern TeamBoardBlock(dept: String) -> String {
   if kinds_json == "[]" then { return "" }
   let rows = TryVal(try query("SELECT from_dept, kind, topic, payload, sources FROM team_board WHERE from_dept != 'owner' AND kind IN (SELECT value FROM json_each(?1)) AND (expires_at IS NULL OR expires_at >= datetime('now')) AND created_at >= datetime('now', '-2 days') ORDER BY id DESC LIMIT 8", [kinds_json]))
   if to_string(rows) == "()" then { return "" }
-  let arr = parse_json(to_string(rows))
-  let count = length(arr)
+  // №603 B.2: итерация по rows напрямую, без parse_json(to_string(…))
+  let count = length(rows)
   if count == 0.0 then { return "" }
   let out = ""
   let i = 0.0
   while i < count {
-    let row = get(arr, i)
+    let row = get(rows, i)
     let src = to_string(json_get(row, "sources", ""))
     let line = "[" + to_string(json_get(row, "from_dept", "")) + " / " + to_string(json_get(row, "kind", "")) + "] " + to_string(json_get(row, "topic", "")) + ": " + substring(to_string(json_get(row, "payload", "")), 0.0, 160.0)
     if src != "" then { let line = line + " (источники: " + src + ")" }
@@ -862,7 +863,7 @@ pattern TeamBoardAdminLine() -> String {
   // A.6 #482: видимость в /admin board — публикации за сутки + подписки.
   let pubs = TryVal(try query("SELECT COUNT(*) AS c FROM team_board WHERE created_at >= datetime('now', '-1 day')", []))
   let n_pub = "0"
-  if to_string(pubs) != "()" then { let n_pub = to_string(json_get(parse_json(to_string(pubs)), "[0].c", "0")) }
+  if to_string(pubs) != "()" then { let n_pub = to_string(json_get(get(pubs, 0), "c", "0")) }
   let subs = parse_json(TeamBoardSubscriptions())
   return "Доска команды: публикаций за сутки " + n_pub + ", подписчиков " + to_string(length(subs)) + "; истёкший ttl чистится при каждой публикации; инъекции владельца идут через доску (one-shot)."
 }
