@@ -1402,7 +1402,10 @@ pattern UpdateConsensus(dept: String, query: String, result_summary: String) -> 
   let content = replace(content, "Last updated: initialized", "Last updated: " + now_str)
   // Insert before END CONSENSUS
   let content = replace(content, "=== END CONSENSUS ===", entry + "=== END CONSENSUS ===")
-  let _ = write_file("memories/consensus.mlog", content)
+  // №603 (слой 2, вскрыт фиксом B.1): запись в app-image (*.mlog) на 0.34.x
+  // всегда отказана гвардом №475 — без try это рвало HandleDeptQuery уже ПОСЛЕ
+  // BuildContext (отдел отработал, ответ потерян). Консенсус-лог — best-effort.
+  let _ = TryVal(try write_file("memories/consensus.mlog", content))
   return "ok"
 }
 
@@ -1630,9 +1633,10 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   // TEAM-2 #481 A.5: источники — консультации по карте потребностей
   if auto_block != "" then { let final_reply = final_reply + TeamFooterFromBlock(auto_block) }
   let _ = RecordAssistantMessage(chat_id, dept, final_reply)
-  let _ = YanaAutoMemorize(query, reply, chat_id)
+  // №603: слой 2 — вспомогательные логи не должны рвать ответ отдела
+  let _ = TryVal(try YanaAutoMemorize(query, reply, chat_id))
   // IDEA-1: Update consensus with this interaction
-  let _ = UpdateConsensus(dept, query, reply)
+  let _ = TryVal(try UpdateConsensus(dept, query, reply))
   // IDEA-2: Record learning if verify score is high
   let _ = RecordLearning(dept, query, reply, verify_score)
   let _ = AuditLog("dept_query", dept, "model=" + used_model + " tokens=" + tokens_in + "+" + tokens_out + " verify=" + verify_score + " query: " + substring(query, 0.0, 100.0))
