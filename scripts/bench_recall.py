@@ -15,7 +15,7 @@
 Метрики: hit@5, MRR@5, доля пустых выдач. Решение по порогу из наряда:
 апгрейд поиска, если LIKE hit@5 < 0.7.
 
-Golden-набор: tests/golden/recall_golden.json — 62 запроса трёх видов
+Golden-набор: tests/recall_golden.json — 62 запроса трёх видов
 (keyword / question / paraphrase), каждый размечен на релевантную запись
 корпуса через {file, needle} — разрешение детерминированное и проверяемое
 (первая строка файла, содержащая иглу; тест фиксирует однозначность).
@@ -51,7 +51,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from lib.fosved_memory import FosvedMemory  # noqa: E402
 
-GOLDEN_PATH = REPO_ROOT / "tests" / "golden" / "recall_golden.json"
+GOLDEN_PATH = REPO_ROOT / "tests" / "recall_golden.json"
 
 # Корпус: реальные офисные артефакты в репо (не синтетика).
 CORPUS_GLOBS = [
@@ -529,7 +529,7 @@ def main() -> int:
         "date": time.strftime("%Y-%m-%d"),
         "corpus_records": len(records),
         "golden_queries": len(queries),
-        "golden_path": "tests/golden/recall_golden.json",
+        "golden_path": "tests/recall_golden.json",
         "seed_superseded": sup,
         "decision_threshold": f"апгрейд поиска, если LIKE hit@5 < {threshold}",
         "contours": contours,
