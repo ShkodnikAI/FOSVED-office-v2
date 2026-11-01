@@ -36,12 +36,10 @@ Render НЕТ и НЕ БЫЛО** — всего 4 сервиса: prod web, stag
 Создание планировщика — наряд #255.
 
 **Преемник (2026-09-22, наряд №420):** исполнитель расписаний = **нативный cron
-Metalogos** (№418/№419); waker (бодрствование free-инстанса Render) = **GitHub
-Actions**; cron-job.org выводится из исполнения (cutover-чеклист — в секции
-waker ниже). **2026-09-23, FO-051:** waker переехал в ПУБЛИЧНЫЙ репозиторий
-Metalogos- (`.github/workflows/waker.yml`, GH-hosted `ubuntu-latest`, `*/10`) —
-офисный `keepalive.yml` демонтирован (self-hosted раннер офлайн; надгробие —
-в секции waker ниже).
+Metalogos** (№418/№419); cron-job.org выводится из исполнения. До 27.10 —
+waker GH Actions (№420/FO-051); удалён Metalogos №827, прод Starter не
+засыпает, здоровье — Render Health Check `/health` (надгробие — в секции
+waker ниже).
 
 **✅ Миграция исполнена (2026-09-22, наряд №421, PR #310):** Category-A аудит
 0.21 погашен (`mlog-021 audit app.mlog` → 0 ошибок; 20 предупреждений —
@@ -141,11 +139,10 @@ CRON_SECRET (засветился на скрине → ротация посл�
 Планировщик офиса = **нативный cron Metalogos 0.21.0** (наряд №418: дедуп окон,
 catch-up `run_once|skip`, per-job IANA TZ, payload-контракт, рестарт-персистность
 через KV-стор `data/metalogos_kv.db`). Внешний cron-job.org выводится из
-исполнения; keep-alive (бодрствование free-инстанса Render) — waker на
-GitHub Actions в публичном Metalogos- (наряд №420; с 2026-09-23 —
-`.github/workflows/waker.yml` репозитория Metalogos-, FO-051), потому что
-нативный тик не генерирует входящий трафик и не считает время мёртвого
-контейнера.
+исполнения. До 27.10 — waker GH Actions (№420/FO-051); удалён Metalogos
+№827, прод Starter не засыпает, здоровье — Render Health Check `/health`
+(раньше: нативный тик не генерирует входящий трафик и не считает время
+мёртвого контейнера).
 
 **Расположение KV-стора (№428 A.5, 2026-09-29).** Литерал `data/metalogos_kv.db`
 в декларации `memory { persist: … }` — единственная форма, которую допускает
@@ -181,7 +178,6 @@ create/remove остаются mlog-internal (админ-домен).
 | weekly-digest | `0 9 * * 1` | WeeklySlot | «Weekly Digest» (понедельники) |
 | lz-daily | `10 9 * * *` | LzDailySlot | cron-job.org «LZ daily» |
 | collect-news | `0 */6 * * *` | CollectNewsSlot (HTTP `/cron/collect-news`, наряд #424: RSS 20 лент + GDELT + Tavily) | — (внешний аналог снят при переносе) |
-| keep-alive | `*/10 * * * *` | GH Actions **Metalogos-** `.github/workflows/waker.yml` (№420; переезд FO-051, 2026-09-23) | «Keep Alive» |
 
 **HTTP-фолбэк (п.4 наряда):** все `/cron/*`-роуты остаются ручным/аварийным
 триггером; дедуп окон №418 делает двойной запуск (HTTP + нативный тик в одном
@@ -223,7 +219,11 @@ Category A аудит app.mlog на 0.21 блокирует бут: долг №
 сломала бы внешние триггеры легаси-пути. `tests/test_cron_routes.py` и
 фикстуры используют собственные тестовые секреты и ротации не требуют.
 
-## Waker: GitHub Actions keep-alive (наряд №420, 2026-09-22) — финальная архитектура исполнителей
+## Waker (история, удалён 27.10)
+
+> Waker (GH Actions keep-alive, №420/FO-051) удалён 27.10 — Metalogos №827;
+> прод на Starter не засыпает, здоровье — Render Health Check `/health`.
+> Текст ниже — исторический, не переписывался.
 
 **Итоговая схема:** бизнес-расписания исполняет **нативный cron Metalogos**
 (реестр `dept/schedules.mlog`, дедуп окон/catch-up/TZ — №418, бутстрап и живая
@@ -295,10 +295,9 @@ best-effort, задержки под нагрузкой достигают ми�
    секция выше): живые — **Admin Reply**, **Morning Brief**; остальные уже на
    паузе с августа (Control Check, Evening Summary, Night Cycle, Weekly
    Digest); «Monthly Review» отсутствует.
-4. Keep-alive GH Actions остаётся единственной внешней зависимостью офиса.
-   **2026-09-23, FO-051:** waker переехал в публичный Metalogos- (GH-hosted
-   `ubuntu-latest` — от офисной квоты Actions #306 больше не зависит;
-   воркфлоу в main Metalogos-, ≥2 успешных прогона с prod `/health → 200`).
+4. До 27.10 — waker GH Actions (№420/FO-051) как единственная внешняя
+   зависимость офиса; удалён Metalogos №827, прод Starter не засыпает,
+   здоровье — Render Health Check `/health`.
 5. *Rollback-путь:* включить задачи cron-job.org обратно (те же URL; после
    ротации CRON_SECRET — обновить секрет в URL задач, иначе задачи начнут
    получать 401). Нативный контур при этом не ломается: дедуп окон №418 делает
