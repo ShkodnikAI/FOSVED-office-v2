@@ -206,6 +206,13 @@ def _harness_mlog(port):
         + _extract("NightPhaseBegin", sched_src, 'return "acquired"', path="dept/scheduler.mlog")
     )
     tryval_text = _extract("TryVal", utils_src, "return")  # офисный, не builtin
+    # #612: InitDB зовёт ColumnExists/AlterColIfMissing (dept/utils.mlog,
+    # форма #604) — харнесс включает настоящие определения
+    colguard_text = (
+        _extract("ColumnExists", utils_src, "pragma_table_info", path="dept/utils.mlog")
+        + "\n\n"
+        + _extract("AlterColIfMissing", utils_src, "ColumnExists", path="dept/utils.mlog")
+    )
     # хвост InitDB вызывает LZDataMaintain и LZWatchSeedCategory (dept/lz.mlog,
     # #566) — стабы для харнесса
     init_db_text = init_db_text.replace("let _ = LZDataMaintain()",
@@ -227,6 +234,7 @@ def _harness_mlog(port):
         + "profile legacy { egress: permissive_with_audit }\n\n"
         + "db { url: env(\"DATABASE_URL\") }\n\n"
         + tryval_text + "\n\n"
+        + colguard_text + "\n\n"
         + init_db_text + "\n\n"
         + outbox_text + "\n\n"
         + guard_text + "\n\n"
