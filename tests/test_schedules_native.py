@@ -37,8 +37,8 @@ def test_registry_has_all_target_slots_with_msk():
 
 
 def test_registry_keep_alive_is_external_and_disabled():
-    # keep-alive не может быть нативным (входящий трафик держит free-инстанс
-    # бодрым — это работа waker'а №420); в реестре — выключенная памятка.
+    # keep-alive не нативный (внешний keep-alive снят 27.10, №827; слот
+    # выключен); в реестре — выключенная памятка.
     assert 'name: "keep-alive"' in SCHEDULES
     assert "ExternalKeepAlive" in SCHEDULES
 
