@@ -149,17 +149,24 @@ pattern InitDB() -> String {
   // dept/priority/plan/acceptance/test_status/test_log/report/dispatch_id/
   // rework_count/in_work_at/testing_at. ALTER идемпотентен (try): колонки
   // добираются к живой БД при старте. Логика — в dept/narad.mlog.
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN dept TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN plan TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN acceptance TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN test_log TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN report TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN dispatch_id TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN in_work_at TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:narads", 3600.0, "once"), "ALTER TABLE narads ADD COLUMN testing_at TEXT"))
+  // #612 (хвост приёмки #604): миграции боевого app.mlog — под гардом
+  // AlterColIfMissing (форма dogfood_staging.mlog:157): один грант на всю
+  // миграционную часть — scope db:alter:* (грант не менее специфичен, чем
+  // действие, ADR-0155 §3.1), TTL 120 с, N(45) — по числу уникальных ALTER
+  // после дедупликации (было 59 строк, 14 дублей удалено); при добавлении
+  // миграции нарастить квоту. Пропуск и дубли грант не консюмируют.
+  let mig = grant_issue("db:alter:*", 120, "n", 45)
+  let _ = AlterColIfMissing(mig, "narads", "dept", "ALTER TABLE narads ADD COLUMN dept TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "priority", "ALTER TABLE narads ADD COLUMN priority TEXT DEFAULT 'normal'")
+  let _ = AlterColIfMissing(mig, "narads", "plan", "ALTER TABLE narads ADD COLUMN plan TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "acceptance", "ALTER TABLE narads ADD COLUMN acceptance TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "test_status", "ALTER TABLE narads ADD COLUMN test_status TEXT DEFAULT 'none'")
+  let _ = AlterColIfMissing(mig, "narads", "test_log", "ALTER TABLE narads ADD COLUMN test_log TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "report", "ALTER TABLE narads ADD COLUMN report TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "dispatch_id", "ALTER TABLE narads ADD COLUMN dispatch_id TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "rework_count", "ALTER TABLE narads ADD COLUMN rework_count INTEGER DEFAULT 0")
+  let _ = AlterColIfMissing(mig, "narads", "in_work_at", "ALTER TABLE narads ADD COLUMN in_work_at TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "testing_at", "ALTER TABLE narads ADD COLUMN testing_at TEXT")
   // FO-049 (#161): метрики нарядной дисциплины — строка на каждый закрытый наряд
   db_execute("CREATE TABLE IF NOT EXISTS narad_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, narad_id TEXT, dept TEXT, first_try INTEGER DEFAULT 0, rework_count INTEGER DEFAULT 0, lead_seconds INTEGER, accepted_by TEXT, created_at TEXT DEFAULT (datetime('now')))")
   let _ = TryVal(try db_execute("CREATE INDEX IF NOT EXISTS idx_narad_stats_created ON narad_stats(created_at)"))
@@ -175,16 +182,16 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS shop_price_history (id INTEGER PRIMARY KEY AUTOINCREMENT, offer_id INTEGER NOT NULL, price_byn REAL NOT NULL, old_price_byn REAL, in_stock INTEGER, ts TEXT DEFAULT (datetime('now')))")
   db_execute("CREATE INDEX IF NOT EXISTS idx_shop_ph_offer_ts ON shop_price_history(offer_id, ts)")
   db_execute("CREATE TABLE IF NOT EXISTS shop_watches (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, target_price_byn REAL, discount_pct REAL, alert_in_stock INTEGER DEFAULT 0, status TEXT DEFAULT 'active', last_checked_at TEXT, last_alert_json TEXT, created_at TEXT DEFAULT (datetime('now')))")
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:shop_watches", 3600.0, "once"), "ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT"))
+  let _ = AlterColIfMissing(mig, "shop_watches", "last_alert_json", "ALTER TABLE shop_watches ADD COLUMN last_alert_json TEXT")
   db_execute("CREATE TABLE IF NOT EXISTS shop_dossiers (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, format TEXT NOT NULL, payload TEXT, snapshot_json TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))")
   // Наряд #329: URL фото товара (WB basket-хост, вычисляется в SHOP-3).
   // В свежей схеме — колонка выше в CREATE shop_offers; к живой БД
   // добирается идемпотентным ALTER (try), паттерн db:alter:<table>.
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:shop_offers", 3600.0, "once"), "ALTER TABLE shop_offers ADD COLUMN image_url TEXT"))
+  let _ = AlterColIfMissing(mig, "shop_offers", "image_url", "ALTER TABLE shop_offers ADD COLUMN image_url TEXT")
   // Наряд #437 A.3: название оффера для проверки соответствия выдачи
   // запросу («найдено не то: <категория> вместо <предмет>») — колонка
   // в свежей схеме выше, к живой БД — тот же идемпотентный ALTER.
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:shop_offers", 3600.0, "once"), "ALTER TABLE shop_offers ADD COLUMN title TEXT"))
+  let _ = AlterColIfMissing(mig, "shop_offers", "title", "ALTER TABLE shop_offers ADD COLUMN title TEXT")
 
   // Admin
   db_execute("CREATE TABLE IF NOT EXISTS admin_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, content TEXT, duration_sec TEXT, created_at TEXT DEFAULT (datetime('now')))")
@@ -205,7 +212,7 @@ pattern InitDB() -> String {
   // MON-1 (#171): посты Telegram-каналов от монитор-процесса (telegram_monitor.py)
   // НЕ переиспользуем lz_github_updates — там GitHub-релизы (lz_github.py, channel_id="github")
   db_execute("CREATE TABLE IF NOT EXISTS lz_channel_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL, message_id TEXT NOT NULL, channel_name TEXT, text TEXT, media_type TEXT, date TEXT, scanned_at TEXT DEFAULT (datetime('now')), UNIQUE(channel_id, message_id))")
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:lz_channel_posts", 3600.0, "once"), "ALTER TABLE lz_channel_posts ADD COLUMN stats_json TEXT"))
+  let _ = AlterColIfMissing(mig, "lz_channel_posts", "stats_json", "ALTER TABLE lz_channel_posts ADD COLUMN stats_json TEXT")
   // #252: миграция lz_telegram_posts → lz_github_updates. Таблица хранила GitHub-релизы
   // из lz_github.py (channel_id="github") — имя врало. Блок идемпотентен: пока старая
   // таблица существует в sqlite_master — разовый ALTER-апгрейд + копия данных
@@ -218,7 +225,7 @@ pattern InitDB() -> String {
   // и INSERT/DROP добавляли ещё две caught-error строки в бут-лог.
   let lz_old_posts = query("SELECT name FROM sqlite_master WHERE type='table' AND name='lz_telegram_posts'", [])
   if length(lz_old_posts) > 0.0 then {
-    let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:lz_telegram_posts", 3600.0, "once"), "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT"))
+    let _ = AlterColIfMissing(mig, "lz_telegram_posts", "update_id", "ALTER TABLE lz_telegram_posts ADD COLUMN update_id TEXT")
     let _ = TryVal(try db_execute("INSERT OR IGNORE INTO lz_github_updates (update_id, channel_id, channel_name, text, date, scanned_at) SELECT update_id, channel_id, channel_name, text, date, scanned_at FROM lz_telegram_posts"))
     let _ = TryVal(try db_execute_with_grant(grant_issue("db:drop:lz_telegram_posts", 3600.0, "once"), "DROP TABLE lz_telegram_posts"))
   }
@@ -234,15 +241,15 @@ pattern InitDB() -> String {
   // Yana calendar & reminders
   db_execute("CREATE TABLE IF NOT EXISTS yana_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_text TEXT, event_date TEXT, event_type TEXT DEFAULT 'reminder', created_at TEXT DEFAULT (datetime('now')))")
   // Yana events - alter table extensions
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN reminded_at TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN fire_time TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN until_date TEXT"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:yana_events", 3600.0, "once"), "ALTER TABLE yana_events ADD COLUMN chat_id TEXT"))
+  let _ = AlterColIfMissing(mig, "yana_events", "reminded_at", "ALTER TABLE yana_events ADD COLUMN reminded_at TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "rrule_kind", "ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "fire_time", "ALTER TABLE yana_events ADD COLUMN fire_time TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "fire_weekday", "ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "fire_monthday", "ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "next_fire_at", "ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "until_date", "ALTER TABLE yana_events ADD COLUMN until_date TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "active", "ALTER TABLE yana_events ADD COLUMN active INTEGER DEFAULT 1")
+  let _ = AlterColIfMissing(mig, "yana_events", "chat_id", "ALTER TABLE yana_events ADD COLUMN chat_id TEXT")
 
   // Yana metrics — delegation accuracy & forgetting incidents
   db_execute("CREATE TABLE IF NOT EXISTS yana_delegation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, query TEXT, delegated_to TEXT, dept_response_summary TEXT, was_correct INTEGER, feedback_source TEXT, delegated_at TEXT DEFAULT (datetime('now')), verified_at TEXT)")
@@ -283,9 +290,9 @@ pattern InitDB() -> String {
   // dept_archive.forecast_value: numeric forecast at creation time (Finance only)
   // dept_verification.actual_value: numeric actual post-factum (Finance only)
   // dept_verification.outcome_flag: categorical flag (Legal: "clean" / "rewrite_required")
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:dept_archive", 3600.0, "once"), "ALTER TABLE dept_archive ADD COLUMN forecast_value REAL"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:dept_verification", 3600.0, "once"), "ALTER TABLE dept_verification ADD COLUMN actual_value REAL"))
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:dept_verification", 3600.0, "once"), "ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT"))
+  let _ = AlterColIfMissing(mig, "dept_archive", "forecast_value", "ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
+  let _ = AlterColIfMissing(mig, "dept_verification", "actual_value", "ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
+  let _ = AlterColIfMissing(mig, "dept_verification", "outcome_flag", "ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
 
   // Webhook dedup — time-windowed (WH-3): replaces eternal kv-flag
   db_execute("CREATE TABLE IF NOT EXISTS webhook_dedup (update_id TEXT PRIMARY KEY, seen_at TEXT DEFAULT (datetime('now')))")
@@ -314,10 +321,10 @@ pattern InitDB() -> String {
   // идемпотентен: на существующей колонке бросает — TryVal глотает
   // (конвенция ALTER-миграций этого InitDB). Заполняют LZProvRecord/
   // LZProvRule (dept/lz.mlog) в момент записи значения.
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:knowledge_artifacts", 3600.0, "once"), "ALTER TABLE knowledge_artifacts ADD COLUMN provenance TEXT DEFAULT '{}'"))
+  let _ = AlterColIfMissing(mig, "knowledge_artifacts", "provenance", "ALTER TABLE knowledge_artifacts ADD COLUMN provenance TEXT DEFAULT '{}'")
   // #559 A.1: исход алерта для FPR (confirmed|retracted|pending, дефолт pending;
   // проставляется вручную при разборе — честный подсчёт без выдуманных исходов)
-  let _ = TryVal(try db_execute_with_grant(grant_issue("db:alter:disruption_alerts", 3600.0, "once"), "ALTER TABLE disruption_alerts ADD COLUMN outcome TEXT DEFAULT 'pending'"))
+  let _ = AlterColIfMissing(mig, "disruption_alerts", "outcome", "ALTER TABLE disruption_alerts ADD COLUMN outcome TEXT DEFAULT 'pending'")
   // #565 A.1/A.2: ключи предсказаний и журнал сырых прогонов. Ключи пишутся
   // В МОМЕНТ предсказания (LZDisruptionScore/LZHypeCycleMap/LZInflectionDetect,
   // dept/lz.mlog); ретроактивные запрещены. Сводные метрики — только из raw
@@ -445,42 +452,28 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS watchlist_scenarios (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, scenario_label TEXT, description TEXT, observable_source TEXT, threshold TEXT, window_start TEXT, window_end TEXT, status TEXT DEFAULT 'pending', triggered_at TEXT, triggered_note TEXT, created_at TEXT DEFAULT (datetime('now')))")
   // ── конец DDL-пака naryad-363 ──
   // ── naryad-363: ALTER-хвост — дрейф схем существующих таблиц (код пишет, схемы нет) ──
-  let _ = TryVal(try db_execute("ALTER TABLE analysis ADD COLUMN mode TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE analysis ADD COLUMN published_at TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE analysis ADD COLUMN superseded_by_id TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE analysis ADD COLUMN topic_slug TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE analysis ADD COLUMN watch_until TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE campaign_verifications ADD COLUMN miss_source TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE knowledge_graph ADD COLUMN valid_from TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE knowledge_graph ADD COLUMN valid_to TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN acceptance TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN dept TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN in_work_at TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN plan TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN priority TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN report TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN rework_count REAL"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN test_log TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN test_status TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN testing_at TEXT"))
+  let _ = AlterColIfMissing(mig, "analysis", "mode", "ALTER TABLE analysis ADD COLUMN mode TEXT")
+  let _ = AlterColIfMissing(mig, "analysis", "published_at", "ALTER TABLE analysis ADD COLUMN published_at TEXT")
+  let _ = AlterColIfMissing(mig, "analysis", "superseded_by_id", "ALTER TABLE analysis ADD COLUMN superseded_by_id TEXT")
+  let _ = AlterColIfMissing(mig, "analysis", "topic_slug", "ALTER TABLE analysis ADD COLUMN topic_slug TEXT")
+  let _ = AlterColIfMissing(mig, "analysis", "watch_until", "ALTER TABLE analysis ADD COLUMN watch_until TEXT")
+  let _ = AlterColIfMissing(mig, "campaign_verifications", "miss_source", "ALTER TABLE campaign_verifications ADD COLUMN miss_source TEXT")
+  let _ = AlterColIfMissing(mig, "knowledge_graph", "valid_from", "ALTER TABLE knowledge_graph ADD COLUMN valid_from TEXT")
+  let _ = AlterColIfMissing(mig, "knowledge_graph", "valid_to", "ALTER TABLE knowledge_graph ADD COLUMN valid_to TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "priority", "ALTER TABLE narads ADD COLUMN priority TEXT")
+  let _ = AlterColIfMissing(mig, "narads", "rework_count", "ALTER TABLE narads ADD COLUMN rework_count REAL")
+  let _ = AlterColIfMissing(mig, "narads", "test_status", "ALTER TABLE narads ADD COLUMN test_status TEXT")
   // #428 A.3: колонка без выражения по умолчанию. Форма с выражением в
   // DEFAULT отвергается частью движков SQLite на ALTER (прод-бут 2026-09-29:
   // non-constant default) — у базы на диске колонки могло не быть, а
   // dept/admin.mlog пишет updated_at при создании и смене статуса наряда.
   // Заполнение — отдельным идемпотентным UPDATE (при каждом старте дёшево:
   // после первого прогона WHERE updated_at IS NULL не находит строк).
-  let _ = TryVal(try db_execute("ALTER TABLE narads ADD COLUMN updated_at TEXT"))
+  let _ = AlterColIfMissing(mig, "narads", "updated_at", "ALTER TABLE narads ADD COLUMN updated_at TEXT")
   let _ = TryVal(try db_execute("UPDATE narads SET updated_at = datetime('now') WHERE updated_at IS NULL"))
-  let _ = TryVal(try db_execute("ALTER TABLE training_sessions ADD COLUMN checklist_progress TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE training_sessions ADD COLUMN debrief_notes TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN active TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN chat_id TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN fire_monthday TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN fire_time TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN fire_weekday TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN next_fire_at TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN reminded_at TEXT"))
-  let _ = TryVal(try db_execute("ALTER TABLE yana_events ADD COLUMN rrule_kind TEXT"))
+  let _ = AlterColIfMissing(mig, "training_sessions", "checklist_progress", "ALTER TABLE training_sessions ADD COLUMN checklist_progress TEXT")
+  let _ = AlterColIfMissing(mig, "training_sessions", "debrief_notes", "ALTER TABLE training_sessions ADD COLUMN debrief_notes TEXT")
+  let _ = AlterColIfMissing(mig, "yana_events", "active", "ALTER TABLE yana_events ADD COLUMN active TEXT")
   // ── конец ALTER-хвоста naryad-363 ──
 
   // ── Наряд №376 (P2): DDL-пачка QA/Dev/Design — 16 таблиц. Схема снята с
