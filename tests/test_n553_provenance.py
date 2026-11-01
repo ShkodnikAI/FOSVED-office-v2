@@ -23,8 +23,9 @@ CI = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"
 def test_a1_provenance_column_in_ddl_and_migration():
     # inline-DDL документирует колонку (AGENTS.md §1: inline-DDL и схема не расходятся)
     assert "provenance TEXT DEFAULT EMPTY_JSON" in LZ
-    # миграция InitDB — по конвенции ALTER-миграций (TryVal+grant), без удаления данных
-    assert 'grant_issue("db:alter:knowledge_artifacts", 3600.0, "once"), "ALTER TABLE knowledge_artifacts ADD COLUMN provenance TEXT DEFAULT' in APP
+    # миграция InitDB — под гардом AlterColIfMissing (#612, форма #604
+    # dogfood_staging.mlog), без удаления данных
+    assert 'AlterColIfMissing(mig, "knowledge_artifacts", "provenance", "ALTER TABLE knowledge_artifacts ADD COLUMN provenance TEXT DEFAULT' in APP
 
 
 def test_a1_provenance_filled_at_write_time():

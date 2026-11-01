@@ -32,8 +32,8 @@ def test_a1_outcome_field_and_migration():
     # колонка появляется миграцией: CREATE-строка disruption_alerts без outcome
     create_line = next(l for l in APP.splitlines() if "CREATE TABLE IF NOT EXISTS disruption_alerts" in l)
     assert "outcome" not in create_line
-    # миграция по конвенции TryVal+grant (без удаления данных)
-    assert 'grant_issue("db:alter:disruption_alerts", 3600.0, "once"), "ALTER TABLE disruption_alerts ADD COLUMN outcome TEXT DEFAULT \'pending\'"' in APP
+    # миграция под гардом AlterColIfMissing (#612, форма #604 — без удаления данных)
+    assert 'AlterColIfMissing(mig, "disruption_alerts", "outcome", "ALTER TABLE disruption_alerts ADD COLUMN outcome TEXT DEFAULT \'pending\'"' in APP
 
 
 def test_a1_lab_score_implementation():
