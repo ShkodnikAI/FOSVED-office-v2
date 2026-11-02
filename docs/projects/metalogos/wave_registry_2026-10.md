@@ -50,6 +50,8 @@
 
 <!-- r54-pin: wave-76 W-E issue numbers pinned at issue time — dispatch 76 -> gh#1714, naryads 866-871 -> gh#1708-gh#1713; dispatch self-link verified (lesson R50/R62) -->
 
+<!-- r55-pin: wave-77 W-F issue numbers pinned at issue time — dispatch 77 -> gh#1729, naryads 872-877 -> gh#1723-gh#1728; dispatch self-link verified (lesson R50/R62) -->
+
 <!-- r55: wave-77 W-F registered before issue 02.11 — fact-check R55 GET-only on Metalogos- main 89d06850; wave-76 closure pinned in the same commit (lesson R44: duplicate the R-code marker into the office registry); owner directive 02.11 «Проверяй и заводи следующую волну» -->
 
 ## К изданию (состав утверждён владельцем 23.10; номера присваивает диспатч)
