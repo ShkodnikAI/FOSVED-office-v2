@@ -124,7 +124,12 @@ class TestAdminUaTokenGuards:
     def test_admin_ua_token_pattern(self):
         seg = "\n".join(_code_lines(ADMIN))
         assert "pattern AdminUaToken()" in seg
-        assert 'env("INTERNAL_API_TOKEN")' in seg
+        # #630 A.2: env_or с дефолтом "" (env() бросает ENV_NOT_FOUND на
+        # незаданной переменной ещё до проверки на пустоту); незаданный токен —
+        # прежняя семантика fail-closed (return "" → itok="" → 401 на
+        # Python-стороне, test_python_fail_closed ниже)
+        assert 'env_or("INTERNAL_API_TOKEN", "")' in seg
+        assert 'env("INTERNAL_API_TOKEN")' not in seg
         # hash_only-мост, не raw
         assert 'hash_only' in seg.split("pattern AdminUaToken()")[1][:400]
 
