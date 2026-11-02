@@ -16,11 +16,21 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.34.1 — прод-бинарь (линия
-# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2→0.34.0→0.34.1, ADR-0009/0012/0015/0017/0018/0189/0197;
-# бинарь из официального релиза тега v0.34.1 (assets + SHA256SUMS), source commit 0f0f1293,
-# sha256 артефакта fdac4152f073de38566ad6dff87f5e82ea58cd21a12bb9d845abff8b0d670852 —
-# внеплановый fix-релиз (ADR-0189 §2.6, наряд №833; переход по приказу владельца 2026-10-30):
+# Metalogos v0.38.0 — прод-бинарь (линия
+# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2→0.34.0→0.34.1→0.38.0, ADR-0009/0012/0015/0017/0018/0189/0197/0203;
+# бинарь из официального релиза тега v0.38.0 (assets + SHA256SUMS), source commit 67b005fe,
+# sha256 артефакта da714fd536850ff9ebcfce4e0eab2971f033c9c35bbd83f6ffb66fa51a0f1d1d —
+# плановый релиз-переход (наряд FOSVED-office-v2#620; приказ владельца 2026-11-01):
+# 0.36.0 (ADR-0203 §2.4) — правило capability: 12 carriers PROFILE_PERMIT_SHARP (exec, exec_argv,
+# delete_file, git_push, http_post, http_post_multipart, send_message, send_photo, send_document,
+# smtp_send, smtp_send_html, tts_send) отказывают до запуска без profile capability { allow_carrier: "…" }
+# или гранта builtin:<name>; profile legacy НЕ обходит — минимальная миграция: декларации в шапках
+# точек входа (app.mlog, dogfood_staging.mlog, CI-тесты v3) — ровно три носителя офиса
+# (http_post, send_message, exec; сужение до грантов builtin:* — отдельное решение владельца);
+# 0.38.0 — approval-гейт cron_run (HUMAN_OVERSIGHT: IRREVERSIBLE_NO_GRANT без живого мандата
+# approval_issue) — в офисе вызовов cron_run нет (grep-инвентаризация #620); 0.35.0 — паспорт
+# моделей / LICENSED_FLOOR — локальных весов офис не использует (LLM через внешние API).
+# Пин 0.34.1 (fdac4152, source 0f0f1293, внеплановый fix-релиз №833, приказ 2026-10-30) — история:
 # №829 — фикс мис-диспетчеризации VM при profile legacy (Metalogos-#1616/#1618: чужой паттерн
 # / потеря аргументов вызовов, молчаливый режим коррупции); №831 — SQL_DYNAMIC-гейт 5/5
 # по классификации (query/query_row/query_scalar/db_execute арг-0, db_execute_with_grant арг-1)
