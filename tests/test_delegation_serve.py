@@ -152,7 +152,7 @@ def _env(tmp: pathlib.Path) -> dict:
     env.update({
         "METALOGOS_SERVE_ALLOW_EXEC": "1",
         "METALOGOS_HTTP_ALLOW_PRIVATE": "1",
-        "METALOGOS_SERVE_BACKEND": "interpreter",
+        "METALOGOS_SERVE_BACKEND": "vm",
         # как в test_prod_boot: data dir = cwd (ROOT) — иначе гвард #455 режет
         # read_file('VERSION') в /health и read_file персон из library/
         "METALOGOS_DATA_DIR": ".",

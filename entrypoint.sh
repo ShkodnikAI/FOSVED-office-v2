@@ -152,10 +152,15 @@ export METALOGOS_SERVE_ALLOW_EXEC="${METALOGOS_SERVE_ALLOW_EXEC:-1}"
 # 0.21 отвечает только на команды без LLM — репродукция в отчёте №422.
 # Публичная поверхность не меняется: наружу смотрит только reverse-прокси.
 export METALOGOS_HTTP_ALLOW_PRIVATE="${METALOGOS_HTTP_ALLOW_PRIVATE:-1}"
-# ADR-0171 дефолт — VM, но VM-хендлеры 0.21+ не видят db-соединение (db_decl):
-# office-путь держим на интерпретаторе до починки апстрима (находка №419).
-# №349/B.1: пин ЯВНЫЙ и здесь, и в render.yaml — VM-дефолт 0.21+ не подхватывается.
-export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-interpreter}"
+# ADR-0171 дефолт — VM. Исторический пин на interpreter (№419: VM-хендлеры
+# 0.21+ не видят db_decl) снят в #620 (02.11): office-код db_decl больше не
+# использует (0 вхождений в app.mlog/dept), а на 0.38.0 interpreter-бэкенд
+# НЕ применяет capability-декларации входной точки — все irreversible-карриеры
+# (http_post/send_message) fail-closed, офис мёртв (upstream: Metalogos issue
+# 02.11, репрод serve+interpreter vs serve+vm). VM декларации чтит —
+# подтверждено микропробой и полным pytest.
+# №349/B.1: пин ЯВНЫЙ и здесь, и в render.yaml — дефолт не подхватывается молча.
+export METALOGOS_SERVE_BACKEND="${METALOGOS_SERVE_BACKEND:-vm}"
 # #445 A.3: rate-limit по реальному клиенту. Доверенный пир mlog — только
 # reverse_proxy (127.0.0.1), XFF от него ПЕРЕЗАПИСЫВАЕТСЯ клиентским адресом
 # (контракт №263, reverse_proxy.py:_upstream_headers). До наряда: peer 127.0.0.1

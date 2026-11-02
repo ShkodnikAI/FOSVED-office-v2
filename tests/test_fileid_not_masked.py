@@ -92,7 +92,7 @@ class _Serve:
             f.write(_harness(read_line, self.port))
         env = dict(os.environ)
         env.update({
-            "METALOGOS_SERVE_BACKEND": "interpreter",
+            "METALOGOS_SERVE_BACKEND": "vm",
             "METALOGOS_SERVE_ALLOW_EXEC": "1",
             "METALOGOS_HTTP_ALLOW_PRIVATE": "1",
             "METALOGOS_DATA_DIR": self.dir,

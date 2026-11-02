@@ -39,9 +39,10 @@ def _version(binary: str) -> str:
     return out.stdout.strip().splitlines()[0]
 
 
-def test_battle_binary_is_0341():
+def test_battle_binary_is_0380():
+    # #620 (02.11): миграция офиса на Metalogos v0.38.0
     v = _version("bin/mlog")
-    assert "0.34.1" in v, f"боевой бинарь должен быть 0.34.1 (релиз v0.34.1), получено: {v}"
+    assert "0.38.0" in v, f"боевой бинарь должен быть 0.38.0 (релиз v0.38.0), получено: {v}"
 
 
 def test_prev_good_binary_is_0271():
@@ -57,10 +58,10 @@ def test_old_binaries_are_out():
 
 
 def test_battle_binary_sha256_matches_artifact():
-    # целостность релиз-артефакта тега v0.34.1 (sha256 из SHA256SUMS релиза; переход 2026-10-30)
-    expected_prefix = "fdac4152f073de38566ad6dff87f5e82ea58cd21a12bb9d845abff8b0d670852"
+    # целостность релиз-артефакта тега v0.38.0 (sha256 из SHA256SUMS релиза; переход 2026-11-02, #620)
+    expected_prefix = "da714fd536850ff9ebcfce4e0eab2971f033c9c35bbd83f6ffb66fa51a0f1d1d"
     h = hashlib.sha256((REPO_ROOT / "bin" / "mlog").read_bytes()).hexdigest()
-    assert h == expected_prefix, f"bin/mlog sha256={h}, ожидание SHA256SUMS v0.34.1: {expected_prefix}"
+    assert h == expected_prefix, f"bin/mlog sha256={h}, ожидание SHA256SUMS v0.38.0: {expected_prefix}"
 
 
 def test_prev_good_binary_sha256_matches():

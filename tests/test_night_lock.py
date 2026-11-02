@@ -213,6 +213,11 @@ def _harness_mlog(port):
         + "\n\n"
         + _extract("AlterColIfMissing", utils_src, "ColumnExists", path="dept/utils.mlog")
     )
+    # #620 (0.38.0): VM компилирует файл ЦЕЛИКОМ — NightTickSlot зовёт
+    # PollJobStatus (фаза golden-evals, scheduler.mlog:773), interpreter
+    # резолвил лениво и прощал отсутствие определения, VM — нет. Включаем
+    # НАСТОЯЩИЙ паттерн (не стаб), как остальные прод-определения выше.
+    poll_text = _extract("PollJobStatus", sched_src, "http_get", path="dept/scheduler.mlog")
     # хвост InitDB вызывает LZDataMaintain и LZWatchSeedCategory (dept/lz.mlog,
     # #566) — стабы для харнесса
     init_db_text = init_db_text.replace("let _ = LZDataMaintain()",
@@ -238,6 +243,7 @@ def _harness_mlog(port):
         + init_db_text + "\n\n"
         + outbox_text + "\n\n"
         + guard_text + "\n\n"
+        + poll_text + "\n\n"
         + tick_text + "\n\n"
         + "pattern NightSlotStub() -> String {\n"
         + "  let _ = db_execute(\"UPDATE no_such_table_n569 SET x = 1\", [])\n"
@@ -291,7 +297,7 @@ class _Serve:
             "DATABASE_URL": f"sqlite:{self.db}",
             "CRON_SECRET": TOKEN_N569,
             "METALOGOS_ENV_ALLOWLIST": "CRON_SECRET,DATABASE_URL",
-            "METALOGOS_SERVE_BACKEND": "interpreter",
+            "METALOGOS_SERVE_BACKEND": "vm",
             "METALOGOS_HTTP_ALLOW_PRIVATE": "1",
             "METALOGOS_DATA_DIR": self.dir,
         })

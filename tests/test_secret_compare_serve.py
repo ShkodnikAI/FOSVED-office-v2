@@ -167,7 +167,7 @@ class _Serve:
             "CRON_SECRET": cron_secret,
             "INTERNAL_API_TOKEN": token,
             "METALOGOS_ENV_ALLOWLIST": "CRON_SECRET,INTERNAL_API_TOKEN",
-            "METALOGOS_SERVE_BACKEND": "interpreter",
+            "METALOGOS_SERVE_BACKEND": "vm",
             "METALOGOS_HTTP_ALLOW_PRIVATE": "1",
             "METALOGOS_DATA_DIR": self.dir,
             # прод-эквивалент (entrypoint M455_NAMES): read_file("dept/yana.mlog")
