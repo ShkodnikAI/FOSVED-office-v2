@@ -4,7 +4,7 @@
 
 Адаптирован #546 A.1 (рецепт Metalogos-#1317): сравнение — SecretMatches
 (hash_only с обеих сторон), ct_eq по сырой строке молча ломался на
-токен-подобных значениях. Поднимает реальный `bin/mlog serve` (0.32.0) на
+токен-подобных значениях. Поднимает реальный `bin/mlog serve` на
 МИНИМАЛЬНОМ харнессе, в который программно вставлен НАСТОЯЩИЙ текст pattern
 RequireInternalAuth (+ SecretMatches), извлечённый из app.mlog (статическая
 гвард ниже проверяет: заголовок, hash_only-обёртка, вызов SecretMatches).
@@ -15,12 +15,18 @@ RequireInternalAuth (+ SecretMatches), извлечённый из app.mlog (с�
 - неверный заголовок → 401
 - без заголовка      → 401
 - при пустом env     → 200 (auth-off: expected == "" → "ok")
+  (#630 B.1: переменная УДАЛЯЕТСЯ из окружения процесса, а не задаётся
+  пустой строкой — именно так выглядит стенд; бэкенд VM, как в остальных
+  serve-тестах после #620)
 
 Мутации:
 - #536: «сравнение → true» — харнесс с мутацией отвечает 200 на неверный
   токен: кейсы 401 поймали бы мутацию (мета-тест падает, если НЕпойман);
 - #546: «вернуть redact(..., "all")» — на токен-подобном верном токене
-  мутант отвечает 401 (значение замаскировано): кейс 200 поймает.
+  мутант отвечает 401 (значение замаскировано): кейс 200 поймает;
+- #630 B.1: «env_or → env» — на переменной, удалённой из окружения,
+  маршрут падает 500 [ENV_NOT_FOUND] с [ROUTE_HANDLER_ERROR] в stderr
+  (репродукция стенда 02.11): кейс auth-off 200 поймает.
 """
 import os
 import re
@@ -93,6 +99,16 @@ def _free_port(preferred):
             return s.getsockname()[1]
 
 
+def _log_contains(log_name, needle, timeout=10):
+    """Поллинг serve.log: stderr процесса буферизован, строка появляется с задержкой."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if needle in open(log_name, encoding="utf-8", errors="replace").read():
+            return True
+        time.sleep(0.4)
+    return needle in open(log_name, encoding="utf-8", errors="replace").read()
+
+
 class _Serve:
     """subprocess bin/mlog serve + ожидание готовности; гарантированная уборка."""
 
@@ -105,8 +121,13 @@ class _Serve:
         with open(src, "w", encoding="utf-8") as f:
             f.write(_harness(pattern_text, self.port))
         env = dict(os.environ)
+        # #630 B.1: env_token=None = переменная НЕ задана вовсе (удалена из
+        # окружения, как на стенде); задать "" ≠ удалить — env() различает
+        # пустую и незаданную переменную ([ENV_NOT_FOUND] только на последней).
+        env.pop("INTERNAL_API_TOKEN", None)
+        if env_token is not None:
+            env["INTERNAL_API_TOKEN"] = env_token
         env.update({
-            "INTERNAL_API_TOKEN": env_token,
             "METALOGOS_ENV_ALLOWLIST": "INTERNAL_API_TOKEN,CRON_SECRET",
             "METALOGOS_SERVE_BACKEND": "vm",
             "METALOGOS_SERVE_ALLOW_EXEC": "1",
@@ -115,6 +136,7 @@ class _Serve:
         })
         os.chmod(MLOG_BIN, 0o755)
         log = open(os.path.join(self.dir, "serve.log"), "w")
+        self.log_name = log.name  # #630: тесты читают stderr serve-процесса
         self.proc = subprocess.Popen(
             [MLOG_BIN, "serve", src], cwd=self.dir, env=env,
             stdout=log, stderr=subprocess.STDOUT,
@@ -126,7 +148,9 @@ class _Serve:
                 tail = open(log.name, errors="replace").read()[-600:]
                 raise RuntimeError(f"mlog serve умер при старте:\n{tail}")
             try:
-                if requests.get(self.url + "/auth-probe", timeout=2).status_code in (200, 401):
+                # 500 в наборе: мутант #630 (env_or→env) отвечает 500 на
+                # /auth-probe — сервер жив, маршрут падает (это и проверяем)
+                if requests.get(self.url + "/auth-probe", timeout=2).status_code in (200, 401, 500):
                     return
             except requests.RequestException:
                 pass
@@ -162,7 +186,9 @@ def serve_with_tokenlike():
 
 @pytest.fixture()
 def serve_empty_env():
-    s = _Serve(_extract_pattern(), "")
+    # #630 B.1: None = переменная УДАЛЕНА из окружения процесса (стенд),
+    # а не задана пустой строкой
+    s = _Serve(_extract_pattern(), None)
     yield s
     s.stop()
 
@@ -195,9 +221,14 @@ def test_missing_header_401(serve_with_token):
 
 
 def test_empty_env_200_auth_off(serve_empty_env):
-    # пустой env → expected == "" → "ok" (dev-стенды, auth-off)
+    # #630 B.1: переменная удалена из окружения (стенд) → env_or даёт дефолт
+    # "" → expected == "" → "ok" (auth-off, как обещает комментарий в app.mlog)
     r = requests.get(serve_empty_env.url + "/auth-probe", timeout=5)
     assert r.status_code == 200, r.text
+    time.sleep(1.0)  # дать процессу дописать stderr
+    assert not _log_contains(serve_empty_env.log_name, "[ROUTE_HANDLER_ERROR]", timeout=3), (
+        "на исправленном пути в stderr служебные [ROUTE_HANDLER_ERROR] — "
+        "auth-off не должен ничего ломать")
 
 
 # ── Мутации: сравнение→true (#536) и «вернуть all» (#546) обязаны пасть ───
@@ -248,6 +279,34 @@ def test_mutation_all_policy_is_killed(serve_with_tokenlike):
         s.stop()
 
 
+def test_mutation_env_or_back_to_env_is_killed():
+    """Мутант #630 B.1 «env_or → env» обязан пасть на удалённой переменной.
+
+    Оригинал: переменная удалена из окружения (стенд) → 200 (auth-off).
+    Мутант: env() бросает [ENV_NOT_FOUND] → маршрут 500 с
+    [ROUTE_HANDLER_ERROR] в stderr — репродукция стенда 02.11 09:29Z.
+    """
+    pat = _extract_pattern()
+    assert 'env_or("INTERNAL_API_TOKEN", "")' in pat, (
+        "в app.mlog нет ожидаемой точки env_or для мутации")
+    mutant = pat.replace(
+        'env_or("INTERNAL_API_TOKEN", "")',
+        'env("INTERNAL_API_TOKEN")')
+    assert mutant != pat, "мутация env_or→env не применилась"
+    s = _Serve(mutant, None)  # переменная удалена — ровно условие стенда
+    try:
+        r = requests.get(s.url + "/auth-probe", timeout=5)
+        assert r.status_code != 200, (
+            "мутант env_or→env неотличим от оригинала на удалённой переменной "
+            "— кейс auth-off не поймал бы регрессию стенда")
+        assert _log_contains(s.log_name, "[ROUTE_HANDLER_ERROR]"), (
+            "ожидался [ROUTE_HANDLER_ERROR] в stderr мутанта")
+        assert _log_contains(s.log_name, "ENV_NOT_FOUND"), (
+            "ожидался [ENV_NOT_FOUND] в stderr мутанта")
+    finally:
+        s.stop()
+
+
 # ── Статическая гвард: в app.mlog заголовок + hash_only + SecretMatches ──
 
 
@@ -263,3 +322,20 @@ def test_app_mlog_pattern_uses_header_and_secret_matches():
         "app.mlog: RequireInternalAuth всё ещё читает токен из query (утечка #536)"
     assert 'expected == "" then { return "ok" }' in pat, \
         "app.mlog: ветка auth-off (expected == \"\") исчезла — запрет #536"
+    assert 'env_or("INTERNAL_API_TOKEN", "")' in pat, \
+        "app.mlog: чтение токена снова через env() — [ENV_NOT_FOUND] на " \
+        "незаданной переменной, регрессия #630"
+    assert 'env("INTERNAL_API_TOKEN")' not in pat, \
+        "app.mlog: в паттерне остался сырой env() без дефолта (#630)"
+
+
+def test_dogfood_staging_pattern_uses_env_or():
+    """#630 A.1: вторая точка входа (dogfood_staging.mlog) — тоже env_or."""
+    src = open(os.path.join(REPO, "dogfood_staging.mlog"), encoding="utf-8").read()
+    m = re.search(r"pattern RequireInternalAuth\(\) -> String \{.*?\n\}", src, re.S)
+    assert m, "pattern RequireInternalAuth не найден в dogfood_staging.mlog"
+    pat = m.group(0)
+    assert 'env_or("INTERNAL_API_TOKEN", "")' in pat, \
+        "dogfood_staging.mlog: RequireInternalAuth не на env_or (регрессия #630)"
+    assert 'env("INTERNAL_API_TOKEN")' not in pat, \
+        "dogfood_staging.mlog: остался сырой env() без дефолта (#630)"
