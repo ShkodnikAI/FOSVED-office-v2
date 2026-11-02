@@ -117,6 +117,9 @@ def test_a1_live_call_accepts_300():
     th = threading.Thread(target=_serve, daemon=True)
     th.start()
     probe = (
+        # #620 (0.36.0+): http_post — irreversible carrier; живой прогон идёт
+        # на бинаре без батарейного стенда, декларация обязательна в самом пробнике
+        'profile capability { allow_carrier: "http_post" allow_carrier: "send_message" allow_carrier: "exec" }\n'
         'pattern Main1(_: String) -> String {\n'
         f'  let r = http_post("http://127.0.0.1:{port}/ping", "{{}}", "application/json", 300.0)\n'
         '  return to_string(r)\n'

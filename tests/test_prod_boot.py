@@ -45,7 +45,7 @@ def _env(tmp: pathlib.Path) -> dict:
     env.update({
         "METALOGOS_SERVE_ALLOW_EXEC": "1",
         "METALOGOS_HTTP_ALLOW_PRIVATE": "1",
-        "METALOGOS_SERVE_BACKEND": "interpreter",
+        "METALOGOS_SERVE_BACKEND": "vm",
         "METALOGOS_DATA_DIR": ".",
         "METALOGOS_ENV_ALLOWLIST": census,
         "METALOGOS_SENSITIVE_PATH_ALLOWLIST": ",".join(names),
