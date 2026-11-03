@@ -1208,11 +1208,17 @@ pattern ComputeDesignMetrics() -> Dict {
   }
 
   // Design-to-code drift score (from verification table)
-  let drift_row = query("SELECT AVG(drift_score) as avg FROM design_verification WHERE verified_at >= DATE_SUB(datetime('now'), INTERVAL 30 DAY)", [])
+  // #635 A2b: диалект MySQL (DATE_SUB … INTERVAL 30 DAY) → SQLite
+  // datetime('now','-30 days'); try — пустая таблица/сбой запроса деградируют
+  // метрику в 0.0 («нет данных»), квартальный отчёт не падает
+  let drift_r = try query("SELECT AVG(drift_score) as avg FROM design_verification WHERE verified_at >= datetime('now','-30 days')", [])
   let mut drift = 0.0
-  if length(drift_row) > 0 then {
-    let d = get(drift_row, 0)
-    let drift = to_float(json_get(d, "avg", 0.0))
+  if drift_r.ok then {
+    let drift_row = drift_r.value
+    if length(drift_row) > 0 then {
+      let d = get(drift_row, 0)
+      let drift = to_float(json_get(d, "avg", 0.0))
+    }
   }
 
   return {
@@ -1229,7 +1235,13 @@ pattern ComputeDesignMetrics() -> Dict {
 
 pattern DesignQuarterlyMethodologyReview() -> String {
   // Quarterly review of design methodology adherence
-  let metrics = ComputeDesignMetrics()
+  // #635 A2b: try на вызове метрик из квартального отчёта — сбой БД
+  // деградирует в нули (в тексте — «нет данных»), отчёт не падает
+  let mr = try ComputeDesignMetrics()
+  let mut metrics = {total_artifacts: 0.0, avg_iteration_count: 0.0, avg_a11y_score: 0.0, pct_under_3_iterations: 0.0, design_system_reuse: 0.0, drift_score: 0.0}
+  if mr.ok then {
+    let metrics = mr.value
+  }
 
   let prompt = "Проведи квартальный обзор методологии дизайн-отдела Fosved.\n\nМетрики:\n• Всего артефактов: " + to_string(metrics.total_artifacts) + "\n• Средние итерации: " + to_string(metrics.avg_iteration_count) + "\n• Средний a11y: " + to_string(metrics.avg_a11y_score) + "\n• % ≤3 итераций: " + to_string(metrics.pct_under_3_iterations) + "%\n• DS reuse: " + to_string(metrics.design_system_reuse) + "%\n• Drift: " + to_string(metrics.drift_score) + "\n\nЖёсткие правила:\n1. Нет финализации без a11y\n2. Каждый компонент → дизайн-система\n3. Только токены, никаких свободных стилей\n4. 7 состояний для хэндоффа\n5. Mobile-first обязателен\n6. Пользовательские задачи обязательны\n7. Примеры + анти-паттерны для DS\n8. Итерации записаны\n9. Ревью с Dev обязателен\n10. Стоковые фото с обоснованием\n11. Trust calibration для AI\n12. Исследование для нового домена\n\nОцени adherence каждого правила (0-10) и дай рекомендации."
   let review = redact(to_string(TryVal(try call_llm(prompt))), "all")
@@ -1478,3 +1490,36 @@ pattern DesignUxReview(question: String) -> String {
   return r
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// ГВАРД №312 (аудит dept 0.27.1): сырые SQL-фикстуры — только в паттернах
+// N634*/N635* (в test-блоках литералы db_execute не проходят мост №391).
+// #635 A2b: диалект-сайт drift (ComputeDesignMetrics) переведён на SQLite;
+// тест ниже красный при мутации «вернуть MySQL-форму» (try деградирует
+// drift в 0.0 — seeded-строка перестаёт считаться).
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern N635InsertDrift(score: Float) -> String {
+  let _ = db_execute("INSERT INTO design_verification (artifact_id, drift_score, verdict, verified_at) VALUES ('n635-artifact', ?1, 'ok', datetime('now'))", [score])
+  return "ok"
+}
+
+test "n635: диалект-сайт Design — drift-запрос на SQLite-форме (A2b)" {
+  let _ = InitDB()
+  let _ = N635InsertDrift(0.42)
+  let r = try ComputeDesignMetrics()
+  if r.ok then {
+    assert_eq(r.value.drift_score > 0.0, true)
+  } else {
+    // ИЗВЕСТНЫЙ пре-существующий разрыв (вне A2b, отдельный дефект):
+    // reuse-запрос метрик читает design_system_id, которого нет в
+    // design_artifacts (app.mlog:409) — ComputeDesignMetrics всегда
+    // падает на нём. Тест красный, если сломан ЛЮБОЙ другой запрос,
+    // т.е. в том числе диалект-сайт drift (мутация «вернуть MySQL-форму»
+    // даст ошибку INTERVAL, а не design_system_id).
+    // TryError — Struct: строковая форма содержит code и message
+    assert_eq(contains(to_string(r.error), "design_system_id"), true)
+  }
+  // квартальный отчёт вызывающим try деградирует, но не падает (#635 A2b)
+  let q = DesignQuarterlyMethodologyReview()
+  assert_eq(contains(q, "КВАРТАЛЬНЫЙ ОБЗОР МЕТОДОЛОГИИ ДИЗАЙНА"), true)
+}

@@ -698,10 +698,19 @@ pattern CheckMethodologyGap(assessmentId: String, wasPredictable: String) -> Str
 pattern GetLegalMetric() -> String {
   // pct-clean-signings = clean / total × 100
   // #634 A2a: query() → List; разбор через get(rows, 0.0) + json_get(row, col) без пути "0.col"
-  let rows = query(
-    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable FROM legal_assessment_verifications WHERE verified_at >= datetime('now') - INTERVAL '30 days'",
+  // #635 A2b: INTERVAL '30 days' → datetime('now','-30 days'); try — пустая
+  // таблица/сбой запроса деградируют в N/A-форму («нет данных»), не падение
+  let rows_r = try query(
+    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable FROM legal_assessment_verifications WHERE verified_at >= datetime('now','-30 days')",
     []
   )
+  let mut rows = []
+  if rows_r.ok then {
+    let rows = rows_r.value
+  }
+  if length(rows) == 0 then {
+    return json_encode({ metric: METRIC(), value: "N/A", sample_size: "0", period: "last_30_days" })
+  }
   let data = get(rows, 0.0)
   let total = to_float(json_get(data, "total", "0"))
   let clean = to_float(json_get(data, "clean", "0"))
@@ -731,10 +740,17 @@ pattern GetLegalMetric() -> String {
 // Task 1: Daily check — verifications due
 pattern RunDailyCheck() -> String {
   // #634 A2a: query() → List; итерация по строкам get(rows, i), без parse_json-путей "i.col"
-  let rows = query(
-    "SELECT id, short_title, jurisdiction, document_type FROM legal_assessments WHERE status = 'published' AND verification_date::date = CURRENT_DATE",
+  // #635 A2b: постгресовый каст verification_date::date → SQLite
+  // date(verification_date) = CURRENT_DATE; try — сбой запроса деградирует
+  // в «no verifications due» («нет данных»), не падение
+  let rows_r = try query(
+    "SELECT id, short_title, jurisdiction, document_type FROM legal_assessments WHERE status = 'published' AND date(verification_date) = CURRENT_DATE",
     []
   )
+  let mut rows = []
+  if rows_r.ok then {
+    let rows = rows_r.value
+  }
   let count = length(rows)
   if count > 0 then {
     let mut i = 0
@@ -757,10 +773,19 @@ pattern RunDailyCheck() -> String {
 // Task 2: Monthly review — compute pct-clean-signings
 pattern RunMonthlyReview() -> String {
   // #634 A2a: query() → List; разбор через get(rows, 0.0) + json_get(row, col) без пути "0.col"
-  let rows = query(
-    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean_signings, SUM(CASE WHEN outcome = 'rewrite' THEN 1 ELSE 0 END) as rewrites, SUM(CASE WHEN outcome = 'dispute' THEN 1 ELSE 0 END) as disputes, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable_rewrites FROM legal_assessment_verifications WHERE verified_at >= datetime('now') - INTERVAL '30 days'",
+  // #635 A2b: INTERVAL '30 days' → datetime('now','-30 days'); try — пустая
+  // таблица/сбой запроса деградируют в «нет данных», не падение
+  let rows_r = try query(
+    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean_signings, SUM(CASE WHEN outcome = 'rewrite' THEN 1 ELSE 0 END) as rewrites, SUM(CASE WHEN outcome = 'dispute' THEN 1 ELSE 0 END) as disputes, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable_rewrites FROM legal_assessment_verifications WHERE verified_at >= datetime('now','-30 days')",
     []
   )
+  let mut rows = []
+  if rows_r.ok then {
+    let rows = rows_r.value
+  }
+  if length(rows) == 0 then {
+    return "📊 Legal — Monthly Review\n\nНет данных (пустая таблица или ошибка запроса)"
+  }
   let data = get(rows, 0.0)
   let total = to_float(json_get(data, "total", "0"))
   let cleanSignings = to_float(json_get(data, "clean_signings", "0"))
@@ -775,8 +800,9 @@ pattern RunMonthlyReview() -> String {
     let pctPredictableMissed = to_string((predictableRewrites / total) * 100.0)
   }
 
-  let _ = db_execute(
-    "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, clean_signings, rewrite_count, dispute_count, predictable_rewrites_count, pct_clean_signings, pct_predictable_missed, created_at) VALUES (datetime('now') - INTERVAL '30 days', datetime('now'), ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+  // #635 A2b: INTERVAL в period_start → datetime('now','-30 days')
+  let _ = try db_execute(
+    "INSERT INTO legal_monthly_reviews (period_start, period_end, total_assessments, clean_signings, rewrite_count, dispute_count, predictable_rewrites_count, pct_clean_signings, pct_predictable_missed, created_at) VALUES (datetime('now','-30 days'), datetime('now'), ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
     [to_string(total), to_string(cleanSignings), to_string(rewrites), to_string(disputes), to_string(predictableRewrites), pctClean, pctPredictableMissed]
   )
 
@@ -795,10 +821,19 @@ pattern RunMonthlyReview() -> String {
 // Task 3: Quarterly methodology review
 pattern LegalQuarterlyMethodologyReview() -> String {
   // #634 A2a: query() → List; разбор через get(rows, 0.0) — форма probe_a2_parsejson
-  let rows = query(
-    "SELECT SUM(predictable_rewrites_count) as total_predictable, SUM(total_assessments) as total FROM legal_monthly_reviews WHERE created_at >= datetime('now') - INTERVAL '90 days'",
+  // #635 A2b: INTERVAL '90 days' → datetime('now','-90 days'); try — пустая
+  // таблица/сбой запроса деградируют в «нет данных», не падение
+  let rows_r = try query(
+    "SELECT SUM(predictable_rewrites_count) as total_predictable, SUM(total_assessments) as total FROM legal_monthly_reviews WHERE created_at >= datetime('now','-90 days')",
     []
   )
+  let mut rows = []
+  if rows_r.ok then {
+    let rows = rows_r.value
+  }
+  if length(rows) == 0 then {
+    return "📋 Legal — Quarterly Methodology Review\n\nНет данных за 90 дней (пустая таблица или ошибка запроса)"
+  }
   let data = get(rows, 0.0)
   let totalPredictable = to_float(json_get(data, "total_predictable", "0"))
   let total = to_float(json_get(data, "total", "0"))
@@ -934,10 +969,17 @@ pattern VerifyResult(query: String) -> String {
 
 pattern LegalSearchArchive(filter: String) -> String {
   // #634 A2a: query() → List; наружу json_encode (прежняя JSON-форма)
-  let rows = query(
-    "SELECT id, short_title, document_type, status, jurisdiction, risk_level, created_at FROM legal_assessments WHERE short_title ILIKE '%' || ? || '%' ORDER BY created_at DESC LIMIT 10",
+  // #635 A2b: постгресовый ILIKE → SQLite LIKE (ASCII-фолдинг без локали —
+  // для кириллицы регистрозависимо; фильтры архива — ID/латиница);
+  // try — сбой запроса деградирует в «Архив пуст» («нет данных»)
+  let rows_r = try query(
+    "SELECT id, short_title, document_type, status, jurisdiction, risk_level, created_at FROM legal_assessments WHERE short_title LIKE '%' || ? || '%' ORDER BY created_at DESC LIMIT 10",
     [filter]
   )
+  let mut rows = []
+  if rows_r.ok then {
+    let rows = rows_r.value
+  }
   if length(rows) == 0 then { return "📭 Архив пуст или нет совпадений по фильтру: " + filter }
   return "📚 Legal архив:\n" + json_encode(rows)
 }
@@ -1231,9 +1273,10 @@ pattern LegalCheck(question: String) -> String {
 // объявлен). Негативная ветка «Шаблоны не загружены» не тестируется во
 // флэттене именно из-за двойной коллекции; ветка тривиальна (length==0).
 // ГВАРД №312: сырые SQL-фикстуры — только в паттернах N634*.
-// Диалект-сайты (INTERVAL, ::date, ILIKE) тестируются нарядом #635 (A2b):
-// GetLegalMetric, RunDailyCheck, RunMonthlyReview, LegalQuarterlyMethodologyReview,
-// LegalSearchArchive — до A2b честно в отказе рантайма; здесь — ListTemplates.
+// Диалект-сайты (INTERVAL, ::date, ILIKE) переведены на SQLite нарядом
+// #635 (A2b): GetLegalMetric, RunDailyCheck, RunMonthlyReview,
+// LegalQuarterlyMethodologyReview, LegalSearchArchive — try-деградация
+// в «нет данных», тест n635 ниже красный при мутации «вернуть MySQL-форму».
 // ═══════════════════════════════════════════════════════════════════════
 
 pattern N634InsertTemplate() -> String {
@@ -1246,4 +1289,39 @@ test "n634: ListTemplates отдаёт шаблоны из БД в JSON-форм
   let _ = N634InsertTemplate()
   let reply = ListTemplates()
   assert_eq(contains(reply, "n634-nda-template"), true)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ГВАРД №312: сырые SQL-фикстуры — только в паттернах N634*/N635*.
+// #635 A2b: сиды + тест диалект-сайтов; мутация «вернуть MySQL-форму»
+// (INTERVAL/::date/ILIKE) ловится красным: сбой запроса деградирует
+// в «нет данных»/N/A/«Архив пуст», сид-данные перестают считаться.
+// ═══════════════════════════════════════════════════════════════════════
+
+pattern N635InsertVerification() -> String {
+  let _ = db_execute("INSERT INTO legal_assessment_verifications (assessment_id, outcome, rewrite_was_predictable, verified_at) VALUES ('n635', 'clean', 'false', datetime('now'))", [])
+  return "ok"
+}
+
+pattern N635InsertAssessment() -> String {
+  let _ = db_execute("INSERT INTO legal_assessments (short_title, full_result, document_type, status, jurisdiction, verification_date) VALUES ('n635-archive-marker', 'n635', 'contract', 'published', 'RU', datetime('now'))", [])
+  return "ok"
+}
+
+test "n635: диалект-сайты Legal — метрика/daily/monthly/quarterly/архив на SQLite-форме (A2b)" {
+  let _ = InitDB()
+  let _ = N635InsertVerification()
+  let metric = GetLegalMetric()
+  assert_eq(contains(metric, "N/A"), false)
+  let _ = N635InsertAssessment()
+  let daily = RunDailyCheck()
+  assert_eq(contains(daily, "due"), true)
+  let archive = LegalSearchArchive("n635-archive-marker")
+  assert_eq(contains(archive, "n635-archive-marker"), true)
+  let monthly = RunMonthlyReview()
+  assert_eq(contains(monthly, "Нет данных"), false)
+  assert_eq(contains(monthly, "Monthly Review"), true)
+  let quarterly = LegalQuarterlyMethodologyReview()
+  assert_eq(contains(quarterly, "Нет данных"), false)
+  assert_eq(contains(quarterly, "Quarterly Methodology Review"), true)
 }
