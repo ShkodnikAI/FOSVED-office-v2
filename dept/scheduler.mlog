@@ -884,3 +884,31 @@ pattern LzDigestSlot() -> String {
   let _ = AuditLog("cron_lz_digest", "lz", "native digest slot (№376)")
   return LZDailyDigest()
 }
+
+// ── Наряд #636 (A2c): отказ отдела — громкий, с причиной, не тишина ──────
+// Блоки перенесены нарядом #644 из app.mlog (0.20.0 — фолбэк-бинарь
+// entrypoint — не имеет грамматики `test`; первые test-блоки в app.mlog
+// ломали фолбэк-разбор, test_n399_a2_llm_757 красный, Deploy gate
+// пропущен). Промежуточный дом dept/utils.mlog не подошёл: автономный
+// прогон test_n474 (`mlog test dept/utils.mlog`) падал — HandleDeptQuery
+// определён в app.mlog и вне его контекста неразрешим. Здесь блоки
+// резолвятся при `mlog test app.mlog` (CI-шаг наряда #644); автономных
+// прогонов scheduler.mlog из pytest нет (границы: utils, osp).
+// В тестовом стенде LLM-прокси недоступен: CallLLMResilient падает →
+// TryVal -> "()" → срабатывает ветка отказа. Контракт: владелец получает
+// «Отдел X не ответил: <причина>», в trace_log — строка status='error'.
+// Мутация «вернуть return ""» делает оба теста красными (наряд #636).
+test "n636: отказ LLM — владельцу причина вместо тишины" {
+  let _ = InitDB()
+  let reply = HandleDeptQuery("qa", "тест громкого отказа #636", "n636-silent")
+  assert_eq(contains(reply, "не ответил"), true)
+  assert_eq(contains(reply, "Отдел qa"), true)
+}
+
+test "n636: отказ LLM — строка error в trace_log (dept_fail)" {
+  let _ = InitDB()
+  let _ = HandleDeptQuery("qa", "тест трейса отказа #636", "n636-trace")
+  let rows = query("SELECT COUNT(*) AS c FROM trace_log WHERE action='dept_fail' AND dept='qa' AND status='error'", [])
+  let count = to_float(json_get(rows[0], "c", "0"))
+  assert_eq(count >= 1.0, true)
+}
