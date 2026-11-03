@@ -209,15 +209,26 @@ jobs:
             [ -e "$M455_F" ] || continue
             M455_NAMES="${M455_NAMES},$(basename "$M455_F")"
           done
+          # #634 A2a: send_message в 0.38 fail-closed (не-2xx = throw) — тест
+          # ветки блокировки ReleaseGate шёл в реальный api.telegram.org с
+          # fake-токеном. Локальный мок Bot API (METALOGOS_TELEGRAM_API_BASE)
+          # делает прогон детерминированным, без сети; прод-код не тронут.
+          python3 tests/mock_telegram.py 18801 &
+          MOCK_PID=$!
+          sleep 1
           set -o pipefail
           DATABASE_URL=sqlite:/tmp/mlogtest/office.db \
           METALOGOS_DATA_DIR=. \
           METALOGOS_HTTP_ALLOW_PRIVATE=1 \
           METALOGOS_SENSITIVE_PATH_ALLOWLIST="$M455_NAMES" \
+          METALOGOS_TELEGRAM_API_BASE=http://127.0.0.1:18801 \
           OWNER_TELEGRAM_ID=000000000 \
           TELEGRAM_BOT_TOKEN=fake-token-n644 \
           CRON_SECRET=fake-cron-n644 \
             ./bin/mlog test app.mlog 2>&1 | tee /tmp/mlogtest/out.txt
+          RC=$?
+          kill $MOCK_PID 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then exit $RC; fi
           if grep -q "❌" /tmp/mlogtest/out.txt; then
             echo "FAIL: в выводе mlog test есть ❌"
             grep "❌" /tmp/mlogtest/out.txt | head -5
