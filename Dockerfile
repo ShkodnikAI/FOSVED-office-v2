@@ -16,11 +16,15 @@ COPY requirements.txt /office/requirements.txt
 COPY requirements.lock /office/requirements.lock
 RUN pip3 install -r requirements.lock --break-system-packages
 
-# Metalogos v0.38.0 — прод-бинарь (линия
-# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2→0.34.0→0.34.1→0.38.0, ADR-0009/0012/0015/0017/0018/0189/0197/0203;
-# бинарь из официального релиза тега v0.38.0 (assets + SHA256SUMS), source commit 67b005fe,
-# sha256 артефакта da714fd536850ff9ebcfce4e0eab2971f033c9c35bbd83f6ffb66fa51a0f1d1d —
-# плановый релиз-переход (наряд FOSVED-office-v2#620; приказ владельца 2026-11-01):
+# Metalogos v0.38.1 — прод-бинарь (линия
+# 0.25.0→0.27.0→0.27.1→0.28.0→0.29.0→0.30.0→0.33.1→0.33.2→0.34.0→0.34.1→0.38.0→0.38.1, ADR-0009/0012/0015/0017/0018/0189/0197/0203;
+# бинарь из официального релиза тега v0.38.1 (assets + SHA256SUMS), source commit 4f79b31,
+# sha256 артефакта 9d1b2f8aa16b81ba146609136697389de06ed3bc447c7c6c19d2f0c66976b7ad —
+# внеплановый patch-релиз (наряд FOSVED-office-v2#649; приказ владельца 2026-11-03):
+# 0.38.1: тики cron видят allow_carrier (Metalogos-#1735) — на 0.38.0 каждый тик встроенного
+# cron отказывал IRREVERSIBLE_NO_GRANT на валидной декларации (ночной цикл, утренний бриф,
+# ответ Админа, слоты ЛЗ молча умерли 03.11); фикс возвращает permit-roster в нативный тик
+# (fresh_program_context) и serve-интерпретатор (merge_interpreter). Предыдущий пин:
 # 0.36.0 (ADR-0203 §2.4) — правило capability: 12 carriers PROFILE_PERMIT_SHARP (exec, exec_argv,
 # delete_file, git_push, http_post, http_post_multipart, send_message, send_photo, send_document,
 # smtp_send, smtp_send_html, tts_send) отказывают до запуска без profile capability { allow_carrier: "…" }
