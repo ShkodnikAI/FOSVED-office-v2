@@ -1,0 +1,159 @@
+// ПРОБА D3-2 (ревью плана офиса, 02.11.2026) — «лесенка секций»: проверяемая
+// нарезка скилла на ядро и приложения. Все 24 скилла ОСП имеют единый скелет H2
+// (измерено: Prerequisites 24/24, Core principle 24/24, Anti-patterns 24/24,
+// The procedure 23/24, Output template 22/24) — значит резать можно ПО СЕКЦИЯМ,
+// а не «на глаз» по символам:
+//   L1 = Core principle            (принцип: что это и зачем)
+//   L2 = L1 + Anti-patterns        (что ломает метод)
+//   L3 = L2 + Output template      (форма ответа)
+//   L4 = L3 + The procedure        (полная процедура)
+// Уровень выбирает ПРОГРАММА по бюджету (D6), без магических констант.
+// Запуск: cwd=work/osp_skills, DATABASE_URL=sqlite::memory:
+db { url: env("DATABASE_URL") }
+
+pattern CoreSkillList() -> String {
+  return "deconstruct|awareness-frame|root-cause-mapping|forces-and-potentials|strategic-maneuvers|two-paths-synthesis|decision-tree-forecast|reflexive-impact|calibration|system-health-diagnostics"
+}
+
+// Бюджет по глубине — копия прод-лестницы dept/osp.mlog:58-65
+pattern LadderBudget(depth: Float) -> Float {
+  if depth <= 0.0 then { return 8000.0 }
+  if depth <= 1.0 then { return 12000.0 }
+  if depth <= 2.0 then { return 18000.0 }
+  if depth <= 3.0 then { return 20000.0 }
+  return 23000.0
+}
+
+// Ядро скилла до уровня level (секции отбираются по заголовку, не по длине)
+pattern SkillCore(name: String, level: Float) -> String {
+  let raw = redact(read_file_or("skills/" + name + "/SKILL.md", ""), "all")
+  if raw == "" then { return "" }
+  let chunks = split(raw, "\n## ")
+  let mut out = ""
+  each c in chunks {
+    let cs = to_string(c)
+    let lines = split(cs, "\n")
+    let title = lower(trim(to_string(get(lines, 0.0))))
+    if starts_with(title, "core principle") and level >= 1.0 then {
+      out = out + "## " + cs
+    }
+    if starts_with(title, "anti-patterns") and level >= 2.0 then {
+      out = out + "## " + cs
+    }
+    if starts_with(title, "output template") and level >= 3.0 then {
+      out = out + "## " + cs
+    }
+    if starts_with(title, "the procedure") and level >= 4.0 then {
+      out = out + "## " + cs
+    }
+  }
+  return out
+}
+
+pattern LadderHdr(name: String) -> Float {
+  return length("\n--- " + name + " ---\n")
+}
+
+// Суммарный размер 10 ядер на уровне level
+pattern LadderCoresTotal(level: Float) -> Float {
+  let mut total = 0.0
+  each nm in split(CoreSkillList(), "|") {
+    let n = to_string(nm)
+    total = total + length(SkillCore(n, level)) + LadderHdr(n)
+  }
+  return total
+}
+
+// Уровень ядер: максимальный L, при котором все 10 ядер влезают в бюджет
+pattern LadderCoreLevel(budget: Float) -> Float {
+  let mut best = 0.0
+  let mut L = 1.0
+  while L <= 4.0 {
+    if LadderCoresTotal(L) <= budget then {
+      best = L
+    }
+    L = L + 1.0
+  }
+  return best
+}
+
+// Уровень приложения: максимальный L, при котором приложение влезает в остаток
+pattern LadderAppLevel(budget: Float, core_total: Float, app: String) -> Float {
+  let mut best = 0.0
+  let mut L = 1.0
+  while L <= 4.0 {
+    if core_total + length(SkillCore(app, L)) + LadderHdr(app) <= budget then {
+      best = L
+    }
+    L = L + 1.0
+  }
+  return best
+}
+
+// Сборка: ядра 10 скиллов + одно приложение по триггеру
+pattern LadderLoad(depth: Float, app: String) -> String {
+  let budget = LadderBudget(depth)
+  let cl = LadderCoreLevel(budget)
+  if cl < 1.0 then { return "REFUSE|бюджет " + to_string(budget) + " меньше одного ядра" }
+  let mut result = ""
+  let mut n = 0.0
+  each nm in split(CoreSkillList(), "|") {
+    let name = to_string(nm)
+    let body = SkillCore(name, cl)
+    if body != "" then {
+      result = result + "\n--- " + name + " ---\n" + body
+      n = n + 1.0
+    }
+  }
+  let core_total = length(result)
+  let al = LadderAppLevel(budget, core_total, app)
+  let mut apps = 0.0
+  if al >= 1.0 then {
+    let ab = SkillCore(app, al)
+    if ab != "" then {
+      result = result + "\n--- " + app + " ---\n" + ab
+      apps = 1.0
+    }
+  }
+  return "cores=" + to_string(n) + "/10 core_level=" + to_string(cl) + " app_level=" + to_string(al) + " apps=" + to_string(apps) + " chars=" + to_string(length(result)) + " budget=" + to_string(budget) + " fits=" + to_string(length(result) <= budget)
+}
+
+test "лесенка: измеренные размеры уровней (10 ядер Tier-1)" {
+  print("L1=" + to_string(LadderCoresTotal(1.0)) + " L2=" + to_string(LadderCoresTotal(2.0)) + " L3=" + to_string(LadderCoresTotal(3.0)) + " L4=" + to_string(LadderCoresTotal(4.0)))
+  assert_eq(LadderCoresTotal(1.0) < 8000.0, true)
+  assert_eq(LadderCoresTotal(2.0) > 18000.0, true)
+  assert_eq(LadderCoresTotal(3.0) > 23000.0, true)
+  assert_eq(LadderCoresTotal(4.0) > 60000.0, true)
+}
+
+test "depth=0..2 (8000/12000/18000): всё ядро не влезает — грузится L1 + приложение" {
+  print("d0 " + LadderLoad(0.0, "cross-asset-divergence"))
+  print("d1 " + LadderLoad(1.0, "cross-asset-divergence"))
+  print("d2 " + LadderLoad(2.0, "cross-asset-divergence"))
+  assert_eq(contains(LadderLoad(0.0, "cross-asset-divergence"), "cores=10/10 core_level=1"), true)
+  assert_eq(contains(LadderLoad(2.0, "cross-asset-divergence"), "fits=true"), true)
+}
+
+test "depth=3..4 (20000/23000): влезает L2 — принцип + анти-паттерны всех 10" {
+  print("d3 " + LadderLoad(3.0, "cross-asset-divergence"))
+  print("d4 " + LadderLoad(4.0, "cross-asset-divergence"))
+  assert_eq(contains(LadderLoad(3.0, "cross-asset-divergence"), "core_level=2"), true)
+  assert_eq(contains(LadderLoad(4.0, "cross-asset-divergence"), "core_level=2"), true)
+  assert_eq(contains(LadderLoad(4.0, "cross-asset-divergence"), "fits=true"), true)
+}
+
+test "критерий приёмки B1 из плана (≥6 полных ядер при depth=3) недостижим" {
+  // полное ядро = L4 (все 4 секции). Сколько полных ядер влезает в 20000?
+  let mut k = 0.0
+  let mut acc = 0.0
+  each nm in split(CoreSkillList(), "|") {
+    let n = to_string(nm)
+    let sz = length(SkillCore(n, 4.0)) + LadderHdr(n)
+    if acc + sz <= 20000.0 then {
+      acc = acc + sz
+      k = k + 1.0
+    }
+  }
+  print("полных ядер (L4) в бюджете depth=3: " + to_string(k) + " занято " + to_string(acc))
+  assert_eq(k < 6.0, true)
+}

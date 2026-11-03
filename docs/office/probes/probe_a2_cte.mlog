@@ -1,0 +1,40 @@
+// ПРОБА A2c — вставляет ли CTE+INSERT через db_execute реальные строки?
+// (если да, сайт quest.mlog:24 НЕ входит в 24 сломанных: db_execute отказывает
+//  только когда запрос ВОЗВРАЩАЕТ набор результатов)
+db { url: env("DATABASE_URL") }
+
+pattern TryVal(x: String) -> String { return x.value }
+
+pattern C0Schema() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS probe_cp2 (quest_id TEXT, step_num INTEGER, status TEXT)", [])
+  return "ok"
+}
+
+pattern C1CteInsert(qid: String, steps: String) -> String {
+  let r = TryVal(try db_execute("WITH RECURSIVE seq(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM seq WHERE n < CAST(?2 AS INTEGER) - 1) INSERT INTO probe_cp2 (quest_id, step_num, status) SELECT ?1, n, 'pending' FROM seq", [qid, steps]))
+  if to_string(r) == "()" then { return "REFUSED" }
+  return "OK"
+}
+
+pattern C2Count(qid: String) -> String {
+  let rows = query("SELECT COUNT(*) as cnt FROM probe_cp2 WHERE quest_id = ?1", [qid])
+  return to_string(json_get(get(rows, 0.0), "cnt", "-1"))
+}
+
+// контрольный случай: CTE, который ВОЗВРАЩАЕТ строки (форма SELECT-сайтов)
+pattern C3CteSelect() -> String {
+  let r = TryVal(try db_execute("WITH seq(n) AS (SELECT 1) SELECT n FROM seq", []))
+  if to_string(r) == "()" then { return "REFUSED" }
+  return "OK"
+}
+
+test "CTE+INSERT через db_execute работает и вставляет строки" {
+  assert_eq(C0Schema(), "ok")
+  assert_eq(C1CteInsert("Q-9", "4"), "OK")
+  assert_eq(C2Count("Q-9"), "4")
+}
+
+test "CTE+SELECT через db_execute отказывает (класс сломанных сайтов)" {
+  assert_eq(C0Schema(), "ok")
+  assert_eq(C3CteSelect(), "REFUSED")
+}

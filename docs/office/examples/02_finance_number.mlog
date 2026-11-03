@@ -1,0 +1,465 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Пример 2. ФИНАНСЫ — вид исхода `number` на общем контракте (пример 1)
+//   mlog check examples/02_finance_number.mlog
+//   mlog test  examples/02_finance_number.mlog
+// Общий модуль подключается импортом, а НЕ копируется:
+//   import ./card_contract   (в проде — import dept/card)
+// `mlog test` прогоняет и тесты модуля — каждый пример доказывает, что
+// контракт зелёный в его контексте.
+//
+// ЧТО ЧИНИМ (факты аудита 02.11.2026, всё проверено grep/чтением):
+//  1. invoices — 0 писателей во всём проде (единственная запись — UPDATE в
+//     dept/finance.mlog:627): автомат счёта (finance.mlog:593, 10 переходов)
+//     недостижим, «FAIL: invoice not found» — единственный возможный ответ.
+//     Здесь FinanceInvoiceCreate — недостающий писатель.
+//  2. financial_forecast_verifications — 0 писателей (app.mlog:427), 4 читателя
+//     → ComputeFinanceMAPE (app.mlog:1259) навсегда «недостаточно данных (0/10)».
+//     Здесь факт пишется и в dept_verification, и в legacy-таблицу (переиспользование,
+//     а не шестая схема).
+//  3. FinanceVerifyForecast (dept/finance.mlog:672) просит LLM посчитать MAPE
+//     и ничего не сохраняет. Здесь MAPE считает программа (правило офиса:
+//     модель не вычисляет то, что может программа).
+//  4. FinanceScore (dept/finance.mlog:744) печатает «Missed tax deadlines: 0
+//     (target 0)» при пустой tax_calendar_events — ложно-зелёный. Здесь та же
+//     метрика при отсутствии данных отвечает «не хватает данных: …».
+//  5. exchange_rates — 0 писателей И 0 читателей (app.mlog:417), при этом
+//     скилл-заглушка multi-currency-handling (finance.mlog:439) обещает пересчёт
+//     «по курсу на дату операции (exchange_rates)». Здесь — писатель и честный
+//     N/A, когда курса нет (выдумывать курс запрещено).
+//  6. Цели MAPE — из устава library/finance.md:41-44 (30d ≤ 5%, 60d ≤ 10%,
+//     90d ≤ 15%), а не из головы исполнителя.
+// ══════════════════════════════════════════════════════════════════════════
+
+import ./card_contract
+
+schema finance {
+  table invoices {
+    id: Int primary_key auto_increment,
+    invoice_number: Text,
+    client_name: Text,
+    amount: Float default("0"),
+    currency: String default("BYN"),
+    status: String default("drafted"),
+    due_date: Text,
+    paid_at: Text nullable,
+    paid_amount: Float nullable,
+    created_at: Text nullable,
+    note: Text nullable
+  }
+  table invoice_status_history {
+    id: Int primary_key auto_increment,
+    invoice_id: Int,
+    from_status: Text,
+    to_status: Text,
+    reason: Text nullable,
+    changed_at: Text nullable
+  }
+  table financial_forecast_verifications {
+    id: Int primary_key auto_increment,
+    forecast_id: Int,
+    outcome: Text,
+    actual_value: Text nullable,
+    mape: Float nullable,
+    verified_at: Text nullable
+  }
+  table tax_calendar_events {
+    id: Int primary_key auto_increment,
+    jurisdiction: Text,
+    tax_type: Text nullable,
+    description: Text nullable,
+    deadline_date: Text,
+    completed: Int default("0"),
+    completed_at: Text nullable,
+    card_id: Int nullable
+  }
+  table exchange_rates {
+    id: Int primary_key auto_increment,
+    from_currency: Text,
+    to_currency: Text,
+    rate: Float default("0"),
+    rate_date: Text
+  }
+}
+
+pattern TryVal2(x: String) -> String { return x.value }
+pattern FinNow() -> String { return to_string(TryVal2(try date_format_iso(now_unix()))) }
+
+// ── 1. СЧЁТ: недостающий писатель + автомат из dept/finance.mlog:593 дословно
+// (10 легальных переходов). Возвращает "OK|<id>" или "FAIL: <причина>".
+pattern FinanceInvoiceCreate(number: String, client: String, amount: Float, currency: String, due_date: String) -> String {
+  if length(trim(number)) < 2.0 then { return "FAIL: номер счёта обязателен" }
+  if length(trim(client)) < 2.0 then { return "FAIL: клиент не указан" }
+  if amount <= 0.0 then { return "FAIL: сумма должна быть > 0" }
+  let dd = CardDaysTo(due_date)
+  if dd == -99999.0 then { return "FAIL: due_date не ISO-дата: " + due_date }
+  let dup = query("SELECT id FROM invoices WHERE invoice_number = ?", [number])
+  if length(dup) > 0.0 then { return "FAIL: счёт " + number + " уже существует (идемпотентность)" }
+  let id = db_insert("invoices", {
+    invoice_number: number, client_name: client, amount: amount, currency: currency,
+    status: "drafted", due_date: due_date, created_at: FinNow()
+  })
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?, '', 'drafted', ?, ?)", [to_string(id), "создан", FinNow()])
+  return "OK|" + to_string(id)
+}
+
+// Офисный автомат ДОСЛОВНО (dept/finance.mlog:599-620): 10 переходов.
+// Обнаруженный дефект: из 'overdue' легальны только 'escalation' и 'written_off',
+// из 'escalation' — только 'pre_legal'. Оплата просроченного счёта не записывается
+// ВООБЩЕ → метрика устава recovery-time (library/finance.md:47, target ≤ 14 дней)
+// неизмерима по построению. Ниже — тот же автомат + недостающие переходы.
+pattern FinanceTransitionAllowedLegacy(current: String, new_status: String) -> Bool {
+  if current == "drafted" and new_status == "issued" then { return true }
+  if current == "issued" and new_status == "sent" then { return true }
+  if current == "sent" and new_status == "partially_paid" then { return true }
+  if (current == "sent" or current == "partially_paid") and new_status == "paid" then { return true }
+  if current == "paid" and new_status == "closed" then { return true }
+  if (current == "sent" or current == "partially_paid") and new_status == "overdue" then { return true }
+  if current == "overdue" and new_status == "escalation" then { return true }
+  if current == "escalation" and new_status == "pre_legal" then { return true }
+  if current == "partially_paid" and new_status == "paid" then { return true }
+  if new_status == "written_off" then { return true }
+  return false
+}
+
+// Исправление: оплата возможна из любого «живого» долгового статуса.
+// Форма, не мнение: список переходов — данные, а не оценка модели.
+pattern FinanceTransitionAllowed(current: String, new_status: String) -> Bool {
+  if FinanceTransitionAllowedLegacy(current, new_status) then { return true }
+  if (current == "overdue" or current == "escalation" or current == "pre_legal") and (new_status == "partially_paid" or new_status == "paid") then { return true }
+  return false
+}
+
+pattern FinanceInvoiceTransition(invoice_id: Float, new_status: String, reason: String) -> String {
+  let rows = query("SELECT status FROM invoices WHERE id = ?", [to_string(invoice_id)])
+  if length(rows) == 0.0 then { return "FAIL: invoice not found" }
+  let current = to_string(json_get(get(rows, 0.0), "status", ""))
+  let mut valid = FinanceTransitionAllowed(current, new_status)
+  if valid == false then { return "FAIL: transition " + current + " → " + new_status + " is not allowed" }
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?, ?, ?, ?, ?)", [to_string(invoice_id), current, new_status, reason, FinNow()])
+  if new_status == "paid" then {
+    let _ = db_execute("UPDATE invoices SET status = ?, paid_at = ? WHERE id = ?", [new_status, FinNow(), to_string(invoice_id)])
+  } else {
+    let _ = db_execute("UPDATE invoices SET status = ? WHERE id = ?", [new_status, to_string(invoice_id)])
+  }
+  return "OK: " + current + " → " + new_status
+}
+
+// Просрочка — программно (в проде это делал FinanceDailyCheck, dept/finance.mlog:855,
+// но слот finance-daily выключен: dept/schedules.mlog:70 enabled=false).
+pattern FinanceMarkOverdue(now_iso: String) -> String {
+  let rows = query("SELECT id FROM invoices WHERE status IN ('sent','issued','partially_paid') AND due_date < ?", [now_iso])
+  let mut n = 0.0
+  each r in rows {
+    let id = to_float(to_string(json_get(r, "id", "0")))
+    let res = FinanceInvoiceTransition(id, "overdue", "due_date наступил (программа, не модель)")
+    if starts_with(res, "OK") then { n = n + 1.0 }
+  }
+  return "OK|overdue=" + to_string(n)
+}
+
+// ── 2. ПРОГНОЗ: карточка вида number на общем контракте.
+// Горизонт → цель MAPE по уставу (library/finance.md:41-44).
+pattern FinanceForecastCard(topic: String, amount: Float, horizon_days: Float, verify_by: String, source: String) -> String {
+  let claim = to_string(amount) + " BYN на горизонте " + to_string(horizon_days) + " дн."
+  let cj = json_encode({value: amount, horizon_days: horizon_days, unit: "BYN", target_pct: CardTargetPct("number", horizon_days, 0.0)})
+  return CardSave("finance", "number", topic, claim, cj, verify_by, "stated", source, "no", "", "{}", 0.0)
+}
+
+// ── 3. СВЕРКА ПРОГНОЗА: ошибку считает программа (CardVerifyNumber),
+// факт дополнительно пишется в legacy-таблицу financial_forecast_verifications,
+// чтобы существующие читатели (app.mlog:1260, finance.mlog:735) ожили без
+// переписывания. Прямая замена LLM-«верификации» finance.mlog:672.
+pattern FinanceVerifyForecastCard(card_id: Float, actual: Float, verified_by: String, caveats: String) -> String {
+  let res = CardVerifyNumber(card_id, actual, verified_by, caveats)
+  if starts_with(res, "NO") then { return res }
+  let rows = query("SELECT f.error_value AS e, f.error_class AS c FROM dept_verification f WHERE f.archive_id = ? ORDER BY f.id DESC LIMIT 1", [to_string(card_id)])
+  if length(rows) == 0.0 then { return "NO|факт не записан" }
+  let err = to_float(to_string(json_get(get(rows, 0.0), "e", "0")))
+  let cls = to_string(json_get(get(rows, 0.0), "c", ""))
+  let _ = db_execute("INSERT INTO financial_forecast_verifications (forecast_id, outcome, actual_value, mape, verified_at) VALUES (?, ?, ?, ?, ?)", [to_string(card_id), cls, to_string(actual), to_string(err), FinNow()])
+  return res
+}
+
+// ── 4. НАЛОГОВЫЙ КАЛЕНДАРЬ: писатель (в проде 0) + карточка-обязательство.
+pattern FinanceTaxEvent(jurisdiction: String, tax_type: String, description: String, deadline_date: String) -> String {
+  let dd = CardDaysTo(deadline_date)
+  if dd == -99999.0 then { return "FAIL: deadline_date не ISO-дата" }
+  let cj = json_encode({effect: "налоговое обязательство зарегистрировано", deadline: deadline_date})
+  let card = CardSave("finance", "receipt", "Налог: " + description + " (" + jurisdiction + ")", description, cj, deadline_date, "stated", "finance:tax-calendar", "no", "", "{}", 0.0)
+  if starts_with(card, "GATED") then { return card }
+  let card_id = to_float(get(split(card, "|"), 1.0))
+  let id = db_insert("tax_calendar_events", { jurisdiction: jurisdiction, tax_type: tax_type, description: description, deadline_date: deadline_date, completed: 0.0, card_id: card_id })
+  return "OK|" + to_string(id) + "|card=" + to_string(card_id)
+}
+
+pattern FinanceTaxComplete(event_id: Float, proof_ref: String) -> String {
+  let rows = query("SELECT completed, card_id FROM tax_calendar_events WHERE id = ?", [to_string(event_id)])
+  if length(rows) == 0.0 then { return "FAIL: событие не найдено" }
+  let done = to_float(to_string(json_get(get(rows, 0.0), "completed", "0")))
+  if done > 0.0 then { return "FAIL: уже отмечено выполненным (идемпотентность)" }
+  let card_id = to_float(to_string(json_get(get(rows, 0.0), "card_id", "0")))
+  let acc = CardVerifyReceipt(card_id, proof_ref, "ok", "owner")
+  if starts_with(acc, "NO") then { return acc }
+  let _ = db_execute("UPDATE tax_calendar_events SET completed = 1, completed_at = ? WHERE id = ?", [FinNow(), to_string(event_id)])
+  return "OK|" + acc
+}
+
+// ── 5. КУРС ВАЛЮТ: писатель + честный N/A (выдуманный курс = ложное число
+// в отчёте владельца; устав finance.md требует пересчёт по курсу на дату).
+pattern FinanceFxRate(from_c: String, to_c: String, rate: Float, rate_date: String) -> String {
+  if rate <= 0.0 then { return "FAIL: курс должен быть > 0" }
+  let dup = query("SELECT id FROM exchange_rates WHERE from_currency = ? AND to_currency = ? AND rate_date = ?", [from_c, to_c, rate_date])
+  if length(dup) > 0.0 then {
+    let _ = db_execute("UPDATE exchange_rates SET rate = ? WHERE from_currency = ? AND to_currency = ? AND rate_date = ?", [to_string(rate), from_c, to_c, rate_date])
+    return "OK|updated"
+  }
+  let _ = db_insert("exchange_rates", { from_currency: from_c, to_currency: to_c, rate: rate, rate_date: rate_date })
+  return "OK|inserted"
+}
+
+pattern FinanceConvert(amount: Float, from_c: String, to_c: String, rate_date: String) -> String {
+  if from_c == to_c then { return "OK|" + to_string(amount) + "|" + to_c + "|rate=1 (та же валюта)" }
+  let rows = query("SELECT rate FROM exchange_rates WHERE from_currency = ? AND to_currency = ? AND rate_date <= ? ORDER BY rate_date DESC LIMIT 1", [from_c, to_c, rate_date])
+  if length(rows) == 0.0 then { return "N/A|курса " + from_c + "→" + to_c + " на " + rate_date + " в exchange_rates нет — пересчёт не выполнялся (число не выдумывается)" }
+  let rate = to_float(to_string(json_get(get(rows, 0.0), "rate", "0")))
+  return "OK|" + to_string(amount * rate) + "|" + to_c + "|rate=" + to_string(rate)
+}
+
+// ── 6. ОЦЕНКА ОТДЕЛА: 4 метрики устава library/finance.md:41-48.
+// Правило честного n (приём LZLabScore, dept/lz.mlog:1449): нет данных —
+// «не хватает данных: причина», никогда не 0 и не «зелёный по умолчанию».
+pattern FinanceScoreCard() -> String {
+  let out = "Finance — метрики устава (library/finance.md:41-48)\n"
+
+  // 1. mape-cashflow
+  let mape_line = CardScore("finance", "number", 10.0)
+  let out = out + "1. mape-cashflow: " + mape_line + "\n"
+
+  // 2. overdue-invoice-ratio (target ≤ 10%)
+  let open_rows = query("SELECT COUNT(*) AS n FROM invoices WHERE status IN ('sent','issued','partially_paid','overdue','escalation','pre_legal')", [])
+  let n_open = to_float(to_string(json_get(get(open_rows, 0.0), "n", "0")))
+  if n_open == 0.0 then {
+    let out = out + "2. overdue-invoice-ratio: не хватает данных — открытых счетов 0 (invoices не заполнен; в проде писателя нет)\n"
+  } else {
+    let ov_rows = query("SELECT COUNT(*) AS n FROM invoices WHERE status IN ('overdue','escalation','pre_legal')", [])
+    let n_ov = to_float(to_string(json_get(get(ov_rows, 0.0), "n", "0")))
+    let ratio = n_ov / n_open * 100.0
+    let mut verdict = "в цели (≤10%)"
+    if ratio > 10.0 then { verdict = "ВНЕ ЦЕЛИ (>10%)" }
+    let out = out + "2. overdue-invoice-ratio: " + to_string(ratio) + "% (" + to_string(n_ov) + "/" + to_string(n_open) + ") — " + verdict + "\n"
+  }
+
+  // 3. recovery-time (target ≤ 14 дней) — медиана, посчитанная SQL, а не «на глаз»
+  let out = out + "3. recovery-time: " + FinanceRecoveryMedian() + "\n"
+
+  // 4. tax-filing-on-time (target 100%)
+  let tax_all = query("SELECT COUNT(*) AS n FROM tax_calendar_events", [])
+  let n_tax = to_float(to_string(json_get(get(tax_all, 0.0), "n", "0")))
+  if n_tax == 0.0 then {
+    let out = out + "4. tax-filing-on-time: не хватает данных — налоговых событий 0 (в проде tax_calendar_events без писателя, app.mlog:448)\n"
+  } else {
+    let missed = query("SELECT COUNT(*) AS n FROM tax_calendar_events WHERE completed = 0 AND deadline_date < date('now')", [])
+    let n_missed = to_float(to_string(json_get(get(missed, 0.0), "n", "0")))
+    let ontime = (n_tax - n_missed) / n_tax * 100.0
+    let out = out + "4. tax-filing-on-time: " + to_string(ontime) + "% (" + to_string(n_tax - n_missed) + "/" + to_string(n_tax) + ", пропущено " + to_string(n_missed) + ")\n"
+  }
+
+  let out = out + "покрытие: " + CardCoverage("finance")
+  return out
+}
+
+// Медиана дней восстановления по счетам, которые ПРОСРОЧЕНЫ и потом ОПЛАЧЕНЫ.
+// Если таких нет — честная пометка (в офисном автомате их и не могло быть:
+// переход overdue → paid отсутствовал, см. FinanceTransitionAllowedLegacy).
+pattern FinanceRecoveryMedian() -> String {
+  // Один литеральный SELECT, никаких склеек: мутационный сканер [SQL_DYNAMIC]
+  // на динамическом SQL — тот самый класс находок, которых в офисном
+  // бейзлайне 37. Медиана считается окном SQL, а не «на глаз» в коде.
+  // ВАЖНО: query() в Metalogos диспетчеризуется по началу строки — запрос
+  // обязан начинаться с SELECT, иначе CTE (WITH …) уходит в execute() и
+  // падает «Execute returned results». Проверено на 0.38.0 и 0.34.1.
+  // Сканер синков требует ЛИТЕРАЛ в точке вызова: именованная переменная
+  // (let sql = …; query(sql, …)) помечается как [SQL_DYNAMIC]. Поэтому SQL
+  // пишется inline — как и в офисе (dept/legal.mlog:669, dept/engineering.mlog:1016).
+  let rows = query("SELECT AVG(d) AS med, MAX(n) AS n FROM (SELECT (julianday(i.paid_at) - julianday(i.due_date)) AS d, ROW_NUMBER() OVER (ORDER BY (julianday(i.paid_at) - julianday(i.due_date))) AS rn, COUNT(*) OVER () AS n FROM invoices i WHERE i.status IN ('paid','closed') AND i.paid_at IS NOT NULL AND EXISTS (SELECT 1 FROM invoice_status_history h WHERE h.invoice_id = i.id AND h.to_status = 'overdue')) t WHERE rn IN ((n+1)/2, (n+2)/2)", [])
+  let n = to_float(to_string(json_get(get(rows, 0.0), "n", "0")))
+  if n == 0.0 then { return "не хватает данных — оплаченных после просрочки 0 (автомат офиса не имел перехода overdue → paid)" }
+  let days = to_float(to_string(json_get(get(rows, 0.0), "med", "0")))
+  let mut verdict = "в цели (≤ 14 дней)"
+  if days > 14.0 then { verdict = "ВНЕ ЦЕЛИ (> 14 дней)" }
+  return to_string(days) + " дн. (медиана, n=" + to_string(n) + ") — " + verdict
+}
+
+// Медиана дней восстановления — программа, а не «на глаз».
+pattern FinanceRecoveryDays(invoice_id: Float) -> String {
+  let rows = query("SELECT due_date FROM invoices WHERE id = ?", [to_string(invoice_id)])
+  if length(rows) == 0.0 then { return "N/A|счёт не найден" }
+  let due = to_string(json_get(get(rows, 0.0), "due_date", ""))
+  let paid = query("SELECT paid_at FROM invoices WHERE id = ?", [to_string(invoice_id)])
+  let pa = to_string(json_get(get(paid, 0.0), "paid_at", ""))
+  if trim(pa) == "" or pa == "null" then { return "N/A|не оплачен" }
+  let d1 = CardEpochOf(due)
+  let d2 = CardEpochOf(pa)
+  if d1 < 0.0 or d2 < 0.0 then { return "N/A|даты не распознаны" }
+  return "OK|" + to_string((d2 - d1) / 86400.0) + " дн."
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ТЕСТЫ
+// ══════════════════════════════════════════════════════════════════════════
+
+test "финансы: счёт создаётся (недостающий писатель) и идемпотентен" {
+  let r = FinanceInvoiceCreate("BY-2026-001", "ООО Ромашка", 12000.0, "BYN", "2026-11-20")
+  assert_contains(r, "OK|")
+  assert_contains(FinanceInvoiceCreate("BY-2026-001", "ООО Ромашка", 12000.0, "BYN", "2026-11-20"), "FAIL: счёт BY-2026-001 уже существует")
+  assert_contains(FinanceInvoiceCreate("BY-2026-002", "ООО Ромашка", 0.0, "BYN", "2026-11-20"), "FAIL: сумма должна быть > 0")
+  assert_contains(FinanceInvoiceCreate("BY-2026-003", "ООО Ромашка", 100.0, "BYN", "20.11.2026"), "FAIL: due_date не ISO-дата")
+}
+
+test "финансы: автомат счёта — легальные и нелегальные переходы" {
+  let r = FinanceInvoiceCreate("BY-2026-010", "ИП Иванов", 5000.0, "BYN", "2026-11-25")
+  let id = to_float(get(split(r, "|"), 1.0))
+  assert_eq(FinanceInvoiceTransition(id, "issued", "выставлен"), "OK: drafted → issued")
+  assert_eq(FinanceInvoiceTransition(id, "sent", "отправлен"), "OK: issued → sent")
+  assert_contains(FinanceInvoiceTransition(id, "closed", "хочу закрыть"), "FAIL: transition sent → closed is not allowed")
+  assert_eq(FinanceInvoiceTransition(id, "paid", "оплата получена"), "OK: sent → paid")
+  let rows = query("SELECT paid_at FROM invoices WHERE id = ?", [to_string(id)])
+  assert_eq(length(trim(to_string(json_get(get(rows, 0.0), "paid_at", "")))) > 5.0, true)
+  let hist = query("SELECT COUNT(*) AS n FROM invoice_status_history WHERE invoice_id = ?", [to_string(id)])
+  assert_eq(to_float(to_string(json_get(get(hist, 0.0), "n", "0"))), 4.0)
+}
+
+test "финансы: просрочка ставится программой, а не выключенным слотом" {
+  let _ = FinanceInvoiceCreate("BY-2026-011", "ООО Вектор", 8000.0, "BYN", "2026-10-01")
+  let rows = query("SELECT id FROM invoices WHERE invoice_number = 'BY-2026-011'", [])
+  let id = to_float(to_string(json_get(get(rows, 0.0), "id", "0")))
+  let _ = FinanceInvoiceTransition(id, "issued", "выставлен")
+  let _ = FinanceInvoiceTransition(id, "sent", "отправлен")
+  let res = FinanceMarkOverdue("2026-11-02")
+  assert_contains(res, "OK|overdue=")
+  let after = query("SELECT status FROM invoices WHERE id = ?", [to_string(id)])
+  assert_eq(to_string(json_get(get(after, 0.0), "status", "?")), "overdue")
+  assert_eq(FinanceInvoiceTransition(id, "escalation", "14 дней прошло"), "OK: overdue → escalation")
+}
+
+test "финансы: прогноз → карточка → программная сверка → MAPE" {
+  let r = FinanceForecastCard("Кассовый поток декабрь 2026", 145200.0, 60.0, "2026-12-31", "finance:daily")
+  assert_contains(r, "OK|")
+  let id = to_float(get(split(r, "|"), 1.0))
+  let v = FinanceVerifyForecastCard(id, 130000.0, "owner", "факт по банковской выписке")
+  assert_contains(v, "OK|error=")
+  assert_contains(v, "class=overoptimistic")
+  assert_contains(v, "target=10%")
+  // legacy-таблица ожила: тот же факт виден существующим читателям app.mlog:1260
+  let leg = query("SELECT outcome, mape FROM financial_forecast_verifications WHERE forecast_id = ?", [to_string(id)])
+  assert_eq(length(leg), 1.0)
+  assert_eq(to_string(json_get(get(leg, 0.0), "outcome", "?")), "overoptimistic")
+  assert_eq(abs(to_float(to_string(json_get(get(leg, 0.0), "mape", "0"))) - 11.6923) < 0.001, true)
+}
+
+test "финансы: цель MAPE берётся из устава по горизонту" {
+  let a = FinanceForecastCard("Прогноз 30 дней", 1000.0, 30.0, "2026-12-31", "t")
+  let aid = to_float(get(split(a, "|"), 1.0))
+  // факт 1200 → ошибка 16.67% при цели 5% (30d) и прогноз ниже факта
+  assert_contains(FinanceVerifyForecastCard(aid, 1200.0, "owner", ""), "target=5%")
+  let rows30 = query("SELECT error_class FROM dept_verification WHERE archive_id = ?", [to_string(aid)])
+  assert_eq(to_string(json_get(get(rows30, 0.0), "error_class", "?")), "underoptimistic")
+  let b = FinanceForecastCard("Прогноз 90 дней", 1000.0, 90.0, "2026-12-31", "t")
+  let bid = to_float(get(split(b, "|"), 1.0))
+  // та же ошибка 3.85% на горизонте 90 дней — уже в цели (15%)
+  assert_contains(FinanceVerifyForecastCard(bid, 1040.0, "owner", ""), "target=15%")
+  let rows90 = query("SELECT error_class FROM dept_verification WHERE archive_id = ?", [to_string(bid)])
+  assert_eq(to_string(json_get(get(rows90, 0.0), "error_class", "?")), "accurate")
+}
+
+test "финансы: тупик офисного автомата — просроченный счёт нельзя оплатить" {
+  // Доказательство дефекта (dept/finance.mlog:599-620): из overdue нет перехода в paid
+  assert_eq(FinanceTransitionAllowedLegacy("overdue", "paid"), false)
+  assert_eq(FinanceTransitionAllowedLegacy("overdue", "escalation"), true)
+  assert_eq(FinanceTransitionAllowedLegacy("escalation", "paid"), false)
+  // Исправленный автомат переход разрешает, форму — нет
+  assert_eq(FinanceTransitionAllowed("overdue", "paid"), true)
+  assert_eq(FinanceTransitionAllowed("escalation", "paid"), true)
+  assert_eq(FinanceTransitionAllowed("drafted", "paid"), false)
+  assert_eq(FinanceTransitionAllowed("overdue", "closed"), false)
+}
+
+test "финансы: налоговый календарь — писатель, приёмка, идемпотентность" {
+  let r = FinanceTaxEvent("BY", "НДС", "Декларация по НДС за 4 квартал", "2027-01-20")
+  assert_contains(r, "OK|")
+  let id = to_float(get(split(r, "|"), 1.0))
+  assert_contains(FinanceTaxComplete(id, ""), "NO|нет доказательства эффекта")
+  let ok = FinanceTaxComplete(id, "https://nalog.gov.by/receipt/12345")
+  assert_contains(ok, "OK|")
+  assert_contains(ok, "accepted")
+  assert_contains(FinanceTaxComplete(id, "https://nalog.gov.by/receipt/12345"), "FAIL: уже отмечено выполненным")
+  let rows = query("SELECT completed FROM tax_calendar_events WHERE id = ?", [to_string(id)])
+  assert_eq(to_float(to_string(json_get(get(rows, 0.0), "completed", "0"))), 1.0)
+}
+
+test "финансы: курс валют — пересчёт только по записанному курсу, иначе честный N/A" {
+  assert_contains(FinanceConvert(1000.0, "BYN", "BYN", "2026-11-02"), "OK|1000|BYN|rate=1")
+  assert_contains(FinanceConvert(1000.0, "USD", "BYN", "2026-11-02"), "N/A|курса USD→BYN")
+  assert_contains(FinanceConvert(1000.0, "USD", "BYN", "2026-11-02"), "число не выдумывается")
+  assert_contains(FinanceFxRate("USD", "BYN", 3.2, "2026-10-30"), "OK|inserted")
+  assert_contains(FinanceFxRate("USD", "BYN", 3.25, "2026-10-30"), "OK|updated")
+  let conv = FinanceConvert(1000.0, "USD", "BYN", "2026-11-02")
+  assert_contains(conv, "OK|3250|BYN|rate=3.25")
+  assert_contains(FinanceFxRate("USD", "BYN", 0.0, "2026-10-30"), "FAIL: курс должен быть > 0")
+}
+
+test "финансы: оценка отдела — честные метрики вместо ложно-зелёных нулей" {
+  // Минимальный n для MAPE — 10 пар (порог офиса, app.mlog:1258). Набираем.
+  let mut i = 0.0
+  while i < 10.0 {
+    let rr = FinanceForecastCard("Кассовый поток, прогон #" + to_string(i), 100000.0, 30.0, "2026-12-31", "finance:daily")
+    let cid = to_float(get(split(rr, "|"), 1.0))
+    let _ = FinanceVerifyForecastCard(cid, 95000.0, "owner", "")
+    i = i + 1.0
+  }
+  let s = FinanceScoreCard()
+  assert_contains(s, "1. mape-cashflow:")
+  assert_contains(s, "MAPE=")
+  assert_contains(s, "n=1")
+  // просрочка есть (BY-2026-011 в escalation) — метрика живая
+  assert_contains(s, "2. overdue-invoice-ratio:")
+  assert_contains(s, "%")
+  // recovery-time: оплаченных после просрочки ещё нет — честная пометка, не 0
+  assert_contains(s, "3. recovery-time: не хватает данных")
+  assert_contains(s, "автомат офиса не имел перехода overdue → paid")
+  // налоговое событие одно и оно выполнено → 100%, но НЕ «0 (target 0)»
+  assert_contains(s, "4. tax-filing-on-time: 100%")
+  assert_contains(s, "покрытие: покрытие finance:")
+  // ложно-зелёного нуля быть не должно (регрессия на finance.mlog:744)
+  assert_eq(contains(s, "Missed tax deadlines: 0"), false)
+}
+
+test "финансы: медиана дней восстановления считается программой" {
+  let r = FinanceInvoiceCreate("BY-2026-020", "ООО Лада", 3000.0, "BYN", "2026-10-01")
+  let id = to_float(get(split(r, "|"), 1.0))
+  assert_contains(FinanceRecoveryDays(id), "N/A|не оплачен")
+  let _ = FinanceInvoiceTransition(id, "issued", "в")
+  let _ = FinanceInvoiceTransition(id, "sent", "в")
+  let _ = db_execute("UPDATE invoices SET paid_at = '2026-10-11T00:00:00Z' WHERE id = ?", [to_string(id)])
+  let rec = FinanceRecoveryDays(id)
+  assert_contains(rec, "OK|10")
+  assert_contains(rec, "дн.")
+  assert_contains(FinanceRecoveryDays(999999.0), "N/A|счёт не найден")
+}
+
+test "финансы: recovery-time становится измеримой после оплаты просрочки" {
+  let r = FinanceInvoiceCreate("BY-2026-030", "ООО Заря", 4200.0, "BYN", "2026-10-01")
+  let id = to_float(get(split(r, "|"), 1.0))
+  let _ = FinanceInvoiceTransition(id, "issued", "выставлен")
+  let _ = FinanceInvoiceTransition(id, "sent", "отправлен")
+  let _ = FinanceMarkOverdue("2026-11-02")
+  assert_contains(FinanceRecoveryMedian(), "не хватает данных")
+  let pay = FinanceInvoiceTransition(id, "paid", "оплата получена после просрочки")
+  assert_eq(pay, "OK: overdue → paid")
+  let _ = db_execute("UPDATE invoices SET paid_at = '2026-10-11T00:00:00Z' WHERE id = ?", [to_string(id)])
+  let m = FinanceRecoveryMedian()
+  assert_contains(m, "10 дн.")
+  assert_contains(m, "n=1")
+  assert_contains(m, "в цели (≤ 14 дней)")
+  assert_contains(FinanceScoreCard(), "3. recovery-time: 10 дн.")
+}

@@ -1,0 +1,107 @@
+// ПРОБА D4 (ревью плана офиса, 02.11.2026) — структурный хвост ответа отдела:
+// надёжность источника утверждения. Проверяется механизм, а не обещание:
+//   1) хвост извлекается ПРОГРАММОЙ (split по маркеру), без LLM-вызова;
+//   2) форма хвоста проверяется json_validate (REFERENCE.md:2499 — «shape before
+//      use», тот же валидатор, что у call_llm_schema, LLM не зовётся);
+//   3) битый хвост — это FAIL, а не «голый ответ»: молчаливое降级 недопустимо;
+//   4) артефактный отдел (визуал/дизайн): чек-лист собирается из фактов
+//      файловой системы (file_exists) и реестра visual_artifacts, не из мнения.
+db { url: env("DATABASE_URL") }
+
+pattern TryVal(x: String) -> String { return x.value }
+
+pattern TailSchema() -> String {
+  return "{\"type\":\"object\",\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"number\",\"flag\",\"check\",\"receipt\"]},\"claim\":{\"type\":\"string\"},\"verify_by\":{\"type\":\"string\"},\"value\":{\"type\":\"number\"},\"dissent\":{\"type\":\"string\"},\"dissent_reason\":{\"type\":\"string\"}},\"required\":[\"kind\",\"claim\",\"verify_by\"]}"
+}
+
+// Извлечение хвоста: маркер ```card ... ``` (строгий, один на офис)
+pattern CardTailExtract(text: String) -> String {
+  let parts = split(text, "```card")
+  if length(parts) < 2.0 then { return "" }
+  let rest = split(to_string(get(parts, 1.0)), "```")
+  return trim(to_string(get(rest, 0.0)))
+}
+
+// OK|<json> — хвост есть и валиден; FAIL|<причина> — хвост есть, но брак;
+// BARE — хвоста нет (ответ не становится карточкой, но и ошибкой не считается)
+pattern CardTailValidate(text: String) -> String {
+  let tail = CardTailExtract(text)
+  if tail == "" then { return "BARE" }
+  let r = try json_validate(TailSchema(), tail)
+  if r.ok == false then { return "FAIL|json не разобран: " + to_string(r.error.message) }
+  let v = r.value
+  if to_string(json_get(v, "valid", "false")) != "true" then {
+    return "FAIL|форма хвоста: " + to_string(json_get(v, "errors", ""))
+  }
+  return "OK|" + tail
+}
+
+// Чек-лист артефакта — только факты программы (для визуала/дизайна).
+// ВАЖНО: read_file_or/file_exists на путях из deny-list (.env*, *.db, *.mlog,
+// .git/** — Naryad #455) отвергается громко, поэтому чек-лист артефакта строится
+// из (а) факта существования файла, (б) расширения из белого списка,
+// (в) строки реестра отдела (visual_artifacts, visual.mlog:571) — всё программа.
+pattern ArtifactChecks(path: String, ext_ok: String) -> String {
+  let ex = file_exists(path)
+  let mut ext = false
+  if contains(lower(path), ext_ok) then { ext = true }
+  return "[{\"id\":\"exists\",\"pass\":" + to_string(ex) + "},{\"id\":\"ext\",\"pass\":" + to_string(ext) + "}]"
+}
+
+pattern ArtifactRegistryRows(kind: String) -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS visual_artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, source_type TEXT, source_id TEXT, path TEXT, created_at TEXT)", [])
+  let _ = db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES ('card', 'dept', 'visual', 'data/out/cover.png', datetime('now'))", [])
+  let rows = query("SELECT COUNT(*) AS n FROM visual_artifacts WHERE type = ? AND path IS NOT NULL AND path != ''", [kind])
+  return to_string(json_get(get(rows, 0.0), "n", "0"))
+}
+
+test "1: корректный хвост — утверждение извлекается программой" {
+  let ans = "Выручка за декабрь составит 210000 BYN.\n```card\n{\"kind\":\"number\",\"claim\":\"Выручка декабрь 210000 BYN\",\"verify_by\":\"2026-12-31\",\"value\":210000}\n```"
+  let r = CardTailValidate(ans)
+  print("1 " + r)
+  assert_contains(r, "OK|")
+  let j = parse_json(CardTailExtract(ans))
+  assert_eq(to_string(json_get(j, "kind", "?")), "number")
+  assert_eq(to_string(json_get(j, "value", "0")), "210000")
+}
+
+test "2: битый JSON в хвосте — громкий FAIL, а не молчаливый «голый ответ»" {
+  let ans = "Прогноз готов.\n```card\n{\"kind\":\"number\",\"claim\":незакрытая строка}\n```"
+  let r = CardTailValidate(ans)
+  print("2 " + r)
+  assert_contains(r, "FAIL|")
+}
+
+test "3: хвост вне словаря (kind=horoscope, нет verify_by) — FAIL по форме" {
+  let ans = "Ответ.\n```card\n{\"kind\":\"horoscope\",\"claim\":\"все будет хорошо\"}\n```"
+  let r = CardTailValidate(ans)
+  print("3 " + r)
+  assert_contains(r, "FAIL|форма хвоста")
+}
+
+test "4: ответ без хвоста — BARE (консультация, не ошибка)" {
+  let r = CardTailValidate("Справка: ставка рефинансирования 9.5%.")
+  print("4 " + r)
+  assert_eq(r, "BARE")
+}
+
+test "5: артефактный отдел — чек-лист из фактов, а не из мнения" {
+  let good = ArtifactChecks("work/o2/README.md", ".md")
+  let bad = ArtifactChecks("work/o2/dept/net-takogo-faila.md", ".md")
+  let ext = ArtifactChecks("work/o2/README.md", ".png")
+  print("5 good=" + good)
+  print("5 bad=" + bad)
+  print("5 ext=" + ext)
+  assert_contains(good, "\"id\":\"exists\",\"pass\":true")
+  assert_contains(bad, "\"id\":\"exists\",\"pass\":false")
+  assert_contains(ext, "\"id\":\"ext\",\"pass\":false")
+  // реестр артефактов отдела даёт второй факт для чек-листа
+  assert_eq(ArtifactRegistryRows("card"), "1")
+  assert_eq(ArtifactRegistryRows("compression"), "0")
+}
+
+test "6: чувствительный путь — громкий отказ, чек-лист не молчит" {
+  let r = TryVal(try read_file_or("work/o2/dept/visual.mlog", ""))
+  print("6 read_file_or(.mlog) = [" + to_string(r) + "]")
+  assert_eq(to_string(r), "()")
+}

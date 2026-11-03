@@ -1,0 +1,387 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Пример 3. QA — вид исхода `check` на общем контракте (пример 1)
+//   mlog check examples/03_qa_check.mlog --root examples/03_qa_check.mlog
+//   mlog test  examples/03_qa_check.mlog
+//
+// ЧТО ЧИНИМ (факты аудита 02.11.2026):
+//  1. Все три таблицы жизненного цикла QA создаются со статусом 'started' и
+//     НИКОГДА не обновляются: test_runs (dept/qa.mlog:375), ai_eval_runs
+//     (dept/qa.mlog:780), security_audits (dept/qa.mlog:809). UPDATE нет ни
+//     одного → четыре читателя с фильтром status='completed' (qa.mlog:991,
+//     1054, 1135, 1166) структурно пусты.
+//  2. QaEnforceHardRules (dept/qa.mlog:255) передаёт в правила ЛИТЕРАЛЫ:
+//     EnforceRule4_AutomatedTestsRequired(query, "true")   — qa.mlog:256
+//     EnforceRule5_SecurityScanRequired(features, "true")  — qa.mlog:264
+//     EnforceRule11_NoFlakyTestsInCI("default", "0")       — qa.mlog:268
+//     → 3 правила из 4 не могут отказать НИКОГДА. Единственный вызов —
+//     qa.mlog:1358, причём project передаётся строкой "project".
+//  3. ReleaseGate (dept/qa.mlog:1127) — 0 вызовов во всём проде, и данные
+//     читает через db_execute, который возвращает Unit (REFERENCE.md:1192:
+//     «Executes an SQL query without returning data») — SELECT через него
+//     не даёт строк в принципе.
+//  4. qa_verification_log — 0 писателей, 0 читателей (app.mlog:445): таблица
+//     верификации QA мертва полностью.
+//  5. Скиллы QA не грузятся: LoadAllSkills/LoadSkillTier1..3 (qa.mlog:502-537)
+//     возвращают СПИСОК ИМЁН строкой, ни одного read_file — содержимое 11
+//     скиллов из skills_index/qa.txt в промпт не попадает никогда.
+//
+// МЕТОДИКА (§2.5): пороги AI-evals взяты из собственного устава отдела
+// (dept/qa.mlog:182-200: groundedness ≥ 0.85, relevance ≥ 0.85,
+// faithfulness ≥ 0.90, prompt_injection ≥ 0.95), а допуск LLM-судьи к гейту —
+// только после измеренного согласия с разметкой владельца (см. QaJudgeAgreement;
+// систематическое позиционное смещение судей показано в IJCNLP-2025
+// «A Systematic Study of Position Bias in LLM-as-a-Judge»).
+// ══════════════════════════════════════════════════════════════════════════
+
+import ./card_contract
+
+schema qa {
+  table test_runs {
+    id: Int primary_key auto_increment,
+    project: Text,
+    test_type: Text nullable,
+    environment: Text nullable,
+    status: String default("started"),
+    verdict: Text nullable,
+    coverage_pct: Float nullable,
+    total_tests: Int nullable,
+    passed: Int nullable,
+    failed: Int nullable,
+    flaky: Int default("0"),
+    triggered_by: Text nullable,
+    started_at: Text nullable,
+    completed_at: Text nullable
+  }
+  table security_audits {
+    id: Int primary_key auto_increment,
+    project: Text,
+    audit_type: Text nullable,
+    status: String default("started"),
+    findings_critical: Int default("0"),
+    findings_high: Int default("0"),
+    completed_at: Text nullable
+  }
+  table ai_eval_runs {
+    id: Int primary_key auto_increment,
+    project: Text,
+    model_id: Text nullable,
+    status: String default("started"),
+    total_cases: Int default("0"),
+    groundedness_score: Float default("0"),
+    relevance_score: Float default("0"),
+    faithfulness_score: Float default("0"),
+    prompt_injection_score: Float default("0"),
+    overall_pass_rate: Float default("0"),
+    completed_at: Text nullable
+  }
+  table qa_verification_log {
+    id: Int primary_key auto_increment,
+    card_id: Int,
+    project: Text,
+    verdict: Text,
+    checked_by: Text nullable,
+    checked_at: Text nullable
+  }
+}
+
+pattern TryVal3(x: String) -> String { return x.value }
+pattern QaNow() -> String { return to_string(TryVal3(try date_format_iso(now_unix()))) }
+pattern QaEnvProduction() -> String { return "production" }
+pattern QaAiMinCases() -> Float { return 20.0 }
+pattern QaAiPassMin() -> Float { return 0.85 }
+
+// ── 1. ПРОГОН: карточка вида check + недостающий писатель «завершения».
+// Карточка — след для владельца, test_runs — строка для существующих читателей.
+pattern QaRunStart(project: String, test_type: String, environment: String, triggered_by: String) -> String {
+  if length(trim(project)) < 2.0 then { return "FAIL: проект не указан" }
+  if environment == QaEnvProduction() then { return "ОТКАЗ: тестирование в production запрещено (Rule 8, dept/qa.mlog:214)" }
+  let checks = json_encode([{id: "suite", pass: false}, {id: "coverage", pass: false}, {id: "flaky", pass: false}])
+  let cj = json_encode({checks: "suite,coverage,flaky", project: project, test_type: test_type, environment: environment})
+  let card = CardSave("qa", "check", "Прогон " + test_type + " · " + project, "прогон начат", cj, "2026-12-31", "stated", "qa:" + triggered_by, "no", "", "{}", 0.0)
+  if starts_with(card, "GATED") then { return card }
+  let card_id = to_float(get(split(card, "|"), 1.0))
+  let run_id = db_insert("test_runs", { project: project, test_type: test_type, environment: environment, status: "started", triggered_by: triggered_by, started_at: QaNow() })
+  return "OK|card=" + to_string(card_id) + "|run=" + to_string(run_id)
+}
+
+// Недостающий UPDATE: прогон завершён, вердикт и покрытие записаны программой.
+pattern QaRunComplete(card_id: Float, run_id: Float, verdict: String, coverage_pct: Float, total: Float, passed: Float, failed: Float, flaky: Float) -> String {
+  if CardInSet(verdict, "passed|failed|partial|error") == false then { return "FAIL: вердикт вне набора passed|failed|partial|error" }
+  if total <= 0.0 then { return "FAIL: total_tests = 0 — прогон пуст, завершать нечего" }
+  if passed + failed > total then { return "FAIL: passed + failed > total — арифметика прогона не сходится" }
+  let mut checks = "[{\"id\":\"suite\",\"pass\":"
+  if verdict == "passed" then { checks = checks + "true" } else { checks = checks + "false" }
+  checks = checks + "},{\"id\":\"coverage\",\"pass\":"
+  if coverage_pct >= 80.0 then { checks = checks + "true" } else { checks = checks + "false" }
+  checks = checks + "},{\"id\":\"flaky\",\"pass\":"
+  if flaky == 0.0 then { checks = checks + "true" } else { checks = checks + "false" }
+  checks = checks + "}]"
+  let _ = db_execute("UPDATE test_runs SET status = 'completed', verdict = ?, coverage_pct = ?, total_tests = ?, passed = ?, failed = ?, flaky = ?, completed_at = ? WHERE id = ?", [verdict, to_string(coverage_pct), to_string(total), to_string(passed), to_string(failed), to_string(flaky), QaNow(), to_string(run_id)])
+  let res = CardVerifyCheck(card_id, checks, "accepted", "qa:program")
+  let rows = query("SELECT project FROM test_runs WHERE id = ?", [to_string(run_id)])
+  let proj = to_string(json_get(get(rows, 0.0), "project", "?"))
+  let _ = db_insert("qa_verification_log", { card_id: card_id, project: proj, verdict: verdict, checked_by: "program", checked_at: QaNow() })
+  return res + "|run=" + to_string(run_id)
+}
+
+pattern QaSecurityAuditComplete(project: String, critical: Float, high: Float) -> String {
+  let id = db_insert("security_audits", { project: project, audit_type: "dependency_audit+owasp+secrets", status: "started", findings_critical: critical, findings_high: high })
+  let _ = db_execute("UPDATE security_audits SET status = 'completed', completed_at = ? WHERE id = ?", [QaNow(), to_string(id)])
+  return "OK|" + to_string(id)
+}
+
+pattern QaAiEvalComplete(project: String, model_id: String, cases: Float, grounded: Float, relevance: Float, faithful: Float, injection: Float, pass_rate: Float) -> String {
+  let id = db_insert("ai_eval_runs", { project: project, model_id: model_id, status: "started", total_cases: cases, groundedness_score: grounded, relevance_score: relevance, faithfulness_score: faithful, prompt_injection_score: injection, overall_pass_rate: pass_rate })
+  let _ = db_execute("UPDATE ai_eval_runs SET status = 'completed', completed_at = ? WHERE id = ?", [QaNow(), to_string(id)])
+  return "OK|" + to_string(id)
+}
+
+// ── 2. ПРАВИЛА НА ДАННЫХ, а не на литералах. Каждое читает БД через query()
+// (db_execute строк не возвращает — REFERENCE.md:1192).
+pattern QaRule1_PassedSuite(project: String) -> String {
+  let rows = query("SELECT verdict, coverage_pct FROM test_runs WHERE project = ? AND test_type IN ('unit','integration','e2e','smoke') AND status = 'completed' ORDER BY id DESC LIMIT 1", [project])
+  if length(rows) == 0.0 then { return "ОТКАЗ: Rule 1 — нет ни одного ЗАВЕРШЁННОГО критического прогона по проекту " + project + " (в проде status никогда не менялся со 'started')" }
+  let v = to_string(json_get(get(rows, 0.0), "verdict", ""))
+  if v != "passed" then { return "ОТКАЗ: Rule 1 — последний критический прогон: " + v }
+  let cov = to_float(to_string(json_get(get(rows, 0.0), "coverage_pct", "0")))
+  if cov < 80.0 then { return "ОТКАЗ: Rule 1 — покрытие " + to_string(cov) + "% < 80% (цель overall, library/qa.md)" }
+  return "PASS"
+}
+
+pattern QaRule5_SecurityScan(project: String, sensitive: String) -> String {
+  if sensitive != "true" then { return "PASS" }
+  let rows = query("SELECT findings_critical, findings_high FROM security_audits WHERE project = ? AND status = 'completed' ORDER BY id DESC LIMIT 1", [project])
+  if length(rows) == 0.0 then { return "ОТКАЗ: Rule 5 — чувствительный проект без ЗАВЕРШЁННОГО security scan" }
+  let crit = to_float(to_string(json_get(get(rows, 0.0), "findings_critical", "0")))
+  let high = to_float(to_string(json_get(get(rows, 0.0), "findings_high", "0")))
+  if crit > 0.0 then { return "ОТКАЗ: Rule 5 — критических находок: " + to_string(crit) }
+  if high > 0.0 then { return "ОТКАЗ: Rule 5 — высоких находок: " + to_string(high) }
+  return "PASS"
+}
+
+pattern QaRule6_AiEvals(project: String, is_ai: String) -> String {
+  if is_ai != "true" then { return "PASS" }
+  let rows = query("SELECT total_cases, groundedness_score, relevance_score, faithfulness_score, prompt_injection_score, overall_pass_rate FROM ai_eval_runs WHERE project = ? AND status = 'completed' ORDER BY id DESC LIMIT 1", [project])
+  if length(rows) == 0.0 then { return "ОТКАЗ: Rule 6 — AI-система без ЗАВЕРШЁННЫХ AI evals" }
+  let r = get(rows, 0.0)
+  let cases = to_float(to_string(json_get(r, "total_cases", "0")))
+  if cases < QaAiMinCases() then { return "ОТКАЗ: Rule 6 — кейсов " + to_string(cases) + " < " + to_string(QaAiMinCases()) }
+  let g = to_float(to_string(json_get(r, "groundedness_score", "0")))
+  let rel = to_float(to_string(json_get(r, "relevance_score", "0")))
+  let fai = to_float(to_string(json_get(r, "faithfulness_score", "0")))
+  let inj = to_float(to_string(json_get(r, "prompt_injection_score", "0")))
+  if g < 0.85 then { return "ОТКАЗ: Rule 6 — groundedness " + to_string(g) + " < 0.85" }
+  if rel < 0.85 then { return "ОТКАЗ: Rule 6 — relevance " + to_string(rel) + " < 0.85" }
+  if fai < 0.90 then { return "ОТКАЗ: Rule 6 — faithfulness " + to_string(fai) + " < 0.90" }
+  if inj < 0.95 then { return "ОТКАЗ: Rule 6 — prompt_injection_resistance " + to_string(inj) + " < 0.95" }
+  let pr = to_float(to_string(json_get(r, "overall_pass_rate", "0")))
+  if pr < QaAiPassMin() then { return "ОТКАЗ: Rule 6 — overall_pass_rate " + to_string(pr) + " < " + to_string(QaAiPassMin()) }
+  return "PASS"
+}
+
+pattern QaRule11_NoFlaky(project: String) -> String {
+  let rows = query("SELECT COALESCE(SUM(flaky), 0) AS f FROM test_runs WHERE project = ? AND status = 'completed'", [project])
+  let f = to_float(to_string(json_get(get(rows, 0.0), "f", "0")))
+  if f > 0.0 then { return "ОТКАЗ: Rule 11 — мигающих тестов " + to_string(f) + " (в проде число передавалось литералом \"0\": qa.mlog:268)" }
+  return "PASS"
+}
+
+pattern QaRule8_NoProd(environment: String) -> String {
+  if environment == QaEnvProduction() then { return "ОТКАЗ: Rule 8 — тестирование в production запрещено" }
+  return "PASS"
+}
+
+// ── 3. РЕЛИЗНЫЙ ГЕЙТ: живой (в отличие от dept/qa.mlog:1127 — 0 вызовов).
+pattern QaReleaseGate(project: String, environment: String, is_ai: String, sensitive: String) -> String {
+  let r8 = QaRule8_NoProd(environment)
+  if r8 != "PASS" then { return "BLOCKED|" + r8 }
+  let r1 = QaRule1_PassedSuite(project)
+  let r5 = QaRule5_SecurityScan(project, sensitive)
+  let r6 = QaRule6_AiEvals(project, is_ai)
+  let r11 = QaRule11_NoFlaky(project)
+  let mut blocked = false
+  let mut report = ""
+  if r1 != "PASS" then { blocked = true }
+  if r5 != "PASS" then { blocked = true }
+  if r6 != "PASS" then { blocked = true }
+  if r11 != "PASS" then { blocked = true }
+  report = "R1:" + r1 + " | R5:" + r5 + " | R6:" + r6 + " | R11:" + r11
+  if blocked then { return "BLOCKED|" + report }
+  return "PASS|" + report
+}
+
+// Офисный композит ДОСЛОВНО (dept/qa.mlog:255-272): литералы вместо данных.
+// Оставлен здесь как отрицательный контроль — тест показывает, что он не
+// блокирует ничего, кроме Rule 8.
+pattern QaLegacyLiteralGate(query: String, environment: String) -> String {
+  let mut r4 = "PASS"
+  if query == "только ручное тестирование" then { r4 = "ОТКАЗ" }
+  let r8 = QaRule8_NoProd(environment)
+  if r8 != "PASS" then { return r8 }
+  let r5 = "PASS"
+  let r11 = "PASS"
+  if r4 != "PASS" then { return r4 }
+  return "PASS|литералы: hasAutomated=\"true\", hasSecurityScan=\"true\", flakyCount=\"0\" — R5:" + r5 + " R11:" + r11
+}
+
+// ── 4. ДОПУСК LLM-СУДЬИ К ГЕЙТУ: сначала измеряем согласие с разметкой
+// владельца, потом (и только потом) судья участвует в решении.
+// Вход: [{"judge":"pass","owner":"pass"}, ...]
+pattern QaJudgeAgreement(pairs_json: String, min_n: Float, min_agreement: Float) -> String {
+  let pairs = TryVal(try parse_json(pairs_json))
+  if to_string(pairs) == "()" then { return "FAIL: pairs_json не JSON" }
+  let mut n = 0.0
+  let mut agree = 0.0
+  let mut judge_pass = 0.0
+  let mut owner_pass = 0.0
+  let mut both_pass = 0.0
+  each p in pairs {
+    n = n + 1.0
+    let j = lower(to_string(json_get(p, "judge", "")))
+    let o = lower(to_string(json_get(p, "owner", "")))
+    if j == o then { agree = agree + 1.0 }
+    if j == "pass" then { judge_pass = judge_pass + 1.0 }
+    if o == "pass" then { owner_pass = owner_pass + 1.0 }
+    if j == "pass" and o == "pass" then { both_pass = both_pass + 1.0 }
+  }
+  if n < min_n then { return "НЕ ДОПУЩЕН: не хватает данных — пар «судья/владелец» " + to_string(n) + " из " + to_string(min_n) + " (согласие не измерено, гейт на судье строить нельзя)" }
+  let pct = agree / n * 100.0
+  // каппа Коэна: поправка на случайное согласие — без неё 80% при перекошенных
+  // классах выглядит лучше, чем есть
+  let pe = (judge_pass / n) * (owner_pass / n) + ((n - judge_pass) / n) * ((n - owner_pass) / n)
+  let mut kappa = 0.0
+  if pe < 1.0 then { kappa = (agree / n - pe) / (1.0 - pe) }
+  let mut verdict = "НЕ ДОПУЩЕН: согласие " + to_string(pct) + "% < " + to_string(min_agreement * 100.0) + "%"
+  if pct >= min_agreement * 100.0 then { verdict = "ДОПУЩЕН как неблокирующий сигнал" }
+  if pct >= min_agreement * 100.0 and kappa >= 0.6 then { verdict = "ДОПУЩЕН к блокирующему гейту" }
+  return "OK|n=" + to_string(n) + "|agreement=" + to_string(pct) + "%|kappa=" + to_string(kappa) + "|" + verdict
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ТЕСТЫ
+// ══════════════════════════════════════════════════════════════════════════
+
+test "qa: прогон создаётся и завершается (недостающий UPDATE)" {
+  let r = QaRunStart("office-v2", "unit", "staging", "ci")
+  assert_contains(r, "OK|card=")
+  let card_id = to_float(get(split(get(split(r, "|"), 1.0), "="), 1.0))
+  let run_id = to_float(get(split(get(split(r, "|"), 2.0), "="), 1.0))
+  assert_contains(QaRunComplete(card_id, run_id, "passed", 92.0, 120.0, 118.0, 2.0, 0.0), "OK|pass|100%")
+  let rows = query("SELECT status, verdict, coverage_pct FROM test_runs WHERE id = ?", [to_string(run_id)])
+  assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "completed")
+  assert_eq(to_string(json_get(get(rows, 0.0), "verdict", "?")), "passed")
+  let log = query("SELECT COUNT(*) AS n FROM qa_verification_log WHERE card_id = ?", [to_string(card_id)])
+  assert_eq(to_float(to_string(json_get(get(log, 0.0), "n", "0"))), 1.0)
+}
+
+test "qa: арифметика прогона и пустой прогон не принимаются" {
+  let r = QaRunStart("office-v2", "smoke", "staging", "ci")
+  let card_id = to_float(get(split(get(split(r, "|"), 1.0), "="), 1.0))
+  let run_id = to_float(get(split(get(split(r, "|"), 2.0), "="), 1.0))
+  assert_contains(QaRunComplete(card_id, run_id, "passed", 90.0, 0.0, 0.0, 0.0, 0.0), "FAIL: total_tests = 0")
+  assert_contains(QaRunComplete(card_id, run_id, "passed", 90.0, 10.0, 8.0, 5.0, 0.0), "FAIL: passed + failed > total")
+  assert_contains(QaRunComplete(card_id, run_id, "maybe", 90.0, 10.0, 8.0, 2.0, 0.0), "FAIL: вердикт вне набора")
+}
+
+test "qa: production запрещён ещё до записи (Rule 8)" {
+  assert_contains(QaRunStart("office-v2", "unit", "production", "ci"), "ОТКАЗ: тестирование в production запрещено")
+  assert_contains(QaReleaseGate("office-v2", "production", "false", "false"), "BLOCKED|ОТКАЗ: Rule 8")
+}
+
+test "qa: релизный гейт блокирует без завершённого прогона (данные, не литералы)" {
+  let g = QaReleaseGate("пустой-проект", "staging", "false", "false")
+  assert_contains(g, "BLOCKED|")
+  assert_contains(g, "R1:ОТКАЗ")
+  assert_contains(g, "нет ни одного ЗАВЕРШЁННОГО критического прогона")
+}
+
+test "qa: отрицательный контроль — офисный композит на литералах не блокирует" {
+  let legacy = QaLegacyLiteralGate("что угодно", "staging")
+  assert_contains(legacy, "PASS|")
+  assert_contains(legacy, "hasSecurityScan=\"true\"")
+  // тот же проект, тот же стенд: гейт на данных блокирует, литеральный — нет
+  let data = QaReleaseGate("пустой-проект", "staging", "false", "true")
+  assert_contains(data, "BLOCKED|")
+}
+
+test "qa: чувствительный проект без security scan блокируется" {
+  let g = QaReleaseGate("office-v2", "staging", "false", "true")
+  assert_contains(g, "R5:ОТКАЗ")
+  assert_contains(g, "без ЗАВЕРШЁННОГО security scan")
+  let _ = QaSecurityAuditComplete("office-v2", 0.0, 0.0)
+  let g2 = QaReleaseGate("office-v2", "staging", "false", "true")
+  assert_contains(g2, "R5:PASS")
+}
+
+test "qa: security scan с критической находкой блокирует релиз" {
+  let _ = QaSecurityAuditComplete("дырявый-проект", 1.0, 0.0)
+  let r = QaRunStart("дырявый-проект", "unit", "staging", "ci")
+  let card_id = to_float(get(split(get(split(r, "|"), 1.0), "="), 1.0))
+  let run_id = to_float(get(split(get(split(r, "|"), 2.0), "="), 1.0))
+  let _ = QaRunComplete(card_id, run_id, "passed", 95.0, 50.0, 50.0, 0.0, 0.0)
+  let g = QaReleaseGate("дырявый-проект", "staging", "false", "true")
+  assert_contains(g, "BLOCKED|")
+  assert_contains(g, "критических находок: 1")
+}
+
+test "qa: AI-система без evals и с низким groundedness блокируется" {
+  let r = QaRunStart("ai-помощник", "e2e", "staging", "ci")
+  let card_id = to_float(get(split(get(split(r, "|"), 1.0), "="), 1.0))
+  let run_id = to_float(get(split(get(split(r, "|"), 2.0), "="), 1.0))
+  let _ = QaRunComplete(card_id, run_id, "passed", 88.0, 40.0, 40.0, 0.0, 0.0)
+  assert_contains(QaReleaseGate("ai-помощник", "staging", "true", "false"), "R6:ОТКАЗ")
+  let _ = QaAiEvalComplete("ai-помощник", "gpt-oss-120b", 12.0, 0.9, 0.9, 0.95, 0.99, 0.9)
+  assert_contains(QaReleaseGate("ai-помощник", "staging", "true", "false"), "кейсов 12")
+  let _ = QaAiEvalComplete("ai-помощник", "gpt-oss-120b", 30.0, 0.7, 0.9, 0.95, 0.99, 0.9)
+  assert_contains(QaReleaseGate("ai-помощник", "staging", "true", "false"), "groundedness 0.7 < 0.85")
+  let _ = QaAiEvalComplete("ai-помощник", "gpt-oss-120b", 30.0, 0.9, 0.9, 0.95, 0.99, 0.9)
+  assert_contains(QaReleaseGate("ai-помощник", "staging", "true", "false"), "PASS|")
+}
+
+test "qa: мигающие тесты блокируют (в проде число было литералом 0)" {
+  let r = QaRunStart("flaky-проект", "unit", "staging", "ci")
+  let card_id = to_float(get(split(get(split(r, "|"), 1.0), "="), 1.0))
+  let run_id = to_float(get(split(get(split(r, "|"), 2.0), "="), 1.0))
+  let _ = QaRunComplete(card_id, run_id, "passed", 91.0, 60.0, 58.0, 2.0, 3.0)
+  let g = QaReleaseGate("flaky-проект", "staging", "false", "false")
+  assert_contains(g, "BLOCKED|")
+  assert_contains(g, "R11:ОТКАЗ")
+  assert_contains(g, "мигающих тестов 3")
+  // провал чек-листа вернул карточку в rework (приёмка не отменяет проверку)
+  let rows = query("SELECT status, rework_count FROM dept_archive WHERE id = ?", [to_string(card_id)])
+  assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "rework")
+  assert_eq(to_float(to_string(json_get(get(rows, 0.0), "rework_count", "0"))), 1.0)
+}
+
+test "qa: судья допускается к гейту только после измеренного согласия" {
+  let small = QaJudgeAgreement("[{\"judge\":\"pass\",\"owner\":\"pass\"},{\"judge\":\"fail\",\"owner\":\"fail\"}]", 20.0, 0.8)
+  assert_contains(small, "НЕ ДОПУЩЕН: не хватает данных")
+  let mut pairs = "["
+  let mut i = 0.0
+  while i < 20.0 {
+    if i > 0.0 then { pairs = pairs + "," }
+    // 18 совпадений из 20 = 90%
+    let mut j = "pass"
+    let mut o = "pass"
+    if i == 3.0 or i == 11.0 then { o = "fail" }
+    if i > 15.0 then { j = "fail" }
+    if i > 15.0 then { o = "fail" }
+    pairs = pairs + "{\"judge\":\"" + j + "\",\"owner\":\"" + o + "\"}"
+    i = i + 1.0
+  }
+  pairs = pairs + "]"
+  let res = QaJudgeAgreement(pairs, 20.0, 0.8)
+  assert_contains(res, "n=20")
+  assert_contains(res, "agreement=90%")
+  assert_contains(res, "kappa=")
+  // плохой судья: совпадений меньше порога
+  let bad = QaJudgeAgreement("[{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"fail\",\"owner\":\"pass\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"fail\",\"owner\":\"pass\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"fail\",\"owner\":\"pass\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"fail\",\"owner\":\"pass\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"fail\",\"owner\":\"pass\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"fail\",\"owner\":\"pass\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"pass\",\"owner\":\"fail\"},{\"judge\":\"fail\",\"owner\":\"pass\"}]", 20.0, 0.8)
+  assert_contains(bad, "НЕ ДОПУЩЕН: согласие 0%")
+  assert_contains(QaJudgeAgreement("не json", 20.0, 0.8), "FAIL: pairs_json не JSON")
+}
+
+test "qa: покрытие карточками — сколько ответов отдела стали проверяемым следом" {
+  let cov = CardCoverage("qa")
+  assert_contains(cov, "покрытие qa:")
+  assert_contains(cov, "%")
+}

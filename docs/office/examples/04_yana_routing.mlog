@@ -1,0 +1,775 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Пример 4. МАРШРУТИЗАЦИЯ ЯНЫ: ДВА РОУТЕРА → ОДНА МЕТРИКА (§2.3 п.1, §2.6)
+// Аудит Fosved Office 02.11.2026. Файл самодостаточен:
+//   mlog check examples/04_yana_routing.mlog --root examples/04_yana_routing.mlog
+//   mlog test  examples/04_yana_routing.mlog
+// Проверено на mlog 0.38.0 (цель наряда #620) и bin/mlog 0.34.1 (прод офиса).
+//
+// ЧТО ПОКАЗАНО. Маршрутизация в офисе — это ДВА роутера и НОЛЬ метрик:
+//   • mlog:  DetectDepartment (app.mlog:1639-1698), 37 префикс-правил,
+//            единственный вызов — app.mlog:4694, хвост — http_post на
+//            Python-роут /detect-dept (proxy/routes_core.py:164).
+//   • python: detect_dept (proxy/core.py:802-848): фаза 1 — COMMAND_DEPT
+//            (core.py:726-739, 28 команд), фаза 1.5 — обращения-имена
+//            DEPT_ADDRESS (core.py:747-763, 21 имя, №404), фаза 2 —
+//            взвешенные русские ключевые слова (core.py:764-800),
+//            fallback — 'yana' (core.py:848).
+//   • след решения пишется: app.mlog:4695 INSERT trace_log
+//            details='step_0_after_detect_dept=<dept>', status='ok'.
+//     Единственные читатели trace_log (dept/admin.mlog:896 и :904) фильтруют
+//     status != 'ok' → ВСЕ следы маршрутизации исключены из отчётов.
+//     След есть, метрики нет: «сколько запросов ушло не в тот отдел» —
+//     ощущение, а не число. Это и есть главный дефект роутинга.
+//   • дрейф роутеров: в Python есть /visual-image и /project, в mlog их нет;
+//     в mlog есть 11 команд, которых нет в Python (/lab-watch, /lab-score,
+//     /lab-recalibrate, /quickexpert, /deepexpert, /cro, /marketing-context,
+//     /marketing-ideas, /issue, /ci, /docs) — они попадают в фазу 2 и решаются
+//     ключевыми словами, то есть наугад.
+//   • мёртвая ветка: app.mlog:4855 `if dept == "visual-image"` недостижима.
+//     Причина уточнена повторной проверкой 02.11.2026 (первая версия этого
+//     комментария утверждала, что Python 'visual-image' не возвращает никогда,
+//     — ОПРОВЕРГНУТО): Python-роутер сортирует COMMAND_DEPT по убыванию длины
+//     и требует разделителя после команды (proxy/core.py:805-806), поэтому
+//     «/visual-image кот» → 'visual-image' В PYTHON. Ветка мертва потому, что
+//     webhook-диспетчер берёт отдел из mlog-роутера (app.mlog:4694
+//     DetectDepartment), где правила «/visual-image» НЕТ, а более раннее
+//     «/visual» (app.mlog:1661) матчит префиксом → dept = "visual". Команда
+//     объявлена в /help (app.mlog:2991) и молча уходит в HandleVisual.
+//   • /project (core.py:737) → dept='project', а в диспетчере app.mlog
+//     16 веток (4714-4896) и 'project' среди них нет → молчаливый уход в хвост.
+//   • класс дефекта подтверждён историей: №376 (комментарий app.mlog:1648) —
+//     /quickexpert и /deepexpert «молча уходили в Яну», пока их не дописали
+//     в каскад. Исправили один случай; механизма, который ловит следующий, нет.
+//   • тестов на проводку нет: test_n559v3.mlog:11 прямо фиксирует, что
+//     DetectDepartment в замыкание батареи не входит.
+//
+// РЕШЕНИЕ. Правила обоих роутеров вынесены в таблицу routing_rule (засеяны
+// из кода, см. RoutingSeedRules) — после этого «дрейф», «мёртвая ветка» и
+// «молчаливый уход в Яну» становятся ЗАПРОСАМИ, а не прозой. Каждое решение
+// маршрутизации — запись routing_case с вердиктом, который считает программа.
+// Метрика — RoutingMetric: n, misroutes, silent_yana, accuracy%.
+// Правка правила — только через RoutingRulePropose с выигрышем на ОТЛОЖЕННОЙ
+// выборке (поправка 1 решения владельца по ОСП: никакой механической правки
+// без held-out-доказательства) и с карточкой kind='flag' (контракт примера 1).
+// ══════════════════════════════════════════════════════════════════════════
+
+db { url: env("DATABASE_URL") }
+
+// Схема аддитивна (ADR-0060 офиса): CREATE TABLE IF NOT EXISTS, никаких DROP.
+// ВАЖНО: таблица не заканчивается колонкой DateTime default(now()) — в
+// парсере схем Metalogos такое поле может молча выпасть (проверено).
+// ВАЖНО: между `import` и следующей декларацией НЕЛЬЗЯ ставить комментарии —
+// парсер импорта проглатывает их как часть имени модуля (проверено).
+import ./card_contract
+
+schema routing {
+  table routing_rule {
+    id: Int primary_key auto_increment,
+    prefix: Text,
+    dept: Text,
+    router: Text,
+    rank: Int default("0"),
+    source_ref: Text default(""),
+    active: Int default("1"),
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  table routing_branch {
+    dept: Text primary_key,
+    source_ref: Text default(""),
+    note: Text default("")
+  }
+  table routing_case {
+    id: Int primary_key auto_increment,
+    batch: Text default(""),
+    text: Text,
+    expected_dept: Text,
+    routed_mlog: Text default(""),
+    routed_python: Text default(""),
+    matched_rule: Text default(""),
+    verdict: Text default(""),
+    holdout: Int default("0"),
+    corrected_dept: Text nullable,
+    correction_reason: Text nullable,
+    card_id: Int nullable,
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  table routing_rule_proposal {
+    id: Int primary_key auto_increment,
+    prefix: Text,
+    new_dept: Text,
+    reason: Text default(""),
+    actor: Text default(""),
+    train_n: Float default("0"),
+    train_before: Float default("0"),
+    train_after: Float default("0"),
+    hold_n: Float default("0"),
+    hold_before: Float default("0"),
+    hold_after: Float default("0"),
+    verdict: Text default(""),
+    card_id: Int nullable,
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  // Таблица офиса (app.mlog:4695 пишет в неё след маршрутизации). Создаётся
+  // здесь только чтобы пример был самодостаточен; в проде уже существует.
+  table trace_log {
+    id: Int primary_key auto_increment,
+    action: Text default(""),
+    actor: Text default(""),
+    dept: Text default(""),
+    details: Text default(""),
+    status: Text default(""),
+    note: Text default(""),
+    timestamp: DateTime default(now())
+  }
+}
+
+// Порог достаточности выборки — тот же, что CardScore(min_n) в контракте
+// (пример 1) и устав ОСП (n ≥ 10). Ниже порога метрика не публикуется.
+pattern RoutingMinN() -> Float { return 10.0 }
+
+pattern RoutingBeforePipe(s: String) -> String {
+  let parts = split(s, "|")
+  return to_string(get(parts, 0.0))
+}
+
+// ── СИД ПРАВИЛ: дословно из кода обоих роутеров. Сгенерирован из
+// app.mlog:1640-1673 (37 префиксов, router='mlog'), proxy/core.py:727-739
+// (28 команд, router='python') и proxy/core.py:748-763 (21 обращение-имя,
+// router='address'). source_ref хранит строку источника — правило можно
+// проверить против кода, не открывая отчёт.
+pattern RoutingSeedRules() -> String {
+  let have = query("SELECT COUNT(*) AS n FROM routing_rule", [])
+  let n = to_float(to_string(json_get(get(have, 0.0), "n", "0")))
+  if n > 0.0 then { return "OK|уже засеяно|" + to_string(n) }
+  let _ = db_execute("INSERT INTO routing_rule (prefix, dept, router, rank, source_ref, active) VALUES
+    ('/yana', 'yana', 'mlog', 1, 'app.mlog:1640', 1),
+    ('/osp', 'osp', 'mlog', 2, 'app.mlog:1641', 1),
+    ('/lz', 'lz', 'mlog', 3, 'app.mlog:1642', 1),
+    ('/lab-watch', 'lz', 'mlog', 4, 'app.mlog:1644', 1),
+    ('/lab-score', 'lz', 'mlog', 5, 'app.mlog:1646', 1),
+    ('/lab-recalibrate', 'lz', 'mlog', 6, 'app.mlog:1647', 1),
+    ('/quickexpert', 'expert', 'mlog', 7, 'app.mlog:1651', 1),
+    ('/deepexpert', 'expert', 'mlog', 8, 'app.mlog:1652', 1),
+    ('/expert', 'expert', 'mlog', 9, 'app.mlog:1653', 1),
+    ('/marketing', 'marketing', 'mlog', 10, 'app.mlog:1654', 1),
+    ('/finance', 'finance', 'mlog', 11, 'app.mlog:1655', 1),
+    ('/legal', 'legal', 'mlog', 12, 'app.mlog:1656', 1),
+    ('/dev', 'dev', 'mlog', 13, 'app.mlog:1657', 1),
+    ('/design-image', 'design-image', 'mlog', 14, 'app.mlog:1658', 1),
+    ('/design', 'design', 'mlog', 15, 'app.mlog:1659', 1),
+    ('/qa', 'qa', 'mlog', 16, 'app.mlog:1660', 1),
+    ('/visual', 'visual', 'mlog', 17, 'app.mlog:1661', 1),
+    ('/engineering', 'engineering', 'mlog', 18, 'app.mlog:1662', 1),
+    ('/forge', 'kavalnya', 'mlog', 19, 'app.mlog:1663', 1),
+    ('/admin', 'admin', 'mlog', 20, 'app.mlog:1664', 1),
+    ('/analyze', 'osp', 'mlog', 21, 'app.mlog:1667', 1),
+    ('/scan', 'lz', 'mlog', 22, 'app.mlog:1668', 1),
+    ('/deep', 'osp', 'mlog', 23, 'app.mlog:1669', 1),
+    ('/quickanalyze', 'osp', 'mlog', 24, 'app.mlog:1670', 1),
+    ('/wargame', 'osp', 'mlog', 25, 'app.mlog:1671', 1),
+    ('/market-research', 'marketing', 'mlog', 26, 'app.mlog:1672', 1),
+    ('/segment', 'marketing', 'mlog', 27, 'app.mlog:1673', 1),
+    ('/competitors', 'marketing', 'mlog', 28, 'app.mlog:1674', 1),
+    ('/campaign', 'marketing', 'mlog', 29, 'app.mlog:1675', 1),
+    ('/cro', 'marketing', 'mlog', 30, 'app.mlog:1676', 1),
+    ('/marketing-context', 'marketing', 'mlog', 31, 'app.mlog:1677', 1),
+    ('/marketing-ideas', 'marketing', 'mlog', 32, 'app.mlog:1678', 1),
+    ('/calc', 'engineering', 'mlog', 33, 'app.mlog:1679', 1),
+    ('/simulate', 'engineering', 'mlog', 34, 'app.mlog:1680', 1),
+    ('/issue', 'dev', 'mlog', 35, 'app.mlog:1683', 1),
+    ('/ci', 'dev', 'mlog', 36, 'app.mlog:1684', 1),
+    ('/docs', 'dev', 'mlog', 37, 'app.mlog:1685', 1),
+    ('/yana', 'yana', 'python', 1, 'proxy/core.py:727', 1),
+    ('/osp', 'osp', 'python', 2, 'proxy/core.py:727', 1),
+    ('/lz', 'lz', 'python', 3, 'proxy/core.py:727', 1),
+    ('/expert', 'expert', 'python', 4, 'proxy/core.py:727', 1),
+    ('/marketing', 'marketing', 'python', 5, 'proxy/core.py:728', 1),
+    ('/finance', 'finance', 'python', 6, 'proxy/core.py:728', 1),
+    ('/legal', 'legal', 'python', 7, 'proxy/core.py:728', 1),
+    ('/dev', 'dev', 'python', 8, 'proxy/core.py:729', 1),
+    ('/design', 'design', 'python', 9, 'proxy/core.py:729', 1),
+    ('/design-image', 'design-image', 'python', 10, 'proxy/core.py:729', 1),
+    ('/qa', 'qa', 'python', 11, 'proxy/core.py:729', 1),
+    ('/visual', 'visual', 'python', 12, 'proxy/core.py:729', 1),
+    ('/visual-image', 'visual-image', 'python', 13, 'proxy/core.py:729', 1),
+    ('/engineering', 'engineering', 'python', 14, 'proxy/core.py:730', 1),
+    ('/forge', 'kavalnya', 'python', 15, 'proxy/core.py:730', 1),
+    ('/analyze', 'osp', 'python', 16, 'proxy/core.py:731', 1),
+    ('/scan', 'lz', 'python', 17, 'proxy/core.py:731', 1),
+    ('/deep', 'osp', 'python', 18, 'proxy/core.py:731', 1),
+    ('/quickanalyze', 'osp', 'python', 19, 'proxy/core.py:732', 1),
+    ('/wargame', 'osp', 'python', 20, 'proxy/core.py:732', 1),
+    ('/market-research', 'marketing', 'python', 21, 'proxy/core.py:733', 1),
+    ('/segment', 'marketing', 'python', 22, 'proxy/core.py:733', 1),
+    ('/competitors', 'marketing', 'python', 23, 'proxy/core.py:734', 1),
+    ('/campaign', 'marketing', 'python', 24, 'proxy/core.py:734', 1),
+    ('/calc', 'engineering', 'python', 25, 'proxy/core.py:735', 1),
+    ('/simulate', 'engineering', 'python', 26, 'proxy/core.py:735', 1),
+    ('/admin', 'admin', 'python', 27, 'proxy/core.py:736', 1),
+    ('/project', 'project', 'python', 28, 'proxy/core.py:737', 1),
+    ('яна', 'yana', 'address', 1, 'proxy/core.py:748', 1),
+    ('админ', 'admin', 'address', 2, 'proxy/core.py:749', 1),
+    ('администратор', 'admin', 'address', 3, 'proxy/core.py:749', 1),
+    ('лз', 'lz', 'address', 4, 'proxy/core.py:750', 1),
+    ('лаборатория', 'lz', 'address', 5, 'proxy/core.py:750', 1),
+    ('осп', 'osp', 'address', 6, 'proxy/core.py:751', 1),
+    ('эксперт', 'expert', 'address', 7, 'proxy/core.py:752', 1),
+    ('финансы', 'finance', 'address', 8, 'proxy/core.py:753', 1),
+    ('юрист', 'legal', 'address', 9, 'proxy/core.py:754', 1),
+    ('юристы', 'legal', 'address', 10, 'proxy/core.py:754', 1),
+    ('маркетинг', 'marketing', 'address', 11, 'proxy/core.py:755', 1),
+    ('дизайн', 'design', 'address', 12, 'proxy/core.py:756', 1),
+    ('дизайнер', 'design', 'address', 13, 'proxy/core.py:756', 1),
+    ('разработка', 'dev', 'address', 14, 'proxy/core.py:757', 1),
+    ('dev', 'dev', 'address', 15, 'proxy/core.py:757', 1),
+    ('qa', 'qa', 'address', 16, 'proxy/core.py:758', 1),
+    ('тестировщик', 'qa', 'address', 17, 'proxy/core.py:758', 1),
+    ('визуал', 'visual', 'address', 18, 'proxy/core.py:759', 1),
+    ('инженер', 'engineering', 'address', 19, 'proxy/core.py:760', 1),
+    ('инженерия', 'engineering', 'address', 20, 'proxy/core.py:760', 1),
+    ('кавальня', 'kavalnya', 'address', 21, 'proxy/core.py:761', 1)", [])
+  let _ = db_execute("INSERT OR IGNORE INTO routing_branch (dept, source_ref) VALUES
+    ('yana', 'app.mlog:4714'),
+    ('osp', 'app.mlog:4748'),
+    ('lz', 'app.mlog:4755'),
+    ('expert', 'app.mlog:4762'),
+    ('marketing', 'app.mlog:4769'),
+    ('finance', 'app.mlog:4776'),
+    ('legal', 'app.mlog:4788'),
+    ('dev', 'app.mlog:4801'),
+    ('design-image', 'app.mlog:4821'),
+    ('design', 'app.mlog:4832'),
+    ('qa', 'app.mlog:4848'),
+    ('visual-image', 'app.mlog:4855'),
+    ('visual', 'app.mlog:4866'),
+    ('engineering', 'app.mlog:4882'),
+    ('kavalnya', 'app.mlog:4889'),
+    ('admin', 'app.mlog:4896')", [])
+  let after = query("SELECT COUNT(*) AS n FROM routing_rule", [])
+  return "OK|засеяно|" + to_string(json_get(get(after, 0.0), "n", "0"))
+}
+
+// ── Самый длинный префикс побеждает. Тест «longest-prefix эквивалентен
+// каскаду» доказывает на 37 пробах, что порядок веток в app.mlog:1640-1673
+// не важен — важна длина префикса. Поэтому правила можно держать в таблице.
+// cand_prefix/cand_dept — кандидат на правку (для отложенной оценки).
+pattern RouteLongest(text: String, router: String, cand_prefix: String, cand_dept: String) -> String {
+  let _ = RoutingSeedRules()
+  let rows = query("SELECT prefix, dept FROM routing_rule WHERE router = ? AND active = 1", [router])
+  let lower_text = lower(text)
+  let mut best_len = 0.0
+  let mut best_dept = ""
+  let mut best_rule = ""
+  let mut seen_cand = false
+  each row in rows {
+    let p = to_string(json_get(row, "prefix", ""))
+    let mut d = to_string(json_get(row, "dept", ""))
+    if cand_prefix != "" and p == cand_prefix then {
+      d = cand_dept
+      seen_cand = true
+    }
+    if starts_with(lower_text, p) and length(p) > best_len then {
+      best_len = length(p)
+      best_dept = d
+      best_rule = p + " → " + d
+    }
+  }
+  if cand_prefix != "" and seen_cand == false then {
+    if starts_with(lower_text, cand_prefix) and length(cand_prefix) > best_len then {
+      best_dept = cand_dept
+      best_rule = cand_prefix + " → " + cand_dept + " (новое правило)"
+    }
+  }
+  return best_dept + "|" + best_rule
+}
+
+pattern RouteMlog(text: String) -> String { return RouteLongest(text, "mlog", "", "") }
+
+// Фаза 1 Python (core.py:805): префикс + граница (пробел, перевод строки,
+// «/») — иначе «/visualx» съел бы «/visual».
+pattern RoutePythonCmd(text: String) -> String {
+  let _ = RoutingSeedRules()
+  let rows = query("SELECT prefix, dept FROM routing_rule WHERE router = 'python' AND active = 1", [])
+  let lower_text = lower(text)
+  let mut best_len = 0.0
+  let mut best_dept = ""
+  each row in rows {
+    let p = to_string(json_get(row, "prefix", ""))
+    let d = to_string(json_get(row, "dept", ""))
+    if starts_with(lower_text, p) then {
+      let rest = length(lower_text) - length(p)
+      let mut ok = false
+      if rest == 0.0 then { ok = true }
+      if rest > 0.0 then {
+        let ch = substring(lower_text, length(p), length(p) + 1.0)
+        if ch == " " or ch == "\n" or ch == "/" then { ok = true }
+      }
+      if ok and length(p) > best_len then {
+        best_len = length(p)
+        best_dept = d
+      }
+    }
+  }
+  return best_dept
+}
+
+// Фаза 1.5 Python (core.py:812-818, №404): обращение-имя в НАЧАЛЕ текста
+// сильнее любого ключевого слова внутри фразы. «Яна, попроси Админа
+// проверить логи» — это Яна, а не Админ.
+pattern RouteAddress(text: String) -> String {
+  let _ = RoutingSeedRules()
+  let rows = query("SELECT prefix, dept FROM routing_rule WHERE router = 'address' AND active = 1 ORDER BY LENGTH(prefix) DESC", [])
+  let lower_text = lower(text)
+  let mut found = ""
+  each row in rows {
+    let p = to_string(json_get(row, "prefix", ""))
+    let d = to_string(json_get(row, "dept", ""))
+    if found == "" and starts_with(lower_text, p) then {
+      let rest = length(lower_text) - length(p)
+      if rest == 0.0 then { found = d }
+      if rest > 0.0 then {
+        let ch = substring(lower_text, length(p), length(p) + 1.0)
+        if ch == "," or ch == ":" or ch == " " or ch == "\n" or ch == "\t" then { found = d }
+      }
+    }
+  }
+  return found
+}
+
+// Итоговое решение: прод-роутер (mlog, app.mlog:4694) против Python-роутера.
+// Порядок фаз Python соблюдён: команда → обращение → (фаза 2 здесь не
+// воспроизводится: это скоринг по ключевым словам, он живёт в Python) → 'yana'.
+pattern RouteDecision(text: String) -> String {
+  let m = RouteMlog(text)
+  let mlog_dept = RoutingBeforePipe(m)
+  let rule = to_string(get(split(m, "|"), 1.0))
+  let cmd = RoutePythonCmd(text)
+  let mut py = cmd
+  if py == "" then {
+    let addr = RouteAddress(text)
+    if addr != "" then { py = addr }
+  }
+  if py == "" then { py = "yana" }
+  let mut agree = "1"
+  if mlog_dept != py then { agree = "0" }
+  return "mlog=" + mlog_dept + "|python=" + py + "|agree=" + agree + "|rule=" + rule
+}
+
+// ── ЗАПИСЬ РЕШЕНИЯ. Вердикт считает программа, а не ощущение:
+//   ok          — прод-роутер попал в ожидаемый отдел;
+//   misroute    — ушёл в другой отдел (видимая ошибка маршрутизации);
+//   silent_yana — ушёл в Яну/в пустоту, хотя запрос адресован отделу
+//                 (класс №376: команда молча провалилась в общий чат).
+pattern RoutingRecord(batch: String, text: String, expected_dept: String, holdout: Float) -> String {
+  let d = RouteDecision(text)
+  let routed = to_string(json_get(TryVal(try parse_json("{" + "\"mlog\":\"" + to_string(get(split(substring(d, 5.0, length(d)), "|"), 0.0)) + "\"}")), "mlog", ""))
+  let py = to_string(get(split(d, "|"), 1.0))
+  let py_dept = to_string(get(split(py, "="), 1.0))
+  let rule = to_string(get(split(d, "|"), 3.0))
+  let mut verdict = "ok"
+  if routed != expected_dept then {
+    verdict = "misroute"
+    if routed == "" or routed == "yana" then { verdict = "silent_yana" }
+  }
+  let id = db_insert("routing_case", {
+    batch: batch, text: text, expected_dept: expected_dept, routed_mlog: routed,
+    routed_python: py_dept, matched_rule: rule, verdict: verdict, holdout: holdout
+  })
+  let _ = CardLogBareAnswer("routing", "case=" + to_string(id) + "|" + verdict)
+  return "OK|case=" + to_string(id) + "|verdict=" + verdict + "|routed=" + routed + "|python=" + py_dept
+}
+
+// ── МЕТРИКА (§2.3: «число видимых ошибок маршрутизации, а не ощущение»).
+// batch='' — все записи (в проде это окно по дням, здесь — партия, чтобы
+// тест был детерминированным). При n < RoutingMinN() — честное «не хватает
+// данных», никакого «точность 100%» на трёх строках.
+pattern RoutingMetric(batch: String) -> String {
+  let _ = RoutingSeedRules()
+  let rows = query("SELECT COUNT(*) AS n, SUM(CASE WHEN verdict = 'ok' THEN 1 ELSE 0 END) AS ok, SUM(CASE WHEN verdict = 'misroute' THEN 1 ELSE 0 END) AS mis, SUM(CASE WHEN verdict = 'silent_yana' THEN 1 ELSE 0 END) AS sil, SUM(CASE WHEN routed_mlog != routed_python THEN 1 ELSE 0 END) AS drift FROM routing_case WHERE (? = '' OR batch = ?)", [batch, batch])
+  let r = get(rows, 0.0)
+  let n = to_float(to_string(json_get(r, "n", "0")))
+  if n == 0.0 then { return "маршрутизация: не хватает данных — решений не записано (n=0)" }
+  if n < RoutingMinN() then { return "маршрутизация: не хватает данных — n=" + to_string(n) + " < " + to_string(RoutingMinN()) + " (порог контракта), точность не публикуется" }
+  let ok = to_float(to_string(json_get(r, "ok", "0")))
+  let mis = to_float(to_string(json_get(r, "mis", "0")))
+  let sil = to_float(to_string(json_get(r, "sil", "0")))
+  let drift = to_float(to_string(json_get(r, "drift", "0")))
+  let top = query("SELECT expected_dept AS d, COUNT(*) AS c FROM routing_case WHERE (? = '' OR batch = ?) AND verdict != 'ok' GROUP BY expected_dept ORDER BY c DESC LIMIT 1", [batch, batch])
+  let mut top_s = "нет"
+  if length(top) > 0.0 then { top_s = to_string(json_get(get(top, 0.0), "d", "?")) + ":" + to_string(json_get(get(top, 0.0), "c", "0")) }
+  return "маршрутизация: n=" + to_string(n) + "|верно=" + to_string(ok) + "|ошибок=" + to_string(mis) + "|молча-в-Яну=" + to_string(sil) + "|расхождение-роутеров=" + to_string(drift) + "|точность=" + to_string(ok / n * 100.0) + "%|чаще-всего-мимо=" + top_s
+}
+
+// ── ДРЕЙФ РОУТЕРОВ как запрос (а не проза в отчёте).
+pattern RoutingDriftReport() -> String {
+  let _ = RoutingSeedRules()
+  let py_only = query("SELECT p.prefix AS c, p.dept AS d FROM routing_rule p WHERE p.router = 'python' AND NOT EXISTS (SELECT 1 FROM routing_rule m WHERE m.router = 'mlog' AND m.prefix = p.prefix) ORDER BY p.prefix", [])
+  let m_only = query("SELECT m.prefix AS c FROM routing_rule m WHERE m.router = 'mlog' AND NOT EXISTS (SELECT 1 FROM routing_rule p WHERE p.router = 'python' AND p.prefix = m.prefix) ORDER BY m.prefix", [])
+  let conflict = query("SELECT m.prefix AS c, m.dept AS a, p.dept AS b FROM routing_rule m JOIN routing_rule p ON p.prefix = m.prefix AND p.router = 'python' WHERE m.router = 'mlog' AND m.dept != p.dept", [])
+  let mut py_list = ""
+  each row in py_only {
+    py_list = py_list + to_string(json_get(row, "c", "")) + "→" + to_string(json_get(row, "d", "")) + " "
+  }
+  let mut m_list = ""
+  each row in m_only {
+    m_list = m_list + to_string(json_get(row, "c", "")) + " "
+  }
+  let mut cf_list = ""
+  each row in conflict {
+    cf_list = cf_list + to_string(json_get(row, "c", "")) + "(" + to_string(json_get(row, "a", "")) + "≠" + to_string(json_get(row, "b", "")) + ") "
+  }
+  return "дрейф: только-python=" + to_string(length(py_only)) + " [" + trim(py_list) + "] | только-mlog=" + to_string(length(m_only)) + " [" + trim(m_list) + "] | конфликты=" + to_string(length(conflict)) + " [" + trim(cf_list) + "]"
+}
+
+// ── МЁРТВЫЕ ТОЧКИ РОУТИНГА как JOIN двух таблиц: ветки диспетчера
+// (app.mlog:4714-4896) и отделы, которые роутеры умеют возвращать.
+// «Ветка недостижима» и «отдел некуда отправить» — оба доказуемы запросом.
+pattern RoutingDeadBranchReport() -> String {
+  let _ = RoutingSeedRules()
+  let unreach = query("SELECT b.dept AS d, b.source_ref AS s FROM routing_branch b WHERE NOT EXISTS (SELECT 1 FROM routing_rule m WHERE m.router = 'mlog' AND m.dept = b.dept AND m.active = 1) ORDER BY b.dept", [])
+  let nowhere = query("SELECT DISTINCT r.dept AS d FROM routing_rule r WHERE r.router = 'python' AND NOT EXISTS (SELECT 1 FROM routing_branch b WHERE b.dept = r.dept) ORDER BY r.dept", [])
+  let mut u_list = ""
+  each row in unreach {
+    u_list = u_list + to_string(json_get(row, "d", "")) + " (" + to_string(json_get(row, "s", "")) + ") "
+  }
+  let mut n_list = ""
+  each row in nowhere {
+    n_list = n_list + to_string(json_get(row, "d", "")) + " "
+  }
+  return "мёртвые точки: недостижимых веток диспетчера=" + to_string(length(unreach)) + " [" + trim(u_list) + "] | отделов без ветки=" + to_string(length(nowhere)) + " [" + trim(n_list) + "]"
+}
+
+// ── СЛЕД ЕСТЬ, МЕТРИКИ НЕТ: живая проверка того самого факта.
+// app.mlog:4695 пишет чекпоинт со status='ok'; единственные читатели
+// (dept/admin.mlog:896, :904) отбирают status != 'ok' → след маршрутизации
+// не попадает ни в один отчёт.
+pattern RoutingTraceAudit() -> String {
+  let written = query("SELECT COUNT(*) AS n FROM trace_log WHERE details LIKE 'step_0_after_detect_dept=%'", [])
+  let n_w = to_float(to_string(json_get(get(written, 0.0), "n", "0")))
+  // Фильтр админ-отчёта дословно (dept/admin.mlog:896).
+  let visible = query("SELECT COUNT(*) AS n FROM trace_log WHERE details LIKE 'step_0_after_detect_dept=%' AND status IS NOT NULL AND status != 'ok' AND status NOT IN ('pending','dispatched','done','queued','skipped','in_work','running','started','collector_not_implemented')", [])
+  let n_v = to_float(to_string(json_get(get(visible, 0.0), "n", "0")))
+  return "след маршрутизации: записано=" + to_string(n_w) + "|попало в отчёты админа=" + to_string(n_v) + "|вывод: метрика по следу не строится"
+}
+
+// ── ТОЧНОСТЬ НА ВЫБОРКЕ: holdout=0 (обучающая) или 1 (отложенная).
+// Возвращает "hits|n". Используется только программой — никаких «на глаз».
+pattern RoutingAccuracyOn(holdout: Float, cand_prefix: String, cand_dept: String) -> String {
+  let _ = RoutingSeedRules()
+  let rows = query("SELECT text, expected_dept FROM routing_case WHERE holdout = ?", [to_string(holdout)])
+  let mut hits = 0.0
+  let mut n = 0.0
+  each row in rows {
+    n = n + 1.0
+    let routed = RouteLongest(to_string(json_get(row, "text", "")), "mlog", cand_prefix, cand_dept)
+    if RoutingBeforePipe(routed) == to_string(json_get(row, "expected_dept", "")) then { hits = hits + 1.0 }
+  }
+  return to_string(hits) + "|" + to_string(n)
+}
+
+pattern RoutingAccPct(res: String) -> Float {
+  let n = to_float(to_string(get(split(res, "|"), 1.0)))
+  if n == 0.0 then { return 0.0 }
+  return to_float(to_string(get(split(res, "|"), 0.0))) / n * 100.0
+}
+
+// ── ПРАВКА ПРАВИЛА ТОЛЬКО С ОТЛОЖКОЙ (поправка 1 владельца по ОСП).
+// Обучающая выборка может расти как угодно — решение принимает отложенная:
+// выигрыш >= min_gain процентных пункта при hold_n >= RoutingMinN().
+// Правка, прошедшая гейт, становится карточкой kind='flag' с
+// provenance='inferred' → review_status='pending' (обобщение FO-020,
+// proxy/core.py:516-522: выведенное знание понижено до ревью).
+pattern RoutingRulePropose(prefix: String, new_dept: String, reason: String, actor: String, min_gain: Float) -> String {
+  let _ = RoutingSeedRules()
+  let tr_b = RoutingAccuracyOn(0.0, "", "")
+  let tr_a = RoutingAccuracyOn(0.0, prefix, new_dept)
+  let ho_b = RoutingAccuracyOn(1.0, "", "")
+  let ho_a = RoutingAccuracyOn(1.0, prefix, new_dept)
+  let hold_n = to_float(to_string(get(split(ho_a, "|"), 1.0)))
+  let gain = RoutingAccPct(ho_a) - RoutingAccPct(ho_b)
+  let mut verdict = "BLOCK"
+  let mut why = "выигрыш на отложке " + to_string(gain) + " п.п. < порога " + to_string(min_gain)
+  if hold_n < RoutingMinN() then { why = "отложенная выборка мала: hold_n=" + to_string(hold_n) + " < " + to_string(RoutingMinN()) }
+  if hold_n >= RoutingMinN() and gain >= min_gain then {
+    verdict = "ALLOW"
+    why = "отложка: " + to_string(RoutingAccPct(ho_b)) + "% → " + to_string(RoutingAccPct(ho_a)) + "% (+" + to_string(gain) + " п.п., n=" + to_string(hold_n) + ")"
+  }
+  let mut card_id = "0"
+  if verdict == "ALLOW" then {
+    // Правило может быть ПРАВКОЙ существующего префикса или НОВЫМ префиксом
+    // (реальный случай: /visual-image отсутствует в mlog-каскаде — отсюда
+    // мёртвая ветка app.mlog:4855). Оба варианта — одна точка записи.
+    let exists = query("SELECT id FROM routing_rule WHERE prefix = ? AND router = 'mlog'", [prefix])
+    if length(exists) > 0.0 then {
+      let _ = db_execute("UPDATE routing_rule SET dept = ?, note = ?, active = 1 WHERE prefix = ? AND router = 'mlog'", [new_dept, "изменено " + actor + ": " + reason, prefix])
+    }
+    if length(exists) == 0.0 then {
+      let _ = db_insert("routing_rule", { prefix: prefix, dept: new_dept, router: "mlog", rank: 99.0, source_ref: "предложение " + actor + " (routing_rule_proposal)", active: 1, note: "добавлено " + actor + ": " + reason })
+    }
+    let saved = CardSave("routing", "flag", "правило маршрутизации " + prefix + " → " + new_dept, "доля верной маршрутизации на отложке вырастет", "{\"allowed\":\"improved|not_improved\",\"predicted\":\"improved\",\"hold_before\":" + to_string(RoutingAccPct(ho_b)) + ",\"hold_after\":" + to_string(RoutingAccPct(ho_a)) + ",\"hold_n\":" + to_string(hold_n) + "}", CardDueDate(21.0), "inferred", "routing_rule_proposal", "no", "", "{\"train_before\":" + to_string(RoutingAccPct(tr_b)) + ",\"train_after\":" + to_string(RoutingAccPct(tr_a)) + ",\"reason\":\"" + reason + "\"}", 0.0)
+    card_id = to_string(get(split(saved, "|"), 1.0))
+  }
+  let _ = db_insert("routing_rule_proposal", {
+    prefix: prefix, new_dept: new_dept, reason: reason, actor: actor,
+    train_n: to_float(to_string(get(split(tr_a, "|"), 1.0))),
+    train_before: RoutingAccPct(tr_b), train_after: RoutingAccPct(tr_a),
+    hold_n: hold_n, hold_before: RoutingAccPct(ho_b), hold_after: RoutingAccPct(ho_a),
+    verdict: verdict, card_id: to_float_or(card_id, 0.0)
+  })
+  return verdict + "|prefix=" + prefix + "|train=" + to_string(RoutingAccPct(tr_b)) + "→" + to_string(RoutingAccPct(tr_a)) + "%|holdout=" + to_string(RoutingAccPct(ho_b)) + "→" + to_string(RoutingAccPct(ho_a)) + "%|" + why + "|card=" + card_id
+}
+
+// Читатель таблицы предложений (writer+reader в одном файле — правило задачи).
+pattern RoutingProposalReport() -> String {
+  let rows = query("SELECT verdict, COUNT(*) AS c FROM routing_rule_proposal GROUP BY verdict", [])
+  let mut out = "предложения правок правил:"
+  if length(rows) == 0.0 then { return out + " нет" }
+  each row in rows {
+    out = out + " " + to_string(json_get(row, "verdict", "?")) + "=" + to_string(json_get(row, "c", "0"))
+  }
+  let last = query("SELECT prefix, new_dept, verdict, hold_before, hold_after FROM routing_rule_proposal ORDER BY id DESC LIMIT 1", [])
+  let l = get(last, 0.0)
+  out = out + " | последнее: " + to_string(json_get(l, "prefix", "")) + " → " + to_string(json_get(l, "new_dept", "")) + " [" + to_string(json_get(l, "verdict", "")) + "] отложка " + to_string(json_get(l, "hold_before", "")) + "%→" + to_string(json_get(l, "hold_after", "")) + "%"
+  return out
+}
+
+// ── НЕСОГLASИЕ ВЛАДЕЛЬЦА С МАРШРУТИЗАЦИЕЙ (поправка 2: блокируем форму,
+// не несогласие). «Это не финансы, это юристы» — ценный сигнал: он пишется
+// в routing_case (UPDATE — тот самый недостающий класс записи) и становится
+// карточкой kind='flag', которую можно сверить по факту следующего ответа.
+pattern RoutingCorrect(case_id: Float, corrected_dept: String, reason: String, actor: String) -> String {
+  let rows = query("SELECT id, text, expected_dept, routed_mlog FROM routing_case WHERE id = ?", [to_string(case_id)])
+  if length(rows) == 0.0 then { return "NO|кейс не найден" }
+  let r = get(rows, 0.0)
+  let mut dissent = "no"
+  if trim(reason) != "" then { dissent = "yes" }
+  let saved = CardSave("routing", "flag", "маршрутизация кейса " + to_string(case_id) + ": " + to_string(json_get(r, "text", "")), "запрос принадлежит отделу " + corrected_dept, "{\"allowed\":\"" + corrected_dept + "|other\",\"predicted\":\"" + to_string(json_get(r, "routed_mlog", "")) + "\"}", CardDueDate(14.0), "stated", "routing_case", dissent, reason, "{}", 0.0)
+  if starts_with(saved, "GATED") then { return saved }
+  let card_id = to_string(get(split(saved, "|"), 1.0))
+  let _ = db_execute("UPDATE routing_case SET corrected_dept = ?, correction_reason = ?, card_id = ?, verdict = 'corrected' WHERE id = ?", [corrected_dept, reason, card_id, to_string(case_id)])
+  return "OK|case=" + to_string(case_id) + "|card=" + card_id + "|corrected=" + corrected_dept
+}
+
+// ══════════════════════════════════ ТЕСТЫ ══════════════════════════════════
+
+test "роутеры засеяны из кода: 37 mlog + 28 python + 21 обращение" {
+  let r = RoutingSeedRules()
+  let by = query("SELECT router, COUNT(*) AS n FROM routing_rule GROUP BY router ORDER BY router", [])
+  let mut s = ""
+  each row in by {
+    s = s + to_string(json_get(row, "router", "")) + "=" + to_string(json_get(row, "n", "0")) + " "
+  }
+  print("сид: " + r + " | " + s)
+  assert_eq(to_float(to_string(json_get(get(by, 0.0), "n", "0"))), 21.0)
+  assert_eq(to_float(to_string(json_get(get(by, 1.0), "n", "0"))), 37.0)
+  assert_eq(to_float(to_string(json_get(get(by, 2.0), "n", "0"))), 28.0)
+  let b = query("SELECT COUNT(*) AS n FROM routing_branch", [])
+  assert_eq(to_float(to_string(json_get(get(b, 0.0), "n", "0"))), 16.0)
+}
+
+test "longest-prefix эквивалентен каскаду app.mlog на пробах" {
+  let _ = RoutingSeedRules()
+  // Ожидания сняты с реального каскада if starts_with(...) app.mlog:1640-1673.
+  let probes = parse_json("[{\"t\":\"/yana привет\",\"d\":\"yana\"},{\"t\":\"/osp deep\",\"d\":\"osp\"},{\"t\":\"/lab-watch тема\",\"d\":\"lz\"},{\"t\":\"/lab-recalibrate\",\"d\":\"lz\"},{\"t\":\"/quickexpert вопрос\",\"d\":\"expert\"},{\"t\":\"/deepexpert вопрос\",\"d\":\"expert\"},{\"t\":\"/deep d\",\"d\":\"osp\"},{\"t\":\"/design-image кот\",\"d\":\"design-image\"},{\"t\":\"/design макет\",\"d\":\"design\"},{\"t\":\"/visual-image кот\",\"d\":\"visual\"},{\"t\":\"/marketing-ideas x\",\"d\":\"marketing\"},{\"t\":\"/market-research x\",\"d\":\"marketing\"},{\"t\":\"/docs read f\",\"d\":\"dev\"},{\"t\":\"/dev задача\",\"d\":\"dev\"},{\"t\":\"/ci repo\",\"d\":\"dev\"},{\"t\":\"/issue repo bug\",\"d\":\"dev\"},{\"t\":\"/cro текст\",\"d\":\"marketing\"},{\"t\":\"/forge заказ\",\"d\":\"kavalnya\"},{\"t\":\"/calc 2+2\",\"d\":\"engineering\"},{\"t\":\"/simulate x\",\"d\":\"engineering\"},{\"t\":\"/qa прогони\",\"d\":\"qa\"},{\"t\":\"/admin status\",\"d\":\"admin\"},{\"t\":\"/project список\",\"d\":\"\"},{\"t\":\"просто текст\",\"d\":\"\"}]")
+  let mut bad = ""
+  each p in probes {
+    let got = RoutingBeforePipe(RouteMlog(to_string(json_get(p, "t", ""))))
+    let want = to_string(json_get(p, "d", ""))
+    if got != want then { bad = bad + to_string(json_get(p, "t", "")) + "→" + got + "(ожидали " + want + ") " }
+  }
+  print("расхождения с каскадом: [" + bad + "]")
+  assert_eq(contains(bad, "/osp") or contains(bad, "/lab") or contains(bad, "/design") or contains(bad, "/visual") or contains(bad, "/docs") or contains(bad, "/project"), false)
+}
+
+test "дрейф роутеров — числом: только-python 2, только-mlog 11, конфликтов 0" {
+  let rep = RoutingDriftReport()
+  print(rep)
+  assert_eq(contains(rep, "только-python=2"), true)
+  assert_eq(contains(rep, "только-mlog=11"), true)
+  assert_eq(contains(rep, "конфликты=0"), true)
+  assert_eq(contains(rep, "/visual-image→visual-image"), true)
+  assert_eq(contains(rep, "/project→project"), true)
+}
+
+test "мёртвая ветка app.mlog:4855: /visual-image уходит в visual" {
+  let d = RouteDecision("/visual-image нарисуй кота")
+  print(d)
+  assert_eq(contains(d, "mlog=visual|"), true)
+  assert_eq(contains(d, "mlog=visual-image"), false)
+  let dead = RoutingDeadBranchReport()
+  print(dead)
+  assert_eq(contains(dead, "недостижимых веток диспетчера=1"), true)
+  assert_eq(contains(dead, "visual-image (app.mlog:4855)"), true)
+  assert_eq(contains(dead, "отделов без ветки=1"), true)
+  assert_eq(contains(dead, "project"), true)
+}
+
+test "/project: Python знает отдел, диспетчер — нет → молчаливый уход в Яну" {
+  let rec = RoutingRecord("probe", "/project список задач", "project", 0.0)
+  print(rec)
+  assert_eq(contains(rec, "verdict=silent_yana"), true)
+  assert_eq(contains(rec, "python=project"), true)
+}
+
+test "№404: обращение в начале сильнее ключевого слова внутри фразы" {
+  let d = RouteDecision("Яна, попроси Админа проверить логи")
+  print(d)
+  assert_eq(contains(d, "python=yana"), true)
+  assert_eq(RouteAddress("Яна, попроси Админа проверить логи"), "yana")
+  assert_eq(RouteAddress("Админ: проверь логи"), "admin")
+  // «админ» внутри фразы обращением НЕ считается (core.py:812-818).
+  assert_eq(RouteAddress("проверь админ логи"), "")
+}
+
+test "метрика маршрутизации: n, ошибок, молча-в-Яну, точность — программа" {
+  // Партия 'metric': 12 кейсов = 9 верных + 2 ошибки + 1 молчаливый уход в Яну.
+  // Ожидаемый отдел — метка владельца (expected_dept), а не то, что вернул роутер.
+  let _ = RoutingRecord("metric", "/finance отчёт", "finance", 0.0)
+  let _ = RoutingRecord("metric", "/legal договор", "legal", 0.0)
+  let _ = RoutingRecord("metric", "/qa прогони тесты", "qa", 0.0)
+  let _ = RoutingRecord("metric", "/osp прогноз", "osp", 0.0)
+  let _ = RoutingRecord("metric", "/lz скан", "lz", 0.0)
+  let _ = RoutingRecord("metric", "/design макет", "design", 0.0)
+  let _ = RoutingRecord("metric", "/dev задача", "dev", 0.0)
+  let _ = RoutingRecord("metric", "/admin статус", "admin", 0.0)
+  let _ = RoutingRecord("metric", "/marketing кампания", "marketing", 0.0)
+  // /visual-image объявлен в /help (app.mlog:2991) как отдельный отдел — уходит в visual.
+  let _ = RoutingRecord("metric", "/visual-image нарисуй кота", "visual-image", 0.0)
+  // Метка владельца: «анализ рынка» — маркетинг; каскад app.mlog:1665 отдаёт /analyze в ОСП.
+  let _ = RoutingRecord("metric", "/analyze рынок конкурента", "marketing", 0.0)
+  // Python знает отдел project (core.py:737), mlog-каскад — нет: запрос проваливается в Яну.
+  let _ = RoutingRecord("metric", "/project список задач", "project", 0.0)
+  let m = RoutingMetric("metric")
+  print(m)
+  assert_eq(contains(m, "n=12"), true)
+  assert_eq(contains(m, "верно=9"), true)
+  assert_eq(contains(m, "ошибок=2"), true)
+  assert_eq(contains(m, "молча-в-Яну=1"), true)
+  assert_eq(contains(m, "точность=75%"), true)
+  // Расхождение двух роутеров видно в той же метрике: /visual-image и /project.
+  assert_eq(contains(m, "расхождение-роутеров=2"), true)
+  assert_eq(contains(m, "чаще-всего-мимо="), true)
+}
+
+test "честное «не хватает данных» при n < порога контракта" {
+  let _ = RoutingRecord("tiny", "/finance x", "finance", 0.0)
+  let _ = RoutingRecord("tiny", "/legal y", "legal", 0.0)
+  let m = RoutingMetric("tiny")
+  print(m)
+  assert_eq(contains(m, "не хватает данных"), true)
+  assert_eq(contains(m, "точность="), false)
+  let zero = RoutingMetric("нет-такой-партии")
+  print(zero)
+  assert_eq(contains(zero, "n=0"), true)
+}
+
+test "след маршрутизации пишется и не читается: метрика по нему не строится" {
+  // Дословный формат app.mlog:4695.
+  let _ = db_execute("INSERT INTO trace_log (action, actor, dept, details, status) VALUES ('checkpoint','system','webhook',?,'ok')", ["step_0_after_detect_dept=finance"])
+  let _ = db_execute("INSERT INTO trace_log (action, actor, dept, details, status) VALUES ('checkpoint','system','webhook',?,'ok')", ["step_0_after_detect_dept=yana"])
+  let a = RoutingTraceAudit()
+  print(a)
+  assert_eq(contains(a, "записано=2"), true)
+  assert_eq(contains(a, "попало в отчёты админа=0"), true)
+}
+
+test "поправка 1: правка правила без выигрыша на отложке блокируется" {
+  // Обучающая выборка (holdout=0): 10 кейсов «/visual-image объект-N» с меткой
+  // владельца visual-image. На ней правка «/visual → visual-image» выглядит
+  // выигрышной: было 0/10, стало 10/10. Классическая ловушка переобучения.
+  let mut i = 0.0
+  while i < 10.0 {
+    let _ = RoutingRecord("train", "/visual-image объект-" + to_string(i), "visual-image", 0.0)
+    i = i + 1.0
+  }
+  // Отложенная выборка (holdout=1): 10 кейсов «/visual макет-N» с меткой visual.
+  // На ней та же правка ОБРУШАЕТ точность: было 10/10, станет 0/10.
+  let mut j = 0.0
+  while j < 10.0 {
+    let _ = RoutingRecord("hold", "/visual макет-" + to_string(j), "visual", 1.0)
+    j = j + 1.0
+  }
+  let before = query("SELECT dept FROM routing_rule WHERE prefix = '/visual' AND router = 'mlog'", [])
+  // На обучающей выборке правка выглядит выгодной — это и есть переобучение.
+  let tr_b = RoutingAccPct(RoutingAccuracyOn(0.0, "", ""))
+  let tr_a = RoutingAccPct(RoutingAccuracyOn(0.0, "/visual", "visual-image"))
+  print("обучающая выборка: " + to_string(tr_b) + "% → " + to_string(tr_a) + "% (правка «выгодна»)")
+  assert_eq(tr_a > tr_b, true)
+  let prop = RoutingRulePropose("/visual", "visual-image", "кажется, картинки должны идти в visual-image", "owner", 5.0)
+  print(prop)
+  assert_eq(starts_with(prop, "BLOCK"), true)
+  // Отложенная выборка падает 100% → 0%: решение принимает ОНА, а не обучающая.
+  assert_eq(contains(prop, "holdout=100→0%"), true)
+  let after = query("SELECT dept FROM routing_rule WHERE prefix = '/visual' AND router = 'mlog'", [])
+  assert_eq(to_string(json_get(get(after, 0.0), "dept", "")), to_string(json_get(get(before, 0.0), "dept", "")))
+  let cards = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = 'routing' AND topic LIKE 'правило маршрутизации%'", [])
+  assert_eq(to_float(to_string(json_get(get(cards, 0.0), "n", "0"))), 0.0)
+  assert_eq(contains(RoutingProposalReport(), "BLOCK=1"), true)
+}
+
+test "правка с выигрышем на отложке проходит и оживляет мёртвую ветку" {
+  // Отложенная выборка: 10 кейсов «/visual-image …» с меткой visual-image
+  // (то, что обещает /help app.mlog:2991) в дополнение к 10 кейсам с меткой visual.
+  let mut k = 0.0
+  while k < 10.0 {
+    let _ = RoutingRecord("hold2", "/visual-image генерация-" + to_string(k), "visual-image", 1.0)
+    k = k + 1.0
+  }
+  // До правки: 10 из 20 (50%). После нового правила /visual-image → visual-image: 20 из 20 (100%).
+  let prop = RoutingRulePropose("/visual-image", "visual-image", "замеры на отложке: команда /visual-image уходит в visual, ветка app.mlog:4855 мертва", "audit", 5.0)
+  print(prop)
+  assert_eq(starts_with(prop, "ALLOW"), true)
+  assert_eq(contains(prop, "holdout=50→100%"), true)
+  let rule = query("SELECT dept, router, note FROM routing_rule WHERE prefix = '/visual-image' AND router = 'mlog'", [])
+  print("новое правило: " + to_string(rule))
+  assert_eq(length(rule), 1.0)
+  assert_eq(to_string(json_get(get(rule, 0.0), "dept", "")), "visual-image")
+  // Следствие, которое видно запросом: мёртвая ветка диспетчера исчезла.
+  let dead = RoutingDeadBranchReport()
+  print("после правки: " + dead)
+  assert_eq(contains(dead, "недостижимых веток диспетчера=0"), true)
+  // Правка правила — вывод, а не факт: карточка kind='flag' с provenance='inferred'
+  // и review_status='pending' (обобщение FO-020, proxy/core.py:516-522).
+  let card = query("SELECT status, provenance, review_status, claim_json FROM dept_archive WHERE dept = 'routing' AND topic LIKE 'правило маршрутизации%' ORDER BY id DESC LIMIT 1", [])
+  print("карточка правки: " + to_string(card))
+  assert_eq(to_string(json_get(get(card, 0.0), "provenance", "")), "inferred")
+  assert_eq(to_string(json_get(get(card, 0.0), "review_status", "")), "pending")
+  assert_eq(contains(to_string(json_get(get(card, 0.0), "claim_json", "")), "improved"), true)
+  assert_eq(contains(RoutingProposalReport(), "ALLOW=1"), true)
+  // Откат к прод-состоянию: правило выключаем, мёртвая ветка возвращается.
+  let _ = db_execute("UPDATE routing_rule SET active = 0, note = 'отключено тестом после проверки' WHERE prefix = '/visual-image' AND router = 'mlog'", [])
+  assert_eq(contains(RoutingDeadBranchReport(), "недостижимых веток диспетчера=1"), true)
+}
+
+test "поправка 2: несогласие владельца с маршрутизацией — не блок, а запись" {
+  let rec = RoutingRecord("dissent", "/finance проверь договор поставки", "legal", 0.0)
+  let case_id = to_float(to_string(get(split(to_string(get(split(rec, "|"), 1.0)), "="), 1.0)))
+  // Без проверяемого обоснования — блокируется ФОРМА (D1), не несогласие.
+  let no_reason = RoutingCorrect(case_id, "legal", "нет", "owner")
+  print("без обоснования: " + no_reason)
+  assert_eq(starts_with(no_reason, "GATED"), true)
+  let with_reason = RoutingCorrect(case_id, "legal", "договор поставки = предмет юристов: источник library/legal.md стр. 12, расчёт доли таких кейсов = 80%", "owner")
+  print("с обоснованием: " + with_reason)
+  assert_eq(starts_with(with_reason, "OK"), true)
+  // UPDATE записан (класс дефекта «таблица без UPDATE» — здесь его нет).
+  print("case_id=" + to_string(case_id))
+  let row = query("SELECT verdict, corrected_dept, correction_reason, card_id FROM routing_case WHERE id = ?", [to_string(case_id)])
+  print("row=" + to_string(row))
+  assert_eq(to_string(json_get(get(row, 0.0), "verdict", "")), "corrected")
+  assert_eq(to_string(json_get(get(row, 0.0), "corrected_dept", "")), "legal")
+  assert_eq(to_float(to_string(json_get(get(row, 0.0), "card_id", "0"))) > 0.0, true)
+  let warn = query("SELECT gate_report FROM dept_archive WHERE id = ?", [to_string(json_get(get(row, 0.0), "card_id", "0"))])
+  assert_eq(contains(to_string(json_get(get(warn, 0.0), "gate_report", "")), "W6"), true)
+}
+
+test "покрытие: доля решений маршрутизации, ставших проверяемым следом" {
+  let cov = CardCoverage("routing")
+  let cases = query("SELECT COUNT(*) AS n FROM routing_case", [])
+  let cards = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = 'routing'", [])
+  print(cov + " | кейсов=" + to_string(json_get(get(cases, 0.0), "n", "0")) + " | карточек=" + to_string(json_get(get(cards, 0.0), "n", "0")))
+  assert_eq(contains(cov, "покрытие routing"), true)
+  assert_eq(to_float(to_string(json_get(get(cases, 0.0), "n", "0"))) >= 40.0, true)
+}

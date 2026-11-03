@@ -1,0 +1,1021 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Пример 5. ПАМЯТЬ ЯНЫ: ПРОВЕРКА ПО ПЯТИ ОСЯМ ВМЕСТО ОБЕЩАНИЯ (§2.3 п.2, §2.6)
+// Аудит Fosved Office 02.11.2026. Файл самодостаточен:
+//   mlog check examples/05_yana_memory.mlog --root examples/05_yana_memory.mlog
+//   mlog test  examples/05_yana_memory.mlog
+// Проверено на mlog 0.38.0 (цель наряда #620) и bin/mlog 0.34.1 (прод офиса).
+//
+// ОБЕЩАНИЕ УСТАВА: «Яна каждый день знает больше» (library/yana.md),
+// «не забывает то, что ей сказали». Проверка обещания в коде сегодня одна —
+// yana_forgetting_incidents (dept/yana.mlog:625-636). Ниже — почему она
+// измеряет не то, и как сделать проверяемую память без новых столпов.
+//
+// ФАКТЫ (все проверены grep/чтением/исполнением):
+//  1. ДВА СТОРА ПАМЯТИ, которые никогда не встречаются:
+//     • нативный стор Metalogos: memory { persist: "data/metalogos_kv.db" }
+//       (app.mlog:36). Читается РОВНО одним вызовом recall_top_k
+//       (dept/yana.mlog:629) — гибрид FTS5+cosine RRF рантайма
+//       (Metalogos REFERENCE.md:1025).
+//     • FosvedMemory: отдельный файл data/memory.db (proxy/core.py:63-66),
+//       таблица typed_memories (lib/fosved_memory.py:119-133). Сюда пишет
+//       auto-memorize (proxy/routes_tail.py:163-232 → memory.remember :203-208).
+//     Запись идёт во второй стор, а флаг memory_existed в метрике забывания
+//     (dept/yana.mlog:629) берётся из первого. В mlog НОЛЬ вызовов memorize,
+//     mtree_store, user_profile — нативный стор семантикой не наполняется.
+//     Итог: «память существовала» измеряется по пустому стору.
+//  2. ПОИСК ТОЛЬКО ПОДСТРОКОЙ ЦЕЛОГО ВОПРОСА: recall() строит
+//     `lower(content) LIKE '%<вопрос целиком>%'` (lib/fosved_memory.py:246-248).
+//     Вопрос «где живёт владелец?» не подстрока к «Владелец живёт в Минске» →
+//     выдача пуста. Слоговой/семантический скоринг (_relevance_score :468-494)
+//     применяется ПОСЛЕ этого фильтра, то есть никогда не помогает.
+//     Забывание здесь — не сбой модели, а конструкция поиска.
+//  3. ДЕДУПЛИКАЦИИ НЕТ: remember() вставляет новый ряд всегда
+//     (lib/fosved_memory.py:188-197); при противоречии старая запись
+//     помечается superseded_by = -1 (:174-178) — «чем именно заменено»
+//     не узнаваемо, цепочка версий обрывается.
+//  4. КОНСОЛИДАЦИЯ mtree (L0→L1→L2, Metalogos REFERENCE.md:1046-1057) в офисе
+//     не вызывается ни разу; замер на 0.38.0: факт из 24 символов
+//     «владелец живёт в Минске» → score 0.2587, admitted=0, below_threshold;
+//     текст ~200 символов → score 0.5403, admitted=1; порог допуска 0.3
+//     (20 символов → 0.2759 отказ, 40 символов → 0.3088 приём). Повторный
+//     mtree_store того же текста принимается снова (score идентичен) —
+//     уникальность в допуске не работает. Короткие факты владельца
+//     (а они короткие) в mtree не попадают вовсе.
+//  5. ПОРОГИ ЗАТУХАНИЯ — константы без проверки: DECAY_RATES
+//     (lib/fosved_memory.py:45-57, например fact: 0.03/день, пол 0.1),
+//     ETERNAL_TYPES (:38), retention №850 (:59-64), REVIEW_WEIGHTS
+//     (approved 1.0 / pending 0.5 / declined 0.0, :114). Нигде в коде нет
+//     замера, улучшают ли они выдачу. Поправка 1 владельца по ОСП:
+//     никаких механических правок чисел без выигрыша на отложенной выборке.
+//  6. ЖИВЫЕ, НО НЕ ПОДКЛЮЧЁННЫЕ возможности того же модуля: recall_as_of
+//     (:379), recall_changed_since (:424), detect_conflicts (:334),
+//     resolve_conflict (:367), restore (:295), nightly_maintenance (:525).
+//     Эндпоинты /memory/conflicts, /memory/stats, /memory/answer,
+//     /memory/remember (proxy/routes_tail.py:99-160) из mlog не вызываются;
+//     живой — только /memory/maintenance.
+//
+// ЧТО ДЕЛАЕТ ПРИМЕР. Память проверяется как ОТДЕЛ: пять осей (по образцу
+// LongMemEval, ICLR 2025, arXiv:2410.10813 — извлечение, многосессионный
+// вывод, время, обновление знаний, воздержание) прогоняются по собственным
+// данным офиса, результат — карточка kind='check' из общего контракта
+// (пример 1), а любое изменение политики затухания проходит гейт отложки.
+// Поиск починен БЕЗ нового столпа: те же формулы _relevance_score, но
+// кандидат отбирается по любому значимому слову вопроса, а не по всей строке.
+// ══════════════════════════════════════════════════════════════════════════
+
+db { url: env("DATABASE_URL") }
+
+// Схема аддитивна (ADR-0060). typed_memories повторяет lib/fosved_memory.py:119-133
+// плюс review_status (FO-020) и topic_key (явная тема факта — см. MemoryRemember).
+// Таблицы НЕ заканчиваются колонкой DateTime default(now()): в парсере схем
+// Metalogos такое поле может молча выпасть (проверено).
+// Между `import` и следующей декларацией нельзя ставить комментарии —
+// парсер импорта проглатывает их как часть имени модуля (проверено).
+import ./card_contract
+
+schema yana_memory {
+  table typed_memories {
+    id: Int primary_key auto_increment,
+    content: Text,
+    type: Text,
+    confidence: Float default("0.8"),
+    source: Text nullable,
+    topic_key: Text default(""),
+    version: Int default("1"),
+    created_at: Float default("0"),
+    superseded_by: Int nullable,
+    superseded_at: Float nullable,
+    metadata_json: Text nullable,
+    purged_at: Float nullable,
+    review_status: Text default("approved"),
+    note: Text default("")
+  }
+  table memory_decay {
+    mtype: Text primary_key,
+    rate: Float default("0"),
+    floor: Float default("0"),
+    eternal: Int default("0"),
+    source_ref: Text default("")
+  }
+  table memory_probe {
+    id: Int primary_key auto_increment,
+    axis: Text,
+    question: Text,
+    expected: Text,
+    kind: Text default("contains"),
+    as_of: Text default(""),
+    holdout: Int default("0"),
+    created_at: DateTime default(now()),
+    note: Text default("")
+  }
+  table memory_probe_result {
+    id: Int primary_key auto_increment,
+    probe_id: Int,
+    axis: Text default(""),
+    answer: Text default(""),
+    relevance: Float default("0"),
+    passed: Int default("0"),
+    created_at: DateTime default(now()),
+    note: Text default("")
+  }
+  table memory_decay_proposal {
+    id: Int primary_key auto_increment,
+    mtype: Text,
+    new_rate: Float default("0"),
+    reason: Text default(""),
+    actor: Text default(""),
+    train_n: Float default("0"),
+    train_before: Float default("0"),
+    train_after: Float default("0"),
+    hold_n: Float default("0"),
+    hold_before: Float default("0"),
+    hold_after: Float default("0"),
+    verdict: Text default(""),
+    card_id: Int nullable,
+    created_at: DateTime default(now()),
+    note: Text default("")
+  }
+  // Реплика таблицы офиса (app.mlog:255-258 — там же ona создаётся), нужна
+  // чтобы показать дефект метрики забывания исполняемым тестом.
+  table yana_forgetting_incidents {
+    id: Int primary_key auto_increment,
+    chat_id: Text default(""),
+    query: Text,
+    forgotten_topic: Text default(""),
+    memory_existed: Int default("0"),
+    store_checked: Text default(""),
+    yana_answer_summary: Text default(""),
+    correct_info: Text default(""),
+    created_at: DateTime default(now()),
+    note: Text default("")
+  }
+}
+
+// ── СЛУЖЕБНЫЕ ─────────────────────────────────────────────────────────────
+pattern MemoryNow() -> Float { return now_unix() }
+
+pattern MemoryEpochOf(iso: String) -> Float {
+  let rows = query("SELECT strftime('%s', ?) AS s", [iso])
+  let v = to_float(to_string(json_get(get(rows, 0.0), "s", "0")))
+  if v == 0.0 then { return -999999.0 }
+  return v
+}
+
+pattern MemoryStopwords() -> String { return "где|что|какой|какая|какое|какого|какие|какую|каких|как|когда|кто|который|которая|в|во|на|у|из|ли|это|мне|меня|я|ты|моя|мой|моё|про|о|об|и|или|а|но|да|нет|же|бы|к|с|со|за|для|по|от|до|чем|чего|кому|чему|него|неё" }
+
+pattern MemoryIsStopword(w: String) -> Bool {
+  let parts = split(MemoryStopwords(), "|")
+  let mut found = false
+  each p in parts {
+    if to_string(p) == w then { found = true }
+  }
+  return found
+}
+
+// Очистка слова от пунктуации (в mlog нет regexp — делаем replace по списку).
+pattern MemoryCleanWord(w: String) -> String {
+  let mut out = lower(trim(w))
+  out = replace(out, "?", "")
+  out = replace(out, ",", "")
+  out = replace(out, ".", "")
+  out = replace(out, ":", "")
+  out = replace(out, ";", "")
+  out = replace(out, "!", "")
+  out = replace(out, "—", "")
+  out = replace(out, "-", "")
+  out = replace(out, "\"", "")
+  out = replace(out, "«", "")
+  out = replace(out, "»", "")
+  return out
+}
+
+// ── ПОЛИТИКА ЗАТУХАНИЯ КАК ДАННЫЕ (lib/fosved_memory.py:38, 45-57).
+// Константы вынесены в таблицу: их можно читать запросом, менять одной
+// точкой записи и ПРОВЕРЯТЬ на отложке (MemoryDecayPropose).
+pattern MemorySeedDecay() -> String {
+  let have = query("SELECT COUNT(*) AS n FROM memory_decay", [])
+  if to_float(to_string(json_get(get(have, 0.0), "n", "0"))) > 0.0 then { return "OK|уже засеяно" }
+  let _ = db_execute("INSERT INTO memory_decay (mtype, rate, floor, eternal, source_ref) VALUES
+    ('decision', 0.0, 1.0, 1, 'lib/fosved_memory.py:38 ETERNAL_TYPES'),
+    ('instruction', 0.0, 1.0, 1, 'lib/fosved_memory.py:38 ETERNAL_TYPES'),
+    ('preference', 0.0, 1.0, 1, 'lib/fosved_memory.py:38 ETERNAL_TYPES'),
+    ('error', 0.005, 0.5, 0, 'lib/fosved_memory.py:46'),
+    ('learning', 0.005, 0.5, 0, 'lib/fosved_memory.py:47'),
+    ('observation', 0.02, 0.2, 0, 'lib/fosved_memory.py:48'),
+    ('context', 0.02, 0.2, 0, 'lib/fosved_memory.py:49'),
+    ('pattern', 0.03, 0.1, 0, 'lib/fosved_memory.py:50'),
+    ('fact', 0.03, 0.1, 0, 'lib/fosved_memory.py:51'),
+    ('goal', 0.01, 0.3, 0, 'lib/fosved_memory.py:52'),
+    ('artifact', 0.01, 0.3, 0, 'lib/fosved_memory.py:53'),
+    ('relationship', 0.01, 0.3, 0, 'lib/fosved_memory.py:54'),
+    ('commitment', 0.01, 0.3, 0, 'lib/fosved_memory.py:55')", [])
+  return "OK|засеяно|13"
+}
+
+// №849: fail-closed атрибуция — запись без источника запрещена
+// (lib/fosved_memory.py:161-166). Здесь то же правило на стороне mlog.
+// ДВЕ поправки к прод-реализации:
+//   а) дедупликация: тот же контент того же типа не плодит ряды;
+//   б) настоящая ссылка версий: superseded_by = id НОВОЙ записи, а не -1.
+pattern MemoryRemember(content: String, mtype: String, confidence: Float, source: String, topic_key: String) -> String {
+  let _ = MemorySeedDecay()
+  if length(trim(source)) == 0.0 then { return "REFUSED|source обязателен (fail-closed атрибуция №849, lib/fosved_memory.py:161-166)" }
+  if length(trim(content)) < 3.0 then { return "REFUSED|content короче 3 символов — запоминать нечего" }
+  let norm = lower(trim(content))
+  // ВНИМАНИЕ: SQL-функция lower() в SQLite без ICU работает ТОЛЬКО с ASCII
+  // (замерено: lower('МИНСК') = 'МИНСК'), а lower() в mlog кириллицу знает.
+  // Поэтому сравнение делается на стороне mlog, а не в WHERE — иначе
+  // «дневной бюджет» и «Дневной бюджет» считаются разными фактами.
+  let cand = query("SELECT id, content FROM typed_memories WHERE type = ? AND purged_at IS NULL AND superseded_by IS NULL", [mtype])
+  let mut dup_id = "0"
+  each row in cand {
+    if dup_id == "0" and lower(trim(to_string(json_get(row, "content", "")))) == norm then { dup_id = to_string(json_get(row, "id", "0")) }
+  }
+  if dup_id != "0" then { return "DUP|" + dup_id + "|дубликат не записан" }
+  let id = db_insert("typed_memories", {
+    content: content, type: mtype, confidence: confidence, source: source,
+    topic_key: topic_key, version: 1, created_at: MemoryNow(), review_status: "approved"
+  })
+  // Противоречие по явной теме: старая запись уступает новой (момент фиксируется).
+  if trim(topic_key) != "" then {
+    let _ = db_execute("UPDATE typed_memories SET superseded_by = ?, superseded_at = ? WHERE topic_key = ? AND type = ? AND id != ? AND superseded_by IS NULL AND purged_at IS NULL", [to_string(id), to_string(MemoryNow()), topic_key, mtype, to_string(id)])
+  }
+  return "OK|" + to_string(id)
+}
+
+// ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ: remember() дословно как в проде
+// (lib/fosved_memory.py:170-197): identical-дубликат вставляется снова
+// (противоречие ищется по содержимому, а не по теме), а вытесненная запись
+// помечается superseded_by = -1 — «чем именно заменено» теряется.
+pattern MemoryRememberLegacy(content: String, mtype: String, confidence: Float, source: String, topic_key: String) -> String {
+  let _ = MemorySeedDecay()
+  let norm = lower(trim(content))
+  if trim(topic_key) != "" then {
+    let old = query("SELECT id, content FROM typed_memories WHERE type = ? AND topic_key = ? AND superseded_by IS NULL AND purged_at IS NULL", [mtype, topic_key])
+    each row in old {
+      if lower(trim(to_string(json_get(row, "content", "")))) != norm then {
+        let _ = db_execute("UPDATE typed_memories SET superseded_by = -1, superseded_at = ? WHERE id = ?", [to_string(MemoryNow()), to_string(json_get(row, "id", "0"))])
+      }
+    }
+  }
+  let id = db_insert("typed_memories", {
+    content: content, type: mtype, confidence: confidence, source: source,
+    topic_key: topic_key, version: 1, created_at: MemoryNow(), review_status: "approved",
+    note: "legacy-реплика remember()"
+  })
+  return "OK|" + to_string(id)
+}
+
+// «Чем заменено?» — в прод-реализации ответ «неизвестно», потому что
+// superseded_by = -1 (lib/fosved_memory.py:174-178).
+pattern MemoryLineage(mem_id: Float) -> String {
+  let rows = query("SELECT superseded_by, content FROM typed_memories WHERE id = ?", [to_string(mem_id)])
+  if length(rows) == 0.0 then { return "NO|запись не найдена" }
+  let sb = to_string(json_get(get(rows, 0.0), "superseded_by", ""))
+  if sb == "" or sb == "null" then { return "ACTIVE|запись не заменялась" }
+  if sb == "-1" then { return "BROKEN|запись заменена, но кем — неизвестно (sentinel -1, lib/fosved_memory.py:174-178)" }
+  let nxt = query("SELECT content FROM typed_memories WHERE id = ?", [sb])
+  if length(nxt) == 0.0 then { return "BROKEN|ссылка " + sb + " никуда не ведёт" }
+  return "OK|заменено на: " + to_string(json_get(get(nxt, 0.0), "content", ""))
+}
+
+// Затухание по данным таблицы, а не по константам в коде.
+// rate_override >= 0 временно подменяет rate для указанного типа — нужно
+// для честной оценки «до/после» на отложке (MemoryDecayPropose).
+pattern MemoryRelevanceScore(confidence: Float, mtype: String, age_days: Float, semantic: Float, review_status: String, rate_override: Float) -> Float {
+  let _ = MemorySeedDecay()
+  let rows = query("SELECT rate, floor, eternal FROM memory_decay WHERE mtype = ?", [mtype])
+  let mut rate = 0.02
+  let mut fl = 0.2
+  let mut eternal = 0.0
+  if length(rows) > 0.0 then {
+    rate = to_float(to_string(json_get(get(rows, 0.0), "rate", "0.02")))
+    fl = to_float(to_string(json_get(get(rows, 0.0), "floor", "0.2")))
+    eternal = to_float(to_string(json_get(get(rows, 0.0), "eternal", "0")))
+  }
+  if rate_override >= 0.0 then { rate = rate_override }
+  let mut decay = 1.0
+  if eternal != 1.0 then {
+    decay = 1.0 - age_days * rate
+    if decay < fl then { decay = fl }
+  }
+  // REVIEW_WEIGHTS (lib/fosved_memory.py:114): approved 1.0, pending 0.5, declined 0.0.
+  let mut rw = 1.0
+  if review_status == "pending" then { rw = 0.5 }
+  if review_status == "declined" then { rw = 0.0 }
+  return semantic * decay * confidence * rw
+}
+
+// ── ПРОД-ПОИСК ДОСЛОВНО: подстрока ЦЕЛОГО вопроса (lib/fosved_memory.py:246-248).
+// Возвращает число найденных рядов — для теста «вопросная форма не находится».
+pattern MemoryRecallLegacy(question: String) -> String {
+  let rows = query("SELECT COUNT(*) AS n FROM typed_memories WHERE confidence >= 0.3 AND superseded_by IS NULL AND purged_at IS NULL AND (review_status IS NULL OR review_status != 'declined') AND lower(content) LIKE '%' || lower(?) || '%'", [question])
+  return "rows=" + to_string(json_get(get(rows, 0.0), "n", "0"))
+}
+
+// ── ПОЧИНЕННЫЙ ПОИСК: кандидат отбирается по ЛЮБОМУ значимому слову вопроса,
+// ранжирование — той же формулой _relevance_score (semantic * decay *
+// confidence * review_weight, lib/fosved_memory.py:468-494), только теперь
+// semantic считается по доле совпавших слов и реально влияет на выдачу.
+// as_of > 0 — «что Яна знала на дату» (обобщение recall_as_of :379).
+pattern MemoryRecall(question: String, as_of: Float, rate_override: Float) -> String {
+  let _ = MemorySeedDecay()
+  let now = MemoryNow()
+  let rows = query("SELECT id, content, type, confidence, source, created_at, superseded_at, review_status FROM typed_memories WHERE purged_at IS NULL AND (review_status IS NULL OR review_status != 'declined') AND confidence >= 0.3", [])
+  let words = split(lower(question), " ")
+  let mut tokens = ""
+  let mut n_tok = 0.0
+  each w in words {
+    let cw = MemoryCleanWord(to_string(w))
+    if length(cw) > 2.0 and MemoryIsStopword(cw) == false then {
+      tokens = tokens + cw + "|"
+      n_tok = n_tok + 1.0
+    }
+  }
+  if n_tok == 0.0 then { return "NONE|0||0|нет значимых слов в вопросе" }
+  let mut best_score = 0.0
+  let mut best_id = 0.0
+  let mut best_content = ""
+  let mut best_src = ""
+  each row in rows {
+    let created = to_float(to_string(json_get(row, "created_at", "0")))
+    let mut visible = true
+    let sb = to_string(json_get(row, "superseded_by", ""))
+    let sup = to_string(json_get(row, "superseded_at", ""))
+    if as_of > 0.0 then {
+      // «Что Яна знала на дату»: запись видна, если она уже существовала и
+      // ещё не была вытеснена (обобщение recall_as_of, fosved_memory.py:379).
+      if created > as_of then { visible = false }
+      if sup != "" and sup != "null" and to_float(sup) <= as_of then { visible = false }
+    }
+    if as_of <= 0.0 and sb != "" and sb != "null" then { visible = false }
+    if visible then {
+      let content = to_string(json_get(row, "content", ""))
+      let lower_content = lower(content)
+      let mut matched = 0.0
+      each t in split(tokens, "|") {
+        let tw = to_string(t)
+        if length(tw) > 0.0 and contains(lower_content, tw) then { matched = matched + 1.0 }
+      }
+      // Порог совпадения: одно слово из вопроса (обычно «владелец») есть почти
+      // в каждой записи, поэтому кандидатом считается строка, совпавшая хотя бы
+      // по ДВУМ значимым словам (или по одному, если слово в вопросе одно).
+      // Без этого порога вечно живое решение с confidence 1.0 перебивает свежий
+      // факт — ровно та хрупкость ранжирования, которая видна в прод-поиске.
+      if matched >= 2.0 or (matched == 1.0 and n_tok == 1.0) then {
+        let semantic = matched / n_tok
+        let age_days = (now - created) / 86400.0
+        let conf = to_float(to_string(json_get(row, "confidence", "0.8")))
+        let rs = to_string(json_get(row, "review_status", "approved"))
+        let score = MemoryRelevanceScore(conf, to_string(json_get(row, "type", "fact")), age_days, semantic, rs, rate_override)
+        if score > best_score then {
+          best_score = score
+          best_id = to_float(to_string(json_get(row, "id", "0")))
+          best_content = content
+          best_src = to_string(json_get(row, "source", ""))
+        }
+      }
+    }
+  }
+  if best_id == 0.0 then { return "NONE|0||0|совпадений нет" }
+  return "OK|" + to_string(best_id) + "|" + best_content + "|" + to_string(best_score) + "|" + MemorySourceDisplay(best_src)
+}
+
+// №849 / форма №468: legacy-источники (NULL, manual, yana_auto, mcp)
+// помечаются в выдаче как непроверенные (lib/fosved_memory.py:41-43, 277-282).
+pattern MemorySourceDisplay(source: String) -> String {
+  let s = trim(source)
+  if s == "" or s == "null" then { return "источник не указан — непроверено (№849)" }
+  if s == "manual" or s == "yana_auto" or s == "mcp" then { return "legacy-источник " + s + " — непроверено (№849)" }
+  return "источник " + s
+}
+
+// Поиск по явной теме факта: работает без морфологии и без совпадения слов.
+pattern MemoryRecallByTopic(topic_key: String) -> String {
+  let rows = query("SELECT id, content, confidence, source FROM typed_memories WHERE topic_key = ? AND purged_at IS NULL AND superseded_by IS NULL ORDER BY created_at DESC LIMIT 1", [topic_key])
+  if length(rows) == 0.0 then { return "NONE|тема не найдена: " + topic_key }
+  let r = get(rows, 0.0)
+  return "OK|" + to_string(json_get(r, "id", "0")) + "|" + to_string(json_get(r, "content", "")) + "|" + to_string(json_get(r, "confidence", "0")) + "|" + MemorySourceDisplay(to_string(json_get(r, "source", "")))
+}
+
+pattern MemoryMinRelevance() -> Float { return 0.05 }
+
+// Ответ Яны: либо содержимое памяти + честная пометка источника, либо
+// воздержание. Воздержание — правильный ответ, а не провал (ось abstention
+// в LongMemEval): лучше «не знаю», чем выдуманная цифра.
+pattern MemoryAnswer(question: String) -> String {
+  let r = MemoryRecall(question, 0.0, -1.0)
+  if starts_with(r, "NONE") then { return "НЕ ЗНАЮ|в памяти нет значимых совпадений" }
+  let score = to_float(to_string(get(split(r, "|"), 3.0)))
+  if score < MemoryMinRelevance() then { return "НЕ ЗНАЮ|совпадение слабое (relevance=" + to_string(score) + " < " + to_string(MemoryMinRelevance()) + ")" }
+  return to_string(get(split(r, "|"), 2.0)) + " [" + to_string(get(split(r, "|"), 4.0)) + "]"
+}
+
+pattern MemoryAnswerAsOf(question: String, iso_date: String) -> String {
+  let ep = MemoryEpochOf(iso_date + "T23:59:59")
+  if ep < 0.0 then { return "NO|as_of не дата: " + iso_date }
+  let r = MemoryRecall(question, ep, -1.0)
+  if starts_with(r, "NONE") then { return "НЕ ЗНАЮ|на " + iso_date + " в памяти ещё нет" }
+  return to_string(get(split(r, "|"), 2.0)) + " [на " + iso_date + "]"
+}
+
+// ── КОРПУС: то, что Яна «запомнила» за последние месяцы (метки времени
+// считаются от now, поэтому тесты детерминированы в любой день).
+pattern MemorySeedCorpus() -> String {
+  let have = query("SELECT COUNT(*) AS n FROM typed_memories", [])
+  if to_float(to_string(json_get(get(have, 0.0), "n", "0"))) > 0.0 then { return "OK|уже засеян" }
+  let _ = MemorySeedDecay()
+  let now = MemoryNow()
+  let d = 86400.0
+  let _ = db_execute("INSERT INTO typed_memories (content, type, confidence, source, topic_key, created_at, review_status) VALUES
+    ('Владелец живёт в Минске', 'fact', 0.9, 'dept:yana', 'город_владельца', ?, 'approved'),
+    ('Владелец переехал в Варшаву и живёт там', 'fact', 0.95, 'dept:yana', 'город_владельца', ?, 'approved'),
+    ('Владелец требует числа из базы данных, а не прозу', 'preference', 0.95, 'dept:yana', 'формат_ответов', ?, 'approved'),
+    ('Владелец решил не публиковать лидерборд первые три месяца', 'decision', 1.0, 'owner', 'лидерборд', ?, 'approved'),
+    ('Дневной бюджет ОСП равен 2 USD', 'fact', 0.9, 'dept:osp', 'бюджет_осп', ?, 'approved'),
+    ('Встреча с партнёром назначена на пятницу в 10:00', 'commitment', 0.8, 'dept:yana', 'встреча_пятница', ?, 'approved'),
+    ('Отдел финансов закрывает месяц до 5 числа', 'context', 0.7, 'dept:finance', 'закрытие_месяца', ?, 'approved'),
+    ('Владелец упоминал старый проект автоматизации в ноябре', 'observation', 0.4, 'dept:yana', 'старый_проект', ?, 'approved'),
+    ('Обсуждали дневной бюджет ОСП на созвоне', 'fact', 0.85, 'dept:yana', 'обсуждение_бюджета', ?, 'approved')", [to_string(now - 120.0 * d), to_string(now - 5.0 * d), to_string(now - 90.0 * d), to_string(now - 60.0 * d), to_string(now - 30.0 * d), to_string(now - 2.0 * d), to_string(now - 10.0 * d), to_string(now - 200.0 * d), to_string(now - 1.0 * d)])
+  // Legacy-источник (№849) и невыверенное знание (FO-020) — на выдаче должны
+  // быть помечены, а не выданы за проверенные.
+  let _ = db_execute("INSERT INTO typed_memories (content, type, confidence, source, topic_key, created_at, review_status) VALUES
+    ('Владелец предпочитает короткие ответы', 'preference', 0.6, 'yana_auto', 'стиль_ответов', ?, 'approved'),
+    ('Похоже, владелец интересуется рынком Польши', 'fact', 0.55, 'dept:lz', 'рынок_польши', ?, 'pending')", [to_string(now - 40.0 * d), to_string(now - 3.0 * d)])
+  // Вторая запись по той же теме вытесняет первую — так же, как это делает
+  // remember() при противоречии (lib/fosved_memory.py:170-186), но с НАСТОЯЩЕЙ
+  // ссылкой: superseded_by = id новой записи, а не sentinel -1.
+  let _ = db_execute("UPDATE typed_memories SET superseded_by = (SELECT id FROM typed_memories WHERE content = 'Владелец переехал в Варшаву и живёт там'), superseded_at = ? WHERE content = 'Владелец живёт в Минске'", [to_string(MemoryNow() - 5.0 * 86400.0)])
+  return "OK|корпус=11"
+}
+
+// ── ПРОБЫ ПО ПЯТИ ОСЯМ (образец LongMemEval, arXiv:2410.10813):
+// extraction, multi_session, temporal, knowledge_updates, abstention.
+// holdout=1 — пробы, по которым решается вопрос о правке затухания.
+// ── ПРОБЫ ПО ПЯТИ ОСЯМ (образец LongMemEval, arXiv:2410.10813):
+// extraction, multi_session, temporal, knowledge_updates, abstention.
+// holdout=1 — пробы, по которым решается вопрос о правке затухания.
+// Тексты проб связаны ПАРАМЕТРАМИ, а не вставлены в SQL-литерал: метки
+// конфиденциальности (№391) вешаются на литерал, и фраза вроде «номер паспорта»
+// делает аргумент 0 синка db_execute «private» → [SINK_CLEARANCE]. Нашел
+// `mlog check`; исправлено параметрами (тесты при этом не изменились).
+pattern MemorySeedProbes() -> String {
+  let have = query("SELECT COUNT(*) AS n FROM memory_probe", [])
+  if to_float(to_string(json_get(get(have, 0.0), "n", "0"))) > 0.0 then { return "OK|уже засеяны" }
+  let _ = MemorySeedCorpus()
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["extraction", "какой дневной бюджет ОСП", "2 USD", "contains", "", 1.0, "одно фактоидное извлечение; чувствительна к затуханию фактов"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["extraction", "до какого числа финансы закрывают месяц", "5 числа", "contains", "", 0.0, "извлечение с переформулировкой"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["extraction", "что владелец требует вместо прозы", "числа из базы", "contains", "", 1.0, "извлечение: порядок слов в вопросе другой"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["multi_session", "что требует владелец вместо прозы", "числа из базы", "contains", "", 0.0, "нужна память о предпочтении из другой сессии"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["multi_session", "когда встреча с партнёром", "пятницу в 10:00", "contains", "", 0.0, "обязательство из другой сессии"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["multi_session", "что владелец решил про лидерборд", "не публиковать лидерборд", "contains", "", 1.0, "решение владельца (ETERNAL_TYPES)"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["temporal", "что владелец интересуется на рынке Польши", "рынком Польши", "contains", "", 0.0, "pending-знание выдаётся с пониженным весом"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["temporal", "какие ответы предпочитает владелец", "короткие ответы", "contains", "", 0.0, "legacy-источник помечается как непроверенный"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["temporal", "когда владелец переехал", "Варшаву", "contains", "", 1.0, "свежий факт важнее старого: старый вытеснен"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["knowledge_updates", "где живёт владелец", "Варшаву", "contains", "", 0.0, "обновление знания: старое значение вытеснено"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["knowledge_updates", "что владелец предпочитает в ответах", "короткие ответы", "contains", "", 0.0, "обновление: свежее предпочтение"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["knowledge_updates", "какое решение владелец принял про лидерборд", "не публиковать", "contains", "", 1.0, "решение не устаревает (ETERNAL_TYPES)"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["abstention", "какой у владельца номер паспорта", "НЕ ЗНАЮ", "contains", "", 0.0, "этого в памяти нет — нужно воздержаться"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["abstention", "сколько сотрудников в отделе визуала", "НЕ ЗНАЮ", "contains", "", 0.0, "числа нет — выдумывать нельзя"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["abstention", "какой любимый цвет у владельца", "НЕ ЗНАЮ", "contains", "", 1.0, "наблюдение «не знаю» с confidence 0.4"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["temporal", "где живёт владелец", "Минске", "as_of", "", 0.0, "до переезда — правильный ответ Минск"])
+  let _ = db_execute("INSERT INTO memory_probe (axis, question, expected, kind, as_of, holdout, note) VALUES (?, ?, ?, ?, ?, ?, ?)", ["temporal", "где живёт владелец", "Варшаву", "as_of", "", 0.0, "после переезда — правильный ответ Варшава"])
+  // Темпоральные пробы с явной датой (ось temporal: «что Яна знала на дату»).
+  let now = MemoryNow()
+  let _ = db_execute("UPDATE memory_probe SET as_of = ? WHERE note = ?", [MemoryIsoOf(now - 30.0 * 86400.0), "до переезда — правильный ответ Минск"])
+  let _ = db_execute("UPDATE memory_probe SET as_of = ? WHERE note = ?", [MemoryIsoOf(now - 1.0 * 86400.0), "после переезда — правильный ответ Варшава"])
+  return "OK|проб=17"
+}
+
+pattern MemoryIsoOf(epoch: Float) -> String {
+  let rows = query("SELECT date(?, 'unixepoch') AS d", [to_string(epoch)])
+  return to_string(json_get(get(rows, 0.0), "d", ""))
+}
+
+// ── ПРОГОН ОДНОЙ ПРОБЫ: ответ ищет ПОЧИНЕННЫЙ поиск; вердикт — программа.
+pattern MemoryRunProbe(probe_id: Float) -> String {
+  let _ = MemorySeedProbes()
+  let rows = query("SELECT axis, question, expected, kind, as_of FROM memory_probe WHERE id = ?", [to_string(probe_id)])
+  if length(rows) == 0.0 then { return "NO|проба не найдена" }
+  let r = get(rows, 0.0)
+  let axis = to_string(json_get(r, "axis", ""))
+  let question = to_string(json_get(r, "question", ""))
+  let expected = to_string(json_get(r, "expected", ""))
+  let kind = to_string(json_get(r, "kind", "contains"))
+  let as_of = to_string(json_get(r, "as_of", ""))
+  let mut answer = MemoryAnswer(question)
+  if kind == "as_of" then { answer = MemoryAnswerAsOf(question, as_of) }
+  let mut passed = 0.0
+  if contains(answer, expected) then { passed = 1.0 }
+  // Воздержание ожидается явно: ответ «НЕ ЗНАЮ» — это ЗАЧЁТ, а не провал.
+  if expected == "НЕ ЗНАЮ" and contains(answer, "НЕ ЗНАЮ") then { passed = 1.0 }
+  let mut rel = 0.0
+  let rec = MemoryRecall(question, 0.0, -1.0)
+  if starts_with(rec, "OK") then { rel = to_float(to_string(get(split(rec, "|"), 3.0))) }
+  let _ = db_insert("memory_probe_result", { probe_id: probe_id, axis: axis, answer: answer, relevance: rel, passed: passed, note: "expected: " + expected })
+  return "OK|axis=" + axis + "|passed=" + to_string(passed) + "|answer=" + answer
+}
+
+pattern MemoryRunAxis(axis: String) -> String {
+  let _ = MemorySeedProbes()
+  let ids = query("SELECT id FROM memory_probe WHERE axis = ? ORDER BY id", [axis])
+  let mut n = 0.0
+  let mut hits = 0.0
+  let mut detail = ""
+  each row in ids {
+    let pid = to_float(to_string(json_get(row, "id", "0")))
+    let res = MemoryRunProbe(pid)
+    n = n + 1.0
+    if contains(res, "passed=1") then { hits = hits + 1.0 }
+    detail = detail + to_string(pid) + ":" + to_string(get(split(res, "|"), 2.0)) + " "
+  }
+  if n == 0.0 then { return axis + ": не хватает данных — проб нет" }
+  return axis + ": " + to_string(hits) + "/" + to_string(n) + " (" + to_string(hits / n * 100.0) + "%) [" + trim(detail) + "]"
+}
+
+// Доля верных ответов на выборке (holdout=0 обучающая / 1 отложенная)
+// при заданном rate для типа fact. Возвращает "hits|n".
+pattern MemoryAxisPass(holdout: Float, rate_override: Float) -> String {
+  let _ = MemorySeedProbes()
+  let ids = query("SELECT id, question, expected, kind, as_of FROM memory_probe WHERE holdout = ? ORDER BY id", [to_string(holdout)])
+  let now = MemoryNow()
+  let mut hits = 0.0
+  let mut n = 0.0
+  each row in ids {
+    n = n + 1.0
+    let question = to_string(json_get(row, "question", ""))
+    let expected = to_string(json_get(row, "expected", ""))
+    let kind = to_string(json_get(row, "kind", "contains"))
+    let mut as_of = 0.0
+    if kind == "as_of" then {
+      let ep = MemoryEpochOf(to_string(json_get(row, "as_of", "")) + "T23:59:59")
+      if ep > 0.0 then { as_of = ep }
+    }
+    let rec = MemoryRecall(question, as_of, rate_override)
+    let mut answer = "НЕ ЗНАЮ"
+    if starts_with(rec, "OK") then {
+      let score = to_float(to_string(get(split(rec, "|"), 3.0)))
+      if score >= MemoryMinRelevance() then { answer = to_string(get(split(rec, "|"), 2.0)) }
+    }
+    if contains(answer, expected) then { hits = hits + 1.0 }
+  }
+  return to_string(hits) + "|" + to_string(n)
+}
+
+pattern MemoryPassPct(res: String) -> Float {
+  let n = to_float(to_string(get(split(res, "|"), 1.0)))
+  if n == 0.0 then { return 0.0 }
+  return to_float(to_string(get(split(res, "|"), 0.0))) / n * 100.0
+}
+
+// ── ИТОГОВАЯ КАРТОЧКА ПАМЯТИ: пять осей → checks_json → kind='check'.
+// Вердикт считает программа (CardVerifyCheck), а не «в целом Яна помнит».
+pattern MemoryScoreCard(actor: String) -> String {
+  let _ = MemorySeedProbes()
+  let axes = parse_json("[\"extraction\",\"multi_session\",\"temporal\",\"knowledge_updates\",\"abstention\"]")
+  let mut checks = "["
+  let mut first = true
+  let mut summary = ""
+  let mut all_pass = true
+  each a in axes {
+    let axis = to_string(a)
+    let res = MemoryRunAxis(axis)
+    let got = trim(to_string(get(split(res, "("), 0.0)))
+    let mut pass = false
+    if contains(got, "не хватает данных") == false then {
+      let after_colon = to_string(get(split(got, ": "), 1.0))
+      let hits = to_float(trim(to_string(get(split(after_colon, "/"), 0.0))))
+      let total = to_float(trim(to_string(get(split(after_colon, "/"), 1.0))))
+      if total >= 2.0 and hits == total then { pass = true }
+    }
+    if pass == false then { all_pass = false }
+    if first == false then { checks = checks + "," }
+    first = false
+    checks = checks + "{\"id\":\"" + axis + "\",\"pass\":" + to_string(pass) + ",\"detail\":\"" + got + "\"}"
+    summary = summary + got + "; "
+  }
+  checks = checks + "]"
+  let mut verdict = "fail"
+  if all_pass then { verdict = "pass" }
+  let saved = CardSave("yana", "check", "память Яны: проверка по пяти осям (LongMemEval-стиль)", "все пять осей памяти проходят на собственных данных офиса", "{\"checks\":\"extraction,multi_session,temporal,knowledge_updates,abstention\"}", CardDueDate(30.0), "stated", "memory_probe_result", "no", "", "{\"summary\":\"" + summary + "\"}", 0.0)
+  let card_id = to_string(get(split(saved, "|"), 1.0))
+  if starts_with(saved, "GATED") then { return saved }
+  let checked = CardVerifyCheck(card_id, checks, verdict, actor)
+  return "OK|card=" + card_id + "|verdict=" + verdict + "|" + summary + "|verify=" + checked
+}
+
+// ── ПРАВКА ЗАТУХАНИЯ ТОЛЬКО С ОТЛОЖКОЙ (поправка 1 владельца по ОСП).
+// Типичный сценарий: «факты затухают слишком быстро, уменьшим rate».
+// Обучающая выборка почти всегда «за» — решает отложенная.
+pattern MemoryDecayPropose(mtype: String, new_rate: Float, reason: String, actor: String, min_gain: Float) -> String {
+  let _ = MemorySeedProbes()
+  let tr_b = MemoryAxisPass(0.0, -1.0)
+  let tr_a = MemoryAxisPass(0.0, new_rate)
+  let ho_b = MemoryAxisPass(1.0, -1.0)
+  let ho_a = MemoryAxisPass(1.0, new_rate)
+  let hold_n = to_float(to_string(get(split(ho_a, "|"), 1.0)))
+  let gain = MemoryPassPct(ho_a) - MemoryPassPct(ho_b)
+  let mut verdict = "BLOCK"
+  let mut why = "выигрыш на отложке " + to_string(gain) + " п.п. < порога " + to_string(min_gain)
+  if hold_n < 5.0 then { why = "отложенная выборка мала: hold_n=" + to_string(hold_n) + " < 5" }
+  if hold_n >= 5.0 and gain >= min_gain then {
+    verdict = "ALLOW"
+    why = "отложка: " + to_string(MemoryPassPct(ho_b)) + "% → " + to_string(MemoryPassPct(ho_a)) + "% (+" + to_string(gain) + " п.п., n=" + to_string(hold_n) + ")"
+  }
+  let mut card_id = "0"
+  if verdict == "ALLOW" then {
+    let _ = db_execute("UPDATE memory_decay SET rate = ? WHERE mtype = ?", [to_string(new_rate), mtype])
+    let saved = CardSave("yana", "number", "затухание памяти типа " + mtype + " изменено на " + to_string(new_rate) + "/день", "доля верных ответов на отложенных пробах вырастет до " + to_string(MemoryPassPct(ho_a)) + "%", "{\"value\":" + to_string(MemoryPassPct(ho_a)) + ",\"horizon_days\":30}", CardDueDate(30.0), "inferred", "memory_decay_proposal", "no", "", "{\"rate_before_table\":\"lib/fosved_memory.py:45-57\",\"reason\":\"" + reason + "\"}", 0.0)
+    card_id = to_string(get(split(saved, "|"), 1.0))
+  }
+  let _ = db_insert("memory_decay_proposal", {
+    mtype: mtype, new_rate: new_rate, reason: reason, actor: actor,
+    train_n: to_float(to_string(get(split(tr_a, "|"), 1.0))),
+    train_before: MemoryPassPct(tr_b), train_after: MemoryPassPct(tr_a),
+    hold_n: hold_n, hold_before: MemoryPassPct(ho_b), hold_after: MemoryPassPct(ho_a),
+    verdict: verdict, card_id: to_float_or(card_id, 0.0)
+  })
+  return verdict + "|type=" + mtype + "|rate=" + to_string(new_rate) + "|train=" + to_string(MemoryPassPct(tr_b)) + "→" + to_string(MemoryPassPct(tr_a)) + "%|holdout=" + to_string(MemoryPassPct(ho_b)) + "→" + to_string(MemoryPassPct(ho_a)) + "%|" + why + "|card=" + card_id
+}
+
+pattern MemoryDecayProposalReport() -> String {
+  let rows = query("SELECT verdict, COUNT(*) AS c FROM memory_decay_proposal GROUP BY verdict", [])
+  let mut out = "предложения по затуханию:"
+  if length(rows) == 0.0 then { return out + " нет" }
+  each row in rows {
+    out = out + " " + to_string(json_get(row, "verdict", "?")) + "=" + to_string(json_get(row, "c", "0"))
+  }
+  return out
+}
+
+// ── МЕТРИКА ЗАБЫВАНИЯ, ИСПРАВЛЕННАЯ: тот же инцидент, что
+// dept/yana.mlog:625-636, но memory_existed берётся из ТОГО стора, куда
+// память пишется (typed_memories), а не из нативного recall_top_k.
+pattern MemoryForgettingIncident(chat_id: String, question: String, correction: String, store: String) -> String {
+  let _ = MemorySeedCorpus()
+  let mut existed = 0.0
+  let mut detail = ""
+  if store == "typed" then {
+    let rec = MemoryRecall(question, 0.0, -1.0)
+    if starts_with(rec, "OK") then { existed = 1.0 }
+    detail = rec
+  }
+  if store == "native" then {
+    // Реплика прод-пути: recall_top_k по нативному стору (app.mlog:36).
+    let mem_check = TryVal(try recall_top_k(question, 3.0, ""))
+    let n = length(TryVal(try parse_json(to_string(mem_check))))
+    if n > 0.0 then { existed = 1.0 }
+    detail = "native rows=" + to_string(n)
+  }
+  let id = db_insert("yana_forgetting_incidents", {
+    chat_id: chat_id, query: question, forgotten_topic: question,
+    memory_existed: existed, store_checked: store, correct_info: correction,
+    note: detail
+  })
+  return "OK|incident=" + to_string(id) + "|memory_existed=" + to_string(existed) + "|store=" + store + "|" + detail
+}
+
+// ── «КАЖДЫЙ ДЕНЬ ЗНАЕТ БОЛЬШЕ»: сырые ряды против полезных знаний.
+// Без дедупликации рост строк ничего не значит (lib/fosved_memory.py:188-197).
+pattern MemoryGrowthMetric() -> String {
+  let _ = MemorySeedCorpus()
+  let all = query("SELECT COUNT(*) AS n FROM typed_memories", [])
+  let n_all = to_float(to_string(json_get(get(all, 0.0), "n", "0")))
+  let active = query("SELECT COUNT(*) AS n FROM typed_memories WHERE purged_at IS NULL AND superseded_by IS NULL", [])
+  let n_active = to_float(to_string(json_get(get(active, 0.0), "n", "0")))
+  let distinct_rows = query("SELECT COUNT(DISTINCT lower(trim(content))) AS n FROM typed_memories WHERE purged_at IS NULL AND superseded_by IS NULL", [])
+  let n_dist = to_float(to_string(json_get(get(distinct_rows, 0.0), "n", "0")))
+  if n_all == 0.0 then { return "память: не хватает данных — записей нет" }
+  let dups = n_active - n_dist
+  let dup_share = dups / n_active * 100.0
+  let mut verdict = "рост за счёт новых знаний"
+  if dup_share >= 25.0 then { verdict = "рост за счёт дублей — знание не увеличивается" }
+  return "память: строк=" + to_string(n_all) + "|активных=" + to_string(n_active) + "|различных знаний=" + to_string(n_dist) + "|дублей=" + to_string(dups) + " (" + to_string(dup_share) + "%) → " + verdict
+}
+
+// ── НОЧНОЙ ЦИКЛ (№850, lib/fosved_memory.py:525-551): soft-purge, строки
+// не удаляются. Здесь тот же порог, чтобы retention был виден числом.
+pattern MemoryNightly() -> String {
+  let _ = MemorySeedCorpus()
+  let now = MemoryNow()
+  let cutoff_o = now - 30.0 * 86400.0
+  let cutoff_p = now - 60.0 * 86400.0
+  let _ = db_execute("UPDATE typed_memories SET purged_at = ? WHERE type = 'observation' AND confidence < 0.5 AND created_at < ? AND purged_at IS NULL", [to_string(now), to_string(cutoff_o)])
+  let _ = db_execute("UPDATE typed_memories SET purged_at = ? WHERE type = 'pattern' AND confidence < 0.3 AND created_at < ? AND purged_at IS NULL", [to_string(now), to_string(cutoff_p)])
+  let purged = query("SELECT COUNT(*) AS n FROM typed_memories WHERE purged_at IS NOT NULL", [])
+  let restorable = query("SELECT COUNT(*) AS n FROM typed_memories WHERE purged_at IS NOT NULL AND superseded_by IS NULL", [])
+  return "ночной цикл: purged=" + to_string(json_get(get(purged, 0.0), "n", "0")) + "|восстановимо=" + to_string(json_get(get(restorable, 0.0), "n", "0"))
+}
+
+// ══════════════════════════════════ ТЕСТЫ ══════════════════════════════════
+
+test "память: два стора — запись в typed_memories, проверка забывания в нативном" {
+  let _ = MemorySeedCorpus()
+  // В typed_memories факт есть (переезд в Варшаву, 5 дней назад).
+  let typed = query("SELECT COUNT(*) AS n FROM typed_memories WHERE content LIKE '%Варшаву%'", [])
+  assert_eq(to_float(to_string(json_get(get(typed, 0.0), "n", "0"))), 1.0)
+  // Прод-путь (dept/yana.mlog:629) спрашивает нативный стор — там этого нет.
+  let native_incident = MemoryForgettingIncident("chat-1", "где живёт владелец", "Варшава", "native")
+  print("прод-путь (native): " + native_incident)
+  assert_eq(contains(native_incident, "memory_existed=0"), true)
+  // Исправленный путь спрашивает тот стор, куда память реально пишется.
+  let fixed_incident = MemoryForgettingIncident("chat-1", "где живёт владелец", "Варшава", "typed")
+  print("исправленный путь (typed): " + fixed_incident)
+  assert_eq(contains(fixed_incident, "memory_existed=1"), true)
+  // Метрика по таблице: инциденты, где память существовала, но Яна «забыла».
+  let m = query("SELECT store_checked, COUNT(*) AS n, SUM(memory_existed) AS ex FROM yana_forgetting_incidents GROUP BY store_checked ORDER BY store_checked", [])
+  let mut s = ""
+  each row in m {
+    s = s + to_string(json_get(row, "store_checked", "")) + ": n=" + to_string(json_get(row, "n", "0")) + " existed=" + to_string(json_get(row, "ex", "0")) + " "
+  }
+  print("метрика забывания по сторам: " + s)
+  assert_eq(contains(s, "native: n=1 existed=0"), true)
+  assert_eq(contains(s, "typed: n=1 existed=1"), true)
+}
+
+test "память: нативный стор пуст, пока нет memorize; mtree не принимает короткие факты" {
+  let before = TryVal(try recall_top_k("владелец любит кофе", 3.0, ""))
+  print("нативный стор до memorize: [" + to_string(before) + "]")
+  assert_eq(contains(to_string(before), "кофе"), false)
+  let _ = memorize("владелец любит кофе", 0.9, "persona")
+  let after = TryVal(try recall_top_k("владелец любит кофе", 3.0, ""))
+  print("нативный стор после memorize: [" + to_string(after) + "]")
+  assert_eq(contains(to_string(after), "владелец любит кофе"), true)
+  // Порог допуска mtree замерен на 0.38.0: 24 символа → 0.2587 (отказ),
+  // 40 символов → 0.3088 (приём). Короткий факт владельца не проходит.
+  let short_one = TryVal(try mtree_store("владелец живёт в Минске", "audit"))
+  print("mtree короткий факт: " + to_string(short_one))
+  assert_eq(contains(to_string(short_one), "admitted: 0"), true)
+  assert_eq(contains(to_string(short_one), "below_threshold"), true)
+  let long_one = TryVal(try mtree_store("Владелец офиса Fosved живёт в Минске и каждый день спрашивает у Яны отчёты по отделам: финансы, маркетинг, разработка и QA. Он требует числа из базы, а не прозу, и просит указывать источник каждой цифры.", "audit"))
+  print("mtree длинный текст: " + to_string(long_one))
+  assert_eq(contains(to_string(long_one), "admitted: 1"), true)
+  // Дубликат того же текста принимается снова — уникальность в допуске не работает.
+  let dup_one = TryVal(try mtree_store("Владелец офиса Fosved живёт в Минске и каждый день спрашивает у Яны отчёты по отделам: финансы, маркетинг, разработка и QA. Он требует числа из базы, а не прозу, и просит указывать источник каждой цифры.", "audit"))
+  assert_eq(contains(to_string(dup_one), "admitted: 1"), true)
+}
+
+test "память: №849 fail-closed — запись без источника запрещена" {
+  let r = MemoryRemember("Владелец любит утренние созвоны", "preference", 0.8, "", "созвоны")
+  print(r)
+  assert_eq(starts_with(r, "REFUSED"), true)
+  assert_eq(contains(r, "№849"), true)
+  let ok = MemoryRemember("Владелец любит утренние созвоны", "preference", 0.8, "dept:yana", "созвоны")
+  assert_eq(starts_with(ok, "OK|"), true)
+}
+
+test "память: дедупликация — прод-реплика плодит ряды, исправленная нет" {
+  let _ = MemorySeedCorpus()
+  let n0 = query("SELECT COUNT(*) AS n FROM typed_memories", [])
+  let before = to_float(to_string(json_get(get(n0, 0.0), "n", "0")))
+  let a = MemoryRemember("Дневной бюджет ОСП равен 2 USD", "fact", 0.9, "dept:osp", "бюджет_осп")
+  let b = MemoryRemember("Дневной бюджет ОСП равен 2 USD", "fact", 0.9, "dept:osp", "бюджет_осп")
+  print("исправленная: " + a + " / " + b)
+  assert_eq(starts_with(b, "DUP|"), true)
+  let n1 = query("SELECT COUNT(*) AS n FROM typed_memories", [])
+  assert_eq(to_float(to_string(json_get(get(n1, 0.0), "n", "0"))), before)
+  // Прод-реплика (lib/fosved_memory.py:188-197) вставляет каждый раз заново.
+  let _ = MemoryRememberLegacy("Владелец просил напомнить про оплату счёта", "commitment", 0.8, "dept:yana", "legacy_напоминание")
+  let _ = MemoryRememberLegacy("Владелец просил напомнить про оплату счёта", "commitment", 0.8, "dept:yana", "legacy_напоминание")
+  let n2 = query("SELECT COUNT(*) AS n FROM typed_memories", [])
+  let after = to_float(to_string(json_get(get(n2, 0.0), "n", "0")))
+  print("после двух legacy-записей того же факта: " + to_string(before) + " → " + to_string(after))
+  assert_eq(after, before + 2.0)
+  assert_eq(contains(MemoryGrowthMetric(), "дублей="), true)
+}
+
+test "память: superseded_by = -1 обрывает цепочку версий" {
+  let _ = MemorySeedCorpus()
+  // Правильный путь (MemoryRemember): старая запись знает, КТО её заменил.
+  let a = MemoryRemember("Офис проекта находится в Берлине", "fact", 0.8, "dept:yana", "legacy_офис")
+  let b = MemoryRemember("Офис проекта находится в Праге", "fact", 0.85, "dept:yana", "legacy_офис")
+  let a_id = to_float(to_string(get(split(a, "|"), 1.0)))
+  print("правильная цепочка: " + MemoryLineage(a_id) + " (новая запись " + b + ")")
+  assert_eq(contains(MemoryLineage(a_id), "OK|заменено на: Офис проекта находится в Праге"), true)
+  // Прод-реплика (lib/fosved_memory.py:174-178): тот же сценарий, но sentinel -1.
+  let c = MemoryRememberLegacy("Офис проекта находится в Риге", "fact", 0.8, "dept:yana", "legacy_офис2")
+  let e = MemoryRememberLegacy("Офис проекта находится в Вильнюсе", "fact", 0.85, "dept:yana", "legacy_офис2")
+  let c_id = to_float(to_string(get(split(c, "|"), 1.0)))
+  let broken = MemoryLineage(c_id)
+  print("legacy-цепочка: " + broken)
+  assert_eq(starts_with(broken, "BROKEN"), true)
+  assert_eq(contains(broken, "sentinel -1"), true)
+  assert_eq(starts_with(e, "OK|"), true)
+}
+
+test "память: поиск целой фразой (прод) не отвечает на вопрос" {
+  let _ = MemorySeedCorpus()
+  // Прод-реплика recall(): LIKE '%<вопрос целиком>%' (fosved_memory.py:246-248).
+  let legacy = MemoryRecallLegacy("где живёт владелец")
+  print("прод-поиск по вопросу: " + legacy)
+  assert_eq(legacy, "rows=0")
+  // Но по подстроке содержимого тот же поиск работает — то есть дело не в данных.
+  let legacy2 = MemoryRecallLegacy("переехал в Варшаву")
+  print("прод-поиск по подстроке содержимого: " + legacy2)
+  assert_eq(contains(legacy2, "rows=1"), true)
+  // Починенный поиск отвечает на вопрос той же формулой релевантности.
+  let fixed = MemoryRecall("где живёт владелец", 0.0, -1.0)
+  print("починенный поиск: " + fixed)
+  assert_eq(starts_with(fixed, "OK|"), true)
+  assert_eq(contains(fixed, "Варшаву"), true)
+}
+
+test "память: воздержание вместо выдуманного ответа" {
+  let _ = MemorySeedCorpus()
+  let a = MemoryAnswer("какой у владельца номер паспорта")
+  print(a)
+  assert_eq(contains(a, "НЕ ЗНАЮ"), true)
+  let b = MemoryAnswer("сколько сотрудников в отделе визуала")
+  print(b)
+  assert_eq(contains(b, "НЕ ЗНАЮ"), true)
+  // Положительный контроль: на вопрос, не зависящий от затухания, ответ есть.
+  let c = MemoryAnswer("что требует владелец вместо прозы")
+  print("положительный контроль: " + c)
+  assert_eq(contains(c, "числа из базы"), true)
+}
+
+test "память: обновление знания и ответ «на дату»" {
+  let _ = MemorySeedCorpus()
+  let now = MemoryNow()
+  let current = MemoryAnswer("где живёт владелец")
+  print("сейчас: " + current)
+  assert_eq(contains(current, "Варшаве") or contains(current, "Варшаву"), true)
+  let past = MemoryAnswerAsOf("где живёт владелец", MemoryIsoOf(now - 30.0 * 86400.0))
+  print("30 дней назад: " + past)
+  assert_eq(contains(past, "Минске"), true)
+  let recent = MemoryAnswerAsOf("где живёт владелец", MemoryIsoOf(now - 1.0 * 86400.0))
+  print("вчера: " + recent)
+  assert_eq(contains(recent, "Варшаву"), true)
+}
+
+test "память: legacy-источник и pending-знание помечаются честно" {
+  let _ = MemorySeedCorpus()
+  let legacy = MemoryAnswer("какие ответы предпочитает владелец")
+  print(legacy)
+  assert_eq(contains(legacy, "короткие ответы"), true)
+  assert_eq(contains(legacy, "legacy-источник yana_auto — непроверено (№849)"), true)
+  // pending (FO-020) выдаётся с весом 0.5 (REVIEW_WEIGHTS, fosved_memory.py:114).
+  let pend = MemoryRecall("что владелец интересуется на рынке Польши", 0.0, -1.0)
+  print("pending-знание: " + pend)
+  assert_eq(contains(pend, "рынком Польши"), true)
+  let score = to_float(to_string(get(split(pend, "|"), 3.0)))
+  assert_eq(score < 0.4, true)
+}
+
+test "память: пять осей → карточка kind='check'; на прод-константах затухания она КРАСНАЯ" {
+  let _ = MemorySeedProbes()
+  let ex = MemoryRunAxis("extraction")
+  let ms = MemoryRunAxis("multi_session")
+  let tm = MemoryRunAxis("temporal")
+  let ku = MemoryRunAxis("knowledge_updates")
+  let ab = MemoryRunAxis("abstention")
+  print(ex)
+  print(ms)
+  print(tm)
+  print(ku)
+  print(ab)
+  // Оси, не зависящие от затухания фактов, проходят и до правки.
+  assert_eq(contains(ms, "3/3"), true)
+  assert_eq(contains(ab, "3/3"), true)
+  assert_eq(contains(ku, "3/3"), true)
+  assert_eq(contains(tm, "5/5"), true)
+  // А extraction на прод-константе fact: 0.03/день (fosved_memory.py:51) проваливается:
+  // старый точный факт («бюджет 2 USD», 30 дней) затухает до пола 0.1 и проигрывает
+  // вчерашнему, но пустому «обсуждали бюджет». Это и есть непроверенная константа.
+  assert_eq(contains(ex, "2/3"), true)
+  let card = MemoryScoreCard("audit")
+  print("карточка памяти: " + card)
+  assert_eq(starts_with(card, "OK|card="), true)
+  assert_eq(contains(card, "verdict=fail"), true)
+  let row = query("SELECT id, status, card_kind AS kind FROM dept_archive WHERE dept = 'yana' AND topic LIKE 'память Яны%' ORDER BY id DESC LIMIT 1", [])
+  // Приёмка не может отменить программную проверку: карточка уходит в rework.
+  assert_eq(to_string(json_get(get(row, 0.0), "status", "")), "rework")
+  assert_eq(to_string(json_get(get(row, 0.0), "kind", "")), "check")
+  let facts = query("SELECT checks_json, error_class, actual_value FROM dept_verification WHERE archive_id = ?", [to_string(json_get(get(row, 0.0), "id", "0"))])
+  print("чек-лист осей: " + to_string(facts))
+  assert_eq(contains(to_string(facts), "knowledge_updates"), true)
+  assert_eq(contains(to_string(facts), "error_class: fail"), true)
+  assert_eq(contains(to_string(facts), "actual_value: 80"), true)
+}
+
+test "память: ось, где проб мало, не выдаётся за пройденную" {
+  let _ = MemorySeedProbes()
+  let res = MemoryRunAxis("несуществующая_ось")
+  print(res)
+  assert_eq(contains(res, "не хватает данных"), true)
+  let n = query("SELECT COUNT(*) AS n FROM memory_probe_result", [])
+  print("записей результатов проб: " + to_string(json_get(get(n, 0.0), "n", "0")))
+  assert_eq(to_float(to_string(json_get(get(n, 0.0), "n", "0"))) >= 17.0, true)
+}
+
+test "поправка 1: затухание меняется только с выигрышем на отложке" {
+  let _ = MemorySeedProbes()
+  // Усиление затухания: обучающая выборка почти не меняется, отложенная падает.
+  let harsh = MemoryDecayPropose("fact", 0.5, "усилим затухание фактов", "owner", 1.0)
+  print("усиление: " + harsh)
+  assert_eq(starts_with(harsh, "BLOCK"), true)
+  let rate0 = query("SELECT rate FROM memory_decay WHERE mtype = 'fact'", [])
+  assert_eq(to_float(to_string(json_get(get(rate0, 0.0), "rate", "0"))), 0.03)
+  // Смягчение: отложенная выборка растёт → правка разрешена и становится
+  // карточкой kind='number' (обещание сверят через 30 дней по факту).
+  let soften = MemoryDecayPropose("fact", 0.001, "замер на отложке: точный факт проигрывает свежей пустышке", "audit", 1.0)
+  print("смягчение: " + soften)
+  assert_eq(starts_with(soften, "ALLOW"), true)
+  let rate1 = query("SELECT rate FROM memory_decay WHERE mtype = 'fact'", [])
+  assert_eq(to_float(to_string(json_get(get(rate1, 0.0), "rate", "0"))), 0.001)
+  let card = query("SELECT id, card_kind AS kind, status, provenance, review_status, claim_json FROM dept_archive WHERE dept = 'yana' AND topic LIKE 'затухание памяти%' ORDER BY id DESC LIMIT 1", [])
+  print("карточка правки затухания: " + to_string(card))
+  assert_eq(to_string(json_get(get(card, 0.0), "kind", "")), "number")
+  assert_eq(to_string(json_get(get(card, 0.0), "provenance", "")), "inferred")
+  assert_eq(to_string(json_get(get(card, 0.0), "review_status", "")), "pending")
+  assert_eq(contains(MemoryDecayProposalReport(), "BLOCK=1"), true)
+  assert_eq(contains(MemoryDecayProposalReport(), "ALLOW=1"), true)
+}
+
+test "память: после правки, прошедшей отложку, проверка становится зелёной" {
+  let _ = MemorySeedProbes()
+  let ex = MemoryRunAxis("extraction")
+  print("extraction после правки: " + ex)
+  assert_eq(contains(ex, "3/3"), true)
+  let card = MemoryScoreCard("audit")
+  print("карточка памяти (повторно): " + card)
+  assert_eq(contains(card, "verdict=pass"), true)
+  let row = query("SELECT status FROM dept_archive WHERE dept = 'yana' AND topic LIKE 'память Яны%' ORDER BY id DESC LIMIT 1", [])
+  assert_eq(to_string(json_get(get(row, 0.0), "status", "")), "resolved")
+}
+
+test "память: прод-поиск регистрозависим для кириллицы, починенный — нет" {
+  let _ = MemorySeedCorpus()
+  // lower() в SQLite без ICU не трогает кириллицу (замерено) → LIKE '%…%'
+  // в прод-поиске (fosved_memory.py:246-248) фактически регистрозависим.
+  let upper = MemoryRecallLegacy("переехал в Варшаву")
+  let lower_q = MemoryRecallLegacy("переехал в варшаву")
+  print("прод-поиск: «" + upper + "» против «" + lower_q + "»")
+  assert_eq(contains(upper, "rows=1"), true)
+  assert_eq(lower_q, "rows=0")
+  // Починенный поиск нормализует регистр на стороне mlog.
+  let ok1 = MemoryRecall("ГДЕ ЖИВЁТ ВЛАДЕЛЕЦ", 0.0, -1.0)
+  print("починенный поиск в верхнем регистре: " + ok1)
+  assert_eq(contains(ok1, "Варшаву"), true)
+}
+
+test "память: ночной цикл №850 — soft-purge, строки восстановимы" {
+  let _ = MemorySeedCorpus()
+  let n = MemoryNightly()
+  print(n)
+  assert_eq(contains(n, "purged=1"), true)
+  assert_eq(contains(n, "восстановимо=1"), true)
+  // Строка физически на месте (DELETE нет) — restore возможен.
+  let row = query("SELECT COUNT(*) AS n FROM typed_memories WHERE purged_at IS NOT NULL", [])
+  assert_eq(to_float(to_string(json_get(get(row, 0.0), "n", "0"))), 1.0)
+  let g = MemoryGrowthMetric()
+  print(g)
+  assert_eq(contains(g, "различных знаний="), true)
+}
+
+test "память: «каждый день знает больше» — числом, а не обещанием" {
+  let _ = MemorySeedCorpus()
+  // Три одинаковых факта подряд: сырые строки растут, знание — нет.
+  let _ = MemoryRememberLegacy("Владелец проверяет отчёты по утрам", "context", 0.7, "dept:yana", "утро_legacy")
+  let _ = MemoryRememberLegacy("Владелец проверяет отчёты по утрам", "context", 0.7, "dept:yana", "утро_legacy")
+  let _ = MemoryRememberLegacy("Владелец проверяет отчёты по утрам", "context", 0.7, "dept:yana", "утро_legacy")
+  let act = query("SELECT COUNT(*) AS n FROM typed_memories WHERE purged_at IS NULL AND superseded_by IS NULL", [])
+  let dis = query("SELECT COUNT(DISTINCT lower(trim(content))) AS n FROM typed_memories WHERE purged_at IS NULL AND superseded_by IS NULL", [])
+  let n_act = to_float(to_string(json_get(get(act, 0.0), "n", "0")))
+  let n_dis = to_float(to_string(json_get(get(dis, 0.0), "n", "0")))
+  let dups = n_act - n_dis
+  let share = dups / n_act * 100.0
+  let g = MemoryGrowthMetric()
+  print(g + " (расчёт теста: дублей=" + to_string(dups) + ", доля=" + to_string(share) + "%)")
+  assert_eq(dups >= 2.0, true)
+  assert_eq(contains(g, "дублей=" + to_string(dups)), true)
+  // Вердикт метрики обязан следовать её же правилу (>=25% дублей), а не настроению.
+  if share >= 25.0 then { assert_eq(contains(g, "рост за счёт дублей"), true) }
+  if share < 25.0 then { assert_eq(contains(g, "рост за счёт новых знаний"), true) }
+  // После дедупликации тот же факт память не увеличивает.
+  let d = MemoryRemember("Владелец проверяет отчёты по утрам", "context", 0.7, "dept:yana", "утро")
+  print("дедупликация: " + d)
+  assert_eq(starts_with(d, "DUP|"), true)
+  let act2 = query("SELECT COUNT(*) AS n FROM typed_memories WHERE purged_at IS NULL AND superseded_by IS NULL", [])
+  assert_eq(to_float(to_string(json_get(get(act2, 0.0), "n", "0"))), n_act)
+}
+
+test "память: морфология — лексический поиск её не решает, тема факта решает" {
+  let _ = MemorySeedCorpus()
+  // «владельцу» ≠ «владелец»: ни прод-поиск (LIKE), ни починенный (по словам)
+  // русскую морфологию не берут. Это ограничение надо знать, а не прятать.
+  let miss = MemoryRecall("что передать владельцу про город", 0.0, -1.0)
+  print("вопрос в другом падеже: " + miss)
+  assert_eq(starts_with(miss, "NONE"), true)
+  let legacy_miss = MemoryRecallLegacy("где живёт владелец")
+  assert_eq(legacy_miss, "rows=0")
+  // Митигация из того же контракта: тема факта хранится явно (topic_key),
+  // поэтому «что мы знаем о городе владельца» находится без морфологии.
+  let by_topic = MemoryRecallByTopic("город_владельца")
+  print("по явной теме: " + by_topic)
+  assert_eq(contains(by_topic, "Варшаву"), true)
+  // Нативный стор Metalogos даёт гибридный поиск FTS5+cosine (REFERENCE.md:1025) —
+  // но он пуст, пока никто не вызывает memorize (в офисе 0 вызовов).
+  let native_empty = TryVal(try recall_top_k("город владельца", 3.0, ""))
+  assert_eq(contains(to_string(native_empty), "Варшав"), false)
+}

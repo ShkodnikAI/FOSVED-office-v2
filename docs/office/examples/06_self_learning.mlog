@@ -1,0 +1,646 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Пример 6. ЦИКЛ САМООБУЧЕНИЯ: ОШИБКА → ИЗМЕНЕНИЕ ПОВЕДЕНИЯ → ДОКАЗАТЕЛЬСТВО
+// (§2.3 п.5, §2.6). Аудит Fosved Office 02.11.2026. Файл самодостаточен:
+//   mlog check examples/06_self_learning.mlog --root examples/06_self_learning.mlog
+//   mlog test  examples/06_self_learning.mlog
+// Проверено на mlog 0.38.0 (цель наряда #620) и bin/mlog 0.34.1 (прод офиса).
+//
+// КАК ЦИКЛ УСТРОЕН В ОФИСЕ СЕГОДНЯ (проверено чтением и grep):
+//  1. ЗАПИСЬ ОШИБКИ — жива. /fix (app.mlog:3053-3081) пишет adapt_corrections
+//     (app.mlog:123) с corr_type='manual' и, если отдел yana, дополнительно
+//     YanaRecordForgetting (dept/yana.mlog:625). /good (app.mlog:3084-3099) →
+//     RecordPositiveExample (dept/utils.mlog:216-221) → та же таблица,
+//     corr_type='positive'. Обе ветки отвечают владельцу «сохранено».
+//  2. АНАЛИЗ — жив, но заканчивается прозой. YanaSelfLearn
+//     (dept/scheduler.mlog:319-343) берёт последние 20 коррекций за 7 дней,
+//     прогоняет через call_llm и кладёт ответ в debriefs (period='self-learn',
+//     scheduler.mlog:335). Вызывается из route /cron/morning (app.mlog:2229-2236)
+//     и из MorningBrief (scheduler.mlog:375).
+//  3. ИЗМЕНЕНИЕ ПОВЕДЕНИЯ — ЕСТЬ, но без формы и без срока. Исправлено по
+//     результату повторной проверки 02.11.2026 (первая версия этого заголовка
+//     утверждала «коррекции в промпт не попадают» — ОПРОВЕРГНУТО чтением):
+//       GetCorrections(dept) (dept/utils.mlog:35-38) берёт последние 5
+//       коррекций, BuildContext кладёт их в системный промпт
+//       (dept/context.mlog:20), BuildContext вызывается из HandleDeptQuery
+//       (app.mlog:1580) — то есть текст коррекций до модели ДОХОДИТ.
+//     Что действительно отсутствует:
+//       (а) ФОРМА: в промпт уходит json_encode строк, а не правило с условием,
+//           сроком и автором — модель сама решает, применимо ли исправление;
+//       (б) ОКНО: LIMIT 5 — шестая коррекция молча вытесняет первую, graduation
+//           и retirement отсутствуют;
+//       (в) АНАЛИЗ → ДЕЙСТВИЕ: у debriefs НОЛЬ читателей (grep «FROM debriefs»
+//           по dept/*.mlog, app.mlog, proxy/*.py → 0), колонка actions_taken
+//           (app.mlog:173) не пишется ни одним из двух писателей;
+//       (г) ДУБЛЬ: /context_cmd (proxy/routes_core.py:241-253) собирает тот же
+//           контекст (dialog + corrections + facts) и не вызывается ни из mlog,
+//           ни из Python (единственный вызов — тест
+//           tests/test_memory_consolidation.py:155) → мёртвый дубль BuildContext.
+//  4. ДОКАЗАТЕЛЬСТВО, ЧТО ПОМОГЛО — отсутствует как класс данных.
+//     GetLearningStats (dept/utils.mlog:224-240) считает ОБЪЁМЫ (коррекции за
+//     7 дней, позитивные примеры, разбивка error_type), а не эффект.
+//     error_patterns (app.mlog:124) пишется единственным роутом /learning/fix
+//     (proxy/routes_sched.py:957), у которого нет вызовов из mlog (логика
+//     перенесена в dept/utils.mlog:215) → в проде таблица пуста.
+//  5. Смежный разрыв того же класса: yana_delegation_log.was_correct пишется
+//     как NULL (dept/yana.mlog:620) и не обновляется нигде, поэтому
+//     YanaGetMetrics (dept/yana.mlog:639-650) считает точность делегирования
+//     по пустому множеству — «pending» навсегда.
+//
+// ЧТО ДЕЛАЕТ ПРИМЕР. Замыкает цикл тремя записями, а не прозой:
+//   learn_correction (ошибка) → learn_rule (изменение поведения, попадает в
+//   промпт той же функцией, которой в проде будет call_llm) → learn_effect
+//   (доказательство: пробы до/после на отложенной выборке).
+// Правило появляется только с выигрышем на ОТЛОЖЕННОЙ выборке (поправка 1
+// владельца по ОСП), staje карточкой kind='flag' с provenance='inferred'
+// (review_status='pending', обобщение FO-020), а неподтвердившееся правило
+// отключается с честной фиксацией mismatch. Тест «проза не меняет поведение»
+// воспроизводит прод-поведение YanaSelfLearn и показывает разрыв исполняемо.
+// ══════════════════════════════════════════════════════════════════════════
+
+db { url: env("DATABASE_URL") }
+
+// Таблицы не заканчиваются колонкой DateTime default(now()) — в парсере схем
+// Metalogos такое поле может молча выпасть (проверено). Между `import` и
+// следующей декларацией нельзя ставить комментарии (парсер импорта).
+import ./card_contract
+
+schema learning {
+  table learn_prompt {
+    dept: Text primary_key,
+    base_prompt: Text default(""),
+    source_ref: Text default(""),
+    note: Text default("")
+  }
+  table learn_correction {
+    id: Int primary_key auto_increment,
+    dept: Text,
+    query: Text default(""),
+    correction: Text,
+    corr_type: Text default("manual"),
+    actor: Text default(""),
+    status: Text default("new"),
+    rule_id: Int nullable,
+    card_id: Int nullable,
+    reject_reason: Text nullable,
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  table learn_rule {
+    id: Int primary_key auto_increment,
+    dept: Text,
+    trigger_key: Text,
+    payload: Text,
+    reason: Text default(""),
+    actor: Text default(""),
+    active: Int default("1"),
+    provenance: Text default("inferred"),
+    holdout_win: Float default("0"),
+    card_id: Int nullable,
+    correction_id: Int nullable,
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  table learn_probe {
+    id: Int primary_key auto_increment,
+    dept: Text,
+    question: Text,
+    must_contain: Text,
+    holdout: Int default("0"),
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  table learn_probe_result {
+    id: Int primary_key auto_increment,
+    probe_id: Int,
+    rule_id: Int nullable,
+    answer: Text default(""),
+    passed: Int default("0"),
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  table learn_effect {
+    id: Int primary_key auto_increment,
+    dept: Text default(""),
+    rule_id: Int nullable,
+    stage: Text default(""),
+    train_before: Float default("0"),
+    train_after: Float default("0"),
+    hold_n: Float default("0"),
+    hold_before: Float default("0"),
+    hold_after: Float default("0"),
+    verdict: Text default(""),
+    card_id: Int nullable,
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  // Реплика прод-таблицы (app.mlog:173) — нужна, чтобы исполняемо показать:
+  // анализ, который заканчивается прозой, поведение не меняет.
+  table debriefs {
+    id: Int primary_key auto_increment,
+    dept: Text default(""),
+    period: Text default(""),
+    content: Text default(""),
+    actions_taken: Text nullable,
+    note: Text default(""),
+    created_at: DateTime default(now())
+  }
+  // Реплика prod-таблицы (app.mlog:255-258): was_correct пишется NULL и без
+  // UPDATE метрика делегирования не считается (dept/yana.mlog:620, 639-650).
+  table yana_delegation_log {
+    id: Int primary_key auto_increment,
+    chat_id: Text default(""),
+    query: Text default(""),
+    delegated_to: Text default(""),
+    dept_response_summary: Text default(""),
+    was_correct: Int nullable,
+    feedback_source: Text nullable,
+    verified_at: Text nullable,
+    note: Text default(""),
+    delegated_at: DateTime default(now())
+  }
+}
+
+pattern LearnMinN() -> Float { return 5.0 }
+
+// ── БАЗОВЫЕ ПРОМПТЫ ОТДЕЛОВ (в проде — library/<dept>.md, их читает
+// get_dept_prompt / YanaSelfLearn: scheduler.mlog:321 read_file("library/yana.md")).
+pattern LearnSeedPrompts() -> String {
+  let have = query("SELECT COUNT(*) AS n FROM learn_prompt", [])
+  if to_float(to_string(json_get(get(have, 0.0), "n", "0"))) > 0.0 then { return "OK|уже засеяно" }
+  let _ = db_execute("INSERT INTO learn_prompt (dept, base_prompt, source_ref) VALUES (?, ?, ?)", ["yana", "Ты — Яна, диспетчер офиса. Отвечай по существу, числа бери из базы.", "library/yana.md"])
+  let _ = db_execute("INSERT INTO learn_prompt (dept, base_prompt, source_ref) VALUES (?, ?, ?)", ["finance", "Ты — финансовый отдел. Прогнозы давай с горизонтом и допуском.", "library/finance.md"])
+  let _ = db_execute("INSERT INTO learn_prompt (dept, base_prompt, source_ref) VALUES (?, ?, ?)", ["qa", "Ты — QA. Вердикт только по результатам прогона.", "library/qa.md"])
+  return "OK|3"
+}
+
+// ── ПРОБЫ ПОВЕДЕНИЯ: проверяют не «модель умная», а «правило дошло до ответа».
+// Тексты связаны параметрами: метки конфиденциальности (№391) вешаются на
+// SQL-литерал, и фраза, похожая на ПДн, даёт [SINK_CLEARANCE] (проверено
+// `mlog check` на примере 5).
+pattern LearnSeedProbes() -> String {
+  let have = query("SELECT COUNT(*) AS n FROM learn_probe", [])
+  if to_float(to_string(json_get(get(have, 0.0), "n", "0"))) > 0.0 then { return "OK|уже засеяны" }
+  let _ = LearnSeedPrompts()
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["yana", "какой дневной бюджет ОСП", "источник числа", 1, "правило: указывать источник числа"])
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["yana", "покажи бюджет отдела финансов", "источник числа", 1, "то же правило, другой отдел"])
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["yana", "какая выручка за квартал", "источник числа", 1, "то же правило, третий вопрос"])
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["yana", "сколько счетов не оплачено", "источник числа", 1, "отложенная выборка"])
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["yana", "какой лимит расходов на сегодня", "источник числа", 1, "отложенная выборка"])
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["yana", "какой прогноз курса на месяц", "горизонт", 0, "обучающая: другое правило"])
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["yana", "какая оценка срока по задаче", "горизонт", 0, "обучающая: другое правило"])
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["yana", "когда закроем месяц", "ссылка на таблицу", 0, "обучающая: третье правило"])
+  let _ = db_execute("INSERT INTO learn_probe (dept, question, must_contain, holdout, note) VALUES (?, ?, ?, ?, ?)", ["finance", "какой прогноз выручки", "допуск", 0, "проба другого отдела"])
+  return "OK|9"
+}
+
+// ── КОНТЕКСТ ОТДЕЛА: аналог GetCorrections (dept/utils.mlog:35-38), который
+// BuildContext (dept/context.mlog:20) уже кладёт в промпт. Отличие — ФОРМА:
+// сюда попадают только правила со статусом 'applied' (прошедшие гейт и
+// отложку), а не последние 5 сырых текстов исправлений.
+pattern LearnContextFor(dept: String) -> String {
+  let rows = query("SELECT correction FROM learn_correction WHERE dept = ? AND status = 'applied' ORDER BY id DESC LIMIT 5", [dept])
+  let mut out = ""
+  each row in rows {
+    out = out + "- " + to_string(json_get(row, "correction", "")) + "\n"
+  }
+  if out == "" then { return "" }
+  return "Учти исправления владельца:\n" + out
+}
+
+// ── СБОРКА ПРОМПТА: база (library/<dept>.md) + активные правила + контекст.
+// cand_trigger/cand_payload — правило-кандидат (оценка «после» без записи).
+pattern LearnPromptFor(dept: String, cand_trigger: String, cand_payload: String) -> String {
+  let _ = LearnSeedPrompts()
+  let base = query("SELECT base_prompt FROM learn_prompt WHERE dept = ?", [dept])
+  let mut prompt = ""
+  if length(base) > 0.0 then { prompt = to_string(json_get(get(base, 0.0), "base_prompt", "")) }
+  let rules = query("SELECT payload FROM learn_rule WHERE dept = ? AND active = 1 ORDER BY id", [dept])
+  each row in rules {
+    prompt = prompt + "\nПравило: " + to_string(json_get(row, "payload", ""))
+  }
+  if cand_payload != "" then { prompt = prompt + "\nПравило: " + cand_payload }
+  let ctx = LearnContextFor(dept)
+  if ctx != "" then { prompt = prompt + "\n" + ctx }
+  return prompt
+}
+
+// ── ОТВЕТ ОТДЕЛА. В проде на этом месте call_llm(prompt, question)
+// (схема вызова — app.mlog:1600-1636). Здесь модель заменена детерминированным
+// стендом: ответ собирается из правил, чей триггер встретился в вопросе.
+// Проверяется МЕХАНИЗМ цикла (правило → промпт → ответ), а не качество LLM:
+// если стенд отвечает без правила, значит правило до промпта не дошло.
+pattern LearnAnswer(dept: String, question: String, cand_trigger: String, cand_payload: String) -> String {
+  let prompt = LearnPromptFor(dept, cand_trigger, cand_payload)
+  let mut out = "ответ " + dept + ": данные из базы"
+  let rules = query("SELECT trigger_key, payload FROM learn_rule WHERE dept = ? AND active = 1 ORDER BY id", [dept])
+  each row in rules {
+    let tk = lower(to_string(json_get(row, "trigger_key", "")))
+    if tk != "" and contains(lower(question), tk) then {
+      out = out + " | " + to_string(json_get(row, "payload", ""))
+    }
+  }
+  if cand_trigger != "" and contains(lower(question), lower(cand_trigger)) then {
+    out = out + " | " + cand_payload
+  }
+  // Промпт входит в ответ служебной строкой — видно, что правило доехало.
+  if contains(prompt, "Правило:") then { out = out + " [промпт содержит правила]" }
+  return out
+}
+
+// ── ЗАПИСЬ ОШИБКИ (реплика /fix, app.mlog:3053-3081) + недостающие поля:
+// статус жизненного цикла и связь с правилом/карточкой.
+pattern LearnFix(dept: String, question: String, correction: String, actor: String) -> String {
+  let _ = LearnSeedProbes()
+  if length(trim(correction)) < 5.0 then { return "REFUSED|коррекция короче 5 символов — нечего применять" }
+  let id = db_insert("learn_correction", { dept: dept, query: question, correction: correction, corr_type: "manual", actor: actor, status: "new" })
+  return "OK|correction=" + to_string(id) + "|dept=" + dept
+}
+
+// ── АНАЛИЗ ПРОЗОЙ (реплика YanaSelfLearn, dept/scheduler.mlog:319-343).
+// Оставлена как отрицательный контроль: тест показывает, что ответ отдела
+// после неё НЕ меняется, — ровно то, что происходит в проде.
+pattern LearnSelfLearnProse(dept: String, insights: String) -> String {
+  let _ = db_execute("INSERT INTO debriefs (dept, period, content) VALUES (?, 'self-learn', ?)", [dept, insights])
+  return "OK|debrief записан (читателей у таблицы в проде нет)"
+}
+
+// ── ДОЛЯ ПРОБ, ПРОХОДЯЩИХ С КАНДИДАТОМ И БЕЗ НЕГО. Возвращает "hits|n".
+pattern LearnProbePass(dept: String, holdout: Float, cand_trigger: String, cand_payload: String) -> String {
+  let _ = LearnSeedProbes()
+  let rows = query("SELECT id, question, must_contain FROM learn_probe WHERE dept = ? AND holdout = ? ORDER BY id", [dept, to_string(holdout)])
+  let mut hits = 0.0
+  let mut n = 0.0
+  each row in rows {
+    n = n + 1.0
+    let q = to_string(json_get(row, "question", ""))
+    let need = to_string(json_get(row, "must_contain", ""))
+    let ans = LearnAnswer(dept, q, cand_trigger, cand_payload)
+    let mut passed = 0.0
+    if contains(ans, need) then { passed = 1.0 }
+    let _ = db_insert("learn_probe_result", { probe_id: to_float(to_string(json_get(row, "id", "0"))), answer: ans, passed: passed, note: "cand=" + cand_trigger })
+    if passed == 1.0 then { hits = hits + 1.0 }
+  }
+  return to_string(hits) + "|" + to_string(n)
+}
+
+pattern LearnPct(res: String) -> Float {
+  let n = to_float(to_string(get(split(res, "|"), 1.0)))
+  if n == 0.0 then { return 0.0 }
+  return to_float(to_string(get(split(res, "|"), 0.0))) / n * 100.0
+}
+
+// ── ПРЕДЛОЖЕНИЕ ПРАВИЛА: гейт отложки (поправка 1) + карточка kind='flag'.
+// Обучающая выборка может расти как угодно — решает отложенная.
+pattern LearnProposeRule(dept: String, trigger_key: String, payload: String, reason: String, actor: String, min_gain: Float, correction_id: Float) -> String {
+  let _ = LearnSeedProbes()
+  let tr_b = LearnProbePass(dept, 0.0, "", "")
+  let tr_a = LearnProbePass(dept, 0.0, trigger_key, payload)
+  let ho_b = LearnProbePass(dept, 1.0, "", "")
+  let ho_a = LearnProbePass(dept, 1.0, trigger_key, payload)
+  let hold_n = to_float(to_string(get(split(ho_a, "|"), 1.0)))
+  let gain = LearnPct(ho_a) - LearnPct(ho_b)
+  let mut verdict = "BLOCK"
+  let mut why = "выигрыш на отложке " + to_string(gain) + " п.п. < порога " + to_string(min_gain)
+  if hold_n < LearnMinN() then { why = "отложенная выборка мала: hold_n=" + to_string(hold_n) + " < " + to_string(LearnMinN()) }
+  if hold_n >= LearnMinN() and gain >= min_gain then {
+    verdict = "ALLOW"
+    why = "отложка: " + to_string(LearnPct(ho_b)) + "% → " + to_string(LearnPct(ho_a)) + "% (+" + to_string(gain) + " п.п., n=" + to_string(hold_n) + ")"
+  }
+  let mut rule_id = 0.0
+  let mut card_id = "0"
+  if verdict == "ALLOW" then {
+    let saved = CardSave(dept, "flag", "правило поведения " + dept + ": " + trigger_key, "доля верных ответов отдела на отложенных пробах вырастет", "{\"allowed\":\"improved|not_improved\",\"predicted\":\"improved\",\"hold_before\":" + to_string(LearnPct(ho_b)) + ",\"hold_after\":" + to_string(LearnPct(ho_a)) + ",\"hold_n\":" + to_string(hold_n) + "}", CardDueDate(30.0), "inferred", "learn_rule", "no", "", "{\"reason\":\"" + reason + "\"}", 0.0)
+    card_id = to_string(get(split(saved, "|"), 1.0))
+    rule_id = db_insert("learn_rule", {
+      dept: dept, trigger_key: trigger_key, payload: payload, reason: reason,
+      actor: actor, active: 1, provenance: "inferred", holdout_win: gain,
+      card_id: to_float_or(card_id, 0.0), correction_id: correction_id
+    })
+    if correction_id > 0.0 then {
+      let _ = db_execute("UPDATE learn_correction SET status = 'applied', rule_id = ?, card_id = ? WHERE id = ?", [to_string(rule_id), card_id, to_string(correction_id)])
+    }
+  }
+  let _ = db_insert("learn_effect", {
+    dept: dept, rule_id: rule_id, stage: "propose",
+    train_before: LearnPct(tr_b), train_after: LearnPct(tr_a),
+    hold_n: hold_n, hold_before: LearnPct(ho_b), hold_after: LearnPct(ho_a),
+    verdict: verdict, card_id: to_float_or(card_id, 0.0), note: why
+  })
+  return verdict + "|rule=" + to_string(rule_id) + "|train=" + to_string(LearnPct(tr_b)) + "→" + to_string(LearnPct(tr_a)) + "%|holdout=" + to_string(LearnPct(ho_b)) + "→" + to_string(LearnPct(ho_a)) + "%|" + why + "|card=" + card_id
+}
+
+// ── СВЕРКА ЭФФЕКТА В СЛЕДУЮЩЕМ ОКНЕ: правило подтверждается или отключается.
+// Это и есть недостающее звено «доказательство, что помогло».
+pattern LearnConfirmRule(rule_id: Float, improved: String, actor: String) -> String {
+  let rows = query("SELECT dept, card_id, active FROM learn_rule WHERE id = ?", [to_string(rule_id)])
+  if length(rows) == 0.0 then { return "NO|правило не найдено" }
+  let r = get(rows, 0.0)
+  let card_id = to_float(to_string(json_get(r, "card_id", "0")))
+  let mut flag = "not_improved"
+  if improved == "yes" then { flag = "improved" }
+  let mut out = "OK|rule=" + to_string(rule_id) + "|flag=" + flag
+  if card_id > 0.0 then {
+    let v = CardVerifyFlag(card_id, flag, actor, "сверка эффекта в следующем окне")
+    out = out + "|card=" + v
+    // mismatch → правило отключается: поведение возвращается к прежнему.
+    if contains(v, "class=mismatch") then {
+      let _ = db_execute("UPDATE learn_rule SET active = 0, note = 'отключено: эффект не подтверждён' WHERE id = ?", [to_string(rule_id)])
+      out = out + "|rule=deactivated"
+    }
+  }
+  let _ = db_insert("learn_effect", {
+    dept: to_string(json_get(r, "dept", "")), rule_id: rule_id, stage: "confirm",
+    verdict: flag, card_id: card_id, note: "сверка эффекта: " + actor
+  })
+  return out
+}
+
+// ── ОТКЛОНЕНИЕ ПРАВИЛА ВЛАДЕЛЬЦЕМ (поправка 2): несогласие не блокируется,
+// блокируется только отсутствие проверяемого обоснования (гейт D1/W6 контракта).
+pattern LearnRejectRule(dept: String, trigger_key: String, correction_text: String, reason: String, actor: String) -> String {
+  let saved = CardSave(dept, "flag", "отклонение правила поведения " + dept + ": " + trigger_key, "правило не нужно, поведение оставляем прежним", "{\"allowed\":\"rejected|accepted\",\"predicted\":\"rejected\"}", CardDueDate(14.0), "stated", "learn_correction", "yes", reason, "{}", 0.0)
+  if starts_with(saved, "GATED") then { return saved }
+  let card_id = to_string(get(split(saved, "|"), 1.0))
+  let id = db_insert("learn_correction", {
+    dept: dept, query: trigger_key, correction: correction_text, corr_type: "rejected",
+    actor: actor, status: "rejected", card_id: to_float_or(card_id, 0.0), reject_reason: reason
+  })
+  return "OK|correction=" + to_string(id) + "|card=" + card_id + "|rejected=" + trigger_key
+}
+
+// ── ДЕТЕКТОР МУТАЦИЙ: активные правила, у которых НЕТ записи ALLOW в
+// learn_effect, то есть поведение изменено без доказательства. В прод-цикле
+// такой счётчик невозможен: доказательство не пишется вовсе.
+pattern LearnUnprovenRules(dept: String) -> Float {
+  let rows = query("SELECT COUNT(*) AS n FROM learn_rule r WHERE r.dept = ? AND r.active = 1 AND NOT EXISTS (SELECT 1 FROM learn_effect e WHERE e.rule_id = r.id AND e.verdict = 'ALLOW')", [dept])
+  return to_float(to_string(json_get(get(rows, 0.0), "n", "0")))
+}
+
+// ── ОТЧЁТ ПО ЦИКЛУ: числа, а не «Яна учится». Читатель learn_effect.
+pattern LearnLoopReport(dept: String) -> String {
+  let _ = LearnSeedProbes()
+  let corr = query("SELECT COUNT(*) AS n FROM learn_correction WHERE dept = ?", [dept])
+  let applied = query("SELECT COUNT(*) AS n FROM learn_correction WHERE dept = ? AND status = 'applied'", [dept])
+  let rules = query("SELECT COUNT(*) AS n FROM learn_rule WHERE dept = ? AND active = 1", [dept])
+  let allow = query("SELECT COUNT(*) AS n FROM learn_effect WHERE dept = ? AND verdict = 'ALLOW'", [dept])
+  let block = query("SELECT COUNT(*) AS n FROM learn_effect WHERE dept = ? AND verdict = 'BLOCK'", [dept])
+  let prose = query("SELECT COUNT(*) AS n FROM debriefs WHERE dept = ?", [dept])
+  let prose_read = query("SELECT COUNT(*) AS n FROM debriefs WHERE dept = ? AND actions_taken IS NOT NULL", [dept])
+  return "цикл " + dept + ": коррекций=" + to_string(json_get(get(corr, 0.0), "n", "0"))
+    + "|дошло до правила=" + to_string(json_get(get(applied, 0.0), "n", "0"))
+    + "|правил активно=" + to_string(json_get(get(rules, 0.0), "n", "0"))
+    + "|предложений ALLOW=" + to_string(json_get(get(allow, 0.0), "n", "0"))
+    + "|BLOCK=" + to_string(json_get(get(block, 0.0), "n", "0"))
+    + "|прозы в debriefs=" + to_string(json_get(get(prose, 0.0), "n", "0"))
+    + "|из неё применено=" + to_string(json_get(get(prose_read, 0.0), "n", "0"))
+    + "|правил без доказательства=" + to_string(LearnUnprovenRules(dept))
+}
+
+// ── ДЕЛЕГИРОВАНИЕ: недостающий UPDATE (dept/yana.mlog:620 пишет NULL).
+pattern LearnRecordDelegation(chat_id: String, question: String, target: String, summary: String) -> String {
+  let id = db_insert("yana_delegation_log", { chat_id: chat_id, query: question, delegated_to: target, dept_response_summary: summary })
+  return "OK|delegation=" + to_string(id) + "|was_correct=NULL"
+}
+
+pattern LearnDelegationVerdict(delegation_id: Float, was_correct: Float, source: String) -> String {
+  if was_correct != 0.0 and was_correct != 1.0 then { return "REFUSED|was_correct = 0 или 1, а не " + to_string(was_correct) }
+  let rows = query("SELECT id FROM yana_delegation_log WHERE id = ?", [to_string(delegation_id)])
+  if length(rows) == 0.0 then { return "NO|запись делегирования не найдена" }
+  let _ = db_execute("UPDATE yana_delegation_log SET was_correct = ?, feedback_source = ?, verified_at = datetime('now') WHERE id = ?", [to_string(was_correct), source, to_string(delegation_id)])
+  return "OK|delegation=" + to_string(delegation_id) + "|was_correct=" + to_string(was_correct)
+}
+
+pattern LearnDelegationMetric() -> String {
+  let rows = query("SELECT COUNT(*) AS n, SUM(CASE WHEN was_correct = 1 THEN 1 ELSE 0 END) AS ok, SUM(CASE WHEN was_correct IS NULL THEN 1 ELSE 0 END) AS pending FROM yana_delegation_log", [])
+  let r = get(rows, 0.0)
+  let n = to_float(to_string(json_get(r, "n", "0")))
+  if n == 0.0 then { return "делегирование: не хватает данных — записей нет" }
+  let ok = to_float(to_string(json_get(r, "ok", "0")))
+  let pending = to_float(to_string(json_get(r, "pending", "0")))
+  let judged = n - pending
+  if judged < LearnMinN() then { return "делегирование: не хватает данных — вердиктов " + to_string(judged) + " из " + to_string(n) + " (порог " + to_string(LearnMinN()) + "); в проде judged=0 всегда, потому что was_correct не обновляется" }
+  return "делегирование: n=" + to_string(n) + "|верно=" + to_string(ok) + "|вердиктов=" + to_string(judged) + "|точность=" + to_string(ok / judged * 100.0) + "%"
+}
+
+// ══════════════════════════════════ ТЕСТЫ ══════════════════════════════════
+
+test "обучение: коррекция записывается с жизненным циклом, а не только «сохранено»" {
+  let _ = LearnSeedProbes()
+  let short = LearnFix("yana", "какой бюджет", "нет", "owner")
+  print(short)
+  assert_eq(starts_with(short, "REFUSED"), true)
+  let f = LearnFix("yana", "какой дневной бюджет ОСП", "указывай источник числа: system_settings.daily_budget_osp", "owner")
+  print(f)
+  assert_eq(starts_with(f, "OK|correction="), true)
+  let row = query("SELECT dept, corr_type, status, actor FROM learn_correction ORDER BY id DESC LIMIT 1", [])
+  assert_eq(to_string(json_get(get(row, 0.0), "status", "")), "new")
+  assert_eq(to_string(json_get(get(row, 0.0), "corr_type", "")), "manual")
+  assert_eq(to_string(json_get(get(row, 0.0), "dept", "")), "yana")
+}
+
+test "обучение: проза в debriefs поведение не меняет (реплика YanaSelfLearn)" {
+  let _ = LearnSeedProbes()
+  let before = LearnAnswer("yana", "какой дневной бюджет ОСП", "", "")
+  let prose = LearnSelfLearnProse("yana", "Паттерн ошибок: Яна называет числа без источника. Рекомендация: всегда указывать таблицу и ключ.")
+  let after = LearnAnswer("yana", "какой дневной бюджет ОСП", "", "")
+  print("до прозы:  " + before)
+  print("после прозы: " + after)
+  print(prose)
+  assert_eq(before, after)
+  // Проза записана, но в проде у debriefs нет читателей, а actions_taken не пишется.
+  let rep = LearnLoopReport("yana")
+  print(rep)
+  assert_eq(contains(rep, "прозы в debriefs=1"), true)
+  assert_eq(contains(rep, "из неё применено=0"), true)
+}
+
+test "обучение: до промпта доходит ПРАВИЛО, а не сырой дамп последних 5" {
+  let _ = LearnSeedProbes()
+  // В проде GetCorrections (dept/utils.mlog:36) отдаёт в промпт последние 5
+  // сырых текстов коррекций (LIMIT 5, без статуса и срока). Здесь — только
+  // правила со статусом applied: форма, а не дамп.
+  let corr = query("SELECT id FROM learn_correction WHERE dept = 'yana' ORDER BY id DESC LIMIT 1", [])
+  let cid = to_float(to_string(json_get(get(corr, 0.0), "id", "0")))
+  let _ = db_execute("UPDATE learn_correction SET status = 'applied' WHERE id = ?", [to_string(cid)])
+  let prompt = LearnPromptFor("yana", "", "")
+  print("промпт отдела: " + prompt)
+  assert_eq(contains(prompt, "Учти исправления владельца:"), true)
+  assert_eq(contains(prompt, "источник числа"), true)
+  assert_eq(contains(prompt, "library/yana.md") or contains(prompt, "Яна, диспетчер"), true)
+}
+
+test "поправка 1: правило без выигрыша на отложке не появляется" {
+  let _ = LearnSeedProbes()
+  // Правило, которое ловит только ОДИН вопрос обучающей выборки («прогноз курса»)
+  // и ничего не даёт на отложенной (там вопросы про бюджет/лимит).
+  let prop = LearnProposeRule("yana", "курс", "указывать горизонт прогноза", "владелец попросил горизонт", "owner", 1.0, 0.0)
+  print(prop)
+  assert_eq(starts_with(prop, "BLOCK"), true)
+  let rules = query("SELECT COUNT(*) AS n FROM learn_rule WHERE dept = 'yana'", [])
+  assert_eq(to_float(to_string(json_get(get(rules, 0.0), "n", "0"))), 0.0)
+  let cards = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = 'yana' AND topic LIKE 'правило поведения%'", [])
+  assert_eq(to_float(to_string(json_get(get(cards, 0.0), "n", "0"))), 0.0)
+  let eff = query("SELECT verdict, hold_n FROM learn_effect WHERE stage = 'propose' ORDER BY id DESC LIMIT 1", [])
+  assert_eq(to_string(json_get(get(eff, 0.0), "verdict", "")), "BLOCK")
+}
+
+test "правило с выигрышем на отложке меняет ответ и становится карточкой на ревью" {
+  let _ = LearnSeedProbes()
+  let fresh = LearnFix("yana", "сколько счетов не оплачено", "указывай источник числа: таблица invoices", "owner")
+  let cid = to_float(to_string(get(split(to_string(get(split(fresh, "|"), 1.0)), "="), 1.0)))
+  print("свежая коррекция: " + fresh)
+  let before = LearnAnswer("yana", "какой дневной бюджет ОСП", "", "")
+  let prop = LearnProposeRule("yana", "бюджет", "указывать источник числа (system_settings.daily_budget_<dept>)", "коррекция владельца: числа без источника не принимаются", "audit", 1.0, cid)
+  print(prop)
+  assert_eq(starts_with(prop, "ALLOW"), true)
+  let after = LearnAnswer("yana", "какой дневной бюджет ОСП", "", "")
+  print("до правила:  " + before)
+  print("после правила: " + after)
+  assert_eq(before != after, true)
+  assert_eq(contains(after, "источник числа"), true)
+  // Коррекция получила правило и карточку — цикл замкнут записями.
+  let c = query("SELECT status, rule_id, card_id FROM learn_correction WHERE id = ?", [to_string(cid)])
+  assert_eq(to_string(json_get(get(c, 0.0), "status", "")), "applied")
+  assert_eq(to_float(to_string(json_get(get(c, 0.0), "rule_id", "0"))) > 0.0, true)
+  let card = query("SELECT card_kind AS kind, status, provenance, review_status FROM dept_archive WHERE dept = 'yana' AND topic LIKE 'правило поведения%' ORDER BY id DESC LIMIT 1", [])
+  print("карточка правила: " + to_string(card))
+  assert_eq(to_string(json_get(get(card, 0.0), "kind", "")), "flag")
+  assert_eq(to_string(json_get(get(card, 0.0), "provenance", "")), "inferred")
+  assert_eq(to_string(json_get(get(card, 0.0), "review_status", "")), "pending")
+}
+
+test "доказательство, что помогло: пробы до/после записаны числом" {
+  let eff = query("SELECT stage, train_before, train_after, hold_n, hold_before, hold_after, verdict FROM learn_effect WHERE stage = 'propose' ORDER BY id DESC LIMIT 1", [])
+  print("эффект: " + to_string(eff))
+  assert_eq(to_float(to_string(json_get(get(eff, 0.0), "hold_n", "0"))) >= 5.0, true)
+  assert_eq(to_float(to_string(json_get(get(eff, 0.0), "hold_after", "0"))) > to_float(to_string(json_get(get(eff, 0.0), "hold_before", "0"))), true)
+  let results = query("SELECT COUNT(*) AS n, SUM(passed) AS p FROM learn_probe_result", [])
+  print("проб прогонов: " + to_string(results))
+  assert_eq(to_float(to_string(json_get(get(results, 0.0), "n", "0"))) >= 9.0, true)
+  let rep = LearnLoopReport("yana")
+  print(rep)
+  assert_eq(contains(rep, "правил активно=1"), true)
+  let applied_n = to_float(to_string(get(split(to_string(get(split(rep, "дошло до правила="), 1.0)), "|"), 0.0)))
+  print("дошло до правила: " + to_string(applied_n))
+  assert_eq(applied_n >= 1.0, true)
+  // Все активные правила на этом этапе имеют доказательство.
+  assert_eq(LearnUnprovenRules("yana"), 0.0)
+}
+
+test "сверка эффекта: неподтвердившееся правило отключается честно" {
+  let rule = query("SELECT id, card_id FROM learn_rule WHERE dept = 'yana' AND active = 1 ORDER BY id DESC LIMIT 1", [])
+  let rid = to_float(to_string(json_get(get(rule, 0.0), "id", "0")))
+  let before = LearnAnswer("yana", "какой дневной бюджет ОСП", "", "")
+  let conf = LearnConfirmRule(rid, "no", "owner")
+  print("сверка: " + conf)
+  assert_eq(contains(conf, "flag=not_improved"), true)
+  assert_eq(contains(conf, "class=mismatch"), true)
+  assert_eq(contains(conf, "rule=deactivated"), true)
+  let row = query("SELECT active, note FROM learn_rule WHERE id = ?", [to_string(rid)])
+  assert_eq(to_float(to_string(json_get(get(row, 0.0), "active", "1"))), 0.0)
+  // Поведение вернулось к прежнему — правило действительно отключено, а не «помечено».
+  let after = LearnAnswer("yana", "какой дневной бюджет ОСП", "", "")
+  assert_eq(before != after, true)
+  assert_eq(contains(after, "источник числа"), false)
+  let fact = query("SELECT outcome_flag, error_class FROM dept_verification WHERE archive_id = ? ORDER BY id DESC LIMIT 1", [to_string(json_get(get(rule, 0.0), "card_id", "0"))])
+  print("факт карточки: " + to_string(fact))
+  assert_eq(to_string(json_get(get(fact, 0.0), "error_class", "")), "mismatch")
+}
+
+test "мутационная ловушка: правило без гейта не даёт выигрыша и не имеет доказательства" {
+  let _ = LearnSeedProbes()
+  // МУТАЦИЯ: правило применяется напрямую, минуя LearnProposeRule (так работает
+  // прод-цикл: проза из debriefs → никакого гейта). Проверяем, что ловушка ловится:
+  // (а) отложенная выборка не улучшается, (б) в learn_effect нет записи,
+  // (в) отчёт цикла показывает расхождение «правил активно» против «ALLOW».
+  let before = LearnProbePass("yana", 1.0, "", "")
+  let ungated = db_insert("learn_rule", { dept: "yana", trigger_key: "курс", payload: "указывать горизонт прогноза", reason: "мутация: без гейта отложки", actor: "mutation", active: 1, provenance: "stated", holdout_win: 0.0 })
+  let after = LearnProbePass("yana", 1.0, "", "")
+  print("отложка до мутации: " + before + ", после: " + after)
+  assert_eq(LearnPct(after), LearnPct(before))
+  let proof = query("SELECT COUNT(*) AS n FROM learn_effect WHERE rule_id = ?", [to_string(ungated)])
+  print("записей эффекта для правила без гейта: " + to_string(proof))
+  assert_eq(to_float(to_string(json_get(get(proof, 0.0), "n", "0"))), 0.0)
+  // Инвариант, который и ловит мутацию: активное правило без доказательства.
+  let unproven = LearnUnprovenRules("yana")
+  print("правил без доказательства: " + to_string(unproven))
+  assert_eq(unproven, 1.0)
+  let rep = LearnLoopReport("yana")
+  print(rep)
+  assert_eq(contains(rep, "правил без доказательства=1"), true)
+  // Убираем мутацию: состояние возвращается к проверенному, инвариант снова 0.
+  let _ = db_execute("UPDATE learn_rule SET active = 0, note = 'снято мутационным тестом' WHERE id = ?", [to_string(ungated)])
+  let back = LearnProbePass("yana", 1.0, "", "")
+  assert_eq(LearnPct(back), LearnPct(before))
+  assert_eq(LearnUnprovenRules("yana"), 0.0)
+  assert_eq(contains(LearnLoopReport("yana"), "правил без доказательства=0"), true)
+}
+
+test "сверка эффекта: подтверждённое правило остаётся активным (class=match)" {
+  let _ = LearnSeedProbes()
+  // Новое правило проходит гейт и подтверждается в следующем окне.
+  let prop = LearnProposeRule("yana", "счетов", "указывать источник числа (invoices)", "коррекция владельца по счетам", "audit", 1.0, 0.0)
+  print(prop)
+  assert_eq(starts_with(prop, "ALLOW"), true)
+  let rid = to_float(to_string(get(split(to_string(get(split(prop, "|"), 1.0)), "="), 1.0)))
+  let conf = LearnConfirmRule(rid, "yes", "owner")
+  print("подтверждение: " + conf)
+  assert_eq(contains(conf, "flag=improved"), true)
+  assert_eq(contains(conf, "class=match"), true)
+  assert_eq(contains(conf, "rule=deactivated"), false)
+  let row = query("SELECT active FROM learn_rule WHERE id = ?", [to_string(rid)])
+  assert_eq(to_float(to_string(json_get(get(row, 0.0), "active", "0"))), 1.0)
+}
+
+test "поправка 2: отклонение правила владельцем — запись, а не потеря" {
+  let _ = LearnSeedProbes()
+  let prop = LearnProposeRule("yana", "срок", "указывать горизонт оценки в днях", "владелец просит горизонт", "owner", 1.0, 0.0)
+  print(prop)
+  // Отклонение с проверяемым обоснованием — ценность, а не ошибка (W6).
+  let no_reason = LearnRejectRule("yana", "срок", "указывать горизонт оценки в днях", "не надо", "owner")
+  print("отклонение без обоснования: " + no_reason)
+  assert_eq(starts_with(no_reason, "GATED"), true)
+  let rejected = LearnRejectRule("yana", "срок", "указывать горизонт оценки в днях", "не нужно: горизонт уже даёт ОСП-карточка, источник library/osp.md стр. 41, расчёт дублей = 2", "owner")
+  print("отклонение с обоснованием: " + rejected)
+  assert_eq(starts_with(rejected, "OK"), true)
+  let row = query("SELECT status, reject_reason FROM learn_correction WHERE dept = 'yana' AND correction LIKE '%горизонт%' ORDER BY id DESC LIMIT 1", [])
+  print("отклонённая коррекция: " + to_string(row))
+}
+
+test "делегирование: без UPDATE метрика пуста, с UPDATE — считается" {
+  // Прод-поведение: was_correct = NULL навсегда (dept/yana.mlog:620).
+  let mut i = 0.0
+  while i < 6.0 {
+    let _ = LearnRecordDelegation("chat-1", "запрос " + to_string(i), "finance", "ответ отдела")
+    i = i + 1.0
+  }
+  let empty = LearnDelegationMetric()
+  print("до вердиктов: " + empty)
+  assert_eq(contains(empty, "не хватает данных"), true)
+  assert_eq(contains(empty, "вердиктов 0 из 6"), true)
+  // Вердикты приёмки (то самое недостающее обновление).
+  let ids = query("SELECT id FROM yana_delegation_log ORDER BY id", [])
+  let mut k = 0.0
+  each row in ids {
+    let verdict = 1.0
+    if k == 2.0 or k == 5.0 then { let verdict = 0.0 }
+    let _ = LearnDelegationVerdict(to_float(to_string(json_get(row, "id", "0"))), verdict, "owner")
+    k = k + 1.0
+  }
+  let bad = LearnDelegationVerdict(1.0, 7.0, "owner")
+  assert_eq(starts_with(bad, "REFUSED"), true)
+  let m = LearnDelegationMetric()
+  print("после вердиктов: " + m)
+  assert_eq(contains(m, "n=6"), true)
+  assert_eq(contains(m, "верно=4"), true)
+  assert_eq(contains(m, "точность=66.66666666666666%"), true)
+}
+
+test "обучение: покрытие — доля коррекций, дошедших до проверяемого следа" {
+  let cov = CardCoverage("yana")
+  let corr = query("SELECT COUNT(*) AS n FROM learn_correction WHERE dept = 'yana'", [])
+  let applied = query("SELECT COUNT(*) AS n FROM learn_correction WHERE dept = 'yana' AND status IN ('applied','rejected')", [])
+  print(cov + " | коррекций=" + to_string(json_get(get(corr, 0.0), "n", "0")) + "|с исходом=" + to_string(json_get(get(applied, 0.0), "n", "0")))
+  assert_eq(contains(cov, "покрытие yana"), true)
+  assert_eq(to_float(to_string(json_get(get(applied, 0.0), "n", "0"))) >= 1.0, true)
+}

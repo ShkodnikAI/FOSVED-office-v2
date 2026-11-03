@@ -1,0 +1,1116 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Пример 1 (v2). ЕДИНЫЙ КОНТРАКТ ОТДЕЛА — «КАРТОЧКА» на таблицах прода
+// Порт по решению D1 плана реализации (ревью 02.11.2026).
+//   mlog check examples/card_contract.mlog
+//   mlog test  examples/card_contract.mlog
+// Исполнено на mlog 0.38.0 (цель #620) и bin/mlog 0.34.1 (прод офиса).
+//
+// ЧТО ИЗМЕНИЛОСЬ ПО СРАВНЕНИЮ С v1 (аудит 02.11.2026)
+// v1 объявляла три НОВЫЕ таблицы (dept_card, dept_card_fact, dept_answer_log) —
+// это противоречило тексту самого аудита (§2.4, §8: «карточка живёт в
+// dept_archive, шестая реализация не нужна»). Противоречие найдено диспетчером
+// (поправка 1) и подтверждено: v1 писала в dept_card в 18 местах.
+// v2 не создаёт НИ ОДНОЙ таблицы:
+//   • карточка            → dept_archive      (app.mlog:286, DDL продублирован ниже)
+//   • факт/сверка         → dept_verification (app.mlog:287)
+//   • журнал ответов      → dialog_history    (app.mlog:114 — туда уже пишет шов)
+//   • ключи бюджета       → system_settings   (app.mlog:235, читает proxy/budget.py:100-104)
+//   + 17 аддитивных колонок (ALTER TABLE ADD COLUMN, идемпотентно, под грантом
+//     db:alter:* — форма app.mlog:158/293, ADR-0060: никаких DROP/RENAME).
+//
+// СООТВЕТСТВИЕ КОЛОНОК v1 → v2 (алиасы в SELECT сохраняют ключи json_get):
+//   dept_card.kind          → dept_archive.card_kind       (AS kind)
+//   dept_card.claim         → dept_archive.full_result     (существующая)
+//   dept_card.verify_by     → dept_archive.verification_date (AS verify_by)
+//   dept_card_fact.card_id  → dept_verification.archive_id (существующая, FK)
+//   …actual_number          → …actual_value                (существующая)
+//   …actual_flag            → …outcome_flag                (существующая)
+//   …caveats                → …error_diagnosis             (существующая)
+//   dept_answer_log         → dialog_history (маркер card:<id>| / bare|)
+//
+// ЧТО ДОБАВЛЕНО ПО ИТОГАМ РЕВЬЮ D1+D2 (инварианты OSP_DESIGN_v1 §3.5):
+//   • contour owner|bench|team — колонка и фильтр во ВСЕХ метриках: контур
+//     владельца и тренировочный bench не смешиваются (§1.3, инвариант 5);
+//   • CardVerifyDispatch — замена app.mlog:1215 VerifyArchiveEntryStructured:
+//     legacy /verify больше не пишет status='verified' мимо автомата;
+//   • CardScoreBlock/CardLegacyCounters — доказательство, что ScoreDept
+//     (app.mlog:1304-1308) без правки не видит карточных статусов;
+//   • CardBenchCards — арифметика bench-контура: 150 вопросов × 5 горизонтов;
+//   • CardAuditOrphans — сироты (факт без карточки) видны программно;
+//   • уборка сужена предикатом card_kind IS NOT NULL (стол теперь общий).
+//
+// ТРИ ПРАВИЛА владельца (OSP_DESIGN_v1_DECISION.md) сохранены без изменений:
+//   1. Никакой механической правки чисел без отложки.
+//   2. Блокируем только форму, никогда — несогласие (CardDissentGate).
+//   3. Измеряем систему, которой пользуемся (CardCoverage).
+// ══════════════════════════════════════════════════════════════════════════
+
+db { url: env("DATABASE_URL") }
+
+pattern TryVal(x: String) -> String { return x.value }
+
+// ── МИГРАЦИЯ. DDL — байт в байт как в проде (app.mlog:114/235/286/287),
+// поэтому пример самодостаточен, а в проде эти CREATE — no-op.
+pattern CardEnsureSchema() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS dept_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT NOT NULL, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS dept_verification (id INTEGER PRIMARY KEY AUTOINCREMENT, archive_id INTEGER, actual_outcome TEXT, error_diagnosis TEXT, verified_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(archive_id) REFERENCES dept_archive(id))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)", [])
+  return CardMigrate()
+}
+
+// Форма прода: ColumnExists через pragma_table_info (dept/utils.mlog:382) и
+// один грант db:alter:* на всю миграцию (app.mlog:158, ADR-0155 §3.1).
+pattern CardColumnExists(table: String, column: String) -> Bool {
+  let rows = query("SELECT name FROM pragma_table_info(?) WHERE name = ?", [table, column])
+  return length(rows) > 0.0
+}
+
+pattern CardAlter(mig: Grant, table: String, column: String, ddl: String) -> String {
+  if CardColumnExists(table, column) == true then { return "skip" }
+  let _ = TryVal(try db_execute_with_grant(mig, ddl))
+  if CardColumnExists(table, column) == true then { return "added" }
+  return "FAILED"
+}
+
+pattern CardMigrate() -> String {
+  let mig = grant_issue("db:alter:*", 120, "n", 40)
+  let mut added = 0.0
+  let mut failed = 0.0
+  let r = CardAlter(mig, "dept_archive", "card_kind", "ALTER TABLE dept_archive ADD COLUMN card_kind TEXT DEFAULT 'number'")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "contour", "ALTER TABLE dept_archive ADD COLUMN contour TEXT DEFAULT 'owner'")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "claim_json", "ALTER TABLE dept_archive ADD COLUMN claim_json TEXT DEFAULT '{}'")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "provenance", "ALTER TABLE dept_archive ADD COLUMN provenance TEXT DEFAULT 'stated'")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "review_status", "ALTER TABLE dept_archive ADD COLUMN review_status TEXT DEFAULT 'approved'")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "source", "ALTER TABLE dept_archive ADD COLUMN source TEXT DEFAULT ''")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "dissent_reason", "ALTER TABLE dept_archive ADD COLUMN dissent_reason TEXT")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "gate_report", "ALTER TABLE dept_archive ADD COLUMN gate_report TEXT DEFAULT '{}'")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "payload_json", "ALTER TABLE dept_archive ADD COLUMN payload_json TEXT DEFAULT '{}'")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "rework_count", "ALTER TABLE dept_archive ADD COLUMN rework_count INTEGER DEFAULT 0")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "budget_spent", "ALTER TABLE dept_archive ADD COLUMN budget_spent REAL DEFAULT 0")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_archive", "resolved_at", "ALTER TABLE dept_archive ADD COLUMN resolved_at TEXT")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_verification", "checks_json", "ALTER TABLE dept_verification ADD COLUMN checks_json TEXT DEFAULT '[]'")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_verification", "receipt_ref", "ALTER TABLE dept_verification ADD COLUMN receipt_ref TEXT DEFAULT ''")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_verification", "error_value", "ALTER TABLE dept_verification ADD COLUMN error_value REAL")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_verification", "error_class", "ALTER TABLE dept_verification ADD COLUMN error_class TEXT DEFAULT ''")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_verification", "verified_by", "ALTER TABLE dept_verification ADD COLUMN verified_by TEXT DEFAULT ''")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  // Три колонки, которые прод уже добавил сам (app.mlog:293-295, наряд 8):
+  // в проде ALTER — no-op, в самодостаточном примере их создаёт миграция.
+  // Без forecast_value/actual_value не оживает ComputeFinanceMAPE (app.mlog:1259).
+  let r = CardAlter(mig, "dept_archive", "forecast_value", "ALTER TABLE dept_archive ADD COLUMN forecast_value REAL")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_verification", "actual_value", "ALTER TABLE dept_verification ADD COLUMN actual_value REAL")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  let r = CardAlter(mig, "dept_verification", "outcome_flag", "ALTER TABLE dept_verification ADD COLUMN outcome_flag TEXT")
+  if r == "added" then { added = added + 1.0 }
+  if r == "FAILED" then { failed = failed + 1.0 }
+  return "OK|tables=0|cols=20|new=17|added=" + to_string(added) + "|failed=" + to_string(failed)
+}
+
+// ── Контуры (OSP_DESIGN_v1 §1.3, инвариант 5 §3.5): owner — прогноз владельца,
+// bench — тренировочный поток ForecastBench, team — внутренняя оценка отдела.
+pattern CardContours() -> String { return "owner|bench|team" }
+pattern CardContourOk(c: String) -> Bool {
+  let parts = split(CardContours(), "|")
+  let mut found = false
+  each p in parts {
+    if trim(to_string(p)) == c then { found = true }
+  }
+  return found
+}
+
+
+
+// ── Словари контракта: ОДИН источник (приём office#359 — список делегирования
+// Яны жил в двух местах и расходился; здесь kind/status объявлены один раз).
+pattern CardKinds() -> String { return "number|flag|check|receipt" }
+pattern CardStatuses() -> String { return "drafted|gated|published|watching|resolved|expired|superseded|rework" }
+
+pattern CardInSet(value: String, set: String) -> Bool {
+  let parts = split(set, "|")
+  let mut found = false
+  each p in parts {
+    if trim(to_string(p)) == value then { found = true }
+  }
+  return found
+}
+
+pattern CardKindOk(kind: String) -> Bool { return CardInSet(kind, CardKinds()) }
+pattern CardStatusOk(status: String) -> Bool { return CardInSet(status, CardStatuses()) }
+
+// ── Автомат статусов. Обобщение двух живых механик офиса:
+// OSP (drafted → gated → published → watching → resolved|expired|superseded,
+// наряд #624) и нарядов (приёмка fail → rework → снова в работу, narad.mlog:190).
+pattern CardCanTransition(from: String, to: String) -> String {
+  if CardStatusOk(from) == false then { return "NO: неизвестный статус " + from }
+  if CardStatusOk(to) == false then { return "NO: неизвестный статус " + to }
+  if from == to then { return "NO: переход в себя (" + from + ")" }
+  if from == "drafted" then {
+    if to == "gated" or to == "published" or to == "superseded" then { return "OK" }
+    return "NO: drafted → " + to
+  }
+  if from == "gated" then {
+    if to == "published" or to == "superseded" or to == "drafted" then { return "OK" }
+    return "NO: gated → " + to
+  }
+  if from == "published" then {
+    if to == "watching" or to == "resolved" or to == "expired" or to == "superseded" then { return "OK" }
+    return "NO: published → " + to
+  }
+  if from == "watching" then {
+    if to == "resolved" or to == "expired" or to == "superseded" then { return "OK" }
+    return "NO: watching → " + to
+  }
+  if from == "rework" then {
+    if to == "published" or to == "watching" or to == "superseded" then { return "OK" }
+    return "NO: rework → " + to
+  }
+  // resolved | expired | superseded — терминальные: перезапись истории запрещена
+  return "NO: " + from + " — терминальный статус (история не переписывается)"
+}
+
+// ── Дата: знаковое число дней от сейчас до ISO-даты; -99999 = не распарсилось.
+// (days_between симметричен — знак берём из epoch, приём проверен в ОСП.)
+pattern CardEpochOf(iso: String) -> Float {
+  let t = TryVal(try date_parse_iso(trim(iso)))
+  if to_string(t) == "()" then { return -1.0 }
+  return to_float(to_string(t))
+}
+pattern CardDaysTo(iso: String) -> Float {
+  let e = CardEpochOf(iso)
+  if e < 0.0 then { return -99999.0 }
+  return (e - now_unix()) / 86400.0
+}
+
+// Дата сверки через N дней (ISO) — общий служебный помощник контракта:
+// CardFormGates F4 требует будущую ISO-дату, поэтому все отделы получают её
+// одним и тем же способом (SQL date(), а не арифметикой в коде).
+pattern CardDueDate(days: Float) -> String {
+  let rows = query("SELECT date('now', '+' || CAST(? AS INTEGER) || ' days') AS d", [to_string(days)])
+  return to_string(json_get(get(rows, 0.0), "d", "")) + "T12:00:00Z"
+}
+
+// ── ФОРМАЛЬНЫЕ гейты. Блокируют ТОЛЬКО форму: пустое утверждение, несуществующую
+// дату, неизвестный вид, отсутствие обязательного поля вида исхода.
+// Мнение модели «прогноз нереалистичный» сюда не входит — это несогласие (ниже).
+pattern CardFormGates(dept: String, kind: String, topic: String, claim: String, verify_by: String, claim_json: String) -> String {
+  if length(trim(dept)) < 2.0 then { return "FAIL: F0 отдел не указан" }
+  if CardKindOk(kind) == false then { return "FAIL: F1 неизвестный вид исхода: " + kind + " (допустимы: " + CardKinds() + ")" }
+  if length(trim(topic)) < 5.0 then { return "FAIL: F2 тема короче 5 символов — карточку не найти в архиве" }
+  if length(trim(claim)) < 3.0 then { return "FAIL: F3 утверждение пусто — проверять нечего" }
+  let dd = CardDaysTo(verify_by)
+  if dd == -99999.0 then { return "FAIL: F4 verify_by не ISO-дата: " + verify_by }
+  if dd <= 0.0 then { return "FAIL: F4 окно сверки уже наступило — ответ задним числом не публикуется" }
+  let cj = TryVal(try parse_json(claim_json))
+  if to_string(cj) == "()" then { return "FAIL: F5 claim_json не JSON: " + claim_json }
+  // Обязательные поля вида исхода — без них сверка невозможна в принципе.
+  if kind == "number" then {
+    let v = to_float(to_string(json_get(cj, "value", "-999999999")))
+    if v == -999999999.0 then { return "FAIL: F6 number без claim_json.value — нечего сравнивать с фактом" }
+  }
+  if kind == "flag" then {
+    let allowed = to_string(json_get(cj, "allowed", ""))
+    if length(trim(allowed)) < 1.0 then { return "FAIL: F6 flag без claim_json.allowed — исход не определён" }
+  }
+  if kind == "check" then {
+    let checks = to_string(json_get(cj, "checks", ""))
+    if length(trim(checks)) < 2.0 then { return "FAIL: F6 check без claim_json.checks — качество не определено" }
+  }
+  if kind == "receipt" then {
+    let eff = to_string(json_get(cj, "effect", ""))
+    if length(trim(eff)) < 3.0 then { return "FAIL: F6 receipt без claim_json.effect — неясно, какое действие подтверждать" }
+  }
+  return "PASS"
+}
+
+// ── ПОПРАВКА 2 владельца (ОСП G6 → W6): несогласие с эталоном/рынком/нормой —
+// НЕ блокируется. Блокируется только отсутствие проверяемого обоснования.
+// Обоснованное несогласие — ценный продукт: оно пишется в карточку и в отчёт.
+pattern CardDissentGate(dissent: String, reason: String) -> String {
+  if trim(dissent) == "" or lower(trim(dissent)) == "no" then { return "PASS" }
+  let r = trim(reason)
+  if length(r) < 12.0 then { return "FAIL: D1 несогласие без проверяемого обоснования (нужно >= 12 символов: факт, ссылка, расчёт)" }
+  let mut args = 0.0
+  if contains(r, "http") or contains(r, "стр.") or contains(lower(r), "источник") then { args = args + 1.0 }
+  if contains(r, "=") or contains(lower(r), "расчёт") or contains(r, "%") or contains(r, "руб") then { args = args + 1.0 }
+  if length(r) >= 40.0 then { args = args + 1.0 }
+  if args < 1.0 then { return "FAIL: D1 в обосновании нет ни одного проверяемого аргумента (источник/расчёт/детализация)" }
+  return "WARN: W6 несогласие принято с обоснованием (" + to_string(args) + " аргумент(ов))"
+}
+
+// ── ЕДИНСТВЕННАЯ точка записи. Обещание контракта: «ответ отдела существует
+// как запись» выполняется конструктивно — ответ собирается из строки БД,
+// поэтому «ответили, а в архиве дыра» невозможно (тот же приём, что OSPSaveCard
+// в наряде #624, но общий для всех 15 отделов).
+// Возвращает "OK|<id>|<status>" или "GATED|<id>|<причина>".
+pattern CardSave(dept: String, kind: String, topic: String, claim: String, claim_json: String, verify_by: String, provenance: String, source: String, dissent: String, dissent_reason: String, payload_json: String, cost: Float) -> String {
+  return CardSaveContour(dept, kind, topic, claim, claim_json, verify_by, provenance, source, dissent, dissent_reason, payload_json, cost, "owner")
+}
+
+// D2/инвариант 5 OSP_DESIGN_v1 §3.5: контур (owner|bench|team) задаётся при
+// создании и НЕ меняется — метрики контуров не смешиваются (поправка 3 владельца).
+pattern CardSaveContour(dept: String, kind: String, topic: String, claim: String, claim_json: String, verify_by: String, provenance: String, source: String, dissent: String, dissent_reason: String, payload_json: String, cost: Float, contour: String) -> String {
+  let _ = CardEnsureSchema()
+  if CardContourOk(contour) == false then { return "NO|неизвестный контур: " + contour + " (допустимы: " + CardContours() + ")" }
+  let mut prov = provenance
+  if CardInSet(prov, "stated|inferred") == false then { prov = "stated" }
+  // Выведенное знание (provenance=inferred) до ревью понижено в весе —
+  // обобщение FO-020 (proxy/core.py:516-522, review_status pending/declined).
+  let mut rev = "approved"
+  if prov == "inferred" then { rev = "pending" }
+  let form = CardFormGates(dept, kind, topic, claim, verify_by, claim_json)
+  let dis = CardDissentGate(dissent, dissent_reason)
+  let budget = CardBudgetOk(dept, cost)
+  // Отчёт гейтов собирается по частям: ОДИН флаг провала, а не starts_with
+  // по склейке (проверено тестом «форма прошла, бюджет исчерпан»: склейка
+  // «PASS | FAIL: B1» на starts_with не ловится — карточка ушла бы в published).
+  let mut failed = false
+  let mut report = form
+  if starts_with(form, "FAIL") then { failed = true }
+  if starts_with(dis, "FAIL") then {
+    report = report + " | " + dis
+    failed = true
+  }
+  // ПОПРАВКА 2: обоснованное несогласие — ценный продукт, поэтому WARN тоже
+  // пишется в gate_report карточки. Иначе «согласие с обоснованием» исчезает
+  // из следа и владелец не видит, где отдел спорил с эталоном (регрессия
+  // поймана тестом примера 4 «поправка 2»: gate_report оставался просто PASS).
+  if starts_with(dis, "WARN") then {
+    report = report + " | " + dis
+  }
+  if starts_with(budget, "FAIL") then {
+    report = report + " | " + budget
+    failed = true
+  }
+  let mut status = "published"
+  if failed then { status = "gated" }
+  let id = db_insert("dept_archive", {
+    dept: dept, card_kind: kind, topic: topic, full_result: claim, claim_json: claim_json,
+    verification_date: verify_by, status: status, provenance: prov, review_status: rev, contour: contour,
+    source: source, dissent_reason: dissent_reason, gate_report: report,
+    payload_json: payload_json, budget_spent: cost
+  })
+  // D1: число прогноза дублируется в прод-колонку forecast_value (app.mlog:293) —
+  // ровно в ту, которую читает ComputeFinanceMAPE (app.mlog:1260). Без этой строки
+  // общая метрика финансов осталась бы мёртвой (находка аудита §2.4).
+  if kind == "number" then {
+    let cj2 = TryVal(try parse_json(claim_json))
+    if to_string(cj2) != "()" then {
+      let v2 = to_float_or(to_string(json_get(cj2, "value", "")), -999999.0)
+      if v2 != -999999.0 then {
+        let _ = db_execute("UPDATE dept_archive SET forecast_value = ?1 WHERE id = ?2", [to_string(v2), to_string(id)])
+      }
+    }
+  }
+  let _ = CardLogAnswer(dept, topic, id)
+  if status == "gated" then { return "GATED|" + to_string(id) + "|" + report }
+  return "OK|" + to_string(id) + "|published"
+}
+
+pattern CardLogAnswer(dept: String, answer_ref: String, card_id: Float) -> String {
+  let _ = CardEnsureSchema()
+  let _ = db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('0', 'assistant', ?1, ?2)", [dept, "card:" + to_string(card_id) + "|" + answer_ref])
+  return "ok"
+}
+
+// Ответ отдела, который НЕ стал карточкой (консультация, справка, отказ).
+// Без этой записи CardCoverage считал бы долю от «чего попало» — правило 3.
+pattern CardLogBareAnswer(dept: String, answer_ref: String) -> String {
+  let _ = CardEnsureSchema()
+  let _ = db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('0', 'assistant', ?1, ?2)", [dept, "bare|" + answer_ref])
+  return "ok"
+}
+
+// ── Переход статуса: единственный путь, проверяющий автомат.
+pattern CardTransition(card_id: Float, to: String, reason: String, actor: String) -> String {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT status FROM dept_archive WHERE id = ?", [to_string(card_id)])
+  if length(rows) == 0.0 then { return "NO|карточка " + to_string(card_id) + " не найдена" }
+  let from = to_string(json_get(get(rows, 0.0), "status", ""))
+  let allowed = CardCanTransition(from, to)
+  if allowed != "OK" then { return "NO|" + allowed + " (причина: " + reason + ")" }
+  if to == "resolved" or to == "expired" or to == "superseded" then {
+    let _ = db_execute("UPDATE dept_archive SET status = ?, resolved_at = datetime('now') WHERE id = ?", [to, to_string(card_id)])
+  } else {
+    let _ = db_execute("UPDATE dept_archive SET status = ? WHERE id = ?", [to, to_string(card_id)])
+  }
+  let _ = db_execute("INSERT INTO dept_verification (archive_id, verified_by, error_diagnosis, error_class) VALUES (?, ?, ?, ?)", [to_string(card_id), actor, "переход статуса: " + from + " → " + to, "transition"])
+  return "OK|" + from + " → " + to
+}
+
+// ── СВЕРКА ВИДА number: ошибку считает ПРОГРАММА, не модель.
+// Прямая замена FinanceVerifyForecast (dept/finance.mlog:672), где MAPE
+// просит посчитать LLM, а результат не пишется ни в одну таблицу
+// (financial_forecast_verifications: 0 писателей — app.mlog:427).
+pattern CardErrorPct(forecast: Float, actual: Float) -> Float {
+  if actual == 0.0 then { return -1.0 }
+  let e = abs(forecast - actual) / abs(actual) * 100.0
+  return e
+}
+pattern CardErrorClass(forecast: Float, actual: Float, target_pct: Float) -> String {
+  if actual == 0.0 then { return "uncomputable: факт = 0" }
+  let e = CardErrorPct(forecast, actual)
+  if e <= target_pct then { return "accurate" }
+  if forecast > actual then { return "overoptimistic" }
+  return "underoptimistic"
+}
+// Цель по горизонту — из устава library/finance.md:41-44 (30d<=5%, 60d<=10%, 90d<=15%)
+// иlibrary/lz.md; для остальных видов — значение из claim_json.target_pct.
+pattern CardTargetPct(kind: String, horizon_days: Float, declared: Float) -> Float {
+  if declared > 0.0 then { return declared }
+  if kind == "number" then {
+    if horizon_days <= 30.0 then { return 5.0 }
+    if horizon_days <= 60.0 then { return 10.0 }
+    if horizon_days <= 90.0 then { return 15.0 }
+    return 25.0
+  }
+  return 10.0
+}
+
+pattern CardVerifyNumber(card_id: Float, actual: Float, verified_by: String, caveats: String) -> String {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT dept, card_kind AS kind, status, claim_json, verification_date AS verify_by FROM dept_archive WHERE id = ?", [to_string(card_id)])
+  if length(rows) == 0.0 then { return "NO|карточка не найдена" }
+  let r = get(rows, 0.0)
+  if to_string(json_get(r, "kind", "")) != "number" then { return "NO|вид карточки не number" }
+  let st = to_string(json_get(r, "status", ""))
+  if st != "published" and st != "watching" then { return "NO|сверяется только published/watching (сейчас " + st + ")" }
+  let cj = parse_json(to_string(json_get(r, "claim_json", "{}")))
+  let forecast = to_float(to_string(json_get(cj, "value", "0")))
+  let horizon = to_float(to_string(json_get(cj, "horizon_days", "30")))
+  let declared = to_float(to_string(json_get(cj, "target_pct", "0")))
+  let target = CardTargetPct("number", horizon, declared)
+  let err = CardErrorPct(forecast, actual)
+  let cls = CardErrorClass(forecast, actual, target)
+  let _ = db_insert("dept_verification", {
+    archive_id: card_id, actual_value: actual, error_value: err, error_class: cls,
+    verified_by: verified_by, error_diagnosis: caveats
+  })
+  let _ = db_execute("UPDATE dept_archive SET status = 'resolved', resolved_at = datetime('now') WHERE id = ?", [to_string(card_id)])
+  return "OK|error=" + to_string(err) + "%|class=" + cls + "|target=" + to_string(target) + "%"
+}
+
+// ── СВЕРКА ВИДА flag: доля категориальных исходов (приём legal
+// outcome=clean|rewrite_required — app.mlog:1230-1241, единственное живое
+// место, где исход пишется программно).
+pattern CardVerifyFlag(card_id: Float, flag: String, verified_by: String, caveats: String) -> String {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT card_kind AS kind, status, claim_json FROM dept_archive WHERE id = ?", [to_string(card_id)])
+  if length(rows) == 0.0 then { return "NO|карточка не найдена" }
+  let r = get(rows, 0.0)
+  if to_string(json_get(r, "kind", "")) != "flag" then { return "NO|вид карточки не flag" }
+  let st = to_string(json_get(r, "status", ""))
+  if st != "published" and st != "watching" then { return "NO|сверяется только published/watching (сейчас " + st + ")" }
+  let cj = parse_json(to_string(json_get(r, "claim_json", "{}")))
+  let allowed = to_string(json_get(cj, "allowed", ""))
+  if CardInSet(flag, allowed) == false then { return "NO|исход '" + flag + "' вне допустимых (" + allowed + ") — форма, не мнение" }
+  let predicted = to_string(json_get(cj, "predicted", ""))
+  let mut cls = "match"
+  if predicted != "" and predicted != flag then { cls = "mismatch" }
+  let _ = db_insert("dept_verification", { archive_id: card_id, outcome_flag: flag, error_class: cls, verified_by: verified_by, error_diagnosis: caveats })
+  let _ = db_execute("UPDATE dept_archive SET status = 'resolved', resolved_at = datetime('now') WHERE id = ?", [to_string(card_id)])
+  return "OK|flag=" + flag + "|class=" + cls
+}
+
+// ── СВЕРКА ВИДА check: артефакт с проверяемым качеством. Чек-лист приходит
+// программным JSON ([{"id":"wcag","pass":true},...]) — вердикт считает программа.
+// Замена qa.mlog:1127 ReleaseGate, который читал данные через db_execute
+// (db_execute -> Unit, REFERENCE.md:1192) и не имел ни одного вызова.
+pattern CardVerifyCheck(card_id: Float, checks_json: String, verdict: String, verified_by: String) -> String {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT card_kind AS kind, status FROM dept_archive WHERE id = ?", [to_string(card_id)])
+  if length(rows) == 0.0 then { return "NO|карточка не найдена" }
+  let r = get(rows, 0.0)
+  if to_string(json_get(r, "kind", "")) != "check" then { return "NO|вид карточки не check" }
+  let st = to_string(json_get(r, "status", ""))
+  if st != "published" and st != "watching" then { return "NO|сверяется только published/watching (сейчас " + st + ")" }
+  let checks = parse_json(checks_json)
+  if to_string(checks) == "()" then { return "NO|checks_json не JSON" }
+  let mut total = 0.0
+  let mut passed = 0.0
+  let mut failed_ids = ""
+  each c in checks {
+    total = total + 1.0
+    let ok = to_string(json_get(c, "pass", "false"))
+    if ok == "true" then { passed = passed + 1.0 }
+    if ok != "true" then { let failed_ids = failed_ids + to_string(json_get(c, "id", "?")) + "," }
+  }
+  if total == 0.0 then { return "NO|чек-лист пуст — качество не проверено" }
+  let mut cls = "pass"
+  let mut final = verdict
+  if passed < total then { cls = "fail" }
+  if cls == "fail" and verdict == "accepted" then { final = "rejected: чек-лист не пройден (" + failed_ids + ") — приёмка не может отменить программную проверку" }
+  let rate = passed / total * 100.0
+  let _ = db_insert("dept_verification", { archive_id: card_id, checks_json: checks_json, actual_value: rate, error_class: cls, verified_by: verified_by, error_diagnosis: "пройдено " + to_string(passed) + "/" + to_string(total) + "; провалы: " + failed_ids })
+  if cls == "fail" then {
+    let _ = db_execute("UPDATE dept_archive SET status = 'rework', rework_count = rework_count + 1 WHERE id = ?", [to_string(card_id)])
+  } else {
+    let _ = db_execute("UPDATE dept_archive SET status = 'resolved', resolved_at = datetime('now') WHERE id = ?", [to_string(card_id)])
+  }
+  return "OK|" + cls + "|" + to_string(rate) + "%|" + final
+}
+
+// ── СВЕРКА ВИДА receipt: действие во внешнем мире. Приёмка — как в нарядах
+// (dept/narad.mlog:190): ok закрывает, fail возвращает в rework и увеличивает
+// rework_count; first_try/lead time пишутся в факт (метрики DORA-типа).
+pattern CardVerifyReceipt(card_id: Float, receipt_ref: String, accepted: String, actor: String) -> String {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT card_kind AS kind, status, created_at, rework_count FROM dept_archive WHERE id = ?", [to_string(card_id)])
+  if length(rows) == 0.0 then { return "NO|карточка не найдена" }
+  let r = get(rows, 0.0)
+  if to_string(json_get(r, "kind", "")) != "receipt" then { return "NO|вид карточки не receipt" }
+  let st = to_string(json_get(r, "status", ""))
+  if st != "published" and st != "watching" and st != "rework" then { return "NO|приёмка возможна из published/watching/rework (сейчас " + st + ")" }
+  if length(trim(receipt_ref)) < 3.0 then { return "NO|нет доказательства эффекта (receipt_ref) — действие не подтверждено" }
+  let rw = to_float(to_string(json_get(r, "rework_count", "0")))
+  let mut ft = 1.0
+  if rw > 0.0 then { ft = 0.0 }
+  if accepted == "ok" then {
+    let _ = db_insert("dept_verification", { archive_id: card_id, receipt_ref: receipt_ref, outcome_flag: "accepted", error_class: "first_try=" + to_string(ft), verified_by: actor, error_diagnosis: "rework=" + to_string(rw) })
+    let _ = db_execute("UPDATE dept_archive SET status = 'resolved', resolved_at = datetime('now') WHERE id = ?", [to_string(card_id)])
+    return "OK|accepted|first_try=" + to_string(ft) + "|rework=" + to_string(rw)
+  }
+  if accepted == "fail" then {
+    let _ = db_insert("dept_verification", { archive_id: card_id, receipt_ref: receipt_ref, outcome_flag: "rejected", error_class: "rework", verified_by: actor, error_diagnosis: "возврат на доработку" })
+    let _ = db_execute("UPDATE dept_archive SET status = 'rework', rework_count = rework_count + 1 WHERE id = ?", [to_string(card_id)])
+    return "OK|rework|rework_count=" + to_string(rw + 1.0)
+  }
+  return "NO|вердикт должен быть ok или fail (получено: " + accepted + ")"
+}
+
+// ── ОЦЕНКА ОТДЕЛА: обобщение ScoreDept (app.mlog:1304), ComputeFinanceMAPE
+// (app.mlog:1259) и LZLabScore (dept/lz.mlog:1449). Правило честного n —
+// из LZLabScore: данных мало → «не хватает данных: причина», не суррогат и не 0.
+// Именно так устраняется «ложно-зелёный» /finance score (dept/finance.mlog:744:
+// «Missed tax deadlines: 0 (target 0)» при tax_calendar_events без писателя).
+pattern CardScore(dept: String, kind: String, min_n: Float) -> String {
+  let _ = CardEnsureSchema()
+  let head = "оценка " + dept + " / " + kind + ": "
+  if CardKindOk(kind) == false then { return head + "неизвестный вид" }
+  let total = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND card_kind = ? AND contour = 'owner'", [dept, kind])
+  let n_all = to_float(to_string(json_get(get(total, 0.0), "n", "0")))
+  let res = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND card_kind = ? AND contour = 'owner' AND status = 'resolved'", [dept, kind])
+  let n_res = to_float(to_string(json_get(get(res, 0.0), "n", "0")))
+  if n_all == 0.0 then { return head + "не хватает данных: карточек вида " + kind + " — 0 (отдел не оставляет проверяемых следов)" }
+  if n_res < min_n then { return head + "не хватает данных: разрешено " + to_string(n_res) + " из нужных " + to_string(min_n) + " (всего карточек " + to_string(n_all) + "); окно сверки ещё не наступило или исходы не записаны" }
+  if kind == "number" then {
+    // САМОПРОВЕРКА v2: в v1 сюда попадали строки с error_value = -1 (факт = 0,
+    // ошибка невычислима) и тянули MAPE вниз. Невычислимая пара исключается из
+    // знаменателя и сообщается отдельно — ровно тот баг, который найден в проде
+    // (app.mlog:1270-1278: `if actual != 0.0` пропускает слагаемое, но n растёт).
+    let rows = query("SELECT f.error_value AS e, f.error_class AS c FROM dept_verification f JOIN dept_archive k ON k.id = f.archive_id WHERE k.dept = ? AND k.card_kind = 'number' AND k.contour = 'owner' AND f.error_value IS NOT NULL AND f.error_value >= 0", [dept])
+    let skip = query("SELECT COUNT(*) AS n FROM dept_verification f JOIN dept_archive k ON k.id = f.archive_id WHERE k.dept = ? AND k.card_kind = 'number' AND k.contour = 'owner' AND f.error_value IS NOT NULL AND f.error_value < 0", [dept])
+    let mut s = 0.0
+    let mut n = 0.0
+    let mut over = 0.0
+    each r in rows {
+      s = s + to_float(to_string(json_get(r, "e", "0")))
+      n = n + 1.0
+      if to_string(json_get(r, "c", "")) == "overoptimistic" then { over = over + 1.0 }
+    }
+    if n == 0.0 then { return head + "не хватает данных: пар «прогноз-факт» — 0" }
+    return head + "MAPE=" + to_string(s / n) + "% (n=" + to_string(n) + "), систематика: завышение в " + to_string(over) + "/" + to_string(n) + ", вне расчёта (факт = 0): " + to_string(json_get(get(skip, 0.0), "n", "0"))
+  }
+  if kind == "flag" then {
+    let rows = query("SELECT f.error_class AS c FROM dept_verification f JOIN dept_archive k ON k.id = f.archive_id WHERE k.dept = ? AND k.card_kind = 'flag' AND k.contour = 'owner'", [dept])
+    let mut n = 0.0
+    let mut m = 0.0
+    each r in rows {
+      n = n + 1.0
+      if to_string(json_get(r, "c", "")) == "match" then { m = m + 1.0 }
+    }
+    if n == 0.0 then { return head + "не хватает данных: исходов — 0" }
+    return head + "совпадений=" + to_string(m / n * 100.0) + "% (n=" + to_string(n) + ")"
+  }
+  if kind == "check" then {
+    let rows = query("SELECT f.actual_value AS p, f.error_class AS c FROM dept_verification f JOIN dept_archive k ON k.id = f.archive_id WHERE k.dept = ? AND k.card_kind = 'check' AND k.contour = 'owner'", [dept])
+    let mut n = 0.0
+    let mut s = 0.0
+    let mut fails = 0.0
+    each r in rows {
+      n = n + 1.0
+      s = s + to_float(to_string(json_get(r, "p", "0")))
+      if to_string(json_get(r, "c", "")) == "fail" then { fails = fails + 1.0 }
+    }
+    if n == 0.0 then { return head + "не хватает данных: проверок — 0" }
+    return head + "средний чек-лист=" + to_string(s / n) + "% (n=" + to_string(n) + "), возвратов в доработку=" + to_string(fails)
+  }
+  // receipt — first_try yield + rework (DORA-эквивалент: lead time / change fail rate)
+  let rows = query("SELECT f.error_class AS c FROM dept_verification f JOIN dept_archive k ON k.id = f.archive_id WHERE k.dept = ? AND k.card_kind = 'receipt' AND k.contour = 'owner' AND f.outcome_flag = 'accepted'", [dept])
+  let mut n = 0.0
+  let mut ft = 0.0
+  each r in rows {
+    n = n + 1.0
+    if to_string(json_get(r, "c", "")) == "first_try=1" then { ft = ft + 1.0 }
+  }
+  if n == 0.0 then { return head + "не хватает данных: принятых действий — 0" }
+  return head + "first_try=" + to_string(ft / n * 100.0) + "% (n=" + to_string(n) + ")"
+}
+
+// ── ЧТО СОЗРЕЛО К СВЕРКЕ: общий ночной слот вместо 12 выключенных
+// department-слотов (dept/schedules.mlog:70-81 — finance/legal/marketing/
+// engineering disabled; у четырёх отделов нет ни одного живого расписания).
+pattern CardDue(now_iso: String) -> String {
+  let _ = CardEnsureSchema()
+  let mut out = "["
+  let rows = query("SELECT id, dept, card_kind AS kind, topic, verification_date AS verify_by, status FROM dept_archive WHERE status IN ('published','watching') AND verification_date <= ? ORDER BY verification_date ASC LIMIT 20", [now_iso])
+  let mut i = 0.0
+  each r in rows {
+    if i > 0.0 then { out = out + "," }
+    out = out + json_encode({id: to_float(to_string(json_get(r, "id", "0"))), dept: to_string(json_get(r, "dept", "")), kind: to_string(json_get(r, "kind", "")), topic: to_string(json_get(r, "topic", "")), verify_by: to_string(json_get(r, "verify_by", ""))})
+    i = i + 1.0
+  }
+  out = out + "]"
+  return out
+}
+
+// ── ПОКРЫТИЕ: доля ответов отдела, ставших карточками (правило 3 —
+// измеряем систему, которой пользуемся, а не удобную выборку).
+pattern CardCoverage(dept: String) -> String {
+  let _ = CardEnsureSchema()
+  let all = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = ? AND role = 'assistant' AND (content LIKE 'card:%' OR content LIKE 'bare|%')", [dept])
+  let n_all = to_float(to_string(json_get(get(all, 0.0), "n", "0")))
+  if n_all == 0.0 then { return "покрытие " + dept + ": не хватает данных — ответов не записано" }
+  let with_card = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = ? AND role = 'assistant' AND content LIKE 'card:%'", [dept])
+  let n_card = to_float(to_string(json_get(get(with_card, 0.0), "n", "0")))
+  return "покрытие " + dept + ": " + to_string(n_card / n_all * 100.0) + "% (" + to_string(n_card) + "/" + to_string(n_all) + " ответов стали карточками)"
+}
+
+// ── БЮДЖЕТ: ключ daily_budget_<dept> в system_settings (proxy/budget.py).
+// Проверка ДО записи, а не после — иначе «сначала потратили, потом заметили».
+pattern CardBudgetOk(dept: String, cost: Float) -> String {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT value FROM system_settings WHERE key = ?", ["daily_budget_" + dept])
+  if length(rows) == 0.0 then { return "PASS" }
+  let limit = to_float(to_string(json_get(get(rows, 0.0), "value", "0")))
+  if limit <= 0.0 then { return "PASS" }
+  let spent = query("SELECT COALESCE(SUM(budget_spent), 0) AS s FROM dept_archive WHERE dept = ? AND date(created_at) = date('now')", [dept])
+  let s = to_float(to_string(json_get(get(spent, 0.0), "s", "0")))
+  if s + cost > limit then { return "FAIL: B1 дневной бюджет " + dept + " исчерпан (" + to_string(s) + " + " + to_string(cost) + " > " + to_string(limit) + " USD)" }
+  return "PASS"
+}
+
+// ── Разрушающая уборка — ТОЛЬКО через грант (ADR-0203 офиса; образец
+// app.mlog:1755). Без grant_issue DELETE не выполняется.
+// D1 consequence: у прод-таблицы dept_verification есть FOREIGN KEY(archive_id)
+// REFERENCES dept_archive(id) (app.mlog:287), и рантайм его включает — удалить
+// карточку с историей сверки одним DELETE нельзя ([SQL_ERROR] FOREIGN KEY
+// constraint failed, проверено). Поэтому уборка двухшаговая: сначала факты
+// убираемых карточек, потом сами карточки; предикат сужен до строк контракта
+// (card_kind IS NOT NULL), потому что стол теперь общий для 15 отделов.
+pattern CardPurgeExpired(ttl_seconds: Float) -> String {
+  let _ = CardEnsureSchema()
+  let cond = "status = 'expired' AND card_kind IS NOT NULL AND resolved_at < datetime('now', '-90 days')"
+  let g1 = grant_issue("db:delete:dept_verification", ttl_seconds, "once")
+  let f = TryVal(try db_execute_with_grant(g1, "DELETE FROM dept_verification WHERE archive_id IN (SELECT id FROM dept_archive WHERE " + cond + ")"))
+  if to_string(f) == "()" then { return "NO|грант на уборку фактов не выдан" }
+  let g2 = grant_issue("db:delete:dept_archive", ttl_seconds, "once")
+  let c = TryVal(try db_execute_with_grant(g2, "DELETE FROM dept_archive WHERE " + cond))
+  if to_string(c) == "()" then { return "NO|грант на уборку карточек не выдан" }
+  return "OK|facts=" + to_string(f) + "|cards=" + to_string(c)
+}
+
+// Счётчик брака формы для теста/вахты: карточки контракта без структурного
+// утверждения (claim_json пуст) — их видно программно, а не «на глаз».
+pattern CardEmptyClaims() -> Float {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT COUNT(*) AS n FROM dept_archive WHERE card_kind IS NOT NULL AND (claim_json IS NULL OR claim_json = '' OR claim_json = '{}')", [])
+  return to_float(to_string(json_get(get(rows, 0.0), "n", "0")))
+}
+
+
+// ── LEGACY-ШОВ: /verify <dept> <id> <args> (app.mlog:1215). Без этой замены
+// общая таблица получает ВТОРОГО писателя статусов: VerifyArchiveEntry ставит
+// status='verified' — статуса нет в автомате карточки, поэтому ScoreDept
+// «видит» сверку, а CardScore/CardDue — нет (доказано тестом «ScoreDept …»).
+pattern CardVerifyDispatch(dept: String, entry_id: Float, raw_args: String) -> String {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT card_kind AS kind, status FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
+  if length(rows) == 0.0 then { return "NO|карточка " + to_string(entry_id) + " отдела " + dept + " не найдена" }
+  let kind = to_string(json_get(get(rows, 0.0), "kind", ""))
+  if starts_with(raw_args, "actual=") then {
+    if kind != "number" then { return "NO|вид карточки '" + kind + "', числом сверяется только number" }
+    let v = to_float_or(substring(raw_args, 7.0, length(raw_args)), -999999.0)
+    if v == -999999.0 then { return "NO|actual= не число: " + raw_args }
+    return CardVerifyNumber(entry_id, v, "owner", "/verify " + dept + " " + to_string(entry_id))
+  }
+  if starts_with(raw_args, "outcome=") then {
+    let flag = trim(substring(raw_args, 8.0, length(raw_args)))
+    if kind != "flag" then { return "NO|вид карточки '" + kind + "', флагом сверяется только flag" }
+    return CardVerifyFlag(entry_id, flag, "owner", "/verify " + dept + " " + to_string(entry_id))
+  }
+  if starts_with(raw_args, "receipt=") then {
+    let parts = split(substring(raw_args, 8.0, length(raw_args)), " ")
+    let ref = trim(to_string(get(parts, 0.0)))
+    let mut verdict = "ok"
+    if length(parts) > 1.0 then { verdict = trim(to_string(get(parts, 1.0))) }
+    if kind != "receipt" then { return "NO|вид карточки '" + kind + "', приёмкой сверяется только receipt" }
+    return CardVerifyReceipt(entry_id, ref, verdict, "owner")
+  }
+  if starts_with(raw_args, "checks=") then {
+    if kind != "check" then { return "NO|вид карточки '" + kind + "', чек-листом сверяется только check" }
+    let js = substring(raw_args, 7.0, length(raw_args))
+    return CardVerifyCheck(entry_id, js, "accepted", "owner")
+  }
+  return "NO|/verify требует программного основания: actual=<число> | outcome=<флаг> | checks=<json> | receipt=<ссылка> [ok|fail]. Свободный текст метрикой не становится (D6/D8)"
+}
+
+// ── БЛОК ДЛЯ /score: ScoreDept (app.mlog:1304) считает только 'verified' и
+// 'drafted' — статусы карточки он не видит. Этот блок вставляется в ответ
+// рядом с legacy-счётчиками (правило 4 §4 плана: команды не меняются).
+pattern CardLegacyCounters(dept: String) -> String {
+  let _ = CardEnsureSchema()
+  let v = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND status = 'verified'", [dept])
+  let d = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND status = 'drafted'", [dept])
+  return "verified=" + to_string(json_get(get(v, 0.0), "n", "0")) + "|drafted=" + to_string(json_get(get(d, 0.0), "n", "0"))
+}
+
+pattern CardScoreBlock(dept: String) -> String {
+  let _ = CardEnsureSchema()
+  let total = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND card_kind IS NOT NULL AND contour = 'owner'", [dept])
+  let n = to_string(json_get(get(total, 0.0), "n", "0"))
+  let pub = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND contour = 'owner' AND status = 'published'", [dept])
+  let wat = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND contour = 'owner' AND status = 'watching'", [dept])
+  let res = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND contour = 'owner' AND status = 'resolved'", [dept])
+  let rw = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND contour = 'owner' AND status = 'rework'", [dept])
+  let ga = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = ? AND contour = 'owner' AND status = 'gated'", [dept])
+  return "Карточки (контур владельца): " + n + "\nОпубликовано: " + to_string(json_get(get(pub, 0.0), "n", "0")) + "\nНа вахте: " + to_string(json_get(get(wat, 0.0), "n", "0")) + "\nРазрешено: " + to_string(json_get(get(res, 0.0), "n", "0")) + "\nВ доработке: " + to_string(json_get(get(rw, 0.0), "n", "0")) + "\nЗаблокировано формой: " + to_string(json_get(get(ga, 0.0), "n", "0")) + "\n" + CardCoverage(dept)
+}
+
+// ── АРИФМЕТИКА BENCH-КОНТУРА (ответ на вопрос ревью: «сколько карточек на
+// один bench-вопрос с 5 горизонтами?»). Политика "details" — принятая в D2:
+// строка прогноза живёт в деталях ОСП (osp_forecast, #624), карточка в общем
+// столе отдела НЕ создаётся; политика "cards" — каждая (вопрос, горизонт)
+// карточкой в dept_archive. Числа считает программа, не модель (D6).
+pattern CardBenchCards(n_questions: Float, n_horizons: Float, policy: String) -> String {
+  let rows = n_questions * n_horizons
+  if policy == "details" then { return "cards=0|details=" + to_string(rows) }
+  if policy == "cards" then { return "cards=" + to_string(rows) + "|details=" + to_string(rows) }
+  return "NO|неизвестная политика: " + policy
+}
+
+// ── СИРОТЫ: общий стол означает, что факт без карточки (и карточка без
+// обязательных полей) должен находиться программно, а не «в глазах ревьюера».
+pattern CardAuditOrphans() -> String {
+  let _ = CardEnsureSchema()
+  let orph = query("SELECT COUNT(*) AS n FROM dept_verification v WHERE v.archive_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dept_archive a WHERE a.id = v.archive_id)", [])
+  let empty = query("SELECT COUNT(*) AS n FROM dept_archive WHERE card_kind IS NOT NULL AND (claim_json IS NULL OR claim_json = '' OR claim_json = '{}')", [])
+  let nocont = query("SELECT COUNT(*) AS n FROM dept_archive WHERE card_kind IS NOT NULL AND (contour IS NULL OR contour = '')", [])
+  return "orphans=" + to_string(json_get(get(orph, 0.0), "n", "0")) + "|empty_claims=" + to_string(json_get(get(empty, 0.0), "n", "0")) + "|no_contour=" + to_string(json_get(get(nocont, 0.0), "n", "0"))
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// ТЕСТЫ
+// ══════════════════════════════════════════════════════════════════════════
+
+test "словари: kind и status валидируются из одного источника" {
+  assert_eq(CardKindOk("number"), true)
+  assert_eq(CardKindOk("receipt"), true)
+  assert_eq(CardKindOk("forecast"), false)
+  assert_eq(CardStatusOk("watching"), true)
+  assert_eq(CardStatusOk("done"), false)
+}
+
+test "автомат статусов: легальные переходы" {
+  assert_eq(CardCanTransition("drafted", "published"), "OK")
+  assert_eq(CardCanTransition("published", "watching"), "OK")
+  assert_eq(CardCanTransition("watching", "resolved"), "OK")
+  assert_eq(CardCanTransition("rework", "published"), "OK")
+}
+
+test "автомат статусов: нелегальные и терминальные" {
+  assert_contains(CardCanTransition("drafted", "resolved"), "NO")
+  assert_contains(CardCanTransition("resolved", "published"), "NO: resolved — терминальный")
+  assert_contains(CardCanTransition("published", "published"), "NO: переход в себя")
+  assert_contains(CardCanTransition("bogus", "published"), "NO: неизвестный статус")
+}
+
+test "форма: пустое утверждение и прошедшая дата блокируются" {
+  assert_contains(CardFormGates("finance", "number", "Кассовый разрыв ноябрь", "", "2026-12-31", "{}"), "FAIL: F3")
+  assert_contains(CardFormGates("finance", "number", "Кассовый разрыв ноябрь", "100000 BYN", "2020-01-01", "{}"), "FAIL: F4")
+  assert_contains(CardFormGates("finance", "number", "Кассовый разрыв ноябрь", "100000 BYN", "31.12.2026", "{}"), "FAIL: F4")
+  assert_contains(CardFormGates("finance", "number", "Касс", "100000", "2026-12-31", "{}"), "FAIL: F2")
+  assert_contains(CardFormGates("finance", "horoscope", "Тема достаточно длинная", "claim", "2026-12-31", "{}"), "FAIL: F1")
+}
+
+test "форма: обязательные поля вида исхода" {
+  assert_contains(CardFormGates("finance", "number", "Кассовый разрыв ноябрь", "100000 BYN", "2026-12-31", "{}"), "FAIL: F6")
+  assert_eq(CardFormGates("finance", "number", "Кассовый разрыв ноябрь", "100000 BYN", "2026-12-31", "{\"value\":100000,\"horizon_days\":30}"), "PASS")
+  assert_contains(CardFormGates("legal", "flag", "Оценка договора поставки", "clean", "2026-12-31", "{}"), "FAIL: F6")
+  assert_eq(CardFormGates("legal", "flag", "Оценка договора поставки", "clean", "2026-12-31", "{\"allowed\":\"clean|rewrite_required\"}"), "PASS")
+  assert_contains(CardFormGates("qa", "check", "Релизный чек-лист", "passed", "2026-12-31", "{}"), "FAIL: F6")
+  assert_contains(CardFormGates("kavalnya", "receipt", "Сборка стенда", "сделано", "2026-12-31", "{}"), "FAIL: F6")
+}
+
+test "поправка 2: несогласие не блокируется, блокируется отсутствие обоснования" {
+  assert_eq(CardDissentGate("", ""), "PASS")
+  assert_eq(CardDissentGate("no", ""), "PASS")
+  assert_contains(CardDissentGate("yes", "не согласен"), "FAIL: D1")
+  assert_contains(CardDissentGate("yes", "рынок ошибается"), "FAIL: D1")
+  let ok = CardDissentGate("yes", "Расчёт: выручка Q3 = 145200 BYN, источник https://bss/otchet, отклонение 12%")
+  assert_contains(ok, "WARN: W6")
+}
+
+test "запись: валидная карточка публикуется и отвечает из строки БД" {
+  let r = CardSave("finance", "number", "Кассовый разрыв ноябрь 2026", "100000 BYN",
+    "{\"value\":100000,\"horizon_days\":30}", "2026-12-31", "stated", "yana:delegate:finance", "no", "", "{}", 0.0)
+  assert_contains(r, "OK|")
+  assert_contains(r, "|published")
+  let rows = query("SELECT status, provenance, review_status FROM dept_archive WHERE topic = 'Кассовый разрыв ноябрь 2026'", [])
+  assert_eq(length(rows), 1.0)
+  assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "published")
+  assert_eq(to_string(json_get(get(rows, 0.0), "review_status", "?")), "approved")
+}
+
+test "запись: провал формы → gated, к сверке не допускается" {
+  let r = CardSave("finance", "number", "Прогноз с пустым утверждением", "", "{}", "2026-12-31", "stated", "test", "no", "", "{}", 0.0)
+  assert_contains(r, "GATED|")
+  let id = to_float(get(split(r, "|"), 1.0))
+  let v = CardVerifyNumber(id, 90000.0, "owner", "")
+  assert_contains(v, "NO|сверяется только published/watching")
+}
+
+test "запись: выведенное знание до ревью понижено (provenance=inferred → review pending)" {
+  let r = CardSave("lz", "flag", "Гипотеза о развороте тренда", "hot", "{\"allowed\":\"hot|cooled\"}", "2026-12-31", "inferred", "lz:night-phase", "no", "", "{}", 0.0)
+  assert_contains(r, "OK|")
+  let id = to_float(get(split(r, "|"), 1.0))
+  let rows = query("SELECT provenance, review_status FROM dept_archive WHERE id = ?", [to_string(id)])
+  assert_eq(to_string(json_get(get(rows, 0.0), "provenance", "?")), "inferred")
+  assert_eq(to_string(json_get(get(rows, 0.0), "review_status", "?")), "pending")
+}
+
+test "number: ошибку считает программа (MAPE), а не модель" {
+  assert_eq(abs(CardErrorPct(100000.0, 90000.0) - 11.111111) < 0.001, true)
+  assert_eq(CardErrorClass(100000.0, 90000.0, 5.0), "overoptimistic")
+  assert_eq(CardErrorClass(80000.0, 90000.0, 5.0), "underoptimistic")
+  assert_eq(CardErrorClass(90000.0, 90000.0, 5.0), "accurate")
+  assert_contains(CardErrorClass(1.0, 0.0, 5.0), "uncomputable")
+  assert_eq(CardTargetPct("number", 30.0, 0.0), 5.0)
+  assert_eq(CardTargetPct("number", 90.0, 0.0), 15.0)
+  assert_eq(CardTargetPct("number", 90.0, 20.0), 20.0)
+}
+
+test "number: сквозная сверка карточки — факт, ошибка, класс, статус" {
+  let r = CardSave("finance", "number", "Выручка декабрь 2026 (сквозной)", "145200 BYN",
+    "{\"value\":145200,\"horizon_days\":60}", "2026-12-31", "stated", "finance:daily", "no", "", "{}", 0.0)
+  let id = to_float(get(split(r, "|"), 1.0))
+  let v = CardVerifyNumber(id, 130000.0, "owner", "факт по выписке банка")
+  assert_contains(v, "OK|error=")
+  assert_contains(v, "class=overoptimistic")
+  assert_contains(v, "target=10%")
+  let rows = query("SELECT status, resolved_at FROM dept_archive WHERE id = ?", [to_string(id)])
+  assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "resolved")
+  let facts = query("SELECT actual_value, error_value FROM dept_verification WHERE archive_id = ?", [to_string(id)])
+  assert_eq(length(facts), 1.0)
+  assert_eq(to_float(to_string(json_get(get(facts, 0.0), "actual_value", "0"))), 130000.0)
+}
+
+test "number: повторная сверка терминальной карточки запрещена (история не переписывается)" {
+  let rows = query("SELECT id FROM dept_archive WHERE topic = 'Выручка декабрь 2026 (сквозной)'", [])
+  let id = to_float(to_string(json_get(get(rows, 0.0), "id", "0")))
+  assert_contains(CardVerifyNumber(id, 1.0, "attacker", ""), "NO|сверяется только published/watching")
+}
+
+test "flag: исход вне допустимых — форма, а не мнение; совпадение считается" {
+  let r = CardSave("legal", "flag", "Договор поставки: оценка риска", "clean",
+    "{\"allowed\":\"clean|rewrite_required\",\"predicted\":\"clean\"}", "2026-12-31", "stated", "legal:daily", "no", "", "{}", 0.0)
+  let id = to_float(get(split(r, "|"), 1.0))
+  assert_contains(CardVerifyFlag(id, "maybe", "owner", ""), "NO|исход 'maybe' вне допустимых")
+  let v = CardVerifyFlag(id, "rewrite_required", "owner", "контрагент потребовал правки")
+  assert_contains(v, "OK|flag=rewrite_required|class=mismatch")
+}
+
+test "check: вердикт считает программа; приёмка не отменяет провал чек-листа" {
+  let r = CardSave("qa", "check", "Релиз 0.38: стенд офиса", "готов к релизу",
+    "{\"checks\":\"suite,security,ai_evals\"}", "2026-12-31", "stated", "qa:release", "no", "", "{}", 0.0)
+  let id = to_float(get(split(r, "|"), 1.0))
+  let v = CardVerifyCheck(id, "[{\"id\":\"suite\",\"pass\":true},{\"id\":\"security\",\"pass\":false},{\"id\":\"ai_evals\",\"pass\":true}]", "accepted", "owner")
+  assert_contains(v, "OK|fail|66.666")
+  assert_contains(v, "rejected: чек-лист не пройден")
+  let rows = query("SELECT status, rework_count FROM dept_archive WHERE id = ?", [to_string(id)])
+  assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "rework")
+  assert_eq(to_float(to_string(json_get(get(rows, 0.0), "rework_count", "0"))), 1.0)
+}
+
+test "check: полный чек-лист закрывает карточку" {
+  let r = CardSave("qa", "check", "Релиз 0.38: второй заход", "готов после правок",
+    "{\"checks\":\"suite,security,ai_evals\"}", "2026-12-31", "stated", "qa:release", "no", "", "{}", 0.0)
+  let id = to_float(get(split(r, "|"), 1.0))
+  let v = CardVerifyCheck(id, "[{\"id\":\"suite\",\"pass\":true},{\"id\":\"security\",\"pass\":true},{\"id\":\"ai_evals\",\"pass\":true}]", "accepted", "owner")
+  assert_contains(v, "OK|pass|100%")
+  let rows = query("SELECT status FROM dept_archive WHERE id = ?", [to_string(id)])
+  assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "resolved")
+}
+
+test "receipt: приёмка как в нарядах — ok закрывает, fail возвращает в rework" {
+  let r = CardSave("kavalnya", "receipt", "Сборка стенда 0.38", "стенд поднят, krovi нет",
+    "{\"effect\":\"стенд 0.38 доступен, smoke-тест зелёный\"}", "2026-12-31", "stated", "narad:620", "no", "", "{}", 0.0)
+  let id = to_float(get(split(r, "|"), 1.0))
+  assert_contains(CardVerifyReceipt(id, "ref", "maybe", "owner"), "NO|вердикт должен быть ok или fail")
+  assert_contains(CardVerifyReceipt(id, "", "ok", "owner"), "NO|нет доказательства эффекта")
+  assert_contains(CardVerifyReceipt(id, "https://render/staging", "fail", "owner"), "OK|rework|rework_count=1")
+  let again = CardVerifyReceipt(id, "https://render/staging#2", "ok", "owner")
+  assert_contains(again, "OK|accepted|first_try=0|rework=1")
+}
+
+test "оценка: честное n вместо ложно-зелёного нуля" {
+  let s = CardScore("finance", "number", 10.0)
+  assert_contains(s, "не хватает данных")
+  assert_contains(s, "из нужных 10")
+  let empty = CardScore("marketing", "number", 10.0)
+  assert_contains(empty, "не хватает данных: карточек вида number — 0")
+}
+
+test "оценка: при достаточном n считает программно" {
+  let mut i = 0.0
+  while i < 10.0 {
+    let rr = CardSave("marketing", "number", "Прогноз охвата кампании #" + to_string(i), "100000",
+      "{\"value\":100000,\"horizon_days\":30}", "2026-12-31", "stated", "marketing:daily", "no", "", "{}", 0.0)
+    let id = to_float(get(split(rr, "|"), 1.0))
+    let _ = CardVerifyNumber(id, 95000.0, "owner", "")
+    i = i + 1.0
+  }
+  let s = CardScore("marketing", "number", 10.0)
+  assert_contains(s, "MAPE=")
+  assert_contains(s, "n=10")
+  assert_contains(s, "завышение в 10/10")
+  // MAPE = |100000-95000|/95000*100 = 5.2631...% — число программы, не модели
+  assert_contains(s, "5.26315")
+}
+
+test "созрело к сверке: общий слот вместо 12 выключенных" {
+  let r = CardSave("lz", "flag", "Созревшая карточка ЛЗ", "hot", "{\"allowed\":\"hot|cooled\"}", "2026-12-31", "stated", "lz", "no", "", "{}", 0.0)
+  let id = to_float(get(split(r, "|"), 1.0))
+  // Окно сверки создать в будущем нельзя (гейт F4) — «созревание» имитируем
+  // так, как это делает время: окно уже наступило.
+  let _ = db_execute("UPDATE dept_archive SET verification_date = '2026-11-01' WHERE id = ?", [to_string(id)])
+  let due = CardDue("2026-11-02")
+  assert_contains(due, "Созревшая карточка ЛЗ")
+  assert_contains(due, "\"dept\":\"lz\"")
+  let notdue = CardDue("2020-01-01")
+  assert_eq(notdue, "[]")
+}
+
+test "покрытие: доля ответов, ставших карточками" {
+  let _ = CardLogBareAnswer("finance", "справка о ставках")
+  let _ = CardLogBareAnswer("finance", "консультация без прогноза")
+  let cov = CardCoverage("finance")
+  assert_contains(cov, "покрытие finance:")
+  assert_contains(cov, "%")
+  let none = CardCoverage("design")
+  assert_contains(none, "не хватает данных")
+}
+
+test "бюджет: ключ daily_budget_<dept> проверяется до записи" {
+  let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('daily_budget_osp', '2.00')", [])
+  let ok = CardSave("osp", "number", "Прогноз в пределах бюджета", "0.6", "{\"value\":0.6,\"horizon_days\":30}", "2026-12-31", "stated", "osp", "no", "", "{}", 1.5)
+  assert_contains(ok, "OK|")
+  let over = CardSave("osp", "number", "Прогноз сверх бюджета", "0.7", "{\"value\":0.7,\"horizon_days\":30}", "2026-12-31", "stated", "osp", "no", "", "{}", 1.5)
+  assert_contains(over, "GATED|")
+  assert_contains(over, "B1 дневной бюджет osp исчерпан")
+}
+
+test "форма прошла, бюджет исчерпан → gated (регрессия на склейку отчёта)" {
+  let r = CardSave("osp", "number", "Прогноз после исчерпания бюджета", "0.5",
+    "{\"value\":0.5,\"horizon_days\":30}", "2026-12-31", "stated", "osp", "no", "", "{}", 5.0)
+  assert_contains(r, "GATED|")
+  assert_contains(r, "PASS | FAIL: B1")
+  let rows = query("SELECT status, gate_report FROM dept_archive WHERE topic = 'Прогноз после исчерпания бюджета'", [])
+  assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "gated")
+  assert_contains(to_string(json_get(get(rows, 0.0), "gate_report", "?")), "B1 дневной бюджет osp исчерпан")
+}
+
+test "грант: разрушающая уборка только с grant_issue" {
+  let _ = db_execute("UPDATE dept_archive SET status = 'expired', resolved_at = datetime('now', '-200 days') WHERE topic = 'Прогноз охвата кампании #0'", [])
+  let r = CardPurgeExpired(60.0)
+  assert_contains(r, "OK|facts=")
+  assert_contains(r, "|cards=1")
+  let left = query("SELECT COUNT(*) AS n FROM dept_archive WHERE topic = 'Прогноз охвата кампании #0'", [])
+  assert_eq(to_float(to_string(json_get(get(left, 0.0), "n", "1"))), 0.0)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ТЕСТЫ v2 — добавлены портом по D1 (7 новых; всего 30)
+// ══════════════════════════════════════════════════════════════════════════
+
+test "D1: ноль новых таблиц, 17 аддитивных колонок, миграция идемпотентна" {
+  let m1 = CardMigrate()
+  assert_contains(m1, "tables=0|cols=20|new=17")
+  assert_contains(m1, "failed=0")
+  let m2 = CardMigrate()
+  assert_eq(m2, "OK|tables=0|cols=20|new=17|added=0|failed=0")
+  // таблицы v1 в БД нет — контракт живёт в таблицах прода
+  let gone = query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('dept_card','dept_card_fact','dept_answer_log')", [])
+  assert_eq(to_float(to_string(json_get(get(gone, 0.0), "n", "1"))), 0.0)
+  // колонки действительно существуют (а не «кажется, что ALTER прошёл»)
+  assert_eq(CardColumnExists("dept_archive", "card_kind"), true)
+  assert_eq(CardColumnExists("dept_archive", "contour"), true)
+  assert_eq(CardColumnExists("dept_verification", "error_value"), true)
+  assert_eq(CardColumnExists("dept_verification", "verified_by"), true)
+}
+
+test "D1: legacy /verify идёт через автомат, статуса 'verified' не появляется" {
+  let r = CardSave("dispatch", "number", "Выручка январь 2027 (legacy-шов)", "210000 BYN",
+    "{\"value\":210000,\"horizon_days\":30}", "2027-02-28", "stated", "yana:delegate:finance", "no", "", "{}", 0.0)
+  assert_contains(r, "OK|")
+  let id = to_float(get(split(r, "|"), 1.0))
+  let v = CardVerifyDispatch("dispatch", id, "actual=200000")
+  assert_contains(v, "OK|error=5%")   // to_string(5.0) = "5" — без хвоста ".0"
+  let rows = query("SELECT status FROM dept_archive WHERE id = ?", [to_string(id)])
+  assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "resolved")
+  // статус 'verified' (app.mlog:1224) не появляется — писатель статусов один
+  assert_eq(CardLegacyCounters("dispatch"), "verified=0|drafted=0")
+  // свободный текст основанием не является (D6/D8)
+  assert_contains(CardVerifyDispatch("dispatch", id, "вроде совпало"), "NO|/verify требует программного основания")
+  // чужой вид исхода отвергается формой, а не мнением
+  assert_contains(CardVerifyDispatch("dispatch", id, "outcome=clean"), "NO|вид карточки")
+}
+
+test "D2/инвариант 5: контур bench не смешивается с метриками владельца" {
+  let own = CardSaveContour("ospbench", "number", "Владелец: курс на конец квартала", "2.9",
+    "{\"value\":2.9,\"horizon_days\":60}", "2027-01-31", "stated", "osp", "no", "", "{}", 0.0, "owner")
+  assert_contains(own, "OK|")
+  let ben = CardSaveContour("ospbench", "number", "Bench: вопрос раунда 2026-12 h3", "0.62",
+    "{\"value\":0.62,\"horizon_days\":90}", "2027-03-01", "stated", "forecastbench", "no", "", "{}", 0.0, "bench")
+  assert_contains(ben, "OK|")
+  // метрика отдела считает ТОЛЬКО контур владельца (1 карточка, а не 2)
+  let s = CardScore("ospbench", "number", 1.0)
+  assert_contains(s, "не хватает данных: разрешено 0 из нужных 1 (всего карточек 1)")
+  // контур неизменяем: переход статуса его не трогает
+  let bid = to_float(get(split(ben, "|"), 1.0))
+  let _ = CardTransition(bid, "watching", "вахта по горизонту", "osp")
+  let rows = query("SELECT contour FROM dept_archive WHERE id = ?", [to_string(bid)])
+  assert_eq(to_string(json_get(get(rows, 0.0), "contour", "?")), "bench")
+  // неизвестный контур отвергается до записи
+  assert_contains(CardSaveContour("ospbench", "number", "Контур вне списка", "0.5", "{\"value\":0.5}", "2027-01-31", "stated", "osp", "no", "", "{}", 0.0, "market"), "NO|неизвестный контур")
+}
+
+test "D2: кардинальность bench — 150 вопросов × 5 горизонтов" {
+  // принятая политика (D2 + поправка 3 владельца): bench живёт в деталях ОСП,
+  // общий стол отдела не засоряется 750 строками на раунд
+  assert_eq(CardBenchCards(150.0, 5.0, "details"), "cards=0|details=750")
+  assert_eq(CardBenchCards(100.0, 5.0, "details"), "cards=0|details=500")
+  // отвергнутая альтернатива: карточка на каждый (вопрос, горизонт)
+  assert_eq(CardBenchCards(150.0, 5.0, "cards"), "cards=750|details=750")
+  assert_contains(CardBenchCards(150.0, 5.0, "unknown"), "NO|неизвестная политика")
+  // фактически: в общем столе нет ни одной bench-карточки
+  let n = query("SELECT COUNT(*) AS n FROM dept_archive WHERE contour = 'bench' AND dept = 'ospbench2'", [])
+  assert_eq(to_float(to_string(json_get(get(n, 0.0), "n", "1"))), 0.0)
+}
+
+test "D1: сирота невозможна — FK отвергает факт без карточки; брак полей виден" {
+  assert_contains(CardAuditOrphans(), "orphans=0")
+  // FOREIGN KEY(archive_id) REFERENCES dept_archive(id) (app.mlog:287) —
+  // факт без карточки не вставляется вовсе: гарантия на уровне БД, не проверки
+  let bad = TryVal(try db_execute("INSERT INTO dept_verification (archive_id, actual_outcome, error_diagnosis) VALUES (987654, 'orphan', 'проба: факт без карточки')", []))
+  assert_eq(to_string(bad), "()")
+  assert_contains(CardAuditOrphans(), "orphans=0")
+  // второй класс брака — карточка без структурного утверждения: находится программно
+  let before = CardEmptyClaims()
+  let _ = db_execute("INSERT INTO dept_archive (dept, topic, card_kind, status) VALUES ('orphanaudit', 'Карточка без claim_json', 'number', 'drafted')", [])
+  assert_eq(CardEmptyClaims(), before + 1.0)
+  assert_contains(CardAuditOrphans(), "no_contour=0")
+}
+
+test "D1: ScoreDept без правки не видит карточных статусов — нужен CardScoreBlock" {
+  let r = CardSave("scoreblk", "flag", "Юристы: договор поставки №17", "clean",
+    "{\"allowed\":\"clean|rewrite_required\",\"predicted\":\"clean\"}", "2027-01-31", "stated", "yana:delegate:legal", "no", "", "{}", 0.0)
+  let id = to_float(get(split(r, "|"), 1.0))
+  let _ = CardVerifyFlag(id, "clean", "owner", "сверка для блока оценки")
+  // legacy-счётчики ScoreDept (app.mlog:1307-1308) пусты: 'verified'/'drafted' нет
+  assert_eq(CardLegacyCounters("scoreblk"), "verified=0|drafted=0")
+  // блок карточки показывает реальное состояние
+  let b = CardScoreBlock("scoreblk")
+  assert_contains(b, "Карточки (контур владельца): 1")
+  assert_contains(b, "Разрешено: 1")
+  assert_contains(b, "покрытие scoreblk:")
+}
+
+test "D1: журнал ответов — существующая dialog_history, новых таблиц нет" {
+  let _ = CardLogBareAnswer("covprobe", "справка без утверждения")
+  let _ = CardLogBareAnswer("covprobe", "консультация без утверждения")
+  let r = CardSave("covprobe", "number", "Охват кампании, декабрь 2026", "12000",
+    "{\"value\":12000,\"horizon_days\":30}", "2027-01-15", "stated", "marketing", "no", "", "{}", 0.0)
+  assert_contains(r, "OK|")
+  let cov = CardCoverage("covprobe")
+  assert_contains(cov, "1/3 ответов стали карточками")
+  // маркеры лежат в той таблице, куда уже пишет шов (app.mlog:592-599)
+  let rows = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = 'covprobe' AND role = 'assistant'", [])
+  assert_eq(to_float(to_string(json_get(get(rows, 0.0), "n", "0"))), 3.0)
+  assert_contains(CardCoverage("nodata"), "не хватает данных")
+}
+
+test "D1: legacy ComputeFinanceMAPE (app.mlog:1259) оживает на карточках" {
+  let mut i = 0.0
+  while i < 10.0 {
+    let r = CardSave("mapeprobe", "number", "Прогноз выручки №" + to_string(i) + " (MAPE-проба)",
+      "100000 BYN", "{\"value\":100000,\"horizon_days\":30}", "2027-01-31", "stated", "finance", "no", "", "{}", 0.0)
+    let id = to_float(get(split(r, "|"), 1.0))
+    let _ = CardVerifyNumber(id, 95000.0, "owner", "проба MAPE")
+    i = i + 1.0
+  }
+  // запрос байт в байт как в проде (app.mlog:1260), только отдел параметром
+  let rows = query("SELECT a.forecast_value, v.actual_value FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = ? AND a.forecast_value IS NOT NULL AND v.actual_value IS NOT NULL", ["mapeprobe"])
+  assert_eq(length(rows), 10.0)
+  let f = to_float(to_string(json_get(get(rows, 0.0), "forecast_value", "0")))
+  let a = to_float(to_string(json_get(get(rows, 0.0), "actual_value", "0")))
+  assert_eq(abs(f - 100000.0) < 0.001, true)
+  assert_eq(abs(a - 95000.0) < 0.001, true)
+  // знаменатель MAPE: ошибка считается по строкам с фактом, а не «по всем подряд»
+  assert_eq(abs(CardErrorPct(f, a) - 5.263157) < 0.001, true)
+}
+
+test "v2-самопроверка: невычислимая пара (факт = 0) не уходит в знаменатель MAPE" {
+  let r = CardSave("zeroactual", "number", "Прогноз с нулевым фактом (самопроверка)", "5000 BYN",
+    "{\"value\":5000,\"horizon_days\":30}", "2027-01-31", "stated", "finance", "no", "", "{}", 0.0)
+  let id = to_float(get(split(r, "|"), 1.0))
+  let v = CardVerifyNumber(id, 0.0, "owner", "факт оказался нулевым")
+  assert_contains(v, "uncomputable")
+  let r2 = CardSave("zeroactual", "number", "Прогноз с нормальным фактом (самопроверка)", "5000 BYN",
+    "{\"value\":5000,\"horizon_days\":30}", "2027-01-31", "stated", "finance", "no", "", "{}", 0.0)
+  let id2 = to_float(get(split(r2, "|"), 1.0))
+  let _ = CardVerifyNumber(id2, 4750.0, "owner", "обычная сверка")
+  let s = CardScore("zeroactual", "number", 1.0)
+  print("zeroactual: " + s)
+  // MAPE считается по ОДНОЙ паре (5000→4750 = 5.26%), а не по двум с -1 внутри
+  assert_contains(s, "MAPE=5.2631")
+  assert_contains(s, "n=1")
+  assert_contains(s, "вне расчёта (факт = 0): 1")
+}
