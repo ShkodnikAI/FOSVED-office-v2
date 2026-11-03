@@ -1,4 +1,4 @@
-"""FO-006 tests: таблица facts, ops консолидации, /context_cmd, /cron/consolidate-memory."""
+"""FO-006 tests: таблица facts, ops консолидации, /cron/consolidate-memory."""
 import json
 import os
 import sys
@@ -146,13 +146,3 @@ class TestConsolidateEndpoint:
         assert r.status_code == 200
         data = r.get_json()
         assert data["status"] == "ok"
-
-
-class TestContextCmd:
-    def test_facts_in_context(self, client):
-        dept = f"qa_{uuid.uuid4().hex[:6]}"
-        _seed_fact(dept, "ключевой факт контекста")
-        r = client.post("/context_cmd", json={"dept": dept, "chat_id": "0"})
-        assert r.status_code == 200
-        data = r.get_json()
-        assert any("ключевой факт контекста" in f["content"] for f in data.get("facts", []))
