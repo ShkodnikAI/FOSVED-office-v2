@@ -1595,12 +1595,26 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   let proxy_result = TryVal(try CallLLMResilient(dept, messages))
   if to_string(proxy_result) == "()" then {
     let _ = AuditLog("llm_fail", dept, "CallLLMResilient crashed")
-    return ""
+    // #636 A2c: отказ отдела громкий — владельцу причина вместо тишины,
+    // в trace_log строка status='error' (счётчик отказов — в утренней сводке)
+    let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('dept_fail','system',?,'CallLLMResilient crashed','error')", [dept])
+    return "Отдел " + dept + " не ответил: сбой вызова LLM. Повтори запрос позже или проверь прокси LLM."
   }
   let parsed = TryVal(try parse_json(proxy_result))
   if to_string(parsed) == "()" then {
     let _ = AuditLog("llm_fail", dept, "parse_json on proxy_result failed: " + substring(to_string(proxy_result), 0.0, 100.0))
-    return ""
+    // #636 A2c: громкий отказ вместо тишины (см. ветку выше)
+    let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('dept_fail','system',?,'parse_json on proxy_result failed','error')", [dept])
+    return "Отдел " + dept + " не ответил: неразборчивый ответ LLM. Повтори запрос позже."
+  }
+  // #636 A2c: основной путь «LLM недоступен» — CallLLMResilient не бросает,
+  // а возвращает {reply: "Error: all models failed (...)", error: "..."}.
+  // Отдел не молчит и не отдаёт сырой «Error: …»: владелец получает причину,
+  // в trace_log — строка status='error' (счётчик — в утренней сводке).
+  let llm_error = redact(to_string(json_get(parsed, "error", "")), "all")
+  if llm_error != "" then {
+    let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('dept_fail','system',?,'all models failed: ' + ?,'error')", [dept, substring(llm_error, 0.0, 120.0)])
+    return "Отдел " + dept + " не ответил: LLM недоступен (" + llm_error + "). Повтори запрос позже."
   }
   let reply = redact(to_string(json_get(parsed, "reply", "Error: empty reply")), "all")
   // TEAM-2 #481 A.3: маркеры ASK — консультации коллег и второй проход;
@@ -1639,6 +1653,26 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   let _ = RecordLearning(dept, query, reply, verify_score)
   let _ = AuditLog("dept_query", dept, "model=" + used_model + " tokens=" + tokens_in + "+" + tokens_out + " verify=" + verify_score + " query: " + substring(query, 0.0, 100.0))
   return final_reply
+}
+
+// ── Наряд #636 (A2c): отказ отдела — громкий, с причиной, не тишина ──────
+// В тестовом стенде LLM-прокси недоступен: CallLLMResilient падает →
+// TryVal -> "()" → срабатывает ветка отказа. Контракт: владелец получает
+// «Отдел X не ответил: <причина>», в trace_log — строка status='error'.
+// Мутация «вернуть return ""» делает оба теста красными (наряд #636).
+test "n636: отказ LLM — владельцу причина вместо тишины" {
+  let _ = InitDB()
+  let reply = HandleDeptQuery("qa", "тест громкого отказа #636", "n636-silent")
+  assert_eq(contains(reply, "не ответил"), true)
+  assert_eq(contains(reply, "Отдел qa"), true)
+}
+
+test "n636: отказ LLM — строка error в trace_log (dept_fail)" {
+  let _ = InitDB()
+  let _ = HandleDeptQuery("qa", "тест трейса отказа #636", "n636-trace")
+  let rows = query("SELECT COUNT(*) AS c FROM trace_log WHERE action='dept_fail' AND dept='qa' AND status='error'", [])
+  let count = to_float(json_get(rows[0], "c", "0"))
+  assert_eq(count >= 1.0, true)
 }
 
 pattern DetectDepartment(text: String) -> String {

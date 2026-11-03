@@ -196,6 +196,28 @@ def archive_daily_digest():
 # ══════════════════════════════════════════════════════════════════════
 
 
+def dept_fail_line_24h():
+    """#636 A2c: счётчик громких отказов отделов за сутки (trace_log, action='dept_fail').
+
+    Источник — те же строки, что пишет HandleDeptQuery при отказе LLM
+    (app.mlog, status='error'). Ноль — честный ноль (D9); сбой запроса
+    метрики не роняет бриф (пустая строка).
+    """
+    try:
+        rows = _query(
+            "SELECT dept, COUNT(*) as c FROM trace_log "
+            "WHERE action='dept_fail' AND status='error' "
+            "AND timestamp > datetime('now', '-1 day') "
+            "GROUP BY dept ORDER BY c DESC LIMIT 8", fetch=True)
+        if rows:
+            return "Отказы отделов за сутки: " + ", ".join(
+                f"{r['dept']} — {r['c']}" for r in rows)
+        return "Отказы отделов за сутки: 0"
+    except Exception as e:  # noqa: BLE001 — бриф деградирует без метрики
+        log.warning(f"[morning_brief] dept fail line failed: {e}")
+        return ""
+
+
 @app.post("/scheduler/morning-brief")
 def scheduler_morning_brief():
     """
@@ -328,6 +350,8 @@ def scheduler_morning_brief():
         # Recent corrections
         corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
         corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
+        # #636 A2c: счётчик отказов отделов за сутки — в утренней сводке
+        dept_fail_line = dept_fail_line_24h()
         # FO-036 (наряд #134): задачи FORGE от агентов — только proposed,
         # владелец подтверждает пачкой по утреннему брифу (A.5)
         forge_proposed = ""
@@ -411,6 +435,7 @@ def scheduler_morning_brief():
 Активные отделы: {', '.join(active_depts) if active_depts else 'нет активности'}
 {narads_queue_line}
 Коррекций за сутки: {corrections_24h}
+{dept_fail_line}
 {metrics_text}
 
 === FORGE: ЗАДАЧИ ОТ АГЕНТОВ, ЖДУЩИЕ ПОДТВЕРЖДЕНИЯ (proposed) ===
