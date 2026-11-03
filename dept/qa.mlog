@@ -435,19 +435,24 @@ pattern TransitionDefect(defectId: String, newState: String, regressionTestAdded
   }
 
   // Get current state
-  let currentRows = db_execute(
-    "SELECT status, severity, has_regression_test, has_incident, has_rca FROM defect_records WHERE id = ?",
+  // #634 A2a: query() → List — разбор через get(row) + json_get(row, col),
+  // а не parse_json(String) с путём "0.col" (probe_a2_parsejson: наивная замена = TYPE_MISMATCH).
+  // has_incident/has_rca в схеме defect_records НЕ СУЩЕСТВУЮТ (ни в DDL app.mlog, ни в живой БД;
+  // сайт молча не работал с момента появления) — SELECT приведён к факту, флаги = "false"
+  // (EnforceRule9 консервативен: critical не закрывается без incident/RCA) — вынос владельцу в PR.
+  let currentRows = query(
+    "SELECT status, severity, has_regression_test FROM defect_records WHERE id = ?",
     [defectId]
   )
   if length(currentRows) == 0 then {
     return "Дефект #" + defectId + " не найден."
   }
-  let parsed = parse_json(currentRows)
-  let currentStatus = json_get(parsed, "0.status", "")
-  let currentSeverity = json_get(parsed, "0.severity", "")
-  let hasRegression = json_get(parsed, "0.has_regression_test", "false")
-  let hasIncident = json_get(parsed, "0.has_incident", "false")
-  let hasRCA = json_get(parsed, "0.has_rca", "false")
+  let parsed = get(currentRows, 0.0)
+  let currentStatus = json_get(parsed, "status", "")
+  let currentSeverity = json_get(parsed, "severity", "")
+  let hasRegression = json_get(parsed, "has_regression_test", "false")
+  let hasIncident = "false"
+  let hasRCA = "false"
 
   // Validate transition order
   let validTransition = "false"
@@ -628,12 +633,13 @@ pattern RegressionTestDiscipline(project: String, defectId: String, chat_id: Str
   let _ = AuditLog("skill_execute", QA_DEPT(), "regression-test-discipline for defect " + defectId)
 
   // Get defect details
-  let defectRows = db_execute(
+  // #634 A2a: query() → List; в prompt нужен String — json_encode как старая JSON-форма db_execute
+  let defectRows = query(
     "SELECT severity, summary, status FROM defect_records WHERE id = ?",
     [defectId]
   )
   let defectInfo = "не найден"
-  if length(defectRows) > 0 then { let defectInfo = defectRows }
+  if length(defectRows) > 0 then { let defectInfo = json_encode(defectRows) }
 
   let prompt = "Ты QA-педант. Проектируешь регрессионный тест для дефекта.\n\n" +
     "ЖЁСТКОЕ ПРАВИЛО: Каждый закрытый дефект обязан иметь регрессионный тест. Без него дефект не закрывается.\n\n" +
@@ -819,14 +825,15 @@ pattern CreateSecurityAudit(project: String, auditType: String, chat_id: String)
 
 
 pattern GetSecurityAuditStatus(project: String) -> String {
-  let rows = db_execute(
+  // #634 A2a: query() → List; наружу отдаём json_encode (прежняя JSON-форма)
+  let rows = query(
     "SELECT id, audit_type, status, findings_critical, findings_high, findings_medium, findings_low, completed_at FROM security_audits WHERE project = ? ORDER BY created_at DESC LIMIT 5",
     [project]
   )
   if length(rows) == 0 then {
     return "Security аудиты для проекта " + project + " не найдены."
   }
-  return rows
+  return json_encode(rows)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -925,7 +932,8 @@ pattern CmdQADefects(query: String, chat_id: String) -> String {
   if contains(q, "open")  or  contains(q, "открыт") then { f_open = "yes" }
   if contains(q, "critical")  or  contains(q, "критич") then { f_critical = "yes" }
 
-  let rows = db_execute(
+  // #634 A2a: query() → List; наружу json_encode (прежняя JSON-форма)
+  let rows = query(
     "SELECT id, project, severity, summary, status, created_at FROM defect_records WHERE ((?1 = 'yes' AND status = 'open') OR ?1 = 'no') AND ((?2 = 'yes' AND severity = 'critical') OR ?2 = 'no') ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END, created_at DESC LIMIT 20",
     [f_open, f_critical]
   )
@@ -935,7 +943,7 @@ pattern CmdQADefects(query: String, chat_id: String) -> String {
   }
 
   let _ = AuditLog("cmd_qa_defects", QA_DEPT(), "Defects listed (open=" + f_open + ", critical=" + f_critical + ")")
-  return QA_DISCLAIMER_TOP() + "\n\n" + rows + "\n\n" + QA_DISCLAIMER_BOTTOM()
+  return QA_DISCLAIMER_TOP() + "\n\n" + json_encode(rows) + "\n\n" + QA_DISCLAIMER_BOTTOM()
 }
 
 // /qa-eval — run AI eval
@@ -987,16 +995,18 @@ pattern CmdQACoverage(query: String, chat_id: String) -> String {
   let project = "project"
 
   // Get latest test runs with coverage
-  let rows = db_execute(
+  // #634 A2a: query() → List; в prompt — json_encode (прежняя JSON-форма)
+  let rows = json_encode(query(
     "SELECT id, test_type, verdict, coverage_pct, total_tests, passed, failed, completed_at FROM test_runs WHERE project = ? AND status = 'completed' ORDER BY completed_at DESC LIMIT 10",
     [project]
-  )
+  ))
 
   // Get defect metrics
-  let defectStats = db_execute(
+  // #634 A2a: query() → List; в prompt — json_encode (прежняя JSON-форма)
+  let defectStats = json_encode(query(
     "SELECT severity, COUNT(*) as cnt FROM defect_records WHERE project = ? AND status NOT IN ('wontfix', 'duplicate', 'verified') GROUP BY severity ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END",
     [project]
-  )
+  ))
 
   let prompt = "Ты QA-педант. Формируешь coverage отчёт.\n\n" +
     "ЦЕЛИ:\n" +
@@ -1019,7 +1029,8 @@ pattern CmdQACoverage(query: String, chat_id: String) -> String {
 pattern CmdQARuns(query: String, chat_id: String) -> String {
   let project = "project"
 
-  let rows = db_execute(
+  // #634 A2a: query() → List; наружу json_encode (прежняя JSON-форма)
+  let rows = query(
     "SELECT id, test_type, status, verdict, total_tests, passed, failed, coverage_pct, environment, started_at, completed_at FROM test_runs WHERE project = ? ORDER BY started_at DESC LIMIT 15",
     [project]
   )
@@ -1029,7 +1040,7 @@ pattern CmdQARuns(query: String, chat_id: String) -> String {
   }
 
   let _ = AuditLog("cmd_qa_runs", QA_DEPT(), "Test runs listed for " + project)
-  return QA_DISCLAIMER_TOP() + "\n\n" + rows + "\n\n" + QA_DISCLAIMER_BOTTOM()
+  return QA_DISCLAIMER_TOP() + "\n\n" + json_encode(rows) + "\n\n" + QA_DISCLAIMER_BOTTOM()
 }
 
 // /qa-monitor — production monitoring dashboard
@@ -1037,23 +1048,26 @@ pattern CmdQAMonitor(query: String, chat_id: String) -> String {
   let project = "project"
 
   // Get recent defect metrics
-  let openCritical = db_execute(
+  // #634 A2a: query() → List; счётчики — json_get(get(rows,0),"cnt"), в prompt — json_encode
+  let openCriticalRows = query(
     "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ? AND severity = 'critical' AND status NOT IN ('verified', 'wontfix', 'duplicate')",
     [project]
   )
-  let openHigh = db_execute(
+  let openCritical = to_string(json_get(get(openCriticalRows, 0.0), "cnt", "0"))
+  let openHighRows = query(
     "SELECT COUNT(*) as cnt FROM defect_records WHERE project = ? AND severity = 'high' AND status NOT IN ('verified', 'wontfix', 'duplicate')",
     [project]
   )
-  let recentDefects = db_execute(
+  let openHigh = to_string(json_get(get(openHighRows, 0.0), "cnt", "0"))
+  let recentDefects = json_encode(query(
     "SELECT id, severity, summary, status, created_at FROM defect_records WHERE project = ? AND created_at > datetime('now') - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 10",
     [project]
-  )
+  ))
   let securityStatus = GetSecurityAuditStatus(project)
-  let latestRuns = db_execute(
+  let latestRuns = json_encode(query(
     "SELECT id, test_type, verdict, coverage_pct, completed_at FROM test_runs WHERE project = ? AND status = 'completed' ORDER BY completed_at DESC LIMIT 5",
     [project]
-  )
+  ))
 
   let prompt = "Ты QA-параноик. Формируешь production monitoring отчёт.\n\n" +
     "МЕТРИКИ:\n" +
@@ -1131,12 +1145,15 @@ pattern ReleaseGate(project: String, environment: String, isAISystem: String, pr
   let mut blocked = false
 
   // Rule 1: Critical test suite must pass
-  let latestRun = db_execute(
+  // #634 A2a: query() → List; вердикт — прямой json_get первой строки
+  let latestRun = query(
     "SELECT verdict FROM test_runs WHERE project = ? AND test_type IN ('unit', 'integration', 'e2e', 'smoke') AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
     [project]
   )
   let criticalPassed = "false"
-  if contains(latestRun, "passed") then { let criticalPassed = "true" }
+  if length(latestRun) > 0 then {
+    if json_get(get(latestRun, 0.0), "verdict", "") == "passed" then { let criticalPassed = "true" }
+  }
   let r1 = EnforceRule1_NoReleaseWithoutPassedSuite(project, criticalPassed, environment)
   if r1 != "PASS" then {
     let gateResults = gateResults + "❌ Rule 1 (Critical suite): " + r1 + "\n"
@@ -1147,7 +1164,8 @@ pattern ReleaseGate(project: String, environment: String, isAISystem: String, pr
 
   // Rule 5: Security scan for sensitive features
   let hasSecurityScan = "false"
-  let secAudit = db_execute(
+  // #634 A2a: query() → List; проверка непустоты напрямую на List
+  let secAudit = query(
     "SELECT id FROM security_audits WHERE project = ? AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
     [project]
   )
@@ -1162,7 +1180,8 @@ pattern ReleaseGate(project: String, environment: String, isAISystem: String, pr
 
   // Rule 6: AI evals for AI systems
   if isAISystem == "true" then {
-    let aiEval = db_execute(
+    // #634 A2a: query() → List; проверка непустоты напрямую на List
+    let aiEval = query(
       "SELECT verdict, total_cases, overall_pass_rate FROM ai_eval_runs WHERE project = ? AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
       [project]
     )
@@ -1198,11 +1217,13 @@ pattern ReleaseGate(project: String, environment: String, isAISystem: String, pr
   }
 
   // Security findings check
-  let secFindings = db_execute(
+  // #634 A2a: query() → List; SUM NULL → дефолт "-1" (≠ "0" → гейт блокирует, как раньше "()")
+  let secFindingsRows = query(
     "SELECT SUM(findings_critical + findings_high) as total FROM security_audits WHERE project = ? AND status = 'completed'",
     [project]
   )
-  if contains(secFindings, "0") == false then {
+  let secFindings = to_string(json_get(get(secFindingsRows, 0.0), "total", "-1"))
+  if secFindings != "0" then {
     let gateResults = gateResults + "❌ Security: High+ findings exist in latest audit\n"
     let blocked = true
   } else {
@@ -1233,20 +1254,23 @@ pattern QaQuarterlyMethodologyReview(chat_id: String) -> String {
   let _ = AuditLog("quarterly_review", QA_DEPT(), "Quarterly methodology review started")
 
   // Systematic weakness detection: analyze patterns in defects
-  let defectPatterns = db_execute(
+  // #634 A2a: query() → List; в prompt — json_encode (прежняя JSON-форма)
+  let defectPatterns = json_encode(query(
     "SELECT severity, environment, COUNT(*) as cnt FROM defect_records WHERE created_at > datetime('now') - INTERVAL '90 days' GROUP BY severity, environment ORDER BY cnt DESC",
     []
-  )
+  ))
 
-  let escapeTrend = db_execute(
+  // #634 A2a: query() → List; в prompt — json_encode (прежняя JSON-форма)
+  let escapeTrend = json_encode(query(
     "SELECT DATE_TRUNC('month', created_at) as month, COUNT(*) as total, SUM(CASE WHEN environment = 'production' THEN 1 ELSE 0 END) as escaped FROM defect_records WHERE created_at > datetime('now') - INTERVAL '90 days' GROUP BY DATE_TRUNC('month', created_at) ORDER BY month",
     []
-  )
+  ))
 
-  let fp_rate = db_execute(
+  // #634 A2a: query() → List; в prompt — json_encode (прежняя JSON-форма)
+  let fp_rate = json_encode(query(
     "SELECT COUNT(CASE WHEN status = 'wontfix' THEN 1 END) as wontfix, COUNT(CASE WHEN status = 'duplicate' THEN 1 END) as duplicate, COUNT(*) as total FROM defect_records WHERE created_at > datetime('now') - INTERVAL '90 days'",
     []
-  )
+  ))
 
   let prompt = "Ты QA-педант. Проводишь квартальный обзор методологии.\n\n" +
     "ЦЕЛИ ОБЗОРА:\n" +
@@ -1602,3 +1626,68 @@ pattern QaRiskReview(question: String) -> String {
   return r
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════
+// #634 A2a: тесты перевода db_execute("SELECT…") → query() с переделкой разбора.
+// Прогоняются во флэттене `mlog test app.mlog` (CI-шаг наряда #644); границы
+// автономных прогонов не задеты (test_n474: utils, osp).
+// Данные-сборки: чистка по маркеру проекта 'n634probe'/'n634gate'/'n634runs'.
+// Диалект-сайты (INTERVAL) тестируются нарядом #635 (A2b) — до него они
+// честно остаются в отказе рантайма; LLM-паттерны вне прямого прогона.
+// ═══════════════════════════════════════════════════════════════════════
+
+test "n634: TransitionDefect разбирает дефект через query() и переводит статус" {
+  let _ = InitDB()
+  let _ = db_execute("DELETE FROM defect_records WHERE project = 'n634probe'", [])
+  let _ = db_execute("INSERT INTO defect_records (project, severity, status, summary, environment, has_regression_test) VALUES ('n634probe', 'high', 'open', 'n634-transition-probe', 'staging', 'false')", [])
+  let idRows = query("SELECT id FROM defect_records WHERE project = 'n634probe' ORDER BY id DESC LIMIT 1", [])
+  let id = to_string(json_get(get(idRows, 0.0), "id", "0"))
+  let reply = TransitionDefect(id, "acknowledged", "no", "chat-n634")
+  assert_eq(contains(reply, "ОШИБКА"), false)
+  assert_eq(contains(reply, "acknowledged"), true)
+  let after = query("SELECT status FROM defect_records WHERE id = ?1", [id])
+  assert_eq(json_get(get(after, 0.0), "status", ""), "acknowledged")
+}
+
+test "n634: CmdQADefects возвращает данные дефектов из БД" {
+  let _ = InitDB()
+  let _ = db_execute("DELETE FROM defect_records WHERE project = 'n634probe'", [])
+  let _ = db_execute("INSERT INTO defect_records (project, severity, status, summary) VALUES ('n634probe', 'critical', 'open', 'n634-crit-defect')", [])
+  let reply = CmdQADefects("critical открыт", "chat-n634")
+  assert_eq(contains(reply, "n634-crit-defect"), true)
+  assert_eq(contains(reply, "Дефекты не найдены"), false)
+}
+
+test "n634: CmdQARuns — пусто → сообщение, с данными → JSON-форма" {
+  let _ = InitDB()
+  let _ = db_execute("DELETE FROM test_runs WHERE project = 'n634runs'", [])
+  let empty = CmdQARuns("", "chat-n634")
+  assert_eq(contains(empty, "не найдены"), true)
+  let _ = db_execute("INSERT INTO test_runs (project, test_type, status, verdict, total_tests, passed, failed, coverage_pct) VALUES ('n634runs', 'unit', 'completed', 'passed', '10', 8, 2, '80')", [])
+  let rows = query("SELECT id, test_type, status, verdict FROM test_runs WHERE project = ?1", ["n634runs"])
+  assert_eq(json_get(get(rows, 0.0), "verdict", ""), "passed")
+}
+
+test "n634: GetSecurityAuditStatus отвечает данными аудита" {
+  let _ = InitDB()
+  let _ = db_execute("DELETE FROM security_audits WHERE project = 'n634probe'", [])
+  let none = GetSecurityAuditStatus("n634probe")
+  assert_eq(contains(none, "не найдены"), true)
+  let _ = db_execute("INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low) VALUES ('n634probe', 'owasp', 'completed', '0', '0', '1', '0')", [])
+  let audits = GetSecurityAuditStatus("n634probe")
+  assert_eq(contains(audits, "owasp"), true)
+}
+
+test "n634: ReleaseGate — security 0/verdict passed зелёные, high+ блокирует" {
+  let _ = InitDB()
+  let _ = db_execute("DELETE FROM security_audits WHERE project = 'n634gate'", [])
+  let _ = db_execute("DELETE FROM test_runs WHERE project = 'n634gate'", [])
+  let _ = db_execute("INSERT INTO security_audits (project, audit_type, status, findings_critical, findings_high, findings_medium, findings_low) VALUES ('n634gate', 'owasp', 'completed', '0', '0', '0', '0')", [])
+  let _ = db_execute("INSERT INTO test_runs (project, test_type, status, verdict) VALUES ('n634gate', 'unit', 'completed', 'passed')", [])
+  let gate = ReleaseGate("n634gate", "staging", "false", "none", "chat-n634")
+  assert_eq(contains(gate, "✅ Security: No high+ findings"), true)
+  assert_eq(contains(gate, "✅ Rule 1 (Critical suite): Passed"), true)
+  let _ = db_execute("UPDATE security_audits SET findings_high = '2' WHERE project = 'n634gate'", [])
+  let gate2 = ReleaseGate("n634gate", "staging", "false", "none", "chat-n634")
+  assert_eq(contains(gate2, "❌ Security: High+ findings exist"), true)
+}

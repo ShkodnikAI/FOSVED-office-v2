@@ -697,14 +697,15 @@ pattern CheckMethodologyGap(assessmentId: String, wasPredictable: String) -> Str
 
 pattern GetLegalMetric() -> String {
   // pct-clean-signings = clean / total × 100
-  let rows = db_execute(
+  // #634 A2a: query() → List; разбор через get(rows, 0.0) + json_get(row, col) без пути "0.col"
+  let rows = query(
     "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable FROM legal_assessment_verifications WHERE verified_at >= datetime('now') - INTERVAL '30 days'",
     []
   )
-  let data = parse_json(rows)
-  let total = to_float(json_get(data, "0.total", "0"))
-  let clean = to_float(json_get(data, "0.clean", "0"))
-  let predictable = to_float(json_get(data, "0.predictable", "0"))
+  let data = get(rows, 0.0)
+  let total = to_float(json_get(data, "total", "0"))
+  let clean = to_float(json_get(data, "clean", "0"))
+  let predictable = to_float(json_get(data, "predictable", "0"))
 
   if total > 0.0 then {
     let pctClean = (clean / total) * 100.0
@@ -729,18 +730,19 @@ pattern GetLegalMetric() -> String {
 
 // Task 1: Daily check — verifications due
 pattern RunDailyCheck() -> String {
-  let rows = db_execute(
+  // #634 A2a: query() → List; итерация по строкам get(rows, i), без parse_json-путей "i.col"
+  let rows = query(
     "SELECT id, short_title, jurisdiction, document_type FROM legal_assessments WHERE status = 'published' AND verification_date::date = CURRENT_DATE",
     []
   )
-  let data = parse_json(rows)
-  let count = length(data)
+  let count = length(rows)
   if count > 0 then {
     let mut i = 0
     let mut alerts = ""
     while i < count {
-      let id = redact(to_string(json_get(data, to_string(i) + ".id", "")), "all")
-      let title = redact(to_string(json_get(data, to_string(i) + ".short_title", "")), "all")
+      let row = get(rows, i)
+      let id = redact(to_string(json_get(row, "id", "")), "all")
+      let title = redact(to_string(json_get(row, "short_title", "")), "all")
       let alert = "📋 Legal assessment #" + id + " (" + title + ") — verification date наступил. Требуется проверка post-signing статуса."
       let _ = send_message("owner", alert)
       let alerts = alerts + alert + "\n"
@@ -754,16 +756,17 @@ pattern RunDailyCheck() -> String {
 
 // Task 2: Monthly review — compute pct-clean-signings
 pattern RunMonthlyReview() -> String {
-  let rows = db_execute(
+  // #634 A2a: query() → List; разбор через get(rows, 0.0) + json_get(row, col) без пути "0.col"
+  let rows = query(
     "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'clean' THEN 1 ELSE 0 END) as clean_signings, SUM(CASE WHEN outcome = 'rewrite' THEN 1 ELSE 0 END) as rewrites, SUM(CASE WHEN outcome = 'dispute' THEN 1 ELSE 0 END) as disputes, SUM(CASE WHEN outcome = 'rewrite' AND rewrite_was_predictable = true THEN 1 ELSE 0 END) as predictable_rewrites FROM legal_assessment_verifications WHERE verified_at >= datetime('now') - INTERVAL '30 days'",
     []
   )
-  let data = parse_json(rows)
-  let total = to_float(json_get(data, "0.total", "0"))
-  let cleanSignings = to_float(json_get(data, "0.clean_signings", "0"))
-  let rewrites = to_float(json_get(data, "0.rewrites", "0"))
-  let disputes = to_float(json_get(data, "0.disputes", "0"))
-  let predictableRewrites = to_float(json_get(data, "0.predictable_rewrites", "0"))
+  let data = get(rows, 0.0)
+  let total = to_float(json_get(data, "total", "0"))
+  let cleanSignings = to_float(json_get(data, "clean_signings", "0"))
+  let rewrites = to_float(json_get(data, "rewrites", "0"))
+  let disputes = to_float(json_get(data, "disputes", "0"))
+  let predictableRewrites = to_float(json_get(data, "predictable_rewrites", "0"))
 
   let pctClean = "0"
   let pctPredictableMissed = "0"
@@ -791,13 +794,14 @@ pattern RunMonthlyReview() -> String {
 
 // Task 3: Quarterly methodology review
 pattern LegalQuarterlyMethodologyReview() -> String {
-  let rows = db_execute(
+  // #634 A2a: query() → List; разбор через get(rows, 0.0) — форма probe_a2_parsejson
+  let rows = query(
     "SELECT SUM(predictable_rewrites_count) as total_predictable, SUM(total_assessments) as total FROM legal_monthly_reviews WHERE created_at >= datetime('now') - INTERVAL '90 days'",
     []
   )
-  let data = parse_json(rows)
-  let totalPredictable = to_float(json_get(data, "0.total_predictable", "0"))
-  let total = to_float(json_get(data, "0.total", "0"))
+  let data = get(rows, 0.0)
+  let totalPredictable = to_float(json_get(data, "total_predictable", "0"))
+  let total = to_float(json_get(data, "total", "0"))
 
   let mut review = "📋 Legal — Quarterly Methodology Review\n\n" +
     "Total assessments (90 days): " + to_string(total) + "\n" +
@@ -929,12 +933,13 @@ pattern VerifyResult(query: String) -> String {
 }
 
 pattern LegalSearchArchive(filter: String) -> String {
-  let rows = db_execute(
+  // #634 A2a: query() → List; наружу json_encode (прежняя JSON-форма)
+  let rows = query(
     "SELECT id, short_title, document_type, status, jurisdiction, risk_level, created_at FROM legal_assessments WHERE short_title ILIKE '%' || ? || '%' ORDER BY created_at DESC LIMIT 10",
     [filter]
   )
   if length(rows) == 0 then { return "📭 Архив пуст или нет совпадений по фильтру: " + filter }
-  return "📚 Legal архив:\n" + rows
+  return "📚 Legal архив:\n" + json_encode(rows)
 }
 
 pattern LegalScore() -> String {
@@ -956,14 +961,15 @@ pattern LegalScore() -> String {
 }
 
 pattern ListTemplates() -> String {
-  let rows = db_execute(
+  // #634 A2a: query() → List; наружу json_encode (прежняя JSON-форма)
+  let rows = query(
     "SELECT id, document_type, jurisdiction, business_form, name, version, status FROM contract_templates WHERE status = 'active' ORDER BY document_type, jurisdiction",
     []
   )
   if length(rows) == 0 then {
     return "📋 Шаблоны не загружены. Базовые шаблоны NDA/MSA/SLA доступны через /legal-nda и /legal-msa."
   }
-  return "📋 Доступные шаблоны:\n" + rows
+  return "📋 Доступные шаблоны:\n" + json_encode(rows)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1214,3 +1220,22 @@ pattern LegalCheck(question: String) -> String {
   return r
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════
+// #634 A2a: тесты перевода db_execute("SELECT…") → query() (issue #634).
+// Прогоняются во флэттене `mlog test app.mlog` (CI-шаг наряда #644).
+// Диалект-сайты (INTERVAL, ::date, ILIKE) тестируются нарядом #635 (A2b):
+// GetLegalMetric, RunDailyCheck, RunMonthlyReview, LegalQuarterlyMethodologyReview,
+// LegalSearchArchive — до A2b честно в отказе рантайма; здесь — ListTemplates.
+// ═══════════════════════════════════════════════════════════════════════
+
+test "n634: ListTemplates отдаёт шаблоны из БД в JSON-форме" {
+  let _ = InitDB()
+  let _ = db_execute("DELETE FROM contract_templates WHERE name LIKE 'n634-%'", [])
+  let none = ListTemplates()
+  assert_eq(contains(none, "Шаблоны не загружены"), true)
+  let _ = db_execute("INSERT INTO contract_templates (document_type, jurisdiction, business_form, name, version, status) VALUES ('NDA', 'RU', 'OOO', 'n634-nda-template', '1', 'active')", [])
+  let reply = ListTemplates()
+  assert_eq(contains(reply, "n634-nda-template"), true)
+  let _ = db_execute("DELETE FROM contract_templates WHERE name LIKE 'n634-%'", [])
+}
