@@ -110,10 +110,18 @@ def client():
 
 @pytest.fixture()
 def tg_sent(monkeypatch):
-    """Рекордер вместо Telegram-транспорта."""
+    """Рекордер вместо Telegram-транспорта.
+
+    День фиксируется (`_is_supply_night_msk` → False): иначе тесты волны
+    красные 00:00–06:59 МСК — ночью сообщение уходит в owner_outbox, а не
+    в рекордер (флейк 03.11: hosted-прогон в 06:28 МСК — 3 красных при
+    нулевом диффе кода; rerun в 07:05 МСК — зелёный). Ночной путь покрыт
+    test_night_goes_to_outbox, который сам переопределяет окно на True.
+    """
     sent = []
     monkeypatch.setattr("proxy.telegram._tg_send_message",
                         lambda chat_id, text, **kw: sent.append((chat_id, text)) or 42)
+    monkeypatch.setattr(sup, "_is_supply_night_msk", lambda now=None: False)
     return sent
 
 
