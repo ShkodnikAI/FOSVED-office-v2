@@ -45,15 +45,14 @@ RUN pip3 install -r requirements.lock --break-system-packages
 # test_n588_night). №802: run-гейт enforce'ит sink-clearance — profile legacy в
 # test_n550v3/test_n588_night ОСТАЁТСЯ (это не обходной путь, а канонка); стаб call_python
 # в forge1-9v3 ОСТАЁТСЯ (№799/№800 — undefined refusal на компиляции).
-# bin/mlog-020 (0.20.0) — аварийный фолбэк guard-пробы entrypoint (lax-аудит,
-# грузит сырой app.mlog). bin/mlog-0271 (0.27.1) вендорен как прошлый-хороший
+# bin/mlog-0271 (0.27.1) вендорен как прошлый-хороший
 # тест-гвард (ADR-0015; было mlog-027 = 0.27.0 — выведен; было mlog-025 —
 # выведен #399, а COPY здесь забыли → сборка падала 30.09–01.10, хотфикс
-# 2026-10-01).
+# 2026-10-01). Аварийный фолбэк 0.20 удалён 03.11 (решение владельца, #645):
+# провал guard-пробы entrypoint — громкий отказ бута, без отката на legacy.
 COPY bin/mlog /usr/local/bin/mlog
-COPY bin/mlog-020 /usr/local/bin/mlog-020
 COPY bin/mlog-0271 /usr/local/bin/mlog-0271
-RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-020 /usr/local/bin/mlog-0271 && /usr/local/bin/mlog --version
+RUN chmod +x /usr/local/bin/mlog /usr/local/bin/mlog-0271 && /usr/local/bin/mlog --version
 
 COPY entrypoint.sh /office/entrypoint.sh
 RUN chmod +x /office/entrypoint.sh
@@ -68,7 +67,7 @@ COPY . .
 # стали 100644, а эта строка по-прежнему chmod'ила УДАЛЁННЫЙ mlog-023 →
 # docker build падал, деплой не проходил. Страховка теперь гоняет ВСЕ
 # вендоренные бинари (защита от регресса exec-бит) и верифицирует кандидата.
-RUN chmod +x /office/bin/mlog /office/bin/mlog-020 /office/bin/mlog-0271 \
+RUN chmod +x /office/bin/mlog /office/bin/mlog-0271 \
     && /office/bin/mlog --version
 
 # Node.js deps (Prisma client for PostgreSQL)

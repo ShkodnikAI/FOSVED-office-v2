@@ -6,8 +6,8 @@
 (2) первый провайдер — alias: deepseek, пока default_model — deepseek-chat
     (единственная модель, которую обслуживает deepseek; остальные провайдеры
     её не принимают — без этого порядка резерва фактически нет);
-(3) в entrypoint.sh фолбэк-ветка 0.20 вырезает timeout из serve-копии
-    (0.20 поле не понимает — parse-ошибка на блоке llm);
+(3) запасной путь 0.20 (вырезавший timeout из serve-копии) удалён 03.11
+    (решение владельца, наряд #645) — гвард снят вместе с веткой;
 (4) timeout стоит после max_tokens (грамматика 0.27.1: упорядоченный хвост).
 """
 import os
@@ -61,25 +61,6 @@ def test_a2_deepseek_first():
     )
     assert 'default_model: "deepseek-chat"' in block, (
         "default_model сменился — порядок deepseek-первым пересмотреть"
-    )
-
-
-def test_a3_entrypoint_fallback_cuts_timeout():
-    """(3) Фолбэк-ветка 0.20 вырезает timeout из serve-копии."""
-    entry = _entry_text()
-    m = re.search(r'if \[ "\$MLOG_BIN" = "\$MLOG_LEGACY" \]; then\n(.*?)fi',
-                  entry, re.S)
-    assert m, "в entrypoint.sh не найдена фолбэк-ветка MLOG_LEGACY"
-    fallback = m.group(1)
-    sed_timeout = [ln for ln in fallback.splitlines()
-                   if "timeout: 150" in ln and "sed -i" in ln]
-    assert sed_timeout, "в фолбэк-ветке нет sed, вырезающего '  timeout: 150,'"
-    assert any('/^  timeout: 150,$/d' in ln for ln in sed_timeout), (
-        "sed должен вырезать строку целиком: /^  timeout: 150,$/d"
-    )
-    # вырезающий sed стоит в ветке, которая выполняется только на фолбэке 0.20
-    assert all("MLOG_SERVE_FILE" in ln for ln in sed_timeout), (
-        "sed timeout должен применяться к serve-копии"
     )
 
 
