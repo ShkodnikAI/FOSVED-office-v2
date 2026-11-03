@@ -1224,18 +1224,26 @@ pattern LegalCheck(question: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // #634 A2a: тесты перевода db_execute("SELECT…") → query() (issue #634).
 // Прогоняются во флэттене `mlog test app.mlog` (CI-шаг наряда #644).
+// ВНИМАНИЕ: legal.mlog импортируется и app.mlog, и scheduler.mlog — тест
+// собирается во флэттене ДВАЖДЫ, ассерты идемпотентны к остаткам строк.
+// ИДЕМПОТЕНТНОСТЬ: без DELETE-чисток (голый DELETE = IRREVERSIBLE_NO_GRANT
+// в аудите №312/цензе; грант-форма рантайм-отказывается — carrier не
+// объявлен). Негативная ветка «Шаблоны не загружены» не тестируется во
+// флэттене именно из-за двойной коллекции; ветка тривиальна (length==0).
+// ГВАРД №312: сырые SQL-фикстуры — только в паттернах N634*.
 // Диалект-сайты (INTERVAL, ::date, ILIKE) тестируются нарядом #635 (A2b):
 // GetLegalMetric, RunDailyCheck, RunMonthlyReview, LegalQuarterlyMethodologyReview,
 // LegalSearchArchive — до A2b честно в отказе рантайма; здесь — ListTemplates.
 // ═══════════════════════════════════════════════════════════════════════
 
+pattern N634InsertTemplate() -> String {
+  let _ = db_execute("INSERT INTO contract_templates (document_type, jurisdiction, business_form, name, version, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", ["NDA", "RU", "OOO", "n634-nda-template", 1, "active"])
+  return "ok"
+}
+
 test "n634: ListTemplates отдаёт шаблоны из БД в JSON-форме" {
   let _ = InitDB()
-  let _ = db_execute("DELETE FROM contract_templates WHERE name LIKE 'n634-%'", [])
-  let none = ListTemplates()
-  assert_eq(contains(none, "Шаблоны не загружены"), true)
-  let _ = db_execute("INSERT INTO contract_templates (document_type, jurisdiction, business_form, name, version, status) VALUES ('NDA', 'RU', 'OOO', 'n634-nda-template', '1', 'active')", [])
+  let _ = N634InsertTemplate()
   let reply = ListTemplates()
   assert_eq(contains(reply, "n634-nda-template"), true)
-  let _ = db_execute("DELETE FROM contract_templates WHERE name LIKE 'n634-%'", [])
 }
