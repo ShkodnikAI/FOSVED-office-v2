@@ -13,10 +13,11 @@ A.2.2 — app.mlog: llm { max_tokens: 8192 } сразу после providers (г
 A.2.3 — SendReport (dept/miniapp.mlog): пометка «ОТВЕТ ОБРЕЗАН» через
         llm_last_finish_reason() на общем пути доставки владельцу.
 A.2.4 — entrypoint.sh: фолбэк-патч (0.20 не знает фичу — sed-вырезание из
-        serve-копии; проверено: до патча 0.20 даёт parse-ошибку, после — 0).
-#505 A.3 — фолбэк-конвейер пополнен вырезанием llm { timeout: 150 } (0.20
-        поле не понимает): живая проба ниже воспроизводит фактический
-        конвейер entrypoint целиком (оба sed + вырезание timeout).
+        serve-копии) — УДАЛЁН 03.11: запасной путь 0.20 выведен из офиса
+        (решение владельца, наряд #645, тесты сняты), на боевом бинаре
+        фичи #757/timeout штатны.
+#505 A.3 — вырезание llm { timeout: 150 } жило только в фолбэк-ветке 0.20 —
+        снято вместе с ней (#645); гвард (4) timeout-после-max_tokens остался.
 Запуск: python -m pytest tests/test_n399_a2_llm_757.py -v
 """
 import hashlib
@@ -55,6 +56,8 @@ def test_old_binaries_are_out():
         "mlog-025 выведен из репо (ADR-0012), восстанавливается из git-истории"
     assert not (REPO_ROOT / "bin" / "mlog-027").exists(), \
         "mlog-027 выведен из репо (ADR-0015), восстанавливается из git-истории"
+    assert not (REPO_ROOT / "bin" / "mlog-020").exists(), \
+        "mlog-020 удалён 03.11 (решение владельца, наряд #645), восстанавливается из git-истории"
 
 
 def test_battle_binary_sha256_matches_artifact():
@@ -105,36 +108,7 @@ def test_sendreport_note_before_dispatch():
     assert pattern_pos < note_pos < branch_pos
 
 
-# ── A.2.4: фолбэк-патч entrypoint ─────────────────────────────────────────
-
-
-def test_entrypoint_fallback_patch_exists():
-    assert "/max_tokens: 8192,/d" in ENTRYPOINT, \
-        "фолбэк-патч #399 отсутствует — 0.20 упадёт на llm { max_tokens }"
-    assert 's/llm_last_finish_reason()/""/g' in ENTRYPOINT, \
-        "фолбэк-патч #399: билтин не вырезается — 0.20 упадёт на parse"
-    assert 'if [ "$MLOG_BIN" = "$MLOG_LEGACY" ]' in ENTRYPOINT
-
-
-# ── живая проба фолбэк-патча (реальный mlog-020, не только текст) ─────────
-
-
-def test_fallback_patched_file_parses_on_020():
-    """Реальный путь фолбэка: аугмент + sed-патч → 0.20 check без parse error."""
-    import os
-    import tempfile
-    aug = "{ printf '%s\\n' \"profile legacy { egress: permissive_with_audit }\"; cat app.mlog; }"
-    with tempfile.TemporaryDirectory() as td:
-        srv = os.path.join(td, "serve.mlog")
-        subprocess.run(["bash", "-c", f"{aug} > {srv}"], cwd=REPO_ROOT, check=True)
-        subprocess.run(["sed", "-i", "/max_tokens: 8192,/d", srv], check=True)
-        # #505 A.3: фактический конвейер фолбэка entrypoint вырезает и timeout
-        subprocess.run(["sed", "-i", "/^  timeout: 150,$/d", srv], check=True)
-        subprocess.run(["sed", "-i", "s/llm_last_finish_reason()/\"\"/g", srv], check=True)
-        out = subprocess.run([str(REPO_ROOT / "bin" / "mlog-020"), "check", srv],
-                             capture_output=True, text=True, timeout=120)
-        assert "parse error" not in out.stdout + out.stderr, \
-            f"фолбэк-копия с патчем не должна давать parse error:\n{out.stdout[-600:]}"
+# ── A.2.4: фолбэк-патч entrypoint снят вместе с запасным путём 0.20 (#645) ──
 
 
 def test_feature_file_parses_on_battle_binary():

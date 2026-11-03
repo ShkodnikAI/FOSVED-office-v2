@@ -99,7 +99,7 @@ echo "--- FORGE: repos dir=${FORGE_REPOS_DIR}/forge/repos, scratch swept ---"
 # 2. Metalogos
 # FO-014: песочница документов filesystem-MCP + каталог subprocess-аудита ядра
 # Наряд №395 (PR #191): бинарь и входной файл env-изированы для стейджинга.
-# Стейджинг VM-пилота (FO-050): MLOG_BIN=./bin/mlog (0.30.0, наряд FO-050-R #503 — пин mlog-020 снят: dept/team.mlog не парсится 0.20.0), MLOG_ENTRY=dogfood_staging.mlog
+# Стейджинг VM-пилота (FO-050): MLOG_BIN=./bin/mlog (0.30.0, наряд FO-050-R #503), MLOG_ENTRY=dogfood_staging.mlog. Запасной путь 0.20 удалён 03.11 (решение владельца, наряд #645): провал пробы аудита — громкий отказ, Render держит прошлый деплой.
 #
 # Наряд №349 (2026-09-24): переход 0.19→0.22 (ADR-0005). Наряд N023 (2026-09-24):
 # 0.23.0 (ADR-0006). Наряд N024 (2026-09-25, прямое указание владельца):
@@ -116,10 +116,7 @@ echo "--- FORGE: repos dir=${FORGE_REPOS_DIR}/forge/repos, scratch swept ---"
 # check/audit/27-гвард dept/serve-батарея/.mbc-кросс 4/4 — 0.27 ≡ 0.25
 # байт-идентичны (проверено, ADR-0009 B.2–B.4).
 # Явный MLOG_BIN из env пробу не отменяет, но откат не трогает.
-# Фолбэк — mlog-020 (0.20.0): последний бинарь с корректным try-контрактом И
-# lax-аудитом (грузит сырой app.mlog без моста). 0.21/0.19/0.22/0.23 выведены из ротации.
 MLOG_CANDIDATE="${MLOG_BIN:-./bin/mlog}"
-MLOG_LEGACY="./bin/mlog-020"
 MLOG_ENTRY="${MLOG_ENTRY:-app.mlog}"
 MLOG_BIN="$MLOG_CANDIDATE"
 # №421: проба принимает exit 0 (чисто) и exit 2 (только предупреждения —
@@ -213,33 +210,23 @@ fi
 if [ "$MLOG_PROBE_RC" = "0" ] || [ "$MLOG_PROBE_RC" = "2" ]; then
   echo "--- Metalogos: candidate PASSED the Category A audit probe — serving on $MLOG_CANDIDATE (file: $MLOG_SERVE_FILE)"
 else
+  # #645 (решение владельца 03.11): запасной путь 0.20 удалён — кандидат не
+  # прошёл пробу аудита → старт прерывается громко, Render оставляет
+  # предыдущий рабочий деплой. Осознанный оверрайд оператора (MLOG_BIN_FORCE
+  # — серв на проваленном кандидате) сохранён без изменений.
   if [ -x "$MLOG_CANDIDATE" ]; then
-    echo "!!! Metalogos №419/№349: candidate ($MLOG_CANDIDATE) FAILED the audit probe — Category A blocks the office boot (№327 debt, см. отчёт №419)"
-    echo "!!! GRADUAL CUTOVER: falling back to legacy $MLOG_LEGACY (0.20.0). External cron-job.org keeps firing /cron/* routes; native schedules activate after the migration naryad."
+    echo "!!! Metalogos: candidate ($MLOG_CANDIDATE) FAILED the Category A audit probe (rc=$MLOG_PROBE_RC) — boot aborted; Render keeps the previous live deploy"
     "$MLOG_CANDIDATE" audit "$MLOG_ENTRY" 2>&1 | grep -m3 "ERROR" || true
+    if [ -n "${MLOG_BIN_FORCE:-}" ]; then
+      MLOG_BIN="$MLOG_CANDIDATE"
+      echo "!!! MLOG_BIN_FORCE set — serving on the FAILED candidate anyway (operator override)"
+    else
+      exit 1
+    fi
   else
-    echo "!!! Metalogos №419/№349: candidate $MLOG_CANDIDATE not found — falling back to legacy $MLOG_LEGACY"
+    echo "!!! Metalogos: candidate $MLOG_CANDIDATE not found — boot aborted"
+    exit 1
   fi
-  if [ -n "${MLOG_BIN_FORCE:-}" ]; then
-    MLOG_BIN="$MLOG_CANDIDATE"
-    echo "!!! MLOG_BIN_FORCE set — serving on the FAILED candidate anyway (operator override)"
-  else
-    MLOG_BIN="$MLOG_LEGACY"
-  fi
-fi
-# ── #399 A.2 + #505 A.3: фолбэк-патч фич Metalogos-#757 и timeout ────────────
-# app.mlog несёт llm { max_tokens: 8192, timeout: 150 } и SendReport вызывает
-# llm_last_finish_reason() — эти фичи понимает линия 0.27.1+ (вкл. боевой
-# 0.30.0, ADR-0018; исторические пробы: 0.20/0.25/0.27.0 дают parse-ошибку
-# "expected llm_providers, COMMA, or RBRACE" / "undefined: function").
-# Фолбэк-ветка (кандидат не прошёл пробу — редкий crash-сценарий) служит
-# 0.20, поэтому вырезает фичи из serve-копии; граница — до вывода 0.20
-# из ротации (ADR-0009).
-if [ "$MLOG_BIN" = "$MLOG_LEGACY" ]; then
-  sed -i '/max_tokens: 8192,/d' "$MLOG_SERVE_FILE"
-  sed -i '/^  timeout: 150,$/d' "$MLOG_SERVE_FILE"
-  sed -i 's/llm_last_finish_reason()/""/g' "$MLOG_SERVE_FILE"
-  echo "#399 A.2 + #505 A.3: fallback $MLOG_LEGACY — фича #757 (max_tokens + пометка обрезки) и timeout вырезаны из serve-копии"
 fi
 mkdir -p "${DATABASE_PATH:-./data}/documents" "${DATABASE_PATH:-./data}/logs" "${DATABASE_PATH:-./data}"
 
