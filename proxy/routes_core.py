@@ -238,19 +238,6 @@ def rate_cmd():
     _query("INSERT INTO dept_metrics (dept,metric_name,metric_value,period,created_at) VALUES (?,'satisfaction',?,?,?)", (dept, str(rating), 'daily', datetime.utcnow().isoformat()))
     return jsonify({"status": "ok"})
 
-@app.post("/context_cmd")
-def context_cmd():
-    d = request.get_json(force=True)
-    dept, chat_id = d.get("dept", "yana"), d.get("chat_id", "0")
-    rows = _query("SELECT role,content,created_at FROM dialog_history WHERE dept=? AND chat_id=? ORDER BY id DESC LIMIT 20", (dept, chat_id), fetch=True)
-    corrs = _query("SELECT original_query,correction,created_at FROM adapt_corrections WHERE dept=? ORDER BY id DESC LIMIT 10", (dept,), fetch=True)
-    # FO-006: консолидированные факты — первичный источник памяти (журнал — для связности диалога)
-    fact_rows = _query("SELECT content, confidence, updated_at FROM facts WHERE dept=? AND status='active' ORDER BY updated_at DESC LIMIT 15", (dept,), fetch=True)
-    ctx = {"dialog": [{"role": r["role"], "content": r["content"], "ts": r["created_at"]} for r in reversed(rows)]}
-    ctx["corrections"] = [{"original": r["original_query"], "corrected": r["correction"], "ts": r["created_at"]} for r in corrs]
-    ctx["facts"] = [{"content": r["content"], "confidence": r["confidence"], "ts": r["updated_at"]} for r in fact_rows]
-    return jsonify(ctx)
-
 @app.post("/archive/digest")
 def archive_digest():
     # Deprecated: ранее возвращал фейковый digest_id (md5 тела) — дайджест не генерировался.
