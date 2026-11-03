@@ -209,6 +209,38 @@ jobs:
       - name: Baseline gate mutation self-test (naryad #633)
         run: python3 scripts/mlog_baseline_gate.py --selftest
 
+      # ── #644: mlog-тесты офиса реально выполняются в CI ─────────────────
+      # mlog test app.mlog — все test-блоки офиса (86: dept/*, с #644 в
+      # app.mlog их 0 — см. A.1 #644). Шаг красный при rc≠0 ИЛИ при «❌»
+      # в выводе (0.38.0 может вернуть rc=0 при упавших тестах).
+      # Allowlist №455 собирается тем же способом, что entrypoint.sh:183:
+      # имена dept/*.mlog, library/*.mlog, memories/*.mlog — без хардкода.
+      # Фиктивные непустые OWNER_TELEGRAM_ID/TELEGRAM_BOT_TOKEN/CRON_SECRET —
+      # тестовый стенд без реальных реквизитов.
+      - name: mlog tests (naryad #644)
+        run: |
+          mkdir -p /tmp/mlogtest
+          M455_NAMES="app.mlog,consensus.mlog"
+          for M455_F in dept/*.mlog library/*.mlog memories/*.mlog; do
+            [ -e "$M455_F" ] || continue
+            M455_NAMES="${M455_NAMES},$(basename "$M455_F")"
+          done
+          set -o pipefail
+          DATABASE_URL=sqlite:/tmp/mlogtest/office.db \
+          METALOGOS_DATA_DIR=. \
+          METALOGOS_HTTP_ALLOW_PRIVATE=1 \
+          METALOGOS_SENSITIVE_PATH_ALLOWLIST="$M455_NAMES" \
+          OWNER_TELEGRAM_ID=000000000 \
+          TELEGRAM_BOT_TOKEN=fake-token-n644 \
+          CRON_SECRET=fake-cron-n644 \
+            ./bin/mlog test app.mlog 2>&1 | tee /tmp/mlogtest/out.txt
+          if grep -q "❌" /tmp/mlogtest/out.txt; then
+            echo "FAIL: в выводе mlog test есть ❌"
+            grep "❌" /tmp/mlogtest/out.txt | head -5
+            exit 1
+          fi
+          grep -E "tests passed" /tmp/mlogtest/out.txt
+
       # ── №312: Category-A аудит dept-файлов — гвард «долг не растёт» ──
       # Контракт: audit rc=0 — чисто; rc=2 — только warnings (легально);
       # rc=1 ИЛИ наличие [ERROR] — провал. Бинарь 0.27.1 (vendored
