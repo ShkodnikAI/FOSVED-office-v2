@@ -673,7 +673,10 @@ pattern RunPreApprovalGate(artifact_id: String, wcag_level: String) -> Dict {
   ifg4.passes == false then { let issues = issues + g4.message + "\n" }
 
   // Check 5: Responsive (hard rule 5)
-  let g5 = GateResponsiveDesign(artifact_type, has_mobile, has_responsive)
+  // #652 (решение владельца 04.11, тип-фикс): хелперы объявлены с Bool-параметрами,
+  // а SELECT возвращает TEXT; "false"/NULL/пусто трактуются как false —
+  // семантика правил 5/9/10 не меняется, правка согласования типов у вызовов.
+  let g5 = GateResponsiveDesign(artifact_type, has_mobile == "true", has_responsive == "true")
   let checks_run = checks_run + 1
   ifg5.passes == false then { let issues = issues + g5.message + "\n" }
 
@@ -688,12 +691,12 @@ pattern RunPreApprovalGate(artifact_id: String, wcag_level: String) -> Dict {
   ifg8.passes == false then { let issues = issues + g8.message + "\n" }
 
   // Check 9: Dev review (hard rule 9)
-  let g9 = GateDevReviewBeforeImplementation(status, dev_review_done)
+  let g9 = GateDevReviewBeforeImplementation(status, dev_review_done == "true")
   let checks_run = checks_run + 1
   ifg9.passes == false then { let issues = issues + g9.message + "\n" }
 
   // Check 10: Stock photo (hard rule 10)
-  let g10 = GateStockPhotoUsage(uses_stock, stock_just)
+  let g10 = GateStockPhotoUsage(uses_stock == "true", stock_just)
   let checks_run = checks_run + 1
   ifg10.passes == false then { let issues = issues + g10.message + "\n" }
 
@@ -1507,19 +1510,41 @@ test "n635: диалект-сайт Design — drift-запрос на SQLite-ф
   let _ = InitDB()
   let _ = N635InsertDrift(0.42)
   let r = try ComputeDesignMetrics()
+  // #652 A.1: колонки design_artifacts мигрированы (AlterColIfMissing) —
+  // reuse-запрос design_system_id больше не падает; B.1: метрики
+  // отрабатывают без исключения. Разрыв «no such column: design_system_id»
+  // закрыт; мутация «убрать вызов A.1 для design_system_id» ловится здесь:
+  // r.ok == false, тест красный.
+  assert_eq(r.ok, true)
   if r.ok then {
     assert_eq(r.value.drift_score > 0.0, true)
-  } else {
-    // ИЗВЕСТНЫЙ пре-существующий разрыв (вне A2b, отдельный дефект):
-    // reuse-запрос метрик читает design_system_id, которого нет в
-    // design_artifacts (app.mlog:409) — ComputeDesignMetrics всегда
-    // падает на нём. Тест красный, если сломан ЛЮБОЙ другой запрос,
-    // т.е. в том числе диалект-сайт drift (мутация «вернуть MySQL-форму»
-    // даст ошибку INTERVAL, а не design_system_id).
-    // TryError — Struct: строковая форма содержит code и message
-    assert_eq(contains(to_string(r.error), "design_system_id"), true)
   }
   // квартальный отчёт вызывающим try деградирует, но не падает (#635 A2b)
   let q = DesignQuarterlyMethodologyReview()
   assert_eq(contains(q, "КВАРТАЛЬНЫЙ ОБЗОР МЕТОДОЛОГИИ ДИЗАЙНА"), true)
+}
+
+// #652 B.1: сырая SQL-фикстура — только в паттерне (гвард №312, мост №391).
+// Вставляет артефакт и возвращает его id для гейт-теста.
+pattern N652InsertArtifact() -> String {
+  let _ = db_execute("INSERT INTO design_artifacts (name, artifact_type, status) VALUES ('n652-gate-artifact', 'mockup', 'draft')", [])
+  let rows = query("SELECT id FROM design_artifacts WHERE name = 'n652-gate-artifact' ORDER BY id DESC LIMIT 1", [])
+  if length(rows) == 0 then { return "" }
+  return to_string(json_get(get(rows, 0), "id", ""))
+}
+
+test "n652: RunPreApprovalGate на артефакте — словарь гейта, не [SQL_ERROR]" {
+  let _ = InitDB()
+  let id = N652InsertArtifact()
+  assert_eq(id == "", false)
+  // #652 A.1: до миграции гейт падал на первом SELECT (design_system_id
+  // и три соседних колонки отсутствовали в design_artifacts); теперь —
+  // словарь гейта. Мутация «убрать вызов A.1 для design_system_id»
+  // ловится здесь: g.ok == false, тест красный.
+  let g = try RunPreApprovalGate(id, "AA")
+  assert_eq(g.ok, true)
+  if g.ok then {
+    // словарь гейта: passes — bool, checks_run — счётчик проверок ≥ 1
+    assert_eq(g.value.checks_run >= 1, true)
+  }
 }
