@@ -1,0 +1,246 @@
+// Fosved Office v2 — General Skill Loader (dept/skills)
+//
+// Наряд #623 (W0 эпика #622, P0): общий загрузчик скиллов офиса — план v2
+// D3/D3.1 (`docs/office/OFFICE_IMPLEMENTATION_PLAN_v2.md`) и поправка
+// владельца 03.11 (`docs/office/DECISION_2026-11-03.md`, комментарий в #623):
+//   1. Один модуль для всех отделов; ОСП, ЛЗ, QA/Dev и отделы без загрузчика
+//      читают содержимое скиллов через него, а не имена из индекса.
+//   2. Нарезка по секциям H2 по ПРЕФИКСУ заголовка: L1 `Core principle` →
+//      L2 `+Anti-patterns` → L3 `+Output template` → L4 `+The procedure`.
+//      Скелет 24/24 файлов ОСП единый (замер 05.11: 4/4 секции у каждого);
+//      при двух одноимённых секциях (calibration — два `Output template`)
+//      детерминированно берётся первая.
+//   3. Уровень выбирается по глубине режима: depth 0 → L2, depth 1 → L3,
+//      depth 2–4 → L4 (решение владельца: «экономия не цель»). Бюджет
+//      проверяется ПОСЛЕ добавления (`length(result) + length(entry) <=
+//      budget`); не влезший скилл — громкий пропуск в журнал
+//      (`skill_skipped`, name/size/budget), не тихий.
+//   4. Неразвёрнутый `skills/` (пустые чтения) — WARN в журнал
+//      (`skills_undeployed`); отсутствующий файл индекса — `skill_missing`.
+// Замер лестницы (11 ядер Tier-1 ОСП, snapshot 2026-10-05): L2=20 656,
+// L3=32 759, L4=83 146 символов (`docs/office/probes/probe_d3_ladder.mlog`).
+// app-зависимости (read_file_or, redact, AuditLog) резолвятся глобально
+// в serve-неймспейсе — как у всех dept-модулей.
+
+// Уровень нарезки по глубине режима (поправка владельца 03.11, п. 3):
+// quick (0) → L2, default/regime (1) → L3, wargame/deep/full (2–4) → L4.
+pattern SkillsLevelByDepth(depth: Int) -> Int {
+  if depth <= 0 then { return 2 }
+  if depth == 1 then { return 3 }
+  return 4
+}
+
+// Ядро скилла до уровня level: секции H2 отбираются по префиксу заголовка,
+// при повторе одноимённой секции берётся первая (детерминированность).
+// Префикс-матч обязателен: варианты заголовков («The procedure (step by
+// step)» и др.) терялись бы при точном совпадении — мутация «точное
+// совпадение заголовка» ловится тестом 24×4.
+pattern SkillCoreSliced(name: String, level: Int) -> String {
+  let raw = redact(read_file_or("skills/" + name + "/SKILL.md", ""), "all")
+  if raw == "" then { return "" }
+  let chunks = split(raw, "\n## ")
+  let mut out = ""
+  let mut got_cp = 0.0
+  let mut got_ap = 0.0
+  let mut got_ot = 0.0
+  let mut got_pr = 0.0
+  each c in chunks {
+    let cs = to_string(c)
+    let lines = split(cs, "\n")
+    let title = lower(trim(to_string(get(lines, 0.0))))
+    if got_cp == 0.0 and level >= 1 then {
+      if starts_with(title, "core principle") then {
+        out = out + "## " + cs
+        got_cp = 1.0
+      }
+    }
+    if got_ap == 0.0 and level >= 2 then {
+      if starts_with(title, "anti-patterns") then {
+        out = out + "## " + cs
+        got_ap = 1.0
+      }
+    }
+    if got_ot == 0.0 and level >= 3 then {
+      if starts_with(title, "output template") then {
+        out = out + "## " + cs
+        got_ot = 1.0
+      }
+    }
+    if got_pr == 0.0 and level >= 4 then {
+      if starts_with(title, "the procedure") then {
+        out = out + "## " + cs
+        got_pr = 1.0
+      }
+    }
+  }
+  return out
+}
+
+// Единственная точка бюджетной проверки (#623 п. 2 тела): сначала считаем
+// `length(result) + length(entry) <= budget` (проверка ПОСЛЕ добавления —
+// скилл либо влезает целиком, либо громко пропускается), потом добавляем.
+// Мутация «проверка до добавления» (`length(result) < budget`) ловится
+// тестом depth=3: контекст вылезает за бюджет.
+pattern SkillsAppend(result: String, name: String, level: Int, budget: Float, dept: String) -> String {
+  let body = SkillCoreSliced(name, level)
+  if body == "" then {
+    let _ = AuditLog("skill_missing", dept, "name=" + name + " level=" + to_string(level) + " — файл отсутствует или секций нет")
+    return result
+  }
+  let entry = "\n--- " + name + " ---\n" + body
+  if length(result) + length(entry) <= budget then {
+    return result + entry
+  }
+  let _ = AuditLog("skill_skipped", dept, "name=" + name + " size=" + to_string(length(entry)) + " budget=" + to_string(budget))
+  return result
+}
+
+// Общий загрузчик по индексу отдела: skills_index/<dept>.txt → содержимое.
+// Бюджет и depth передаёт вызывающий; порядок — порядок индекса.
+pattern LoadDeptSkills(dept: String, depth: Int, budget: Float, query: String) -> String {
+  let index_content = redact(read_file_or("skills_index/" + dept + ".txt", ""), "all")
+  if index_content == "" then {
+    let _ = AuditLog("skills_index_missing", dept, "нет skills_index/" + dept + ".txt — скиллы не загружены")
+    return ""
+  }
+  let level = SkillsLevelByDepth(depth)
+  let mut result = ""
+  let mut loaded = 0.0
+  let mut missing = 0.0
+  each skill in split(trim(index_content), "\n") {
+    let name = trim(to_string(skill))
+    if name != "" then {
+      let before = length(result)
+      result = SkillsAppend(result, name, level, budget, dept)
+      if length(result) > before then { loaded = loaded + 1.0 } else { missing = missing + 1.0 }
+    }
+  }
+  if loaded == 0.0 and missing > 0.0 then {
+    let _ = AuditLog("skills_undeployed", dept, "WARN: ни один скилл индекса не читается — skills/ не развёрнут?")
+  }
+  return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════
+
+// 24/24 файлов индекса ОСП дают 4 секции по префиксу (замер поправки
+// владельца, п. 4). Точное совпадение заголовка здесь красное — варианты
+// («The procedure (step by step)», второй «Output template» в calibration)
+// префикс ловит, точный матч — нет (мутация B).
+test "n623: 24/24 скиллов ОСП — 4 секции по префиксу на L4" {
+  let index_content = redact(read_file_or("skills_index/osp.txt", ""), "all")
+  if index_content == "" then {
+    // гвард от ложнозелёного: индекс обязан существовать (в CI — bootstrap
+    // снапшота шагом раньше); без него измерять нечего — тест красный.
+    assert_eq(index_content == "", false)
+  } else {
+    let mut ok4 = 0.0
+    let mut total = 0.0
+    each skill in split(trim(index_content), "\n") {
+      let name = trim(to_string(skill))
+      if name != "" then {
+        total = total + 1.0
+        let body = SkillCoreSliced(name, 4)
+        if body != "" then {
+          if contains(lower(body), "core principle") and contains(lower(body), "anti-patterns") and contains(lower(body), "output template") and contains(lower(body), "the procedure") then {
+            ok4 = ok4 + 1.0
+          }
+        }
+      }
+    }
+    assert_eq(ok4, total)
+    assert_eq(total >= 24.0, true)
+  }
+}
+
+// Лестница уровней: depth 0 → L2, 1 → L3, 2–4 → L4.
+test "n623: SkillsLevelByDepth — 0→L2, 1→L3, 2..4→L4" {
+  assert_eq(SkillsLevelByDepth(0), 2)
+  assert_eq(SkillsLevelByDepth(1), 3)
+  assert_eq(SkillsLevelByDepth(2), 4)
+  assert_eq(SkillsLevelByDepth(3), 4)
+  assert_eq(SkillsLevelByDepth(4), 4)
+}
+
+// Детерминированность дублей: calibration имеет два «Output template» —
+// берётся первый, размер L3 меньше суммы обоих.
+test "n623: calibration — дубль Output template, берётся первый" {
+  let body = SkillCoreSliced("calibration", 3)
+  if body != "" then {
+    let mut n = 0.0
+    each line in split(body, "\n") {
+      if starts_with(lower(trim(to_string(line))), "## output template") then { n = n + 1.0 }
+    }
+    assert_eq(n, 1.0)
+  }
+}
+
+// ── Приёмка #623 (поправка владельца 03.11, п. 4): depth=3 — все ядра
+// Tier-1 (11, включая source-triangulation) на уровне L4 в контексте и в
+// бюджете; depth=0 — те же ядра на L2. Мутация «проверка до добавления»
+// (length(result) < budget) красит depth=3-тест: контекст вылезает за бюджет.
+
+// Счётчик ядер Tier-1 в собранном контексте ОСП
+pattern N623CoreCount(result: String) -> Float {
+  let t1 = "deconstruct|awareness-frame|root-cause-mapping|forces-and-potentials|strategic-maneuvers|two-paths-synthesis|decision-tree-forecast|reflexive-impact|calibration|system-health-diagnostics|source-triangulation"
+  let mut n = 0.0
+  each nm in split(t1, "|") {
+    if contains(result, "\n--- " + to_string(nm) + " ---\n") then { n = n + 1.0 }
+  }
+  return n
+}
+
+test "n623: depth=3 — 11/11 ядер Tier-1 на L4, в бюджете ОСП" {
+  let result = LoadOSPEnrichedSkills("анализ ситуации", "monetary", 3)
+  if contains(result, "No skills loaded") then {
+    // skills/ не развёрнут — гвард от ложнозелёного (в CI bootstrap раньше)
+    assert_eq(contains(result, "No skills loaded"), false)
+  } else {
+    assert_eq(N623CoreCount(result), 11.0)
+    // доменные приложения monetary на месте
+    assert_eq(contains(result, "--- macro-regime-id ---"), true)
+    assert_eq(contains(result, "--- cantillon ---"), true)
+    // L4: секция процедуры присутствует
+    assert_eq(contains(lower(result), "## the procedure"), true)
+    // бюджет depth=3 соблюдён (проверка ПОСЛЕ добавления)
+    assert_eq(length(result) <= OSPSkillBudget(3), true)
+    // deconstruct — всегда первым (#623 п. 3 тела)
+    assert_eq(index_of(result, "--- deconstruct ---") < index_of(result, "--- awareness-frame ---"), true)
+  }
+}
+
+test "n623: depth=0 — 11/11 ядер Tier-1 на L2, в бюджете, без процедур" {
+  let result = LoadOSPEnrichedSkills("анализ ситуации", "monetary", 0)
+  if contains(result, "No skills loaded") then {
+    assert_eq(contains(result, "No skills loaded"), false)
+  } else {
+    assert_eq(N623CoreCount(result), 11.0)
+    assert_eq(length(result) <= OSPSkillBudget(0), true)
+    // L2 = Core principle + Anti-patterns; процедур и шаблонов быть не должно
+    assert_eq(contains(lower(result), "## the procedure"), false)
+    assert_eq(contains(lower(result), "## output template"), false)
+  }
+}
+
+test "n623: depth=1 — L3 (шаблоны есть, процедур нет)" {
+  let result = LoadOSPEnrichedSkills("анализ ситуации", "general", 1)
+  if contains(result, "No skills loaded") then {
+    assert_eq(contains(result, "No skills loaded"), false)
+  } else {
+    assert_eq(contains(lower(result), "## output template"), true)
+    assert_eq(contains(lower(result), "## the procedure"), false)
+    assert_eq(length(result) <= OSPSkillBudget(1), true)
+  }
+}
+
+test "n623: громкий пропуск — крошечный бюджет даёт skill_skipped в журнале" {
+  let _ = InitDB()
+  let result = LoadDeptSkills("osp", 4, 1000.0, "")
+  // ни одно ядро L4 (~4-12 тыс.) не влезает в 1000 — всё пропущено ГРОМКО
+  assert_eq(result == "", true)
+  let rows = query("SELECT COUNT(*) as c FROM audit_log WHERE action = 'skill_skipped' AND dept = 'osp'", [])
+  assert_eq(to_float(json_get(get(rows, 0), "c", "0")) >= 1.0, true)
+}
+
