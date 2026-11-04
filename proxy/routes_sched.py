@@ -350,8 +350,11 @@ def scheduler_morning_brief():
         # Recent corrections
         corr_rows = _query("SELECT COUNT(*) as cnt FROM adapt_corrections WHERE created_at > datetime('now', '-24 hours')", fetch=True)
         corrections_24h = corr_rows[0]["cnt"] if corr_rows else 0
-        # #636 A2c: счётчик отказов отделов за сутки — в утренней сводке
-        dept_fail_line = dept_fail_line_24h()
+        # #636 A2c D.1 (приёмка аудитора 04.11): строка счётчика отказов
+        # собирается в mlog-слоте (DeptFailLine24h, dept/scheduler.mlog) и
+        # приходит полем dept_fails_24h в payload; локальный расчёт — fallback
+        # (старый mlog-клиент или пустое поле). Дубля строки в брифе нет.
+        dept_fail_line = d.get("dept_fails_24h") or dept_fail_line_24h()
         # FO-036 (наряд #134): задачи FORGE от агентов — только proposed,
         # владелец подтверждает пачкой по утреннему брифу (A.5)
         forge_proposed = ""
