@@ -18,7 +18,36 @@ import dept/lz
 // STILL DELEGATED: Python endpoint collects weather, metrics, LZ findings.
 // Migration path: add http_get for OpenWeatherMap API → then migrate.
 // ---------------------------------------------------------------------------
-pattern MorningBrief() -> String {
+// #636 A2c D.1 (приёмка аудитора 04.11): счётчик отказов отделов за сутки —
+// строка в утренней сводке. Источник: trace_log, action='dept_fail',
+// status='error' — те строки, что HandleDeptQuery пишет при отказе LLM
+// (app.mlog:1599-1617). Время строки — колонка timestamp (колонки created_at
+// в trace_log нет, app.mlog:145). Отказов нет — честное «нет» (D9); сбой
+// запроса — «нет данных», сводка не падает.
+pattern DeptFailLine24h() -> String {
+  let rows_r = try query("SELECT dept, COUNT(*) AS c FROM trace_log WHERE action='dept_fail' AND status='error' AND timestamp >= datetime('now','-1 day') GROUP BY dept ORDER BY c DESC", [])
+  if rows_r.ok == false then {
+    return "Отказы отделов: нет данных"
+  }
+  let rows = rows_r.value
+  if length(rows) == 0 then {
+    return "Отказы отделов за сутки: нет"
+  }
+  let mut line = "Отказы отделов за сутки: "
+  let mut fi = 0
+  each row in rows {
+    if fi > 0 then { let line = line + ", " }
+    let fd = redact(to_string(json_get(row, "dept", "")), "all")
+    let fc = to_string(json_get(row, "c", "0"))
+    let line = line + fd + " " + fc
+    let fi = fi + 1
+  }
+  return line
+}
+
+// Сборка payload брифа вынесена из MorningBrief (D.1): тесты n636 проверяют
+// поле dept_fails_24h в payload, а мутация «убрать строку счётчика» красит их.
+pattern MorningBriefPayload() -> String {
   let owner_id = OwnerTelegramId()
 
   // --- P3-1: mlog collects SQL data, Python adds weather + credentials + LLM ---
@@ -74,6 +103,9 @@ pattern MorningBrief() -> String {
   let top_depts = top_depts + "]"
 
   // Delegate to proxy with pre-collected SQL data
+  // #636 A2c D.1: dept_fails_24h — строка счётчика отказов (DeptFailLine24h);
+  // Python-эндпоинт берёт поле из payload, fallback — его собственный расчёт.
+  let dept_fails_24h = DeptFailLine24h()
   let payload = json_encode({
     owner_id: owner_id,
     dialog_24h: dialog_24h,
@@ -85,13 +117,15 @@ pattern MorningBrief() -> String {
     forge_remarks_open: forge_remarks_open,
     calls_yesterday: calls_yesterday,
     cost_yesterday: cost_yesterday,
-    top_depts: top_depts
+    top_depts: top_depts,
+    dept_fails_24h: dept_fails_24h
   })
-  let _ = TryVal(try http_post("http://127.0.0.1:4000/scheduler/morning-brief", payload, "application/json"))
-
-  // Audit
   let _ = AuditLog("morning_brief", "scheduler", "morning brief triggered (mlog SQL: " + dialog_24h + " dialogs, " + narads_pending + " pending narads)")
+  return payload
+}
 
+pattern MorningBrief() -> String {
+  let _ = TryVal(try http_post("http://127.0.0.1:4000/scheduler/morning-brief", MorningBriefPayload(), "application/json"))
   return "ok"
 }
 
@@ -911,4 +945,33 @@ test "n636: отказ LLM — строка error в trace_log (dept_fail)" {
   let rows = query("SELECT COUNT(*) AS c FROM trace_log WHERE action='dept_fail' AND dept='qa' AND status='error'", [])
   let count = to_float(json_get(rows[0], "c", "0"))
   assert_eq(count >= 1.0, true)
+}
+
+// ── #636 A2c D.1 (приёмка аудитора 04.11): счётчик отказов в утренней сводке ──
+// Фикстура — в паттерне: в test-блоках литералы db_execute не проходят мост
+// №391 (прецедент N634*/N635* — dept/qa.mlog). Чистки DELETE нет: голый
+// DELETE — IRREVERSIBLE_NO_GRANT ценза #633, грант-форма в тестовом флэттене
+// рантайм-отказывается (dept/qa.mlog:1641-1646); флэттен гоняет общую БД,
+// поэтому assert по qa инвариантен к накоплению: before+2 (to_string(2.0)="2").
+// Ветки «нет» и «нет данных» на чистой БД проверены пробой (отдельный файл
+// с db-декларацией, mlog run/test) — отчёт #636.
+pattern N636InsertDeptFail(dept: String, details: String) -> String {
+  let _ = db_execute("INSERT INTO trace_log (action,actor,dept,details,status) VALUES ('dept_fail','system',?1,?2,'error')", [dept, details])
+  return "ok"
+}
+
+test "n636 D.1: счётчик отказов за сутки — qa +2, строка в payload брифа" {
+  let _ = InitDB()
+  let before_rows = query("SELECT COUNT(*) AS c FROM trace_log WHERE action='dept_fail' AND dept='qa'", [])
+  let before = to_float(json_get(before_rows[0], "c", "0"))
+  let _ = N636InsertDeptFail("qa", "n636 D.1 fixture 1")
+  let _ = N636InsertDeptFail("qa", "n636 D.1 fixture 2")
+  let line = DeptFailLine24h()
+  assert_eq(contains(line, "Отказы отделов за сутки"), true)
+  assert_eq(contains(line, "qa " + to_string(before + 2.0)), true)
+  // Мутация «убрать строку счётчика» (поле dept_fails_24h из payload или
+  // вызов DeptFailLine24h из MorningBriefPayload) красит оба assert'а ниже.
+  let parsed = parse_json(MorningBriefPayload())
+  let payload_line = to_string(json_get(parsed, "dept_fails_24h", ""))
+  assert_eq(contains(payload_line, "qa " + to_string(before + 2.0)), true)
 }
