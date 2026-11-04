@@ -1125,58 +1125,72 @@ pattern LegacySystemModernization(task_description: String) -> Dict {
 // ═══════════════════════════════════════════════════════════════════════
 
 pattern LoadSkillTiers(task_type: String, explicit_tier3: String) -> Dict {
+  // #623 W0 (план v2 D3, поправка владельца 03.11): содержимое скиллов вместо
+  // имён — нарезка H2 через dept/skills (L3, depth 1), бюджет 60000, проверка
+  // после добавления. Заодно устранён баг затенения: прежние `let tier2 = ...`
+  // внутри if создавали локали — внешний tier2/tier3 оставались пустыми.
+  let budget = 60000.0
+  let level = SkillsLevelByDepth(1)
   // Tier 1: ALWAYS loaded (5 skills)
   let tier1 = "architecture-decision-records,estimation-discipline,code-organization-standards,tech-radar-maintenance,iterative-implementation"
 
   // Tier 2: by task type (12 skills, load relevant subset)
   let mut tier2 = ""
   if task_type == TASK_TYPE_WEB_APP() then {
-    let tier2 = "nextjs-architecture,database-design,api-design,devops-deployment,observability-setup,dependency-management"
+    tier2 = "nextjs-architecture,database-design,api-design,devops-deployment,observability-setup,dependency-management"
   }
   if task_type == TASK_TYPE_SITE() then {
-    let tier2 = "nextjs-architecture,devops-deployment,dependency-management"
+    tier2 = "nextjs-architecture,devops-deployment,dependency-management"
   }
   if task_type == TASK_TYPE_AI_OFFICE() then {
-    let tier2 = "nextjs-architecture,database-design,api-design,agent-architecture,llm-integration,multi-agent-orchestration,devops-deployment,observability-setup,dependency-management"
+    tier2 = "nextjs-architecture,database-design,api-design,agent-architecture,llm-integration,multi-agent-orchestration,devops-deployment,observability-setup,dependency-management"
   }
   if task_type == TASK_TYPE_LOCAL_AI() then {
-    let tier2 = "local-model-deployment,model-fine-tuning,llm-integration,devops-deployment,dependency-management"
+    tier2 = "local-model-deployment,model-fine-tuning,llm-integration,devops-deployment,dependency-management"
   }
   if task_type == TASK_TYPE_INFRASTRUCTURE() then {
-    let tier2 = "devops-deployment,observability-setup,dependency-management"
+    tier2 = "devops-deployment,observability-setup,dependency-management"
   }
   if task_type == TASK_TYPE_REFACTOR() then {
-    let tier2 = "refactoring-discipline,dependency-management,nextjs-architecture,database-design"
+    tier2 = "refactoring-discipline,dependency-management,nextjs-architecture,database-design"
   }
   if task_type == TASK_TYPE_HOTFIX() then {
-    let tier2 = "dependency-management"
+    tier2 = "dependency-management"
   }
 
   // Tier 3: explicit only (3 skills)
   let mut tier3 = ""
   let q = lower(explicit_tier3)
   if contains(q, "performance") or contains(q, "производительност") or contains(q, "оптимизац") then {
-    let tier3 = tier3 + "performance-optimization,"
+    tier3 = tier3 + "performance-optimization,"
   }
   if contains(q, "security") or contains(q, "безопасност") or contains(q, "hardening") then {
-    let tier3 = tier3 + "security-hardening,"
+    tier3 = tier3 + "security-hardening,"
   }
   if contains(q, "legacy") or contains(q, "модернизац") or contains(q, "moderniz") then {
-    let tier3 = tier3 + "legacy-system-modernization,"
+    tier3 = tier3 + "legacy-system-modernization,"
   }
 
-  let t1_count = 5
-  let t2_count = length(split(tier2, ","))
-  let t3_count = length(split(tier3, ","))
-  let loaded_count = t1_count + t2_count + t3_count
-
-  let mut msg = "Загружены skill tiers для " + TaskTypeNameRU(task_type) + ":\n"
-  let msg = msg + "Tier 1 (всегда): " + tier1 + "\n"
-  let mut msg = msg + "Tier 2 (по типу): " + tier2 + "\n"
-  if tier3 != "" then {
-    let msg = msg + "Tier 3 (explicit): " + tier3 + "\n"
+  // Содержимое: Tier 1 всегда, Tier 2 по типу, Tier 3 explicit — через общий
+  // модуль (бюджет после добавления, громкий пропуск)
+  let mut content = ""
+  each nm in split(tier1, ",") {
+    content = SkillsAppend(content, trim(to_string(nm)), level, budget, "dev")
   }
-  let msg = msg + "Всего: " + to_string(loaded_count) + " skills"
+  each nm in split(tier2, ",") {
+    if trim(to_string(nm)) != "" then {
+      content = SkillsAppend(content, trim(to_string(nm)), level, budget, "dev")
+    }
+  }
+  each nm in split(tier3, ",") {
+    if trim(to_string(nm)) != "" then {
+      content = SkillsAppend(content, trim(to_string(nm)), level, budget, "dev")
+    }
+  }
+
+  let loaded_count = length(split(content, "\n--- ")) - 1
+  let mut msg = content
+  if msg == "" then { let msg = "Скиллы Dev не загрузились (skills/ не развёрнут?) — WARN в журнале" }
 
   return {
     tier1_skills: tier1,

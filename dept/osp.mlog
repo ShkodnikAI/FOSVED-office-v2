@@ -56,12 +56,13 @@ pattern OSPDisclaimerBottom() -> String {
 // PROJECT PARAMETERS V4.0
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPSkillBudget(depth: Int) -> Float {
-  if depth == 0 then { return 8000.0 }
-  if depth == 1 then { return 12000.0 }
-  if depth == 2 then { return 18000.0 }
-  if depth == 3 then { return 20000.0 }
-  if depth == 4 then { return 23000.0 }
-  return 12000.0
+  // #623 (решение владельца 03.11 — «экономия не цель»): бюджет растёт под
+  // уровень нарезки: depth 0 → L2 (замер 20 656 на 11 ядрах Tier-1),
+  // depth 1 → L3 (32 759), depth 2–4 → L4 (83 146) + приложения домена
+  // (financial ≈ 17,4 тыс. L4). Замер: probe_d3_ladder, 05.11.
+  if depth == 0 then { return 26000.0 }
+  if depth == 1 then { return 42000.0 }
+  return 120000.0
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -413,7 +414,7 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   // ── Default ──
   let domain = OSPClassifyDomain(query)
   let depth = OSPAutoEscalate(query, 1)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, depth)
   let context = OSPDisclaimer() + "\n\n" + context + "\n\n=== PROJECT PARAMS ===\nDepth: " + to_string(depth) + " Domain: " + domain + "\n"
   let llm_result = redact(to_string(TryVal(try call_llm(context, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -727,9 +728,11 @@ pattern OSPMarketDataBlock(query: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // CONTEXT BUILDER
 // ═══════════════════════════════════════════════════════════════════════
-pattern BuildOSPContext(query: String, domain: String, chat_id: String) -> String {
+pattern BuildOSPContext(query: String, domain: String, chat_id: String, depth: Int) -> String {
   let profile = ReadDeptProfile("osp")
-  let skills = LoadOSPEnrichedSkills(query, domain)
+  // #623: реальный depth режима (0 quick … 4 full) идёт в загрузчик скиллов:
+  // уровень нарезки L2/L3/L4 и бюджет — из глубины, не константа.
+  let skills = LoadOSPEnrichedSkills(query, domain, depth)
   let corrections = GetCorrections("osp")
   let dialog = GetRecentDialog(chat_id, "10", "osp")
   let facts = GetFacts("osp", "12")
@@ -830,69 +833,40 @@ pattern OSPDomainKB(domain: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // SKILL LOADING (3-tier)
 // ═══════════════════════════════════════════════════════════════════════
-pattern LoadOSPEnrichedSkills(query: String, domain: String) -> String {
+pattern LoadOSPEnrichedSkills(query: String, domain: String, depth: Int) -> String {
+  // #623 W0 (план v2 D3, поправка владельца 03.11): нарезка по секциям H2
+  // через общий модуль dept/skills (SkillCoreSliced/SkillsAppend); уровень —
+  // по depth режима (0→L2, 1→L3, 2–4→L4); бюджет — ПОСЛЕ добавления,
+  // пропуск — громко в журнал (skill_skipped). Бюджеты: OSPSkillBudget.
   let t = lower(query)
   let mut result = ""
-  let budget = OSPSkillBudget(1)
-  // Tier 1 always
-  let s = redact(read_file_or("skills/deconstruct/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- deconstruct ---\n" + s }
-  let s = redact(read_file_or("skills/awareness-frame/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- awareness-frame ---\n" + s }
-  let s = redact(read_file_or("skills/root-cause-mapping/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- root-cause-mapping ---\n" + s }
-  let s = redact(read_file_or("skills/forces-and-potentials/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- forces-and-potentials ---\n" + s }
-  let s = redact(read_file_or("skills/strategic-maneuvers/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- strategic-maneuvers ---\n" + s }
-  let s = redact(read_file_or("skills/two-paths-synthesis/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- two-paths-synthesis ---\n" + s }
-  let s = redact(read_file_or("skills/decision-tree-forecast/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- decision-tree-forecast ---\n" + s }
-  let s = redact(read_file_or("skills/reflexive-impact/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- reflexive-impact ---\n" + s }
-  let s = redact(read_file_or("skills/calibration/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- calibration ---\n" + s }
-  let s = redact(read_file_or("skills/system-health-diagnostics/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { result = result + "\n--- system-health-diagnostics ---\n" + s }
-  // Tier 2 by domain
-  if domain == "financial" and length(result) < budget then {
-    let s = redact(read_file_or("skills/cross-asset-divergence/SKILL.md", ""), "all")
-    if s != "" then { result = result + "\n--- cross-asset-divergence ---\n" + s }
-    let s = redact(read_file_or("skills/asymmetric-bet-structure/SKILL.md", ""), "all")
-    if s != "" then { result = result + "\n--- asymmetric-bet-structure ---\n" + s }
+  let budget = OSPSkillBudget(depth)
+  let level = SkillsLevelByDepth(depth)
+  // Tier 1 — ядро, всегда; deconstruct первым (#623); + source-triangulation
+  let t1 = "deconstruct|awareness-frame|root-cause-mapping|forces-and-potentials|strategic-maneuvers|two-paths-synthesis|decision-tree-forecast|reflexive-impact|calibration|system-health-diagnostics|source-triangulation"
+  each nm in split(t1, "|") {
+    result = SkillsAppend(result, to_string(nm), level, budget, "osp")
   }
-  if domain == "monetary" and length(result) < budget then {
-    let s = redact(read_file_or("skills/macro-regime-id/SKILL.md", ""), "all")
-    if s != "" then { result = result + "\n--- macro-regime-id ---\n" + s }
-    let s = redact(read_file_or("skills/cantillon/SKILL.md", ""), "all")
-    if s != "" then { result = result + "\n--- cantillon ---\n" + s }
+  // Tier 2 — по домену
+  if domain == "financial" then {
+    result = SkillsAppend(result, "cross-asset-divergence", level, budget, "osp")
+    result = SkillsAppend(result, "asymmetric-bet-structure", level, budget, "osp")
   }
-  if contains(t, "нарратив") or contains(t, "поток") then {
-    let s = redact(read_file_or("skills/narrative-vs-flows/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { result = result + "\n--- narrative-vs-flows ---\n" + s }
+  if domain == "monetary" then {
+    result = SkillsAppend(result, "macro-regime-id", level, budget, "osp")
+    result = SkillsAppend(result, "cantillon", level, budget, "osp")
   }
-  if contains(t, "цикл") or contains(t, "фаза") then {
-    let s = redact(read_file_or("skills/cycle-position/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { result = result + "\n--- cycle-position ---\n" + s }
-  }
-  if contains(t, "персона") or contains(t, "лидер") then {
-    let s = redact(read_file_or("skills/deep-profiling/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { result = result + "\n--- deep-profiling ---\n" + s }
-  }
-  if contains(t, "индикатор") or contains(t, "watch") then {
-    let s = redact(read_file_or("skills/iw-watchlist/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { result = result + "\n--- iw-watchlist ---\n" + s }
-  }
+  // Tier 2 — по триггерам запроса; +3 никогда не подключённых (#623 п. 4)
+  if contains(t, "нарратив") or contains(t, "поток") then { result = SkillsAppend(result, "narrative-vs-flows", level, budget, "osp") }
+  if contains(t, "цикл") or contains(t, "фаза") then { result = SkillsAppend(result, "cycle-position", level, budget, "osp") }
+  if contains(t, "персона") or contains(t, "лидер") then { result = SkillsAppend(result, "deep-profiling", level, budget, "osp") }
+  if contains(t, "индикатор") or contains(t, "watch") then { result = SkillsAppend(result, "iw-watchlist", level, budget, "osp") }
+  if contains(t, "антихрупк") or contains(t, "antifragil") or contains(t, "волатильн") or contains(t, "volatility") then { result = SkillsAppend(result, "antifragility-design", level, budget, "osp") }
+  if contains(t, "фазов") or contains(t, "перелом") or contains(t, "tipping") then { result = SkillsAppend(result, "phase-transition-detection", level, budget, "osp") }
+  if contains(t, "шеллинг") or contains(t, "schelling") or contains(t, "фокальн") then { result = SkillsAppend(result, "schelling-points", level, budget, "osp") }
   // Tier 3
-  if domain == "military" and length(result) < budget then {
-    let s = redact(read_file_or("skills/order-of-battle/SKILL.md", ""), "all")
-    if s != "" then { result = result + "\n--- order-of-battle ---\n" + s }
-  }
-  if contains(t, "redteam") or contains(t, "red-team") then {
-    let s = redact(read_file_or("skills/red-team/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { result = result + "\n--- red-team ---\n" + s }
-  }
+  if domain == "military" then { result = SkillsAppend(result, "order-of-battle", level, budget, "osp") }
+  if contains(t, "redteam") or contains(t, "red-team") then { result = SkillsAppend(result, "red-team", level, budget, "osp") }
   if result == "" then { return "No skills loaded." }
   return result
 }
@@ -902,7 +876,7 @@ pattern LoadOSPEnrichedSkills(query: String, domain: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, 0)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nБЫСТРЫЙ АНАЛИЗ (depth=0). 200-300 слов. Суть — риск — действие."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -915,7 +889,7 @@ pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
 
 pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, 3)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней. Если строишь сценарии изменения одной величины (цена, курс, индекс) — диапазоны взаимоисключающие без пересечений, вероятность в таблице сценариев форматом P=<число>% (точечная или узкая ≤15 п.п.), сумма середин = 100%. Шкала Кента — словесная метка К числу, не вместо числа. ACH и прогноз согласованы: выжила null-гипотеза — распределение широкое, без «likely» для одного направления."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -948,7 +922,7 @@ pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
 
 pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, 4)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез. Сценарии одной величины — взаимоисключающие непересекающиеся диапазоны; вероятности в таблице форматом P=<число>% (точечные или узкие ≤15 п.п.), сумма середин = 100% ±2. Шкала Кента — метка К числу. ACH согласован с прогнозом."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -980,7 +954,7 @@ pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
 
 pattern OSPWargame(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, 2)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nWARGAME (depth=2). Стороны→Интересы→Силы→Ходы→Дерево→Schelling points→Нэш→Наша стратегия→Red flags."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -995,7 +969,7 @@ pattern OSPWargame(query: String, chat_id: String) -> String {
 // DOMAIN SCANS
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPRegimeScan(query: String, chat_id: String) -> String {
-  let context = BuildOSPContext(query, "monetary", chat_id)
+  let context = BuildOSPContext(query, "monetary", chat_id, 1)
   let prompt = context + "\n\nМАКРО-РЕЖИМ: текущий режим, индикаторы, ЦБ, cross-asset, Cantillon, narrative-vs-reality, I&W перехода."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Macro regime: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1008,7 +982,7 @@ pattern OSPRegimeScan(query: String, chat_id: String) -> String {
 }
 
 pattern OSPCantillonScan(query: String, chat_id: String) -> String {
-  let context = BuildOSPContext(query, "monetary", chat_id)
+  let context = BuildOSPContext(query, "monetary", chat_id, 1)
   let prompt = context + "\n\nКАНТИЛЬОН: эмиссия→порядок получения→кто первый→кто последний→cross-border→последствия."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Cantillon: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1021,7 +995,7 @@ pattern OSPCantillonScan(query: String, chat_id: String) -> String {
 
 pattern OSPNarrativeScan(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, 1)
   let prompt = context + "\n\nНАРРАТИВ vs ПОТОКИ: нарратив→реальные потоки→расхождения→сигнал→spillover→действия."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Narrative vs flows: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1038,7 +1012,7 @@ pattern OSPNarrativeScan(query: String, chat_id: String) -> String {
 pattern OSPVerify(query: String, chat_id: String) -> String {
   let rows = query("SELECT id, topic, confidence FROM analysis WHERE status IN ('watching','published') AND topic LIKE ? LIMIT 5", ["%" + query + "%"])
   if length(rows) == 0 then { return "Нет анализов для верификации: " + query }
-  let context = BuildOSPContext(query, "general", chat_id)
+  let context = BuildOSPContext(query, "general", chat_id, 1)
   let prompt = context + "\n\nВЕРИФИКАЦИЯ: предсказали→произошло→Brier→систематическая ошибка→corrigendum."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Верифицируй: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1057,7 +1031,7 @@ pattern OSPCalibrationScore(chat_id: String) -> String {
   let brier_rows = query("SELECT AVG(brier_total) as avg_brier FROM analysis_verifications", [])
   let avg_brier = "N/A"
   if length(brier_rows) > 0 then { let avg_brier = to_string(json_get(get(brier_rows, 0), "avg_brier", "N/A")) }
-  let context = BuildOSPContext("калибровка", "general", chat_id)
+  let context = BuildOSPContext("калибровка", "general", chat_id, 1)
   let prompt = context + "\n\nКАЛИБРОВКА. Всего: " + t_count + " Верифицировано: " + v_count + " Avg Brier: " + avg_brier + " Цели: Y1≤0.25 Y2≤0.20 Y3≤0.18"
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Калибровочный скор ОСП"))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1069,7 +1043,7 @@ pattern OSPCalibrationScore(chat_id: String) -> String {
 }
 
 pattern OSPRecalibrate(chat_id: String) -> String {
-  let context = BuildOSPContext("рекалибровка", "general", chat_id)
+  let context = BuildOSPContext("рекалибровка", "general", chat_id, 1)
   let prompt = context + "\n\nРЕКАЛИБРОВКА: повторяющиеся ошибки→недоиспользуемые навыки→калибровочные смещения→3 конкретных изменения."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Рекалибровка ОСП"))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1086,7 +1060,7 @@ pattern OSPRecalibrate(chat_id: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPRedteam(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, 1)
   let prompt = context + "\n\nRED TEAM: доминирующий тезис→5 аргументов ПРОТИВ→вероятности→асимметрия→рекомендация."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Red team: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1099,7 +1073,7 @@ pattern OSPRedteam(query: String, chat_id: String) -> String {
 
 pattern OSPRegisterBet(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, 1)
   let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nАСИММЕТРИЧНАЯ СТАВКА: тезис→bounded downside→upside→ratio≥3:1→EV→условия выхода→горизонт→исполнение."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Ставка: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1120,7 +1094,7 @@ pattern OSPRegisterBet(query: String, chat_id: String) -> String {
 pattern OSPWatch(query: String, chat_id: String) -> String {
   let _ = db_execute("INSERT INTO watchlist_scenarios (scenario_label, description, status) VALUES (?, ?, 'pending')", [substring(query, 0, 100), query])
   let domain = OSPClassifyDomain(query)
-  let context = BuildOSPContext(query, domain, chat_id)
+  let context = BuildOSPContext(query, domain, chat_id, 1)
   let prompt = context + "\n\nI&W: индикаторы 30/60/90/180/365 дней, пороги, действие при активации."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Watch: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -1141,7 +1115,7 @@ pattern OSPUnwatch(query: String, chat_id: String) -> String {
 // PROFILE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPProfile(query: String, chat_id: String) -> String {
-  let context = BuildOSPContext(query, "political", chat_id)
+  let context = BuildOSPContext(query, "political", chat_id, 1)
   let prompt = context + "\n\nDEEP PROFILING: биография→сеть→коммуникация→психология→leverage/vulnerabilities→предсказание→трек-рекорд. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]"
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Profile: " + query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
