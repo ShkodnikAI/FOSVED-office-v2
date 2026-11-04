@@ -159,6 +159,7 @@ Reverse Proxy (Flask)
 | `/design`, `/design-image` | дизайн; генерация изображения |
 | `/qa` | QA |
 | `/visual` <type> <source_type> <source_id>, `/visual-card` <id>, `/visual-archive` [фильтр], `/visual-show` <id>, `/visual-template` <type>, `/visual-style`, `/visual-spec` <id>, `/visual-recall` <id> | визуальный департамент: генерация Type 1–5, карточка с автоопределением источника, архив, показ артефакта, шаблоны, стилевой гайд, spec, recall-тест |
+| `/visual-image` <prompt> | генерация изображения через визуальный департамент (#637 A2d: маршрут восстановлен — длинный префикс раньше `/visual`) |
 | `/engineering` | инженерия |
 | `/forge`, `/forge-export` | маршрут в kavalnya; экспорт FORGE-состояния |
 
