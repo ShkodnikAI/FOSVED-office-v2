@@ -10,7 +10,7 @@ merge_interpreter).
 Тест поднимает МИНИМАЛЬНЫЙ харнесс на `bin/mlog serve` (по образцу
 test_prod_boot.py): декларация http_post, нативный слот cron раз в минуту,
 паттерн слота делает http_post на локальную заглушку; бэкенд VM (как прод).
-Ожидание на v0.38.1: заглушка получила запрос, в выводе serve нет
+Ожидание (фикс v0.38.1; на v0.38.3 подтверждено нарядом #663): заглушка получила запрос, в выводе serve нет
 IRREVERSIBLE_NO_GRANT. Мутация: без декларации заглушка молчит, а в выводе
 есть IRREVERSIBLE_NO_GRANT — гейт остаётся закрытым по умолчанию.
 """
@@ -187,7 +187,7 @@ def _run_scenario(tmp: pathlib.Path, template: str, expect_grant_refusal: bool):
 
 
 def test_cron_tick_carrier_passes_with_declaration(tmp_path):
-    """v0.38.1: тик нативного cron видит allow_carrier — http_post доходит."""
+    """Тик нативного cron видит allow_carrier (фикс v0.38.1; на 0.38.3 — #663) — http_post доходит."""
     _run_scenario(tmp_path, HARNESS, expect_grant_refusal=False)
 
 
