@@ -1699,8 +1699,9 @@ pattern OSPRunCostEst() -> Float {
 }
 
 // Лимит дневного бюджета — ЕДИНАЯ точка чтения (W3 #626: тот же ключ, что у
-// прокси и бенчмарк-гейта): system_settings daily_budget_osp (2.00 — B.3
-// владельца) → kv daily_budget_osp → дефолт 2.0. Значение off/пусто в
+// прокси и бенчмарк-гейта): system_settings daily_budget_osp — 10.00 — решение
+// владельца 03.11, подтверждено 05.11 (B.3 2.00 отменено; наряд #664) →
+// kv daily_budget_osp → дефолт 10.0. Значение off/пусто в
 // system_settings — enforcement снят (UNLIMITED в терминах §6.4)
 pattern OSPLimitRead() -> String {
   let rows = query("SELECT value FROM system_settings WHERE key = 'daily_budget_osp'", [])
@@ -1711,7 +1712,7 @@ pattern OSPLimitRead() -> String {
   }
   let kvv = kv_get("daily_budget_osp")
   if kvv != "" then { return kvv }
-  return "2.0"
+  return "10.0"
 }
 
 // Лимит из kv — легаси-путь W2, оставлен для тестов изолированного гварда
@@ -1748,7 +1749,7 @@ pattern OSPEnsemble(question: String) -> String {
   let models = OSPEnsembleModels()
   if models == "OFF" then { return "OFF|" }
   if trim(question) == "" then { return "FAIL|пустой вопрос" }
-  // Лимит — единый OSPLimitRead (system_settings daily_budget_osp → kv → 2.0;
+  // Лимит — единый OSPLimitRead (system_settings daily_budget_osp → kv → 10.0;
   // off — enforcement снят владельцем). #626 W3 унифицировал с OSPBenchBudgetGate
   let lv = OSPLimitRead()
   let mut lim = 999999.0
@@ -2155,11 +2156,23 @@ pattern OSPBenchEnsureSchema() -> String {
   let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_bench_questions (qid TEXT PRIMARY KEY, due_date TEXT, source TEXT, question TEXT, freeze_datetime TEXT, crowd_p REAL, horizons INTEGER, model_payload TEXT)", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_bench_blocked (qid TEXT PRIMARY KEY, due_date TEXT, source TEXT, reason TEXT, checked_at TEXT)", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)", [])
-  // B.3 владельца: дневной бюджет ОСП = 2.00 USD; seeded один раз, дальше —
-  // только владелец меняет (UPDATE OSPW3Setting в тестах)
+  // Бюджет ОСП 10.00 — решение владельца 03.11, подтверждено 05.11 (B.3 2.00
+  // отменено, наряд #664); seeded один раз, дальше — только владелец меняет
+  // (UPDATE OSPW3Setting в тестах)
   let ex = query("SELECT value FROM system_settings WHERE key = 'daily_budget_osp'", [])
   if length(ex) == 0.0 then {
-    let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('daily_budget_osp', '2.00')", [])
+    let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('daily_budget_osp', '10.00')", [])
+  }
+  // A.2 #664: разовая миграция прода 2.00 → 10.00 по маркеру mig_osp_budget_1105:
+  // мигрируется ТОЛЬКО literal '2.00' (наследие B.3) — ручное значение владельца
+  // не трогается; маркер делает миграцию одноразовой за жизнь БД
+  let mig = query("SELECT key FROM system_settings WHERE key = 'mig_osp_budget_1105'", [])
+  if length(mig) == 0.0 then {
+    let cur = query("SELECT value FROM system_settings WHERE key = 'daily_budget_osp'", [])
+    if length(cur) > 0.0 and to_string(json_get(get(cur, 0.0), "value", "")) == "2.00" then {
+      let _ = db_execute("UPDATE system_settings SET value = '10.00' WHERE key = 'daily_budget_osp'", [])
+    }
+    let _ = db_execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('mig_osp_budget_1105', 'done')", [])
   }
   return "ok"
 }
@@ -3130,11 +3143,14 @@ test "n625 budget: исчерпанный дневной лимит — EXCEEDED
   let dbp = try query("SELECT 1 AS one", [])
   if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
       let _ = kv_set("osp_ensemble_models", "")
+      // #664: лимит выставляется ЯВНО — тест не зависит от дефолта/сева/миграции
+      let _ = OSPW3Setting("daily_budget_osp", "2.00")
       let day = OSPDayUtc()
       let _ = kv_set("daily_budget_osp_used:" + day, "2.0")
       assert_contains(OSPEnsemble("вопрос про бюджет ансамбля"), "EXCEEDED|")
       // W2-пометка оседает на карточке через OSPEnsembleApply
       let _ = kv_set("daily_budget_osp_used:" + day, "0")
+      let _ = OSPW3Setting("daily_budget_osp", "10.00")
   }}
 
 test "n625 base rate — поправка 1: n≥10 подаётся, n<10 НЕ подаётся" {
@@ -3464,16 +3480,48 @@ test "n626 бюджет-гейт: OK, OVER с точным cap, UNLIMITED" {
       let _ = kv_set("daily_budget_osp_used:" + OSPDayUtc(), "0")
   }}
 
-test "n626 лимит: единая точка чтения — дефолт 2.0, system_settings приоритет" {
+test "n626 лимит: единая точка чтения — system_settings приоритет, значения явные" {
   let dbp = try query("SELECT 1 AS one", [])
   if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      // #664: тест не зависит от дефолта/сева — все значения выставляются явно
+      let _ = OSPW3Setting("daily_budget_osp", "2.00")
       assert_eq(OSPLimitRead(), "2.00")
       let _ = OSPW3Setting("daily_budget_osp", "5.00")
       assert_eq(OSPLimitRead(), "5.00")
       let _ = OSPW3Setting("daily_budget_osp", "off")
       assert_eq(OSPLimitRead(), "off")
-      let _ = OSPW3Setting("daily_budget_osp", "2.00")
-      assert_eq(OSPLimitRead(), "2.00")
+      let _ = OSPW3Setting("daily_budget_osp", "10.00")
+      assert_eq(OSPLimitRead(), "10.00")
+  }}
+
+test "n664 миграция бюджета: 2.00 → 10.00 по маркеру, ручное значение не трогается" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      // сценарий 1: значение 2.00 (наследие B.3), маркера нет → после вызова
+      // 10.00, маркер есть (№312: DELETE в тесте — только через грант)
+      let g = grant_issue("db:delete:system_settings", 120, "once")
+      let _ = try db_execute_with_grant(g, "DELETE FROM system_settings WHERE key IN ('daily_budget_osp', 'mig_osp_budget_1105')", [])
+      let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('daily_budget_osp', '2.00')", [])
+      let _ = OSPBenchEnsureSchema()
+      let r1 = query("SELECT value FROM system_settings WHERE key = 'daily_budget_osp'", [])
+      assert_eq(to_string(json_get(get(r1, 0.0), "value", "?")), "10.00")
+      let mk = query("SELECT COUNT(*) AS c FROM system_settings WHERE key = 'mig_osp_budget_1105'", [])
+      assert_eq(to_float(to_string(json_get(get(mk, 0.0), "c", "0"))), 1.0)
+      // сценарий 2: повторный вызов после ручного 3.50 → остаётся 3.50
+      // (защищён и маркером, и значение-гардом «только literal 2.00»)
+      let _ = db_execute("UPDATE system_settings SET value = '3.50' WHERE key = 'daily_budget_osp'", [])
+      let _ = OSPBenchEnsureSchema()
+      let r2 = query("SELECT value FROM system_settings WHERE key = 'daily_budget_osp'", [])
+      assert_eq(to_string(json_get(get(r2, 0.0), "value", "?")), "3.50")
+      // сценарий 3 (мутационный гард маркера): literal 2.00 при живом маркере
+      // НЕ мигрируется повторно — миграция одноразовая за жизнь БД; мутация
+      // «убрать проверку маркера» делает этот ассерт красным (2.00 → 10.00)
+      let _ = db_execute("UPDATE system_settings SET value = '2.00' WHERE key = 'daily_budget_osp'", [])
+      let _ = OSPBenchEnsureSchema()
+      let r3 = query("SELECT value FROM system_settings WHERE key = 'daily_budget_osp'", [])
+      assert_eq(to_string(json_get(get(r3, 0.0), "value", "?")), "2.00")
+      // гигиена: вернуть боевое значение (маркер остаётся — консистентно)
+      let _ = db_execute("UPDATE system_settings SET value = '10.00' WHERE key = 'daily_budget_osp'", [])
   }}
 
 test "n626 временной заслон: прогноз после freeze не принимается (MUT-приёмка)" {
