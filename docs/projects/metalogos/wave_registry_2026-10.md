@@ -84,3 +84,5 @@
 Еженедельные docs-наряды — отдельной строкой в разделе «Изданные» при издании.
 
 <!-- r61-pin: wave-83 W-L1 issue numbers pinned at issue time — dispatch 83 -> gh#1834, naryads 916-919 -> gh#1830-gh#1833; drift +4: the publisher's own creation order (naryads issued first, dispatch last — §16.0-2) consumed the precomputed range, no external consumer between precompute (max 1829) and publish; dispatch self-link and all cross-references repaired at issue time (lesson R50/R62); source issue gh#1795 (№901) closed with citation at issue time (r53 form) -->
+
+<!-- r62-pin: wave-84 W-L2 issue numbers pinned at issue time — dispatch 84 -> gh#1842, naryads 920-922 -> gh#1839-gh#1841; phantom drift: the publisher's max_issue check read the stale issues-listing (GitHub eventual consistency) and double-shifted the plan mid-publish — actual numbers matched the precompute (no external consumer), cross-references repaired by PATCH at issue time (lesson R50/R62 + new R63: the next-issue check must GET the concrete number, never the listing) -->
