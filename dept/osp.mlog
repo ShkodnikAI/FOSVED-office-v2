@@ -394,7 +394,12 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
 
   // ── Verification & calibration ──
   if starts_with(t, "/osp verify") then { return OSPVerify(substring(query, 11, 300), chat_id) }
-  if starts_with(t, "/osp score") or starts_with(t, "/osp brier") then { return OSPCalibrationScore(chat_id) }
+  // #625 W2: касание владельца — исход подтверждается одной строкой;
+  // модель исход не судит, парс программный (OSPParseOutcome)
+  if starts_with(t, "/osp resolve") then { return OSPResolveCommand(substring(query, 12, 300), chat_id) }
+  // #625 W2 §5.4: /osp score — программный блок СНАЧАЛА, проза модели после;
+  // OSPCalibrationScore — модель сочиняла оценку — заменён (§7.3)
+  if starts_with(t, "/osp score") or starts_with(t, "/osp brier") then { return OSPScoreCommand(chat_id) }
   if starts_with(t, "/osp recalibrate") then { return OSPRecalibrate(chat_id) }
   if starts_with(t, "/osp bet") then { return OSPRegisterBet(substring(query, 8, 300), chat_id) }
 
@@ -891,7 +896,7 @@ pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
 pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id, 3)
-  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней. Если строишь сценарии изменения одной величины (цена, курс, индекс) — диапазоны взаимоисключающие без пересечений, вероятность в таблице сценариев форматом P=<число>% (точечная или узкая ≤15 п.п.), сумма середин = 100%. Шкала Кента — словесная метка К числу, не вместо числа. ACH и прогноз согласованы: выжила null-гипотеза — распределение широкое, без «likely» для одного направления.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\"}"
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней. Если строишь сценарии изменения одной величины (цена, курс, индекс) — диапазоны взаимоисключающие без пересечений, вероятность в таблице сценариев форматом P=<число>% (точечная или узкая ≤15 п.п.), сумма середин = 100%. Шкала Кента — словесная метка К числу, не вместо числа. ACH и прогноз согласованы: выжила null-гипотеза — распределение широкое, без «likely» для одного направления.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\", \"market_dissent_reason\": \"<если твой p расходится с рыночной ценой из контекста сильнее чем на 35 п.п. — один проверяемый аргумент: ряд, число, дата; иначе поле не добавляй>\"}"
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
@@ -931,7 +936,11 @@ pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
       let as_of = to_string(json_get(cj, "as_of", ""))
       let resolve_by = to_string(json_get(cj, "resolve_by", ""))
       let src_json = OSPFSourcesToDB(context, aid, as_of)
-      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body)
+      // #625 W2: линии рынка предсказаний в офисе нет — crowd_p = -1 (A.9),
+      // гейты рынка молчат; обоснование расхождения — из CARD, если модель
+      // видела рыночную цену и не согласна (поправка 2)
+      let dissent = to_string(json_get(cj, "market_dissent_reason", ""))
+      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body, -1.0, dissent)
       if starts_with(saved, "OK|") or starts_with(saved, "GATED|") then {
         card_line = "\n\n" + OSPFCardLine(to_float(get(split(saved, "|"), 1.0)))
       }
@@ -945,7 +954,7 @@ pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
 pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id, 4)
-  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез. Сценарии одной величины — взаимоисключающие непересекающиеся диапазоны; вероятности в таблице форматом P=<число>% (точечные или узкие ≤15 п.п.), сумма середин = 100% ±2. Шкала Кента — метка К числу. ACH согласован с прогнозом.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\"}"
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез. Сценарии одной величины — взаимоисключающие непересекающиеся диапазоны; вероятности в таблице форматом P=<число>% (точечные или узкие ≤15 п.п.), сумма середин = 100% ±2. Шкала Кента — метка К числу. ACH согласован с прогнозом.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\", \"market_dissent_reason\": \"<если твой p расходится с рыночной ценой из контекста сильнее чем на 35 п.п. — один проверяемый аргумент: ряд, число, дата; иначе поле не добавляй>\"}"
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
@@ -984,7 +993,9 @@ pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
       let as_of = to_string(json_get(cj, "as_of", ""))
       let resolve_by = to_string(json_get(cj, "resolve_by", ""))
       let src_json = OSPFSourcesToDB(context, aid, as_of)
-      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body)
+      // #625 W2: crowd_p = -1 — линии рынка предсказаний нет (A.9, см. deep)
+      let dissent = to_string(json_get(cj, "market_dissent_reason", ""))
+      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body, -1.0, dissent)
       if starts_with(saved, "OK|") or starts_with(saved, "GATED|") then {
         card_line = "\n\n" + OSPFCardLine(to_float(get(split(saved, "|"), 1.0)))
       }
@@ -1066,35 +1077,35 @@ pattern OSPVerify(query: String, chat_id: String) -> String {
   return reply
 }
 
-pattern OSPCalibrationScore(chat_id: String) -> String {
-  let total = query("SELECT COUNT(*) as c FROM analysis", [])
-  let verified = query("SELECT COUNT(*) as c FROM analysis WHERE status = 'verified'", [])
-  let t_count = to_string(json_get(get(total, 0), "c", "0"))
-  let v_count = to_string(json_get(get(verified, 0), "c", "0"))
-  let brier_rows = query("SELECT AVG(brier_total) as avg_brier FROM analysis_verifications", [])
-  let avg_brier = "N/A"
-  if length(brier_rows) > 0 then { let avg_brier = to_string(json_get(get(brier_rows, 0), "avg_brier", "N/A")) }
+// §5.4 #625: числа владельцу — ТОЛЬКО из БД, программным блоком (инвариант 8);
+// прежний OSPCalibrationScore, где модель сочиняла оценку, заменён (§7.3).
+// Проза модели — строго ПОСЛЕ блока.
+pattern OSPScoreCommand(chat_id: String) -> String {
+  let block = OSPScoreBlock("owner")
   let context = BuildOSPContext("калибровка", "general", chat_id, 1)
-  let prompt = context + "\n\nКАЛИБРОВКА. Всего: " + t_count + " Верифицировано: " + v_count + " Avg Brier: " + avg_brier + " Цели: Y1≤0.25 Y2≤0.20 Y3≤0.18"
+  let prompt = context + "\n\nКАЛИБРОВКА. Ниже программный блок точности — НЕ повторяй его числа и не добавляй своих: прокомментируй причины и что улучшить.\n" + block
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Калибровочный скор ОСП"))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(llm_result) == "()" then { return "Сервис недоступен." }
-  let reply = to_string(llm_result)
-  let _ = RecordAssistantMessage(chat_id, "osp", reply)
-  let _ = AuditLog("osp_score", "osp", "total=" + t_count + " verified=" + v_count + " brier=" + avg_brier)
-  return reply
+  if to_string(llm_result) == "()" then { return block }
+  let _ = AuditLog("osp_score", "osp", substring(block, 0.0, 120.0))
+  return block + "\n\n" + to_string(llm_result)
 }
 
 pattern OSPRecalibrate(chat_id: String) -> String {
+  // §5.4 #625: прежний OSPRecalibrate падал молча на to_char в INSERT
+  // monthly_reviews — писатель теперь OSPMonthlyReview (strftime), проза
+  // модели идёт после программного пересчёта
+  let prev = query("SELECT strftime('%Y-%m', 'now', '-1 month') AS p", [])
+  let period = to_string(json_get(get(prev, 0.0), "p", ""))
+  let mr = OSPMonthlyReview(period, "owner")
   let context = BuildOSPContext("рекалибровка", "general", chat_id, 1)
   let prompt = context + "\n\nРЕКАЛИБРОВКА: повторяющиеся ошибки→недоиспользуемые навыки→калибровочные смещения→3 конкретных изменения."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, "Рекалибровка ОСП"))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
   let reply = to_string(llm_result)
-  let _ = db_execute("INSERT INTO monthly_reviews (year_month, improvements) VALUES (to_char(datetime('now'), 'YYYY-MM'), ?)", [substring(reply, 0, 2000)])
   let _ = RecordAssistantMessage(chat_id, "osp", reply)
-  let _ = AuditLog("osp_recalibrate", "osp", "")
+  let _ = AuditLog("osp_recalibrate", "osp", "monthly=" + substring(mr, 0.0, 80.0))
   return reply
 }
 
@@ -1256,20 +1267,30 @@ pattern OSPCrossCountry(question: String) -> String {
 // Схема §3.2: таблицы карточки (osp_base_rates/osp_bench_* — волны 2–3)
 // + аддитивный ALTER-хвост §3.3 (один грант, гвардованный AlterColIfMissing).
 pattern OSPFEnsureSchema() -> String {
-  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_forecast (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'owner', question TEXT NOT NULL, resolution_criteria TEXT, as_of TEXT, resolve_by TEXT, status TEXT NOT NULL DEFAULT 'drafted', p_raw REAL, p_ensemble REAL, p_median REAL, p_logit REAL, p_spread REAL, n_runs INTEGER DEFAULT 0, p_final REAL, crowd_p REAL, prior_rate REAL, prior_n INTEGER, outcome REAL, brier REAL, brier_base REAL, brier_crowd REAL, cal_bucket INTEGER, kent_label TEXT, analysis_id INTEGER, bench_qid TEXT, resolution_date TEXT, methods_json TEXT DEFAULT '[]', gate_report TEXT, models_json TEXT, sources_json TEXT, published_at TEXT, verified_at TEXT, updated_at TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_forecast (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'owner', question TEXT NOT NULL, resolution_criteria TEXT, as_of TEXT, resolve_by TEXT, status TEXT NOT NULL DEFAULT 'drafted', p_raw REAL, p_ensemble REAL, p_median REAL, p_logit REAL, p_spread REAL, n_runs INTEGER DEFAULT 0, p_final REAL, crowd_p REAL, prior_rate REAL, prior_n INTEGER, outcome REAL, brier REAL, brier_base REAL, brier_crowd REAL, cal_bucket INTEGER, kent_label TEXT, analysis_id INTEGER, bench_qid TEXT, resolution_date TEXT, methods_json TEXT DEFAULT '[]', gate_report TEXT, models_json TEXT, sources_json TEXT, market_dissent_reason TEXT, published_at TEXT, verified_at TEXT, updated_at TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
   let _ = db_execute("CREATE INDEX IF NOT EXISTS idx_ospf_kind_status ON osp_forecast(kind, status)", [])
   let _ = db_execute("CREATE INDEX IF NOT EXISTS idx_ospf_resolve ON osp_forecast(status, resolve_by)", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_forecast_events (id INTEGER PRIMARY KEY AUTOINCREMENT, forecast_id INTEGER NOT NULL, from_status TEXT, to_status TEXT, reason TEXT, actor TEXT DEFAULT 'osp', created_at TEXT, FOREIGN KEY(forecast_id) REFERENCES osp_forecast(id))", [])
+  // #625 W2: базовые частоты по классам вопросов — вход прогона ансамбля
+  // (поправка 1 владельца); писатель приходит с W3/bench, читатель — OSPBaseRate
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_base_rates (topic TEXT PRIMARY KEY, n INTEGER, base_rate REAL, source TEXT, updated_at TEXT)", [])
+  // #625 W2: три таблицы-писателя W2 — CREATE идемпотентен к InitDB app.mlog
+  // (списки колонок 1:1 с app.mlog:280/:402/:443); в изолированном прогоне
+  // dept-файла app.mlog недоступен — без этого тесты верификации падают
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS brier_score_log (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, forecast_probability REAL, actual_outcome REAL, brier_score REAL, cumulative_brier REAL, total_forecasts INTEGER, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS analysis_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, scenario_outcomes TEXT, brier_scores TEXT, brier_total REAL, error_category TEXT, error_note TEXT, improvements_for_next TEXT, biases_active_in_analysis TEXT DEFAULT '[]', indicators_triggered INTEGER DEFAULT 0, indicators_total INTEGER DEFAULT 0, verified_at TEXT DEFAULT (datetime('now')), verified_by TEXT DEFAULT 'system')", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS monthly_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, year_month TEXT UNIQUE, forecasts_verified INTEGER DEFAULT 0, brier_average REAL, brier_trend REAL, hit_rate_high_conf REAL, surprise_index REAL, calibration_curve TEXT DEFAULT '[]', error_clusters TEXT, dominant_error TEXT, improvements TEXT DEFAULT '[]', improvements_applied INTEGER DEFAULT 0, flags_for_quarterly TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
   // try: изолированный python-гвард (mlog test dept/osp.mlog) не знает
   // utils (AlterColIfMissing) — UNDEFINED_FUNCTION глотается, миграционная
   // часть проверяется в полном прогоне app.mlog; в serve — резолвится глобально
-  let mig = grant_issue("db:alter:*", 120, "n", 51)
+  let mig = grant_issue("db:alter:*", 120, "n", 52)
   let _ = try AlterColIfMissing(mig, "analysis", "osp_forecast_id", "ALTER TABLE analysis ADD COLUMN osp_forecast_id INTEGER")
   let _ = try AlterColIfMissing(mig, "analysis_verifications", "osp_forecast_id", "ALTER TABLE analysis_verifications ADD COLUMN osp_forecast_id INTEGER")
   let _ = try AlterColIfMissing(mig, "watchlist_scenarios", "osp_forecast_id", "ALTER TABLE watchlist_scenarios ADD COLUMN osp_forecast_id INTEGER")
   let _ = try AlterColIfMissing(mig, "watchlist_scenarios", "threshold_json", "ALTER TABLE watchlist_scenarios ADD COLUMN threshold_json TEXT")
   let _ = try AlterColIfMissing(mig, "indicator", "osp_forecast_id", "ALTER TABLE indicator ADD COLUMN osp_forecast_id INTEGER")
   let _ = try AlterColIfMissing(mig, "research_source", "as_of", "ALTER TABLE research_source ADD COLUMN as_of TEXT")
+  let _ = try AlterColIfMissing(mig, "osp_forecast", "market_dissent_reason", "ALTER TABLE osp_forecast ADD COLUMN market_dissent_reason TEXT")
   return "ok"
 }
 
@@ -1277,7 +1298,7 @@ pattern OSPFEnsureSchema() -> String {
 // Извлечение — split по маркеру (LLM не зовётся, runtime ±0); форма —
 // json_validate под try: «не JSON» = провал прогона, а не 0.5 молча (§4.1).
 pattern OSPFCardSchema() -> String {
-  return "{\"type\":\"object\",\"properties\":{\"p\":{\"type\":\"number\"},\"resolution_criteria\":{\"type\":\"string\"},\"resolve_by\":{\"type\":\"string\"},\"as_of\":{\"type\":\"string\"}},\"required\":[\"p\",\"resolution_criteria\",\"resolve_by\",\"as_of\"]}"
+  return "{\"type\":\"object\",\"properties\":{\"p\":{\"type\":\"number\"},\"resolution_criteria\":{\"type\":\"string\"},\"resolve_by\":{\"type\":\"string\"},\"as_of\":{\"type\":\"string\"},\"market_dissent_reason\":{\"type\":\"string\"}},\"required\":[\"p\",\"resolution_criteria\",\"resolve_by\",\"as_of\"]}"
 }
 
 // OK|<json> — хвост есть и валиден; FAIL|<причина> — брак формы; MISS — нет.
@@ -1464,12 +1485,15 @@ pattern OSPFSourcesToDB(context: String, analysis_id: Int, as_of: String) -> Str
 // ── ЕДИНСТВЕННАЯ точка записи карточки (§3.2, §9.1; ответ владельцу —
 // из строки БД, OSPFCardLine). Провал гейта — карточка в gated с причиной
 // в событиях: тихих отказов нет. MUT2-мишень: OSPCanTransition drafted→published.
-pattern OSPSaveCard(question: String, p_raw: Float, criteria: String, as_of: String, resolve_by: String, src_json: String, analysis_id: Int, prose: String) -> String {
+// #625 W2: до публикации — ансамбль (OSPEnsemble→OSPEnsembleApply: поля
+// p_ensemble/p_spread, G3) и гейты рынка (G6′/W6/W3, поправка 2). crowd_p —
+// линия рынка предсказаний; -1 = линии нет (A.9) — гейты рынка молчат.
+pattern OSPSaveCard(question: String, p_raw: Float, criteria: String, as_of: String, resolve_by: String, src_json: String, analysis_id: Int, prose: String, crowd_p: Float, dissent: String) -> String {
   let _ = OSPFEnsureSchema()
-  let _ = db_execute("INSERT INTO osp_forecast (kind, question, resolution_criteria, as_of, resolve_by, status, p_raw, p_ensemble, n_runs, sources_json, analysis_id, models_json, gate_report) VALUES ('owner', ?, ?, ?, ?, 'drafted', ?, ?, 1, ?, ?, '{\"n_runs\":1}', '')", [question, criteria, as_of, resolve_by, to_string(p_raw), to_string(p_raw), src_json, to_string(analysis_id)])
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, resolution_criteria, as_of, resolve_by, status, p_raw, p_ensemble, n_runs, crowd_p, sources_json, analysis_id, models_json, gate_report) VALUES ('owner', ?, ?, ?, ?, 'drafted', ?, ?, 1, ?, ?, ?, '{\"n_runs\":1}', '')", [question, criteria, as_of, resolve_by, to_string(p_raw), to_string(p_raw), to_string(crowd_p), src_json, to_string(analysis_id)])
   let rows = query("SELECT id FROM osp_forecast WHERE question = ? ORDER BY id DESC LIMIT 1", [question])
   let id = to_float(to_string(json_get(get(rows, 0.0), "id", "0")))
-  let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, '', 'drafted', 'карточка создана (прогон 1; поправка 1 владельца: без сжатия к базовой частоте)', 'osp', datetime('now'))", [to_string(id)])
+  let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, '', 'drafted', 'карточка создана (поправка 1 владельца: базовая частота — вход прогона, без сжатия)', 'osp', datetime('now'))", [to_string(id)])
   // связь с analysis (§3.3) + первый писатель analysis.full_result (§9.6)
   if to_float(to_string(analysis_id)) > 0.0 then {
     let _ = db_execute("UPDATE analysis SET osp_forecast_id = ?, full_result = ? WHERE id = ?", [to_string(id), substring(prose, 0.0, 8000.0), to_string(analysis_id)])
@@ -1485,8 +1509,27 @@ pattern OSPSaveCard(question: String, p_raw: Float, criteria: String, as_of: Str
     return "GATED|" + to_string(id) + "|" + gates
   }
   let _ = OSPTransition(id, "gated", "G2, G5 PASS", "osp")
-  let p = OSPClip(p_raw)
-  let _ = db_execute("UPDATE osp_forecast SET p_final = ?, kent_label = ?, cal_bucket = ?, gate_report = ? WHERE id = ?", [to_string(p), OSPKentOf(p), to_string(OSPBucketOf(p)), "{\"g1\":\"PASS\",\"g2\":\"PASS\",\"g5\":\"PASS\"}", to_string(id)])
+  // W2 #625: ансамбль и гейты чисел — до публикации; отказ (G3/G6′)
+  // оставляет карточку в gated с reason в событиях и gate_report
+  let ens = OSPEnsemble(question)
+  let apply = OSPEnsembleApply(id, ens, crowd_p, dissent)
+  if starts_with(apply, "GATED|") then {
+    let reason = to_string(get(split(apply, "|"), 2.0))
+    let _ = db_execute("UPDATE osp_forecast SET gate_report = ? WHERE id = ?", [reason, to_string(id)])
+    let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, 'gated', 'REFUSED>published', ?, 'osp', datetime('now'))", [to_string(id), reason])
+    return "GATED|" + to_string(id) + "|" + reason
+  }
+  let mut p_base = p_raw
+  let mut marks = ""
+  if starts_with(apply, "OK|") then {
+    p_base = to_float(to_string(get(split(apply, "|"), 1.0)))
+    marks = to_string(get(split(apply, "|"), 2.0))
+  }
+  if trim(dissent) != "" then {
+    let _ = db_execute("UPDATE osp_forecast SET market_dissent_reason = ? WHERE id = ?", [substring(dissent, 0.0, 500.0), to_string(id)])
+  }
+  let p = OSPClip(p_base)
+  let _ = db_execute("UPDATE osp_forecast SET p_final = ?, kent_label = ?, cal_bucket = ?, gate_report = ? WHERE id = ?", [to_string(p), OSPKentOf(p), to_string(OSPBucketOf(p)), "{\"g1\":\"PASS\",\"g2\":\"PASS\",\"g5\":\"PASS\"" + marks + "}", to_string(id)])
   let pub = OSPTransition(id, "published", "гейты пройдены, p_final=" + to_string(p), "osp")
   return "OK|" + to_string(id) + "|published|p_final=" + to_string(p)
 }
@@ -1509,6 +1552,572 @@ pattern OSPFCardLine(forecast_id: Float) -> String {
   let pf = to_string(json_get(r, "p_final", ""))
   if pf == "" then { return "🎲 Карточка прогноза #" + to_string(forecast_id) + ": статус " + st + " — вероятность не опубликована (причина в gated-событиях)" }
   return "🎲 Карточка прогноза #" + to_string(forecast_id) + ": p=" + pf + " — " + to_string(json_get(r, "kent_label", "")) + ", проверка " + to_string(json_get(r, "resolve_by", "")) + ", статус " + st
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// W2 #625: ЧИСЛА — ансамбль, агрегация, метрики, скоринг, бюджет
+// ═══════════════════════════════════════════════════════════════════════
+
+// Формат числа — 3 знака: to_string даёт -0.6399999999999999, в Telegram
+// такое отправлять нельзя — проверено исполнением (§5.4)
+pattern OSPFmt3(x: Float) -> String {
+  let mut neg = ""
+  let mut v = x
+  if v < 0.0 then {
+    neg = "-"
+    v = 0.0 - v
+  }
+  let n = to_int(v * 1000.0 + 0.5)
+  let ip = to_int(to_float(to_string(n)) / 1000.0)
+  let frac = n - ip * 1000
+  let mut fs = to_string(frac)
+  if frac < 10 then { fs = "00" + to_string(frac) }
+  if frac >= 10 and frac < 100 then { fs = "0" + to_string(frac) }
+  return neg + to_string(ip) + "." + fs
+}
+
+// G1-схема прогона ансамбля: p, base_rate_hint, why (§4.2)
+pattern OSPFRunSchema() -> String {
+  return "{\"type\":\"object\",\"properties\":{\"p\":{\"type\":\"number\"},\"base_rate_hint\":{\"type\":\"string\"},\"why\":{\"type\":\"string\"}},\"required\":[\"p\"]}"
+}
+
+// PASS|<p> | FAIL|<причина> — не-JSON = провал прогона, а не 0.5 молча (§4.1)
+// json_validate возвращает вердикт формы — само число берём parse_json-ом
+pattern OSPParseRun(reply: String) -> String {
+  let t = trim(reply)
+  let r = try json_validate(OSPFRunSchema(), t)
+  if to_string(r) == "()" then { return "FAIL|ответ не JSON по схеме прогона" }
+  if r.ok == false then { return "FAIL|форма прогона: " + to_string(r.error.message) }
+  let v = parse_json(t)
+  let p = to_float(to_string(json_get(v, "p", "-999")))
+  if p < 0.0 or p > 1.0 then { return "FAIL|p вне [0,1]: " + to_string(p) }
+  return "PASS|" + to_string(p)
+}
+
+// Сортировка CSV-чисел по возрастанию — выбором минимума; прогонов ≤ 7
+pattern OSPSortCsv(csv: String) -> String {
+  let mut src = trim(csv)
+  let mut out = ""
+  let mut guard = 0.0
+  while src != "" and guard < 10.0 {
+    guard = guard + 1.0
+    let parts = split(src, ";")
+    let n = length(parts)
+    let mut mi = 0.0
+    let mut mv = to_float(to_string(get(parts, 0.0)))
+    let mut i = 0.0
+    while i < n {
+      let v = to_float(to_string(get(parts, i)))
+      if v < mv then {
+        mv = v
+        mi = i
+      }
+      i = i + 1.0
+    }
+    if out == "" then { out = to_string(mv) } else { out = out + ";" + to_string(mv) }
+    let mut rest = ""
+    let mut j = 0.0
+    while j < n {
+      if j != mi then {
+        if rest == "" then { rest = to_string(get(parts, j)) } else { rest = rest + ";" + to_string(get(parts, j)) }
+      }
+      j = j + 1.0
+    }
+    src = rest
+  }
+  return out
+}
+
+// Агрегация: mean — основной; median и logit-pool сохраняются для честного
+// сравнения агрегаторов (§2.1, пример 2); p_spread — population stdev.
+// Вход — CSV валидных вероятностей; выход OK|<mean>|<median>|<logit>|<spread>|<n>
+pattern OSPAggregate(csv: String) -> String {
+  let t = trim(csv)
+  if t == "" then { return "FAIL|нет валидных прогонов" }
+  let parts = split(t, ";")
+  let n = length(parts)
+  let mut sum = 0.0
+  let mut i = 0.0
+  while i < n {
+    sum = sum + to_float(to_string(get(parts, i)))
+    i = i + 1.0
+  }
+  let mean = sum / n
+  let sp = split(OSPSortCsv(t), ";")
+  let midi = to_int(n / 2.0)
+  let mut median = to_float(to_string(get(sp, to_float(to_string(midi)))))
+  if n == 2.0 * to_float(to_string(midi)) then {
+    median = (median + to_float(to_string(get(sp, to_float(to_string(midi - 1)))))) / 2.0
+  }
+  let mut lsum = 0.0
+  let mut vsum = 0.0
+  let mut k = 0.0
+  while k < n {
+    let p = to_float(to_string(get(parts, k)))
+    let pc = OSPClip(p)
+    lsum = lsum + ln(pc / (1.0 - pc))
+    vsum = vsum + (p - mean) * (p - mean)
+    k = k + 1.0
+  }
+  let spread = sqrt(vsum / n)
+  let lp = sigmoid(lsum / n)
+  return "OK|" + to_string(mean) + "|" + to_string(median) + "|" + to_string(lp) + "|" + to_string(spread) + "|" + to_string(n)
+}
+
+// Поправка 1: базовая частота — ВХОД прогона, не сжатие. Класс сравнения —
+// домен вопроса, прокси «вопросы того же типа»; n<10 — не подаётся вовсе.
+// MUT-мишень поправки 1 — проверка n<10. OSPBlendPrior не реализуется:
+// механическое сжатие включается только в W4 по правилу Platt (§5.2)
+pattern OSPBaseRate(question: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let rows = query("SELECT n, base_rate FROM osp_base_rates WHERE topic = ?", [OSPClassifyDomain(question)])
+  if length(rows) == 0.0 then { return "NONE" }
+  let n = to_float(to_string(json_get(get(rows, 0.0), "n", "0")))
+  if n < 10.0 then { return "NONE" }
+  return "OK|" + to_string(to_float(to_string(json_get(get(rows, 0.0), "base_rate", "0")))) + "|" + to_string(n)
+}
+
+pattern OSPBaseRateBlock(question: String) -> String {
+  let br = OSPBaseRate(question)
+  if starts_with(br, "OK|") == false then { return "" }
+  let pp = split(br, "|")
+  return "\nБАЗОВАЯ ЧАСТОТА класса (n=" + to_string(get(pp, 2.0)) + "): " + to_string(get(pp, 1.0)) + " — вход для оценки, не приговор; механическое сжатие запрещено (поправка 1 владельца)."
+}
+
+// UTC-день для kv-ключа бюджета — strftime в SQLite (UTC по умолчанию)
+pattern OSPDayUtc() -> String {
+  let rows = query("SELECT strftime('%Y-%m-%d', 'now') AS d", [])
+  return to_string(json_get(get(rows, 0.0), "d", ""))
+}
+
+// Оценка прогона 0.01 USD — верхняя граница оценки §10 «до +0.05 при полном
+// ансамбле» из 5 прогонов; groq/cerebras фактически 0 USD (прайс офиса —
+// proxy/providers.py MODEL_COSTS). Консервативная — бюджет не недооцениваем
+pattern OSPRunCostEst() -> Float {
+  return 0.01
+}
+
+// Лимит — kv daily_budget_osp (2.00 USD/день, B.3 владельца); счётчик —
+// daily_budget_osp_used на UTC-день; при исчерпании — 1 прогон, пометка W2
+pattern OSPBudgetUsed() -> String {
+  let v = kv_get("daily_budget_osp_used:" + OSPDayUtc())
+  if v == "" then { return "0" }
+  return v
+}
+
+pattern OSPBudgetCharge(usd: Float) -> String {
+  let cur = to_float(OSPBudgetUsed())
+  let nv = cur + usd
+  let _ = kv_set("daily_budget_osp_used:" + OSPDayUtc(), to_string(nv))
+  return to_string(nv)
+}
+
+// Реестр семейств ансамбля: проверенные пары из COMBO_CHAINS fosved-standard
+// (proxy/providers.py:151-160), дешёвые первыми (§10). kv-override
+// osp_ensemble_models — CSV моделей; значение off — рубильник ансамбля
+// (тесты CI дают ноль LLM-вызовов). 400 «no such model» на чужих рунгах
+// circuit breaker не открывает — проверено экспериментом с mock-провайдером
+pattern OSPEnsembleModels() -> String {
+  let ov = kv_get("osp_ensemble_models")
+  if ov == "off" then { return "OFF" }
+  if ov != "" then { return ov }
+  return "openai/gpt-oss-20b;gpt-oss-120b;deepseek-chat;glm-4.6;kimi-k3"
+}
+
+// Один вопрос — до 5 независимых прогонов на разных семействах; прогон —
+// компактный промпт со структурным ответом, заряд бюджета до каждого вызова.
+// Выход: OFF| | EXCEEDED|<причина> | FAIL|<причина> |
+//        OK|<n>|<mean>|<median>|<logit>|<spread>|<skipped>|<models_json>
+pattern OSPEnsemble(question: String) -> String {
+  let models = OSPEnsembleModels()
+  if models == "OFF" then { return "OFF|" }
+  if trim(question) == "" then { return "FAIL|пустой вопрос" }
+  let mut lv = kv_get("daily_budget_osp")
+  if lv == "" then { lv = "2.0" }
+  let lim = to_float(lv)
+  let used0 = to_float(OSPBudgetUsed())
+  if lim - used0 < OSPRunCostEst() then {
+    return "EXCEEDED|бюджет ансамбля на UTC-день исчерпан: " + to_string(used0) + " из " + to_string(lv) + " USD — оценка по одиночному прогону, пометка W2"
+  }
+  let base = OSPBaseRateBlock(question)
+  let prompt = "Ты — независимый аналитик ансамбля прогнозов. Вопрос: " + trim(question) + "." + base + "\nДай ОДНУ строку строго валидного JSON без какого-либо текста до и после: {\"p\": <твоя вероятность числом 0.02-0.98>, \"base_rate_hint\": \"<как базовая частота повлияла; пусто, если не подавалась>\", \"why\": \"<один проверяемый аргумент: ряд, число, дата>\"}"
+  let fams = split(models, ";")
+  let mut runs = ""
+  let mut mj = "{\"runs\":["
+  let mut nval = 0.0
+  let mut skipped = 0.0
+  let mut first = true
+  let mut used = used0
+  each m in fams {
+    let model = trim(to_string(m))
+    if model != "" then {
+      if used + OSPRunCostEst() > lim then {
+        skipped = 1.0
+      } else {
+        let r = TryVal(try call_llm(prompt, question, model))
+        // one-way redact до решений — выход call_llm недоверенный (№316),
+        // идиома офиса как в deep/full; структура JSON переживает redact
+        let rs = redact(to_string(r), "all")
+        if first then { first = false } else { mj = mj + "," }
+        if rs == "()" then {
+          mj = mj + "{\"model\":\"" + model + "\",\"status\":\"FAIL\",\"cause\":\"провайдер не ответил\"}"
+        } else {
+          let pr = OSPParseRun(rs)
+          if starts_with(pr, "PASS|") then {
+            nval = nval + 1.0
+            let pv = substring(pr, 5.0, length(pr))
+            if runs == "" then { runs = pv } else { runs = runs + ";" + pv }
+            mj = mj + "{\"model\":\"" + model + "\",\"status\":\"PASS\",\"p\":" + pv + "}"
+          } else {
+            mj = mj + "{\"model\":\"" + model + "\",\"status\":\"FAIL\"}"
+          }
+        }
+        used = to_float(OSPBudgetCharge(OSPRunCostEst()))
+      }
+    }
+  }
+  mj = mj + "],\"n_valid\":" + to_string(nval) + "}"
+  if nval == 0.0 then { return "FAIL|валидных прогонов нет " + mj }
+  let agg = OSPAggregate(runs)
+  if starts_with(agg, "FAIL|") then { return agg }
+  let ap = split(agg, "|")
+  return "OK|" + to_string(get(ap, 5.0)) + "|" + to_string(get(ap, 1.0)) + "|" + to_string(get(ap, 2.0)) + "|" + to_string(get(ap, 3.0)) + "|" + to_string(get(ap, 4.0)) + "|" + to_string(skipped) + "|" + mj
+}
+
+// Структурность обоснования расхождения с рынком: программа проверяет форму,
+// не смысл — длина ≥ 20 и проверяемый след: цифра или URL
+pattern OSPDissentOK(dissent: String) -> Bool {
+  let d = trim(dissent)
+  if length(d) < 20.0 then { return false }
+  let mut i = 0.0
+  while i < length(d) {
+    let ch = substring(d, i, i + 1.0)
+    if ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9" then { return true }
+    i = i + 1.0
+  }
+  if contains(d, "http") then { return true }
+  return false
+}
+
+// Поправка 2: расхождение с рынком — предупреждение, не блокировка.
+// d = |p − crowd_p|: ≤0.15 OK; ≤0.35 W3; >0.35 — W6 при обосновании,
+// иначе G6BLOCK. crowd_p < 0 — линии нет, молчание (A.9)
+pattern OSPCrowdCompare(p_final: Float, crowd_p: Float, dissent: String) -> String {
+  if crowd_p < 0.0 then { return "SKIP|линии нет" }
+  let mut d = p_final - crowd_p
+  if d < 0.0 then { d = 0.0 - d }
+  let ds = OSPFmt3(d)
+  if d <= 0.15 then { return "OK" }
+  if d <= 0.35 then { return "W3|" + ds }
+  if OSPDissentOK(dissent) then { return "W6|" + ds }
+  return "G6BLOCK|" + ds
+}
+
+// Применение результата ансамбля к карточке ДО публикации: поля ансамбля,
+// G3 (разброс), рынок по поправке 2, W1/W2/W4-пометки. Отказ —
+// GATED|<id>|<причина>, карточка остаётся в gated. MUT-мишени: порог G3
+// 0.25, блок G6prime, обязательность market_dissent_reason.
+// Выход: GATED|<id>|<причина> | OK|<p_base>|<фрагмент gate_report>
+pattern OSPEnsembleApply(forecast_id: Float, ens: String, crowd_p: Float, dissent: String) -> String {
+  let rows = query("SELECT question, p_raw, resolve_by, as_of FROM osp_forecast WHERE id = ?", [to_string(forecast_id)])
+  if length(rows) == 0.0 then { return "GATED|" + to_string(forecast_id) + "|карточка не найдена для применения ансамбля" }
+  let row = get(rows, 0.0)
+  let question = to_string(json_get(row, "question", ""))
+  let as_of = to_string(json_get(row, "as_of", ""))
+  let resolve_by = to_string(json_get(row, "resolve_by", ""))
+  let mut p_base = to_float(to_string(json_get(row, "p_raw", "0.5")))
+  let mut marks = ""
+  if starts_with(ens, "OK|") then {
+    let pp = split(ens, "|")
+    let nv = to_float(to_string(get(pp, 1.0)))
+    let mean = to_float(to_string(get(pp, 2.0)))
+    let median = to_float(to_string(get(pp, 3.0)))
+    let lp = to_float(to_string(get(pp, 4.0)))
+    let spread = to_float(to_string(get(pp, 5.0)))
+    let skipped = to_string(get(pp, 6.0))
+    let mj = to_string(get(pp, 7.0))
+    let _ = db_execute("UPDATE osp_forecast SET p_ensemble = ?, p_median = ?, p_logit = ?, p_spread = ?, n_runs = ?, models_json = ? WHERE id = ?", [to_string(mean), to_string(median), to_string(lp), to_string(spread), to_string(nv), mj, to_string(forecast_id)])
+    if nv >= 3.0 then {
+      if spread > 0.25 then {
+        return "GATED|" + to_string(forecast_id) + "|FAIL: G3 разброс ансамбля " + OSPFmt3(spread) + " больше 0.25 при " + to_string(nv) + " валидных прогонах — модели отвечают на разные вопросы"
+      }
+      marks = marks + ",\"g3\":\"PASS\""
+      p_base = mean
+    } else {
+      let mut w2 = "W2: мета-уверенность низкая — валидных прогонов " + to_string(nv)
+      if skipped == "1" or skipped == "1.0" then { w2 = w2 + "; состав сокращён по бюджету дня" }
+      marks = marks + ",\"w2\":\"" + w2 + "\""
+    }
+  } else {
+    if starts_with(ens, "EXCEEDED|") then {
+      marks = marks + ",\"w2\":\"бюджет ансамбля на день исчерпан — оценка по одному прогону\""
+    }
+  }
+  // G6-рынок (поправка 2): ≤0.15 тихо; 0.15–0.35 W3; >0.35 — W6 только
+  // со структурным обоснованием, иначе G6prime блок
+  if crowd_p >= 0.0 then {
+    let cc = OSPCrowdCompare(p_base, crowd_p, dissent)
+    if starts_with(cc, "G6BLOCK|") then {
+      return "GATED|" + to_string(forecast_id) + "|FAIL: G6prime расхождение с рынком " + substring(cc, 8.0, length(cc)) + " больше 0.35 без market_dissent_reason — публикация блокирована (поправка 2 владельца)"
+    }
+    if starts_with(cc, "W6|") then {
+      marks = marks + ",\"w6\":\"расхождение с рынком " + substring(cc, 3.0, length(cc)) + " — опубликовано с обоснованием\""
+    }
+    if starts_with(cc, "W3|") then {
+      marks = marks + ",\"w3\":\"расхождение с рынком " + substring(cc, 3.0, length(cc)) + "\""
+    }
+  }
+  // W1: отклонение от базовой частоты — |p − rate| > 0.3 при n ≥ 10;
+  // prior_rate/prior_n пишутся на карточку (данные для будущего Platt, W4)
+  let br = OSPBaseRate(question)
+  if starts_with(br, "OK|") then {
+    let bpp = split(br, "|")
+    let rate = to_float(to_string(get(bpp, 1.0)))
+    let bn = to_float(to_string(get(bpp, 2.0)))
+    let _ = db_execute("UPDATE osp_forecast SET prior_rate = ?, prior_n = ? WHERE id = ?", [to_string(rate), to_string(bn), to_string(forecast_id)])
+    let mut d = p_base - rate
+    if d < 0.0 then { d = 0.0 - d }
+    if d > 0.3 then {
+      marks = marks + ",\"w1\":\"отклонение от базовой частоты " + OSPFmt3(d) + " больше 0.3\""
+    }
+  }
+  // W4: короткий горизонт — resolve_by − as_of < 7 дней
+  let days = (OSPFEpochOf(resolve_by) - OSPFEpochOf(as_of)) / 86400.0
+  if days > 0.0 and days < 7.0 then {
+    marks = marks + ",\"w4\":\"горизонт " + OSPFmt3(days) + " дн меньше 7\""
+  }
+  return "OK|" + to_string(p_base) + "|" + marks
+}
+
+// Brier = (p − y)² — программа, не модель (§5.1). MUT-мишень наряда:
+// замена на abs ловится тестом «0.7 против да — 0.090»
+pattern OSPBrier(p: Float, y: Float) -> Float {
+  return (p - y) * (p - y)
+}
+
+// Log-loss, p клиппингован в [0.0001, 0.9999] (§5.1)
+pattern OSPLogLoss(p: Float, y: Float) -> Float {
+  let mut pc = p
+  if pc < 0.0001 then { pc = 0.0001 }
+  if pc > 0.9999 then { pc = 0.9999 }
+  return 0.0 - (y * ln(pc) + (1.0 - y) * ln(1.0 - pc))
+}
+
+// Skill score = 1 − Brier/baseline; линии: 0.25, частота исходов, рынок.
+// baseline > 0 ограждает вызывающий — пол и ограда в OSPScoreBlock (§5.1)
+pattern OSPSkillScore(brier: Float, baseline: Float) -> Float {
+  return 1.0 - brier / baseline
+}
+
+// Пол выборки — одна константа отдела (§5.1, стиль Narad 8: ComputeFinanceMAPE)
+pattern OSPMinN() -> Float {
+  return 10.0
+}
+
+// Парс исхода от владельца — программный, модель исход не судит (§9.7).
+// да/yes/1/true/произошло → 1; нет/no/0/false → 0; дробь и проценты —
+// дробный исход (обобщённый Brier §5.1). Иначе FAIL — не угадываем
+pattern OSPParseOutcome(text: String) -> String {
+  let t = lower(trim(text))
+  if t == "да" or t == "yes" or t == "y" or t == "1" or t == "true" or t == "произошло" or t == "сбылось" then { return "OK|1.0" }
+  if t == "нет" or t == "no" or t == "n" or t == "0" or t == "false" or t == "не произошло" or t == "не сбылось" then { return "OK|0.0" }
+  let mut num = t
+  if contains(num, "%") then {
+    let pp = split(num, "%")
+    num = trim(to_string(get(pp, 0.0)))
+    let v = to_float(num)
+    if v < 0.0 or v > 100.0 then { return "FAIL|проценты вне 0-100: " + text }
+    return "OK|" + to_string(v / 100.0)
+  }
+  if OSPStrIsNumber(num) then {
+    let v = to_float(num)
+    if v < 0.0 or v > 1.0 then { return "FAIL|дробный исход вне 0-1: " + text }
+    return "OK|" + to_string(v)
+  }
+  return "FAIL|исход не распознан: " + text
+}
+
+// Подтверждение исхода владельцем (§9.7): статус → resolved, Brier, строка
+// brier_score_log, analysis_verifications с verified_by=owner. Сверка —
+// только после resolve_by; p_final обязателен (инвариант 1: без него в
+// Brier не попадаем). Инвариант 2: resolved ⇒ outcome+brier+verified_at
+pattern OSPVerifyCard(forecast_id: Float, outcome_text: String, note: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let rows = query("SELECT status, p_final, crowd_p, prior_rate, analysis_id, resolve_by FROM osp_forecast WHERE id = ?", [to_string(forecast_id)])
+  if length(rows) == 0.0 then { return "NO|карточка не найдена" }
+  let row = get(rows, 0.0)
+  let st = to_string(json_get(row, "status", "?"))
+  if st != "published" and st != "watching" then { return "NO|статус " + st + " — исход принимается только с published или watching" }
+  if to_string(json_get(row, "p_final", "")) == "" then { return "NO|p_final отсутствует — карточка в Brier не участвует (инвариант 1)" }
+  let rb = to_string(json_get(row, "resolve_by", ""))
+  if now_unix() < OSPFEpochOf(rb) then { return "NO|горизонт не наступил: сверка после " + rb }
+  let oy = OSPParseOutcome(outcome_text)
+  if starts_with(oy, "FAIL|") then { return "NO|" + oy }
+  let y = to_float(substring(oy, 3.0, length(oy)))
+  let pf = to_float(to_string(json_get(row, "p_final", "0")))
+  let b = OSPBrier(pf, y)
+  let mut reason = "исход подтверждён владельцем: " + outcome_text
+  if trim(note) != "" then { reason = reason + " — " + trim(note) }
+  let tr = OSPTransition(forecast_id, "resolved", reason, "owner")
+  if starts_with(tr, "NO|") then { return tr }
+  let _ = db_execute("UPDATE osp_forecast SET outcome = ?, brier = ?, cal_bucket = ?, verified_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", [to_string(y), to_string(b), to_string(OSPBucketOf(pf)), to_string(forecast_id)])
+  let cp = to_float(to_string(json_get(row, "crowd_p", "-1")))
+  if cp >= 0.0 then {
+    let _ = db_execute("UPDATE osp_forecast SET brier_crowd = ? WHERE id = ?", [to_string(OSPBrier(cp, y)), to_string(forecast_id)])
+  }
+  let prs = to_string(json_get(row, "prior_rate", ""))
+  if prs != "" then {
+    let _ = db_execute("UPDATE osp_forecast SET brier_base = ? WHERE id = ?", [to_string(OSPBrier(to_float(prs), y)), to_string(forecast_id)])
+  }
+  // ряд кумулятивной динамики — у brier_score_log появился первый писатель
+  let prev = query("SELECT COALESCE(SUM(brier_score), 0.0) AS s, COUNT(*) AS c FROM brier_score_log", [])
+  let psum = to_float(to_string(json_get(get(prev, 0.0), "s", "0")))
+  let pcnt = to_float(to_string(json_get(get(prev, 0.0), "c", "0")))
+  let aid = to_float(to_string(json_get(row, "analysis_id", "-1")))
+  // два статических INSERT вместо конкатенации — SQL_DYNAMIC не создаём
+  if aid > 0.0 then {
+    let _ = db_execute("INSERT INTO brier_score_log (analysis_id, forecast_probability, actual_outcome, brier_score, cumulative_brier, total_forecasts) VALUES (?, ?, ?, ?, ?, ?)", [to_string(aid), to_string(pf), to_string(y), to_string(b), to_string(psum + b), to_string(pcnt + 1.0)])
+  } else {
+    let _ = db_execute("INSERT INTO brier_score_log (analysis_id, forecast_probability, actual_outcome, brier_score, cumulative_brier, total_forecasts) VALUES (NULL, ?, ?, ?, ?, ?)", [to_string(pf), to_string(y), to_string(b), to_string(psum + b), to_string(pcnt + 1.0)])
+  }
+  if aid > 0.0 then {
+    let _ = db_execute("INSERT INTO analysis_verifications (analysis_id, scenario_outcomes, brier_scores, brier_total, verified_by) VALUES (?, '[]', ?, ?, 'owner')", ["[\"" + to_string(y) + "\"]", to_string(b), to_string(aid)])
+  }
+  // try: AuditLog живёт в dept/utils — изолированный прогон dept-файла без
+  // app.mlog его не знает; в проде (serve) резолвится глобально
+  let _ = try AuditLog("osp_verify_card", "osp", "id=" + to_string(forecast_id) + " y=" + to_string(y) + " brier=" + OSPFmt3(b))
+  return "OK|" + to_string(forecast_id) + "|brier=" + OSPFmt3(b)
+}
+
+// Программный блок точности (§5.4): числа ТОЛЬКО из БД; пол OSPMinN на
+// каждой метрике; n<10 — честное «недостаточно данных (k/10)», не выдумка
+pattern OSPScoreBlock(kind: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let tot = query("SELECT COUNT(*) AS c FROM osp_forecast WHERE kind = ?", [kind])
+  let total = to_float(to_string(json_get(get(tot, 0.0), "c", "0")))
+  let res = query("SELECT COUNT(*) AS c, AVG(brier) AS ab, AVG(outcome) AS af FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final IS NOT NULL AND outcome IS NOT NULL", [kind])
+  let n = to_float(to_string(json_get(get(res, 0.0), "c", "0")))
+  let mut out = "📐 ОСП · точность (" + kind + ")\nПрогнозов всего: " + to_string(total) + " · разрешено: " + to_string(n)
+  if n < OSPMinN() then {
+    return out + "\nНедостаточно данных для метрик (" + to_string(n) + "/" + to_string(OSPMinN()) + ") — пол " + to_string(OSPMinN()) + ", выдуманных чисел нет"
+  }
+  let ab = to_float(to_string(json_get(get(res, 0.0), "ab", "0")))
+  let f = to_float(to_string(json_get(get(res, 0.0), "af", "0")))
+  out = out + "\nBrier: " + OSPFmt3(ab)
+  out = out + "\nSkill vs «всегда 50%» (0.25): " + OSPFmt3(OSPSkillScore(ab, 0.25))
+  let bl = f * (1.0 - f)
+  if bl > 0.0 then {
+    out = out + "\nSkill vs базовая частота исходов (" + OSPFmt3(f) + "): " + OSPFmt3(OSPSkillScore(ab, bl))
+  }
+  let cr = query("SELECT COUNT(*) AS c, AVG(brier_crowd) AS ac FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND brier_crowd IS NOT NULL", [kind])
+  let nc = to_float(to_string(json_get(get(cr, 0.0), "c", "0")))
+  if nc >= OSPMinN() then {
+    let ac = to_float(to_string(json_get(get(cr, 0.0), "ac", "0")))
+    out = out + "\nBrier толпы/рынка: " + OSPFmt3(ac) + " · skill vs толпа: " + OSPFmt3(OSPSkillScore(ab, ac))
+  } else {
+    out = out + "\nSkill vs толпа: недостаточно данных (" + to_string(nc) + "/" + to_string(OSPMinN()) + ")"
+  }
+  let hi = query("SELECT COUNT(*) AS c, AVG(outcome) AS h FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final >= 0.8 AND outcome IS NOT NULL", [kind])
+  let nh = to_float(to_string(json_get(get(hi, 0.0), "c", "0")))
+  if nh >= OSPMinN() then {
+    let h = to_float(to_string(json_get(get(hi, 0.0), "h", "0")))
+    out = out + "\nHit-rate при p ≥ 80%: " + OSPFmt3(h) + " · surprise index: " + OSPFmt3(1.0 - h)
+  } else {
+    out = out + "\nHit-rate при p ≥ 80%: недостаточно данных (" + to_string(nh) + "/" + to_string(OSPMinN()) + ")"
+  }
+  return out
+}
+
+// Месячный обзор — писатель monthly_reviews через strftime (§5.4: прежний
+// to_char падал молча). kind фильтрует контуры (инвариант 5). Идемпотентно:
+// строка периода обновляется, соседние периоды не трогаются
+pattern OSPMonthlyReview(period: String, kind: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let p = trim(period)
+  if length(p) != 7.0 then { return "NO|период не ГГГГ-ММ: " + period }
+  let res = query("SELECT COUNT(*) AS c, AVG(brier) AS ab FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND outcome IS NOT NULL AND verified_at LIKE ? || '%'", [kind, p])
+  let n = to_float(to_string(json_get(get(res, 0.0), "c", "0")))
+  if n == 0.0 then { return "NO|" + p + ": разрешённых прогнозов нет — строка не пишется" }
+  let ab = to_float(to_string(json_get(get(res, 0.0), "ab", "0")))
+  let ex = query("SELECT id FROM monthly_reviews WHERE year_month = ?", [p])
+  if length(ex) == 0.0 then {
+    let _ = db_execute("INSERT INTO monthly_reviews (year_month, forecasts_verified, brier_average) VALUES (?, ?, ?)", [p, to_string(n), to_string(ab)])
+  } else {
+    let _ = db_execute("UPDATE monthly_reviews SET forecasts_verified = ?, brier_average = ? WHERE year_month = ?", [to_string(n), to_string(ab), p])
+  }
+  let pm = query("SELECT strftime('%Y-%m', ? || '-01', '-1 month') AS p", [p])
+  let prevp = to_string(json_get(get(pm, 0.0), "p", ""))
+  let pv = query("SELECT COUNT(*) AS c, AVG(brier) AS ab FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND outcome IS NOT NULL AND verified_at LIKE ? || '%'", [kind, prevp])
+  let pn = to_float(to_string(json_get(get(pv, 0.0), "c", "0")))
+  if pn >= OSPMinN() then {
+    let pab = to_float(to_string(json_get(get(pv, 0.0), "ab", "0")))
+    let _ = db_execute("UPDATE monthly_reviews SET brier_trend = ? WHERE year_month = ?", [to_string(ab - pab), p])
+  }
+  let hi = query("SELECT COUNT(*) AS c, AVG(outcome) AS h FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final >= 0.8 AND outcome IS NOT NULL AND verified_at LIKE ? || '%'", [kind, p])
+  let nh = to_float(to_string(json_get(get(hi, 0.0), "c", "0")))
+  if nh >= OSPMinN() then {
+    let h = to_float(to_string(json_get(get(hi, 0.0), "h", "0")))
+    let _ = db_execute("UPDATE monthly_reviews SET hit_rate_high_conf = ?, surprise_index = ? WHERE year_month = ?", [to_string(h), to_string(1.0 - h), p])
+  }
+  let _ = try AuditLog("osp_monthly_review", "osp", p + " n=" + to_string(n) + " brier=" + OSPFmt3(ab))
+  return "OK|" + p + "|verified=" + to_string(n) + "|brier=" + OSPFmt3(ab)
+}
+
+// Касание владельца одной строкой: /osp resolve <id> да|нет [заметка]
+pattern OSPResolveCommand(rest: String, chat_id: String) -> String {
+  let parts = split(trim(rest), " ")
+  if length(parts) < 2.0 then { return "Формат: /osp resolve <id> да|нет [заметка] — исход подтверждает владелец; сверка после resolve_by" }
+  let ids = trim(to_string(get(parts, 0.0)))
+  if OSPStrIsNumber(ids) == false then { return "NO|id не число: " + ids }
+  let id = to_float(ids)
+  let outcome = trim(to_string(get(parts, 1.0)))
+  let mut note = ""
+  let mut i = 2.0
+  while i < length(parts) {
+    if note == "" then { note = to_string(get(parts, i)) } else { note = note + " " + to_string(get(parts, i)) }
+    i = i + 1.0
+  }
+  let r = OSPVerifyCard(id, outcome, note)
+  if starts_with(r, "OK|") then {
+    return "✅ Исход записан: " + r + "\n" + OSPFCardLine(id) + "\nБлок точности: /osp score"
+  }
+  return "⚠️ " + r
+}
+
+// ── Фикстуры W2-тестов: сырой SQL только в паттерне (гвард №312).
+// kind изолирует тестовый контур от owner-данных (инвариант 5);
+// засев только в пустой контур — повторные прогоны идемпотентны
+pattern OSPW2SeedIfEmpty(kind: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let cnt = query("SELECT COUNT(*) AS c FROM osp_forecast WHERE kind = ?", [kind])
+  if to_float(to_string(json_get(get(cnt, 0.0), "c", "0"))) == 0.0 then { return "empty" }
+  return "has"
+}
+
+pattern OSPW2SeedResolved(kind: String, p: Float, y: Float) -> String {
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_final, outcome, brier, cal_bucket, verified_at, created_at) VALUES (?, ?, 'resolved', ?, ?, ?, 1, datetime('now'), datetime('now'))", [kind, "n625 seed " + kind + " p=" + to_string(p) + " y=" + to_string(y), to_string(p), to_string(y), to_string(OSPBrier(p, y))])
+  return "ok"
+}
+
+pattern OSPW2SeedCrowd(kind: String, p: Float, y: Float, bc: Float) -> String {
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_final, outcome, brier, brier_crowd, cal_bucket, verified_at, created_at) VALUES (?, ?, 'resolved', ?, ?, ?, ?, 1, datetime('now'), datetime('now'))", [kind, "n625 seed crowd " + kind + " p=" + to_string(p), to_string(p), to_string(y), to_string(OSPBrier(p, y)), to_string(bc)])
+  return "ok"
+}
+
+pattern OSPW2SeedBaseRate(topic: String, n: Float, rate: Float) -> String {
+  let ex = query("SELECT topic FROM osp_base_rates WHERE topic = ?", [topic])
+  if length(ex) == 0.0 then {
+    let _ = db_execute("INSERT INTO osp_base_rates (topic, n, base_rate, source, updated_at) VALUES (?, ?, ?, 'n625-test', datetime('now'))", [topic, to_string(n), to_string(rate)])
+  } else {
+    let _ = db_execute("UPDATE osp_base_rates SET n = ?, base_rate = ? WHERE topic = ?", [to_string(n), to_string(rate), topic])
+  }
+  return "ok"
+}
+
+// Фикстура верификации: горизонт в прошлом — сверка владельцем разрешена
+pattern OSPW2ForcePast(forecast_id: Float) -> String {
+  let _ = db_execute("UPDATE osp_forecast SET resolve_by = date('now', '-1 day') WHERE id = ?", [to_string(forecast_id)])
+  return "ok"
 }
 
 
@@ -1771,11 +2380,13 @@ test "n624: OSPSaveCard сквозной — p_final, Кент, дециль, с
   if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
 
       let _ = OSPFTestTables()
+      // #625 W2: ансамбль выключен в тестах — ноль LLM-вызовов, карточка по p_raw
+      let _ = kv_set("osp_ensemble_models", "off")
       let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
       let aid = OSPDraftAnalysis("n624 сквозной вопрос о ставке", "deep", "monetary", 3)
-      let saved = OSPSaveCard("n624 сквозной вопрос о ставке (карточка)", 0.25, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://fred.stlouisfed.org/series/DFF\"]", aid, "проза прогона для visual")
+      let saved = OSPSaveCard("n624 сквозной вопрос о ставке (карточка)", 0.25, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://fred.stlouisfed.org/series/DFF\"]", aid, "проза прогона для visual", -1.0, "")
       assert_contains(saved, "OK|")
       assert_contains(saved, "|published|p_final=0.25")
       let id = to_float(get(split(saved, "|"), 1.0))
@@ -1815,10 +2426,12 @@ test "n624: G2-провал — карточка в gated, p_final не пише
   let dbp = try query("SELECT 1 AS one", [])
   if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
 
+      // #625 W2: ансамбль выключен в тестах — ноль LLM-вызовов
+      let _ = kv_set("osp_ensemble_models", "off")
       let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
-      let saved = OSPSaveCard("n624 gated-вопрос уникальный", 0.6, "коротко", ao, rb, "[\"https://x\"]", -1, "")
+      let saved = OSPSaveCard("n624 gated-вопрос уникальный", 0.6, "коротко", ao, rb, "[\"https://x\"]", -1, "", -1.0, "")
       assert_contains(saved, "GATED|")
       assert_contains(saved, "FAIL: G2 критерий")
       let id = to_float(get(split(saved, "|"), 1.0))
@@ -1827,7 +2440,7 @@ test "n624: G2-провал — карточка в gated, p_final не пише
       // p_final не пишется: json_get на NULL возвращает дефолт — дефолт вернулся
       assert_eq(to_string(json_get(get(rows, 0.0), "p_final", "NOTNULL")), "NOTNULL")
       // и p вне [0,1] — тоже gated (G1-арифметика)
-      let saved2 = OSPSaveCard("n624 p-вне-диапазона уникальный", 1.5, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://x\"]", -1, "")
+      let saved2 = OSPSaveCard("n624 p-вне-диапазона уникальный", 1.5, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://x\"]", -1, "", -1.0, "")
       assert_contains(saved2, "GATED|")
       assert_contains(saved2, "p вне [0,1]")
 
@@ -1851,4 +2464,310 @@ test "n624: писатель research_source — URL из живого конт�
       assert_eq(OSPFURLsFrom("текст без ссылок"), "")
       assert_eq(OSPFSourcesToDB("текст без ссылок", aid, "2026-11-04"), "[]")
 
+  }}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Тесты W2 #625: метрики, агрегация, гейты чисел, скоринг, бюджет
+// ═══════════════════════════════════════════════════════════════════════
+
+test "n625 fmt3: три знака, минус, артефакты сложения" {
+  assert_eq(OSPFmt3(0.1 + 0.2), "0.300")
+  assert_eq(OSPFmt3(0.0 - 0.6399999), "-0.640")
+  assert_eq(OSPFmt3(1.0), "1.000")
+  assert_eq(OSPFmt3(0.02), "0.020")
+}
+
+test "n625 brier: (0.7−1)² = 0.090; монетка 0.5 даёт 0.250 в обе стороны" {
+  // MUT-мишень: OSPBrier → abs(p−y) — здесь красное: abs даёт 0.300
+  assert_eq(OSPFmt3(OSPBrier(0.7, 1.0)), "0.090")
+  // MUT-мишень: константа 0.25 — здесь красное
+  assert_eq(OSPFmt3(OSPBrier(0.5, 1.0)), "0.250")
+  assert_eq(OSPFmt3(OSPBrier(0.5, 0.0)), "0.250")
+  assert_eq(OSPFmt3(OSPBrier(0.7, 0.0)), "0.490")
+}
+
+test "n625 logloss: монетка 0.693; клип крайней вероятности 9.210" {
+  assert_eq(OSPFmt3(OSPLogLoss(0.5, 1.0)), "0.693")
+  assert_eq(OSPFmt3(OSPLogLoss(0.99999, 0.0)), "9.210")
+}
+
+test "n625 skill: 1 − 0.15/0.25 = 0.400" {
+  assert_eq(OSPFmt3(OSPSkillScore(0.15, 0.25)), "0.400")
+}
+
+test "n625 parseRun: валидный JSON, мусор и p вне диапазона" {
+  assert_eq(OSPParseRun("{\"p\":0.42,\"base_rate_hint\":\"\",\"why\":\"ряд FRED\"}"), "PASS|0.42")
+  assert_contains(OSPParseRun("мусор без json"), "FAIL|")
+  assert_contains(OSPParseRun("{\"p\":1.5,\"why\":\"x\"}"), "FAIL|p вне")
+}
+
+test "n625 aggregate: mean 0.2, median 0.2, logit-pool 0.186, spread 0.082" {
+  let a = OSPAggregate("0.1;0.2;0.3")
+  assert_contains(a, "OK|")
+  let pp = split(a, "|")
+  assert_eq(OSPFmt3(to_float(to_string(get(pp, 1.0)))), "0.200")
+  assert_eq(OSPFmt3(to_float(to_string(get(pp, 2.0)))), "0.200")
+  assert_eq(OSPFmt3(to_float(to_string(get(pp, 3.0)))), "0.186")
+  assert_eq(OSPFmt3(to_float(to_string(get(pp, 4.0)))), "0.082")
+  assert_eq(to_float(to_string(get(pp, 5.0))), 3.0)
+}
+
+test "n625 aggregate: чётное n — median 0.5 по двум середкам; один прогон; пусто" {
+  let a = OSPAggregate("0.8;0.1;0.9;0.2")
+  let pp = split(a, "|")
+  assert_eq(OSPFmt3(to_float(to_string(get(pp, 2.0)))), "0.500")
+  let b = OSPAggregate("0.7")
+  assert_contains(b, "OK|0.7|0.7|")
+  assert_contains(OSPAggregate(""), "FAIL|")
+}
+
+test "n625 crowd: OK, W3, G6-блок без обоснования, W6 с обоснованием, SKIP" {
+  assert_eq(OSPCrowdCompare(0.50, 0.45, ""), "OK")
+  assert_contains(OSPCrowdCompare(0.50, 0.25, ""), "W3|")
+  // MUT-мишень наряда: убрать market_dissent_reason при расхождении 0.4 —
+  // публикация блокируется
+  assert_contains(OSPCrowdCompare(0.50, 0.10, ""), "G6BLOCK|")
+  assert_contains(OSPCrowdCompare(0.50, 0.10, "ряд FRED DFF за октябрь снизился до 3.9%"), "W6|")
+  assert_contains(OSPCrowdCompare(0.50, -1.0, ""), "SKIP|")
+}
+
+test "n625 dissent: короткое и бесцифровое — нет; с числом или URL — да" {
+  assert_eq(OSPDissentOK("коротко"), false)
+  assert_eq(OSPDissentOK("рынок явно ошибается, ждите разворота обратно"), false)
+  assert_eq(OSPDissentOK("ряд FRED DFF за октябрь снизился до 3.9%"), true)
+  assert_eq(OSPDissentOK("см. https://fred.stlouisfed.org/series/DFF"), true)
+}
+
+test "n625 parseOutcome: да, НЕТ, дробное, проценты, отказ" {
+  assert_eq(OSPParseOutcome("да"), "OK|1.0")
+  assert_eq(OSPParseOutcome("НЕТ"), "OK|0.0")
+  assert_eq(OSPParseOutcome("0.5"), "OK|0.5")
+  assert_eq(OSPParseOutcome("60%"), "OK|0.6")
+  assert_contains(OSPParseOutcome("может быть"), "FAIL|")
+}
+
+test "n625 ensemble: рубильник off — OFF, ноль LLM-вызовов" {
+  let _ = kv_set("osp_ensemble_models", "off")
+  assert_eq(OSPEnsemble("вопрос о ставке ФРС"), "OFF|")
+  let _ = kv_set("osp_ensemble_models", "")
+}
+
+test "n625 budget: исчерпанный дневной лимит — EXCEEDED до всякого LLM-вызова" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "")
+      let day = OSPDayUtc()
+      let _ = kv_set("daily_budget_osp_used:" + day, "2.0")
+      assert_contains(OSPEnsemble("вопрос про бюджет ансамбля"), "EXCEEDED|")
+      // W2-пометка оседает на карточке через OSPEnsembleApply
+      let _ = kv_set("daily_budget_osp_used:" + day, "0")
+  }}
+
+test "n625 base rate — поправка 1: n≥10 подаётся, n<10 НЕ подаётся" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let q = "решение ФРС по ключевой ставке n625"
+      let dom = OSPClassifyDomain(q)
+      let _ = OSPW2SeedBaseRate(dom, 12.0, 0.9)
+      assert_contains(OSPBaseRate(q), "OK|0.9|12")
+      assert_contains(OSPBaseRateBlock(q), "БАЗОВАЯ ЧАСТОТА")
+      // MUT-мишень поправки 1: убрать проверку n<10 — блок появится и здесь.
+      // q2 — другой класс (general, без денежных маркеров), чтобы строка
+      // находилась классификацией, а не проваливалась поиском
+      let q2 = "структурный вопрос n625 малая выборка класса"
+      let dom2 = OSPClassifyDomain(q2)
+      let _ = OSPW2SeedBaseRate(dom2, 5.0, 0.5)
+      assert_eq(OSPBaseRate(q2), "NONE")
+      assert_eq(OSPBaseRateBlock(q2), "")
+  }}
+
+test "n625 G3: разброс больше 0.25 при трёх прогонах — карточка не публикуется" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
+      let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
+      let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
+      let saved = OSPSaveCard("n625 G3-вопрос уникальный", 0.5, "Критерий наблюдаемый: значение индекса опубликовано Росстатом", ao, rb, "[\"https://rosstat.gov.ru\"]", -1, "", -1.0, "")
+      let id = to_float(get(split(saved, "|"), 1.0))
+      // MUT-мишень: порог G3 0.25 — при 0.367 карточка обязана остаться gated
+      let g = OSPEnsembleApply(id, "OK|3|0.5|0.5|0.49|0.367|0|{\"runs\":[]}", -1.0, "")
+      assert_contains(g, "GATED|")
+      assert_contains(g, "G3 разброс ансамбля 0.367")
+      let rows = query("SELECT p_spread, n_runs, p_ensemble FROM osp_forecast WHERE id = ?", [to_string(id)])
+      assert_eq(OSPFmt3(to_float(to_string(json_get(get(rows, 0.0), "p_spread", "0")))), "0.367")
+      assert_eq(to_float(to_string(json_get(get(rows, 0.0), "n_runs", "0"))), 3.0)
+  }}
+
+test "n625 G3 pass: разброс 0.1 при трёх прогонах — p_base = mean, поля записаны" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
+      let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
+      let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
+      let saved = OSPSaveCard("n625 G3-pass вопрос уникальный", 0.4, "Критерий наблюдаемый: решение опубликовано протоколом комитета", ao, rb, "[\"https://example.org/n625\"]", -1, "", -1.0, "")
+      let id = to_float(get(split(saved, "|"), 1.0))
+      let g = OSPEnsembleApply(id, "OK|3|0.55|0.5|0.54|0.1|0|{\"runs\":[]}", -1.0, "")
+      assert_contains(g, "OK|0.55|")
+      assert_contains(g, "g3")
+      let rows = query("SELECT p_ensemble, p_median, n_runs, models_json FROM osp_forecast WHERE id = ?", [to_string(id)])
+      assert_eq(OSPFmt3(to_float(to_string(json_get(get(rows, 0.0), "p_ensemble", "0")))), "0.550")
+      assert_eq(OSPFmt3(to_float(to_string(json_get(get(rows, 0.0), "p_median", "0")))), "0.500")
+      assert_eq(to_float(to_string(json_get(get(rows, 0.0), "n_runs", "0"))), 3.0)
+  }}
+
+test "n625 G6prime на карточке: 0.4 без обоснования — gated; с обоснованием — published+W6" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
+      let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
+      let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
+      // MUT-мишень наряда: убрать обязательность market_dissent_reason
+      let s1 = OSPSaveCard("n625 рынок-вопрос без обоснования уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt1\"]", -1, "", 0.1, "")
+      assert_contains(s1, "GATED|")
+      assert_contains(s1, "G6prime")
+      let s2 = OSPSaveCard("n625 рынок-вопрос с обоснованием уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt2\"]", -1, "", 0.1, "биржевой объём упал на 40% — котировка неинформативна")
+      assert_contains(s2, "OK|")
+      assert_contains(s2, "|published|p_final=0.5")
+      let id2 = to_float(get(split(s2, "|"), 1.0))
+      let rows = query("SELECT gate_report, market_dissent_reason FROM osp_forecast WHERE id = ?", [to_string(id2)])
+      assert_contains(to_string(json_get(get(rows, 0.0), "gate_report", "")), "w6")
+      assert_contains(to_string(json_get(get(rows, 0.0), "market_dissent_reason", "")), "40%")
+      // W3 — 0.25 внутри окна
+      let s3 = OSPSaveCard("n625 рынок-вопрос W3 уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt3\"]", -1, "", 0.25, "")
+      assert_contains(s3, "OK|")
+      let id3 = to_float(get(split(s3, "|"), 1.0))
+      let rows3 = query("SELECT gate_report FROM osp_forecast WHERE id = ?", [to_string(id3)])
+      assert_contains(to_string(json_get(get(rows3, 0.0), "gate_report", "")), "w3")
+  }}
+
+test "n625 W4: короткий горизонт помечается в gate_report" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      let drows = query("SELECT date('now', '+3 days') AS rb, date('now', '-1 day') AS ao", [])
+      let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
+      let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
+      let saved = OSPSaveCard("n625 короткий горизонт уникальный", 0.6, "Критерий: публикация отчёта агентства по итогам квартала", ao, rb, "[\"https://example.org/short\"]", -1, "", -1.0, "")
+      assert_contains(saved, "OK|")
+      let id = to_float(get(split(saved, "|"), 1.0))
+      let rows = query("SELECT gate_report FROM osp_forecast WHERE id = ?", [to_string(id)])
+      assert_contains(to_string(json_get(get(rows, 0.0), "gate_report", "")), "w4")
+  }}
+
+test "n625 verify: да после resolve_by — resolved, строка brier_score_log" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
+      let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
+      let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
+      let saved = OSPSaveCard("n625 verify-вопрос уникальный", 0.25, "Критерий: ставка по итогу заседания опубликована пресс-релизом", ao, rb, "[\"https://fred.stlouisfed.org/series/DFF\"]", -1, "", -1.0, "")
+      let id = to_float(get(split(saved, "|"), 1.0))
+      // до горизонта — отказ
+      assert_contains(OSPVerifyCard(id, "да", ""), "NO|горизонт не наступил")
+      // сдвигаем resolve_by в прошлое (фикстура — сырой SQL в паттерне запрещён
+      // в тесте, поэтому через служебный UPDATE там же, где сел seeded-карточка)
+      let _ = OSPW2ForcePast(id)
+      let v = OSPVerifyCard(id, "да", "")
+      assert_contains(v, "OK|")
+      assert_contains(v, "brier=0.563")
+      let rows = query("SELECT status, outcome, brier FROM osp_forecast WHERE id = ?", [to_string(id)])
+      assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "resolved")
+      assert_eq(to_float(to_string(json_get(get(rows, 0.0), "outcome", "0"))), 1.0)
+      let bl = query("SELECT forecast_probability, brier_score, total_forecasts FROM brier_score_log WHERE analysis_id IS NULL AND forecast_probability = 0.25 ORDER BY id DESC LIMIT 1", [])
+      assert_eq(to_float(to_string(json_get(get(bl, 0.0), "total_forecasts", "0"))) >= 1.0, true)
+      assert_eq(OSPFmt3(to_float(to_string(json_get(get(bl, 0.0), "brier_score", "0")))), "0.563")
+      // повторное подтверждение — отказ (терминальный статус)
+      assert_contains(OSPVerifyCard(id, "да", ""), "NO|статус resolved")
+      // нераспознанный исход — отказ, модель не угадывает; горизонт в прошлом,
+      // иначе rb-проверка сработает раньше парса
+      let saved2 = OSPSaveCard("n625 verify-вопрос второй уникальный", 0.6, "Критерий: отчёт опубликован агентством с датой выпуска", ao, rb, "[\"https://example.org/v2\"]", -1, "", -1.0, "")
+      let id2 = to_float(get(split(saved2, "|"), 1.0))
+      let _ = OSPW2ForcePast(id2)
+      assert_contains(OSPVerifyCard(id2, "может быть", ""), "FAIL|исход не распознан")
+  }}
+
+test "n625 score: пол n<10 — честное недостаточно данных; при n=12 — числа из БД" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      if OSPW2SeedIfEmpty("n625small") == "empty" then {
+        let _ = OSPW2SeedResolved("n625small", 0.9, 1.0)
+        let _ = OSPW2SeedResolved("n625small", 0.8, 0.0)
+        let _ = OSPW2SeedResolved("n625small", 0.7, 1.0)
+        let _ = OSPW2SeedResolved("n625small", 0.6, 0.0)
+        let _ = OSPW2SeedResolved("n625small", 0.5, 0.0)
+        let _ = OSPW2SeedResolved("n625small", 0.4, 1.0)
+        let _ = OSPW2SeedResolved("n625small", 0.3, 0.0)
+      }
+      // MUT-мишень: убрать пол n≥10 — блок напечатал бы метрики по 7 строкам
+      assert_contains(OSPScoreBlock("n625small"), "Недостаточно данных для метрик (7/10)")
+      if OSPW2SeedIfEmpty("n625test") == "empty" then {
+        let _ = OSPW2SeedResolved("n625test", 0.9, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.8, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.7, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.6, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.5, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.4, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.3, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.2, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.1, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.85, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.95, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.55, 1.0)
+      }
+      let blk = OSPScoreBlock("n625test")
+      assert_contains(blk, "разрешено: 12")
+      assert_contains(blk, "Brier: 0.156")
+      assert_contains(blk, "Skill vs «всегда 50%» (0.25): 0.374")
+      assert_contains(blk, "Skill vs базовая частота исходов (0.583): 0.356")
+      assert_contains(blk, "Hit-rate при p ≥ 80%: недостаточно данных (4/10)")
+      // crowd-линия — отдельный контур: 10 строк с brier_crowd = 0.25
+      if OSPW2SeedIfEmpty("n625crowd") == "empty" then {
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 1.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 0.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 1.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 0.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 1.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 0.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 1.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 0.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 1.0, 0.25)
+        let _ = OSPW2SeedCrowd("n625crowd", 0.5, 0.0, 0.25)
+      }
+      let crb = OSPScoreBlock("n625crowd")
+      assert_contains(crb, "Brier толпы/рынка: 0.250")
+      assert_contains(crb, "skill vs толпа: 0.000")
+  }}
+
+test "n625 monthly: писатель monthly_reviews через strftime — строка периода" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      if OSPW2SeedIfEmpty("n625test") == "empty" then {
+        let _ = OSPW2SeedResolved("n625test", 0.9, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.8, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.7, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.6, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.5, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.4, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.3, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.2, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.1, 0.0)
+        let _ = OSPW2SeedResolved("n625test", 0.85, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.95, 1.0)
+        let _ = OSPW2SeedResolved("n625test", 0.55, 1.0)
+      }
+      let pm = query("SELECT strftime('%Y-%m', 'now') AS p", [])
+      let period = to_string(json_get(get(pm, 0.0), "p", ""))
+      let mr = OSPMonthlyReview(period, "n625test")
+      assert_contains(mr, "OK|" + period + "|verified=12|brier=0.156")
+      let row = query("SELECT forecasts_verified, brier_average FROM monthly_reviews WHERE year_month = ?", [period])
+      assert_eq(to_float(to_string(json_get(get(row, 0.0), "forecasts_verified", "0"))), 12.0)
+      assert_contains(to_string(json_get(get(row, 0.0), "brier_average", "")), "0.15645")
+      // пустой период — честный отказ без выдуманных нулей
+      assert_contains(OSPMonthlyReview("2025-01", "n625test"), "разрешённых прогнозов нет")
+      // кривой период — отказ по форме
+      assert_contains(OSPMonthlyReview("2026-1", "n625test"), "NO|период не ГГГГ-ММ")
   }}
