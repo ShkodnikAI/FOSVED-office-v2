@@ -95,6 +95,7 @@ import dept/engineering
 import dept/kavalnya
 import dept/team
 import dept/admin
+import dept/card
 
 // ============================================================
 // MEMORY — SQLite via db_execute() in InitDB()
@@ -1227,72 +1228,43 @@ pattern HandleDesignImage(prompt: String, chat_id: String) -> String {
 
 
 // Narad 8 — structured verify: /verify finance <id> actual=<число> or /verify legal <id> outcome=clean|rewrite_required
-// Falls back to legacy VerifyArchiveEntry for free-text outcome (marketing, etc.)
-pattern VerifyArchiveEntryStructured(dept: String, entry_id: Int, raw_args: String) -> String {
-  // Check: is this a structured actual=<number> call (Finance)?
-  if starts_with(raw_args, "actual=") then {
-    let val_str = substring(raw_args, 7.0, length(raw_args))
-    let actual_val = to_float(val_str)
-    let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
-    if length(existing) == 0.0 then {
-      return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
-    }
-    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
-    db_insert("dept_verification", {archive_id: entry_id, actual_value: actual_val, actual_outcome: "actual=" + val_str})
-    return "Запись #" + to_string(entry_id) + " верифицирована: actual=" + val_str
-  }
-
-  // Check: is this a structured outcome=<flag> call (Legal)?
-  if starts_with(raw_args, "outcome=") then {
-    let flag = substring(raw_args, 8.0, length(raw_args))
-    if flag != "clean" and flag != "rewrite_required" then {
-      return "outcome должен быть 'clean' или 'rewrite_required', получено: " + flag
-    }
-    let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
-    if length(existing) == 0.0 then {
-      return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
-    }
-    db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
-    db_insert("dept_verification", {archive_id: entry_id, outcome_flag: flag, actual_outcome: "outcome=" + flag})
-    return "Запись #" + to_string(entry_id) + " верифицирована: outcome=" + flag
-  }
-
-  // Fallback — legacy free-text (marketing and all other cases)
-  return VerifyArchiveEntry(dept, entry_id, raw_args)
-}
-
-pattern VerifyArchiveEntry(dept: String, entry_id: Int, outcome: String) -> String {
-  let existing = query("SELECT * FROM dept_archive WHERE id = ? AND dept = ?", [to_string(entry_id), dept])
-  if length(existing) == 0.0 then {
-    return "Запись #" + to_string(entry_id) + " для " + dept + " не найдена"
-  }
-  db_execute("UPDATE dept_archive SET status = 'verified', verification_date = datetime('now') WHERE id = ?1", [to_string(entry_id)])
-  db_insert("dept_verification", {archive_id: entry_id, actual_outcome: outcome})
-  return "Запись #" + to_string(entry_id) + " (" + dept + ") верифицирована: " + outcome
-}
+// #639 (B2): маршрут единый — CardVerifyDispatch (dept/card): /verify той же
+// формой команды, но единственный писатель статусов — автомат карточки;
+// старые VerifyArchiveEntryStructured/VerifyArchiveEntry удалены (писали
+// status='verified' мимо автомата).
 
 // Narad 8 — Finance MAPE: requires min 10 verified pairs (forecast_value + actual_value)
+// #639: знаменатель — только строки с ненулевым фактом; раньше n рос по всем
+// строкам, а слагаемое при actual = 0 пропускалось (баг :1264-1278), плюс
+// затенение let в цикле. Пар даёт карточный шов: forecast_value ← CardSave,
+// actual_value ← CardVerifyNumber (dept/card).
 pattern ComputeFinanceMAPE() -> String {
   let rows = query("SELECT a.forecast_value, v.actual_value FROM dept_archive a JOIN dept_verification v ON v.archive_id = a.id WHERE a.dept = 'finance' AND a.forecast_value IS NOT NULL AND v.actual_value IS NOT NULL")
   if length(rows) == 0.0 then {
     return "MAPE: недостаточно данных для калибровки (0/10 записей)"
   }
-  let n = 0.0
-  let sum_error = 0.0
+  let mut n = 0.0
+  let mut sum_error = 0.0
+  let mut skipped = 0.0
   each row in rows {
-    let n = n + 1.0
     let forecast = to_float(json_get(row, "forecast_value", "0"))
     let actual = to_float(json_get(row, "actual_value", "0"))
     if actual != 0.0 then {
-      let error = abs(forecast - actual) / abs(actual)
-      let sum_error = sum_error + error
+      n = n + 1.0
+      sum_error = sum_error + abs(forecast - actual) / abs(actual)
+    } else {
+      skipped = skipped + 1.0
     }
   }
   if n < 10.0 then {
     return "MAPE: недостаточно данных для калибровки (" + to_string(to_int(n)) + "/10 записей)"
   }
   let mape = (sum_error / n) * 100.0
-  return "MAPE (калиброванная): " + to_string(mape) + "% (n=" + to_string(to_int(n)) + ")"
+  let base = "MAPE (калиброванная): " + to_string(mape) + "% (n=" + to_string(to_int(n)) + ")"
+  if skipped > 0.0 then {
+    return base + ", вне расчёта (факт = 0): " + to_string(to_int(skipped))
+  }
+  return base
 }
 
 // Narad 8 — Legal % без rewrites: requires min 10 verified entries with outcome_flag
@@ -3998,8 +3970,8 @@ pattern WebhookBody() -> String {
         let prefix_len = length(dept) + length(trim(get(parts, 1.0))) + 2.0
         let mut outcome = substring(rest, prefix_len, length(rest))
         if outcome == "" then { outcome = "подтверждено" }
-        // Narad 8: route to structured verify
-        let result = VerifyArchiveEntryStructured(dept, entry_id, outcome)
+        // Narad 8/#639: route to card-verify dispatch (single status writer)
+        let result = CardVerifyDispatch(dept, entry_id, outcome)
         let _ = AuditLog("archive_verify", dept, "id=" + to_string(entry_id) + " outcome=" + substring(outcome, 0.0, 80.0))
         let _ = SendTelegramReply(chat_id, result)
       } else {
