@@ -81,3 +81,5 @@
 
 Пул новичков: gh#1469 (`reserved-for-newcomer`, агентам не брать).
 Еженедельные docs-наряды — отдельной строкой в разделе «Изданные» при издании.
+
+<!-- r61-pin: wave-83 W-L1 issue numbers pinned at issue time — dispatch 83 -> gh#1834, naryads 916-919 -> gh#1830-gh#1833; drift +4: the publisher's own creation order (naryads issued first, dispatch last — §16.0-2) consumed the precomputed range, no external consumer between precompute (max 1829) and publish; dispatch self-link and all cross-references repaired at issue time (lesson R50/R62); source issue gh#1795 (№901) closed with citation at issue time (r53 form) -->
