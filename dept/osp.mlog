@@ -1280,6 +1280,7 @@ pattern OSPFEnsureSchema() -> String {
   let _ = db_execute("CREATE TABLE IF NOT EXISTS brier_score_log (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, forecast_probability REAL, actual_outcome REAL, brier_score REAL, cumulative_brier REAL, total_forecasts INTEGER, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS analysis_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, scenario_outcomes TEXT, brier_scores TEXT, brier_total REAL, error_category TEXT, error_note TEXT, improvements_for_next TEXT, biases_active_in_analysis TEXT DEFAULT '[]', indicators_triggered INTEGER DEFAULT 0, indicators_total INTEGER DEFAULT 0, verified_at TEXT DEFAULT (datetime('now')), verified_by TEXT DEFAULT 'system')", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS monthly_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, year_month TEXT UNIQUE, forecasts_verified INTEGER DEFAULT 0, brier_average REAL, brier_trend REAL, hit_rate_high_conf REAL, surprise_index REAL, calibration_curve TEXT DEFAULT '[]', error_clusters TEXT, dominant_error TEXT, improvements TEXT DEFAULT '[]', improvements_applied INTEGER DEFAULT 0, flags_for_quarterly TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)", [])
   // try: изолированный python-гвард (mlog test dept/osp.mlog) не знает
   // utils (AlterColIfMissing) — UNDEFINED_FUNCTION глотается, миграционная
   // часть проверяется в полном прогоне app.mlog; в serve — резолвится глобально
@@ -1697,8 +1698,23 @@ pattern OSPRunCostEst() -> Float {
   return 0.01
 }
 
-// Лимит — kv daily_budget_osp (2.00 USD/день, B.3 владельца); счётчик —
-// daily_budget_osp_used на UTC-день; при исчерпании — 1 прогон, пометка W2
+// Лимит дневного бюджета — ЕДИНАЯ точка чтения (W3 #626: тот же ключ, что у
+// прокси и бенчмарк-гейта): system_settings daily_budget_osp (2.00 — B.3
+// владельца) → kv daily_budget_osp → дефолт 2.0. Значение off/пусто в
+// system_settings — enforcement снят (UNLIMITED в терминах §6.4)
+pattern OSPLimitRead() -> String {
+  let rows = query("SELECT value FROM system_settings WHERE key = 'daily_budget_osp'", [])
+  if length(rows) > 0.0 then {
+    let v = trim(to_string(json_get(get(rows, 0.0), "value", "")))
+    if v == "off" or v == "" then { return "off" }
+    return v
+  }
+  let kvv = kv_get("daily_budget_osp")
+  if kvv != "" then { return kvv }
+  return "2.0"
+}
+
+// Лимит из kv — легаси-путь W2, оставлен для тестов изолированного гварда
 pattern OSPBudgetUsed() -> String {
   let v = kv_get("daily_budget_osp_used:" + OSPDayUtc())
   if v == "" then { return "0" }
@@ -1732,9 +1748,11 @@ pattern OSPEnsemble(question: String) -> String {
   let models = OSPEnsembleModels()
   if models == "OFF" then { return "OFF|" }
   if trim(question) == "" then { return "FAIL|пустой вопрос" }
-  let mut lv = kv_get("daily_budget_osp")
-  if lv == "" then { lv = "2.0" }
-  let lim = to_float(lv)
+  // Лимит — единый OSPLimitRead (system_settings daily_budget_osp → kv → 2.0;
+  // off — enforcement снят владельцем). #626 W3 унифицировал с OSPBenchBudgetGate
+  let lv = OSPLimitRead()
+  let mut lim = 999999.0
+  if lv != "off" then { lim = to_float(lv) }
   let used0 = to_float(OSPBudgetUsed())
   if lim - used0 < OSPRunCostEst() then {
     return "EXCEEDED|бюджет ансамбля на UTC-день исчерпан: " + to_string(used0) + " из " + to_string(lv) + " USD — оценка по одиночному прогону, пометка W2"
@@ -2119,6 +2137,562 @@ pattern OSPW2ForcePast(forecast_id: Float) -> String {
   let _ = db_execute("UPDATE osp_forecast SET resolve_by = date('now', '-1 day') WHERE id = ?", [to_string(forecast_id)])
   return "ok"
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// W3 #626: внешний поток ForecastBench + ночная вахта
+// Данные проверены загрузкой реальных файлов 05.11 (question_sets/2026-10-25-llm.json
+// 1473008 байт, 500 вопросов; resolution_sets/2026-10-11: 496 строк, 271 resolved).
+// http-контент публичного источника — недоверенный (№316): все решения — на
+// redact("all")-копии; redact детерминичен между процессами (проверено), одинаковые
+// id обоих файлов маскируются одинаково — join qid сходится
+// ═══════════════════════════════════════════════════════════════════════
+
+// Схема §3.2: внешний контур (удаляется целиком, owner-контур не трогает) +
+// system_settings (тот же ключ бюджета, что у прокси — proxy/budget.py:99-108)
+pattern OSPBenchEnsureSchema() -> String {
+  let _ = OSPFEnsureSchema()
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_bench_rounds (due_date TEXT PRIMARY KEY, question_set TEXT, n_questions INTEGER, n_market INTEGER, n_dataset INTEGER, n_blocked INTEGER, n_rows INTEGER, license TEXT DEFAULT 'CC BY-SA 4.0 · forecastingresearch/forecastbench-datasets', ingested_at TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_bench_questions (qid TEXT PRIMARY KEY, due_date TEXT, source TEXT, question TEXT, freeze_datetime TEXT, crowd_p REAL, horizons INTEGER, model_payload TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_bench_blocked (qid TEXT PRIMARY KEY, due_date TEXT, source TEXT, reason TEXT, checked_at TEXT)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)", [])
+  // B.3 владельца: дневной бюджет ОСП = 2.00 USD; seeded один раз, дальше —
+  // только владелец меняет (UPDATE OSPW3Setting в тестах)
+  let ex = query("SELECT value FROM system_settings WHERE key = 'daily_budget_osp'", [])
+  if length(ex) == 0.0 then {
+    let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('daily_budget_osp', '2.00')", [])
+  }
+  return "ok"
+}
+
+// Атрибуция §6.7 — в каждой строке раунда и в экспорте
+pattern OSPBenchAttribution() -> String {
+  return "CC BY-SA 4.0 · forecastingresearch/forecastbench-datasets"
+}
+
+// Белый список полей (§6.3 слой 1): payload собирается заново — поля исхода
+// не могут в него попасть, потому что их нет в списке. MUT-мишень наряда
+pattern OSPBenchWhitelist() -> String {
+  return "question;resolution_criteria;background;source_intro;url;freeze_datetime_value;resolution_dates;market_info_resolution_criteria"
+}
+
+pattern OSPBenchSetUrl(due: String) -> String {
+  return "https://raw.githubusercontent.com/forecastingresearch/forecastbench-datasets/main/datasets/question_sets/" + due + "-llm.json"
+}
+
+// http_get без гранта (registry.rs:281 — проверка №620); недоверенный контент
+// уходит через one-way redact ДО решений (№316/B1)
+pattern OSPBenchFetchSet(due: String) -> String {
+  let raw = TryVal(try http_get(OSPBenchSetUrl(due), 120.0))
+  let rs = redact(to_string(raw), "all")
+  if rs == "()" or rs == "" then { return "FAIL|источник не ответил: " + OSPBenchSetUrl(due) }
+  return "OK|" + rs
+}
+
+// Слой 1: точное присутствие ключей исхода в вопросе (json_get с sentinel,
+// не поиск подстроки). Блок — раунд останавливается: взят resolution_set
+pattern OSPBenchHasForbidden(qjson: String) -> String {
+  let d = parse_json(qjson)
+  let wl = split("resolved_to;resolved;direction;outcome;actual_value;resolution_value", ";")
+  each k in wl {
+    let key = to_string(k)
+    if to_string(json_get(d, key, "АБСЕНТ")) != "АБСЕНТ" then {
+      return "BLOCK|" + key
+    }
+  }
+  return "CLEAN"
+}
+
+// Payload — только белый список (конструкция, а не фильтр, §6.3).
+// json_encode значения, не to_string: массив resolution_dates — не строка
+pattern OSPBenchBuildPayload(qjson: String) -> String {
+  let d = parse_json(qjson)
+  let wl = split(OSPBenchWhitelist(), ";")
+  let mut out = "{"
+  let mut first = true
+  each k in wl {
+    let key = to_string(k)
+    let v = json_get(d, key, "АБСЕНТ")
+    if to_string(v) != "АБСЕНТ" then {
+      if first then { first = false } else { out = out + "," }
+      out = out + json_encode(key) + ":" + json_encode(v)
+    }
+  }
+  return out + "}"
+}
+
+// resolution_dates: массив ISO-дат (dataset — до 5 горизонтов) | "N/A"
+// (рыночные — одно разрешение на закрытии). Выход: CSV дат | "" — один ряд
+pattern OSPBenchHorizons(res_dates: String) -> String {
+  let t = trim(res_dates)
+  if t == "" or t == "N/A" then { return "" }
+  let inner = trim(t)
+  if starts_with(inner, "[") then { let inner = substring(inner, 1.0, length(inner) - 1.0) }
+  if ends_with(inner, "]") then { let inner = substring(inner, 0.0, length(inner) - 1.0) }
+  let parts = split(inner, ",")
+  let mut out = ""
+  each p in parts {
+    let d = trim(to_string(p))
+    let d2 = d
+    if starts_with(d2, "\"") then { let d2 = substring(d2, 1.0, length(d2) - 1.0) }
+    if length(d2) > 0.0 then {
+      if out == "" then { out = d2 } else { out = out + ";" + d2 }
+    }
+  }
+  return out
+}
+
+// Crowd-линия §6.2 (2): вероятность сообщества только у рынков; у fred/yfinance
+// freeze_value — УРОВЕНЬ РЯДА — принять за вероятность значит Brier ≈ 10000
+pattern OSPBenchCrowd(source: String, freeze_value: String) -> Float {
+  let s = lower(trim(source))
+  if s != "kalshi" and s != "manifold" and s != "metaculus" and s != "polymarket" then { return -1.0 }
+  // №514: to_float на нечисле бросает — явный фолбэк
+  let v = to_float_or(trim(freeze_value), -1.0)
+  if v < 0.0 or v > 1.0 then { return -1.0 }
+  return v
+}
+
+pattern OSPBenchQid(source: String, id: String, due: String) -> String {
+  return lower(trim(source)) + ":" + trim(id) + "@" + due
+}
+
+// Ingest ядра: payload → белый список → утечка-гвард → строки раунда.
+// Идемпотентен: повторный ingest того же due → SKIP (приёмка наряда)
+pattern OSPBenchIngestData(due: String, payload: String) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let ex = query("SELECT n_rows FROM osp_bench_rounds WHERE due_date = ?", [due])
+  if length(ex) > 0.0 then {
+    return "SKIP|раунд " + due + " уже засеян: n_rows=" + to_string(json_get(get(ex, 0.0), "n_rows", "?"))
+  }
+  let d = try parse_json(payload)
+  if to_string(d) == "()" then { return "FAIL|не JSON: question_set" }
+  if d.ok == false then { return "FAIL|не JSON: question_set" }
+  let qs = json_get(d.value, "questions", [])
+  let nq = length(qs)
+  if nq == 0.0 then { return "FAIL|пустой набор вопросов" }
+  // Утечка-гвард по КАЖДОМУ вопросу — один блок останавливает раунд.
+  // json_encode, не to_string: строковая форма объекта не JSON (урок №603 B.2)
+  each q in qs {
+    let qj = json_encode(q)
+    let g = OSPBenchHasForbidden(qj)
+    if starts_with(g, "BLOCK|") then {
+      return "BLOCK|раунд остановлен: в вопросе поле исхода (" + substring(g, 6.0, length(g)) + ") — взят resolution_set вместо question_set"
+    }
+  }
+  // Строки вопросов: payload из белого списка, crowd по источнику
+  let mut nmarket = 0.0
+  let mut i = 0.0
+  while i < nq {
+    let q = get(qs, i)
+    let src = to_string(json_get(q, "source", ""))
+    let qid = OSPBenchQid(src, to_string(json_get(q, "id", "")), due)
+    let fz = to_string(json_get(q, "freeze_datetime", ""))
+    let crowd = OSPBenchCrowd(src, to_string(json_get(q, "freeze_datetime_value", "")))
+    let hz = OSPBenchHorizons(to_string(json_get(q, "resolution_dates", "")))
+    let nhz = 1.0
+    if hz != "" then { let nhz = length(split(hz, ";")) }
+    let _ = db_execute("INSERT INTO osp_bench_questions (qid, due_date, source, question, freeze_datetime, crowd_p, horizons, model_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [qid, due, src, substring(to_string(json_get(q, "question", "")), 0.0, 2000.0), fz, to_string(crowd), to_string(nhz), OSPBenchBuildPayload(json_encode(q))])
+    if crowd >= 0.0 then { let nmarket = nmarket + 1.0 }
+    i = i + 1.0
+  }
+  let ndataset = nq - nmarket
+  // Детерминированная стратифицированная выборка (поправка 3): по N вопросов
+  // с источника, порядок по qid, без random — иначе раунд невоспроизводим
+  let ps_rows = query("SELECT value FROM system_settings WHERE key = 'osp_bench_per_source'", [])
+  let mut per_source = 18.0
+  if length(ps_rows) > 0.0 then { let per_source = to_float(to_string(json_get(get(ps_rows, 0.0), "value", "18"))) }
+  let srcs = query("SELECT DISTINCT source FROM osp_bench_questions WHERE due_date = ? ORDER BY source", [due])
+  let mut sample_csv = ""
+  each s in srcs {
+    let src = to_string(json_get(s, "source", ""))
+    let sub = query("SELECT qid, horizons FROM osp_bench_questions WHERE due_date = ? AND source = ? ORDER BY qid LIMIT ?", [due, src, to_string(per_source)])
+    each r in sub {
+      let qid = to_string(json_get(r, "qid", ""))
+      let nh = to_float(to_string(json_get(r, "horizons", "1")))
+      if sample_csv == "" then { sample_csv = qid + ":" + to_string(nh) } else { sample_csv = sample_csv + ";" + qid + ":" + to_string(nh) }
+    }
+  }
+  let sample_parts = split(sample_csv, ";")
+  let mut nrows = 0.0
+  each p in sample_parts {
+    let pp = split(to_string(p), ":")
+    // qid сам содержит ":" (source:id@due) — горизонт последний элемент
+    if length(pp) >= 2.0 then { nrows = nrows + to_float(to_string(get(pp, to_float(to_string(length(pp) - 1.0))))) }
+  }
+  let nsample = length(sample_parts)
+  let _ = db_execute("INSERT INTO osp_bench_rounds (due_date, question_set, n_questions, n_market, n_dataset, n_blocked, n_rows, license, ingested_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, datetime('now'))", [due, OSPBenchSetUrl(due), to_string(nq), to_string(nmarket), to_string(ndataset), to_string(nrows), OSPBenchAttribution()])
+  return "OK|questions=" + to_string(nq) + "|market=" + to_string(nmarket) + "|dataset=" + to_string(ndataset) + "|sample=" + to_string(nsample) + "|rows=" + to_string(nrows)
+}
+
+// Ingest прод: живой fetch + ядро
+pattern OSPBenchIngest(due: String) -> String {
+  let f = OSPBenchFetchSet(due)
+  if starts_with(f, "FAIL|") then { return f }
+  return OSPBenchIngestData(due, substring(f, 3.0, length(f)))
+}
+
+// Детерминированная выборка раунда — пересчитывается, состояние не хранится
+pattern OSPBenchSample(due: String) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let ps_rows = query("SELECT value FROM system_settings WHERE key = 'osp_bench_per_source'", [])
+  let mut per_source = 18.0
+  if length(ps_rows) > 0.0 then { let per_source = to_float(to_string(json_get(get(ps_rows, 0.0), "value", "18"))) }
+  let srcs = query("SELECT DISTINCT source FROM osp_bench_questions WHERE due_date = ? ORDER BY source", [due])
+  let mut out = ""
+  each s in srcs {
+    let src = to_string(json_get(s, "source", ""))
+    let sub = query("SELECT qid FROM osp_bench_questions WHERE due_date = ? AND source = ? ORDER BY qid LIMIT ?", [due, src, to_string(per_source)])
+    each r in sub {
+      let qid = to_string(json_get(r, "qid", ""))
+      if out == "" then { out = qid } else { out = out + ";" + qid }
+    }
+  }
+  return out
+}
+
+// Маркер конфигурации прогона (поправка 3): строка с отличной конфигурацией —
+// непригодна для калибровки owner
+pattern OSPBenchConfigCurrent() -> String {
+  return "ensemble-v1:" + OSPEnsembleModels()
+}
+
+// Стоимость строки прогноза: ансамбль × оценка прогона (верхняя граница §6.4)
+pattern OSPBenchCostPerRow() -> Float {
+  let fams = split(OSPEnsembleModels(), ";")
+  let mut n = 0.0
+  each f in fams {
+    if trim(to_string(f)) != "" then { let n = n + 1.0 }
+  }
+  if n == 0.0 then { return OSPRunCostEst() }
+  return n * OSPRunCostEst()
+}
+
+// Ворота бюджета §6.4: тот же ключ, что у прокси (OSPLimitRead). Вердикты:
+// OK / OVER с точным cap строк / UNLIMITED (off — enforcement не активен)
+pattern OSPBenchBudgetGate(rows_planned: Float) -> String {
+  let lv = OSPLimitRead()
+  if lv == "off" then { return "UNLIMITED|лимит не установлен — enforcement не активен (видно в отчёте)" }
+  let left = to_float(lv) - to_float(OSPBudgetUsed())
+  let cpr = OSPBenchCostPerRow()
+  let cost = rows_planned * cpr
+  if left >= cost then { return "OK|left=" + OSPFmt3(left) }
+  let cap = to_int(left / cpr)
+  return "OVER|cap=" + to_string(cap) + " строк из " + to_string(rows_planned) + " (left=" + OSPFmt3(left) + ", cost_per_row=" + OSPFmt3(cpr) + ") — лучше все строки дешёвыми семействами, чем половину дорогими (§6.5)"
+}
+
+// Прогноз одной строки раунда: временной заслон (слой 2) → тот же ансамбль,
+// что у owner (поправка 3) → строка kind='bench' в вахту. bench_qid =
+// qid|res_date; конфиг прогона — в models_json
+pattern OSPBenchForecastRow(due: String, qid: String, res_date: String) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let rows = query("SELECT question, model_payload, freeze_datetime, crowd_p FROM osp_bench_questions WHERE qid = ?", [qid])
+  if length(rows) == 0.0 then { return "SKIP|вопрос не найден: " + qid }
+  let row = get(rows, 0.0)
+  let payload = to_string(json_get(row, "model_payload", ""))
+  let crit = to_string(json_get(parse_json(payload), "resolution_criteria", ""))
+  let freeze = to_string(json_get(row, "freeze_datetime", ""))
+  let crowd = to_float(to_string(json_get(row, "crowd_p", "-1")))
+  // Временной заслон (§6.3 слой 2): прогноз после freeze — утечка. MUT-мишень
+  let fe = OSPFEpochOf(freeze)
+  if fe <= 0.0 then { return "SKIP|freeze не распознан: " + freeze }
+  if now_unix() > fe then { return "SKIP|freeze прошёл " + freeze + " — прогноз после заморозки не принимается" }
+  if length(trim(crit)) < 20.0 then { return "SKIP|критерий исхода короче 20 символов" }
+  let qtext = to_string(json_get(row, "question", ""))
+  let ens = OSPEnsemble(qtext + " Критерий исхода: " + crit)
+  if starts_with(ens, "OK|") == false then { return "SKIP|ансамбль недоступен: " + substring(ens, 0.0, 60.0) }
+  let pp = split(ens, "|")
+  let nv = to_float(to_string(get(pp, 1.0)))
+  let mean = to_float(to_string(get(pp, 2.0)))
+  let median = to_float(to_string(get(pp, 3.0)))
+  let lp = to_float(to_string(get(pp, 4.0)))
+  let spread = to_float(to_string(get(pp, 5.0)))
+  let mj = to_string(get(pp, 7.0))
+  let p = OSPClip(mean)
+  let bench_qid = qid + "|" + res_date
+  let mut g3s = "\"w2\":\"валидных прогонов мало\""
+  if nv >= 3.0 and spread <= 0.25 then { g3s = "\"g3\":\"PASS\"" }
+  let gr = "{\"g1\":\"PASS\"," + g3s + "}"
+  let mjf = "{\"config\":" + json_encode(OSPBenchConfigCurrent()) + ",\"runs\":" + mj + "}"
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, resolution_criteria, as_of, resolve_by, status, p_raw, p_ensemble, p_median, p_logit, p_spread, n_runs, crowd_p, p_final, kent_label, cal_bucket, bench_qid, resolution_date, gate_report, models_json, created_at) VALUES ('bench', ?, ?, ?, ?, 'watching', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))", [substring(qtext, 0.0, 2000.0), substring(crit, 0.0, 2000.0), freeze, res_date, to_string(mean), to_string(mean), to_string(median), to_string(lp), to_string(spread), to_string(nv), to_string(crowd), to_string(p), OSPKentOf(p), to_string(OSPBucketOf(p)), bench_qid, res_date, gr, substring(mjf, 0.0, 6000.0)])
+  let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES ((SELECT id FROM osp_forecast WHERE bench_qid = ? ORDER BY id DESC LIMIT 1), '', 'watching', 'bench-прогноз записан (ансамбль, конфиг в models_json)', 'osp-bench', datetime('now'))", [bench_qid])
+  return "OK|" + bench_qid + "|p_final=" + to_string(p)
+}
+
+// Прогон раунда: бюджетные ворота (§6.4) → цикл по выборке × горизонтам.
+// Не вызывается тестами (живой LLM); верифицируется компонентами выше
+pattern OSPBenchRunRound(due: String) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let rnd = query("SELECT n_rows FROM osp_bench_rounds WHERE due_date = ?", [due])
+  if length(rnd) == 0.0 then { return "FAIL|раунд не засеян: " + due }
+  let sample = OSPBenchSample(due)
+  if trim(sample) == "" then { return "FAIL|выборка пуста" }
+  let parts = split(sample, ";")
+  let mut plan = 0.0
+  each p in parts {
+    let prow = query("SELECT horizons FROM osp_bench_questions WHERE qid = ?", [to_string(p)])
+    if length(prow) > 0.0 then { plan = plan + to_float(to_string(json_get(get(prow, 0.0), "horizons", "1"))) }
+  }
+  let gate = OSPBenchBudgetGate(plan)
+  let mut budget_rows = plan
+  if starts_with(gate, "OVER|") then {
+    // OVER|cap=<k> строк из ... — точный потолок строк по бюджету
+    let capv = to_string(get(split(to_string(get(split(gate, " "), 1.0)), "="), 1.0))
+    budget_rows = to_float(capv)
+  }
+  let mut ok = 0.0
+  let mut skip = 0.0
+  let mut fail = 0.0
+  let mut done = 0.0
+  each p in parts {
+    if done >= budget_rows then {
+      skip = skip + 1.0
+    } else {
+      let qid = to_string(p)
+      let qrow = query("SELECT model_payload FROM osp_bench_questions WHERE qid = ?", [qid])
+      if length(qrow) == 0.0 then {
+        skip = skip + 1.0
+      } else {
+        let payload = to_string(json_get(get(qrow, 0.0), "model_payload", ""))
+        let hz = OSPBenchHorizons(to_string(json_get(parse_json(payload), "resolution_dates", "")))
+        if hz == "" then {
+          // рыночный вопрос — один ряд без даты (разрешение на закрытии)
+          let r = OSPBenchForecastRow(due, qid, "")
+          if starts_with(r, "OK|") then { ok = ok + 1.0 } else {
+            if starts_with(r, "SKIP|") then { skip = skip + 1.0 } else { fail = fail + 1.0 }
+          }
+          done = done + 1.0
+        } else {
+          each d in split(hz, ";") {
+            if done >= budget_rows then {
+              skip = skip + 1.0
+            } else {
+              let r = OSPBenchForecastRow(due, qid, to_string(d))
+              if starts_with(r, "OK|") then { ok = ok + 1.0 } else {
+                if starts_with(r, "SKIP|") then { skip = skip + 1.0 } else { fail = fail + 1.0 }
+              }
+              done = done + 1.0
+            }
+          }
+        }
+      }
+    }
+  }
+  return "ROUND|due=" + due + "|план=" + to_string(plan) + "|бюджет_строк=" + to_string(budget_rows) + "|ok=" + to_string(ok) + "|skip=" + to_string(skip) + "|fail=" + to_string(fail) + "|гейт=" + substring(gate, 0.0, 30.0)
+}
+
+// URL набора исходов §6.2
+pattern OSPBenchResolveUrl(due: String) -> String {
+  return "https://raw.githubusercontent.com/forecastingresearch/forecastbench-datasets/main/datasets/resolution_sets/" + due + "_resolution_set.json"
+}
+
+// Resolve прод: живой fetch набора исходов + ядро
+pattern OSPBenchResolve(due: String) -> String {
+  let raw = TryVal(try http_get(OSPBenchResolveUrl(due), 120.0))
+  let rs = redact(to_string(raw), "all")
+  if rs == "()" or rs == "" then { return "FAIL|источник не ответил: " + OSPBenchResolveUrl(due) }
+  return OSPBenchResolveData(due, rs)
+}
+
+// Resolve ядра §6.5: только после записи всех прогнозов раунда (правило Б —
+// MUT-приёмка); исход — из resolution_set, автоматически (B.4 владельца);
+// штраф пропуска — импутация 0.5, считается явно; конфиг-несовместимые строки
+// помечаются непригодными для калибровки owner (поправка 3)
+pattern OSPBenchResolveData(due: String, payload: String) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let rnd = query("SELECT n_rows FROM osp_bench_rounds WHERE due_date = ?", [due])
+  if length(rnd) == 0.0 then { return "FAIL|раунд не засеян: " + due }
+  let nrows = to_float(to_string(json_get(get(rnd, 0.0), "n_rows", "0")))
+  let sample = OSPBenchSample(due)
+  let mut written = 0.0
+  each q in split(sample, ";") {
+    let c = query("SELECT COUNT(*) AS c FROM osp_forecast WHERE kind = 'bench' AND bench_qid LIKE ?", [to_string(q) + "|%"])
+    written = written + to_float(to_string(json_get(get(c, 0.0), "c", "0")))
+  }
+  if nrows > 0.0 and written < nrows then {
+    return "BLOCK|раунд не прогнан: записано " + to_string(written) + " из " + to_string(nrows) + " строк — resolve до прогнозов запрещён (правило Б §6.3)"
+  }
+  let d = try parse_json(payload)
+  if to_string(d) == "()" then { return "FAIL|не JSON: resolution_set" }
+  if d.ok == false then { return "FAIL|не JSON: resolution_set" }
+  let rs = json_get(d.value, "resolutions", [])
+  let nres = length(rs)
+  let mut ok = 0.0
+  let mut pending = 0.0
+  let mut missing = 0.0
+  let mut bsum = 0.0
+  let mut unfit = 0.0
+  let mut i = 0.0
+  while i < nres {
+    let r = get(rs, i)
+    let rsv = to_string(json_get(r, "resolved", "false"))
+    if rsv == "true" or rsv == "True" or rsv == "1" then {
+      let src = to_string(json_get(r, "source", ""))
+      let res_date = to_string(json_get(r, "resolution_date", ""))
+      let y = to_float(to_string(json_get(r, "resolved_to", "-1")))
+      if y < 0.0 or y > 1.0 then {
+        missing = missing + 1.0
+      } else {
+        let qid = OSPBenchQid(src, to_string(json_get(r, "id", "")), due)
+        let fq = query("SELECT id, p_final, models_json FROM osp_forecast WHERE kind = 'bench' AND bench_qid = ? AND status <> 'resolved' ORDER BY id DESC LIMIT 1", [qid + "|" + res_date])
+        if length(fq) == 0.0 and res_date != "" then {
+          // рыночный вопрос — наш ряд без даты (закрытие рынка)
+          let fq = query("SELECT id, p_final, models_json FROM osp_forecast WHERE kind = 'bench' AND bench_qid = ? AND status <> 'resolved' ORDER BY id DESC LIMIT 1", [qid + "|"])
+        }
+        if length(fq) == 0.0 then {
+          missing = missing + 1.0
+        } else {
+          let frow = get(fq, 0.0)
+          let fid = to_float(to_string(json_get(frow, "id", "0")))
+          let pf = to_float(to_string(json_get(frow, "p_final", "0.5")))
+          let b = OSPBrier(pf, y)
+          let tr = OSPTransition(fid, "resolved", "исход из resolution_set (bench, " + OSPBenchAttribution() + ")", "osp-bench")
+          if starts_with(tr, "OK|") then {
+            let _ = db_execute("UPDATE osp_forecast SET outcome = ?, brier = ?, verified_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", [to_string(y), to_string(b), to_string(fid)])
+            bsum = bsum + b
+            ok = ok + 1.0
+            // поправка 3: конфиг прогона отличается — непригодно для калибровки owner
+            let cfg = to_string(json_get(parse_json(to_string(json_get(frow, "models_json", "{}"))), "config", ""))
+            if cfg != OSPBenchConfigCurrent() then {
+              unfit = unfit + 1.0
+              let _ = db_execute("UPDATE osp_forecast SET gate_report = gate_report || ? WHERE id = ?", [",\"calibration\":\"unfit-config\"", to_string(fid)])
+            }
+          } else {
+            missing = missing + 1.0
+          }
+        }
+      }
+    } else {
+      pending = pending + 1.0
+    }
+    i = i + 1.0
+  }
+  let penalty = missing * 0.25
+  let mut bavg = 0.0
+  if ok > 0.0 then { bavg = bsum / ok }
+  return "RESOLVE|due=" + due + "|строк_исходов=" + to_string(nres) + "|разрешено_наших=" + to_string(ok) + "|ещё_не_разрешено=" + to_string(pending) + "|нет_нашего_прогноза=" + to_string(missing) + "|Brier_покрытых=" + OSPFmt3(bavg) + "|покрытие=" + to_string(written) + "/" + to_string(nrows) + "|штраф_за_пропуски=+" + OSPFmt3(penalty) + "|конфиг-несовместимых=" + to_string(unfit)
+}
+
+// ── Ночная вахта (§4.5, §10 волна 3): обход due-карточек и громкая архивация ──
+
+// Что ждёт сверки владельца: watching-карточки с наступившим горизонтом;
+// bench-строки — ждут автоматического исхода, не трогаем
+pattern OSPWatchDue(now_iso: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let t = OSPFEpochOf(now_iso)
+  if t <= 0.0 then { return "FAIL|now не ISO: " + now_iso }
+  // resolve_by — ISO-дата; строковое сравнение в SQL легально (SQLite ISO,
+  // §6.3 слой 2 прим.: лексикографика в mlog нет, в SQL — есть)
+  let rows = query("SELECT id, question, bench_qid FROM osp_forecast WHERE status = 'watching' AND resolve_by IS NOT NULL AND resolve_by <> '' AND resolve_by <= ? ORDER BY id", [substring(now_iso, 0.0, 10.0)])
+  if length(rows) == 0.0 then { return "вахта: ничего не ждёт сверки" }
+  let mut out = ""
+  each r in rows {
+    let id = to_string(json_get(r, "id", ""))
+    let bq = to_string(json_get(r, "bench_qid", ""))
+    let q = substring(to_string(json_get(r, "question", "")), 0.0, 80.0)
+    if bq != "" then {
+      if out == "" then { out = "⏳ bench " + bq + " — исход придёт OSPBenchResolve" } else { out = out + "\n⏳ bench " + bq + " — исход придёт OSPBenchResolve" }
+    } else {
+      let line = "📐 карточка " + id + " ждёт сверки: " + q + " — /osp resolve " + id + " да|нет"
+      if out == "" then { out = line } else { out = out + "\n" + line }
+    }
+  }
+  return out
+}
+
+// Громкая архивация: watching/published без исхода после горизонта + 7 дней
+// (грейс на сверку владельцем) → expired + событие (инвариант 4). AUTOMATON:
+// published/watching → expired разрешён (W1 карта переходов)
+pattern OSPArchiveExpired(now_iso: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let cutoff = query("SELECT date(?, '-7 days') AS c", [substring(now_iso, 0.0, 10.0)])
+  let cut = to_string(json_get(get(cutoff, 0.0), "c", ""))
+  let rows = query("SELECT id, question, status FROM osp_forecast WHERE status IN ('watching','published') AND resolve_by IS NOT NULL AND resolve_by <> '' AND resolve_by < ? AND outcome IS NULL ORDER BY id", [cut])
+  if length(rows) == 0.0 then { return "вахта: истёкших нет" }
+  let mut out = ""
+  let mut n = 0.0
+  each r in rows {
+    let id = to_float(to_string(json_get(r, "id", "0")))
+    let st = to_string(json_get(r, "status", "?"))
+    let tr = OSPTransition(id, "expired", "истекла без исхода: горизонт прошёл больше 7 дней назад, сверки владельца не было", "osp-watch")
+    if starts_with(tr, "OK|") then {
+      n = n + 1.0
+      let line = "🗄️ карточка " + to_string(id) + " истекла без исхода — громкая архивация (был статус " + st + ")"
+      if out == "" then { out = line } else { out = out + "\n" + line }
+    }
+  }
+  if n == 0.0 then { return "вахта: истёкших нет" }
+  return out
+}
+
+// Ночной слот: обход due + архивация; находки — в ночной отчёт 07:15
+// (OutboxPut → OutboxFlush 07:15, механизм #550)
+pattern OSPWatchSlot() -> String {
+  let _ = OSPBenchEnsureSchema()
+  let today = query("SELECT date('now') AS d", [])
+  let now_iso = to_string(json_get(get(today, 0.0), "d", ""))
+  let due = OSPWatchDue(now_iso)
+  let expired = OSPArchiveExpired(now_iso)
+  let mut rep = "🌙 Ночная вахта ОСП:\n" + due
+  if expired != "вахта: истёкших нет" then {
+    rep = rep + "\n" + expired
+    let _ = try OutboxPut("osp-watch", rep)
+  }
+  let _ = try AuditLog("osp_watch_slot", "osp", substring(rep, 0.0, 120.0))
+  return rep
+}
+
+// Слот раунда бенчмарка: самый свежий засеянный раунд — прогон + попытка resolve.
+// Расписание (вторник/суббота) — реестр dept/schedules.mlog, entry выключен
+// до решения владельца (протокол №419); роут /cron/osp-bench — ручной триггер
+pattern OSPBenchSlot() -> String {
+  let _ = OSPBenchEnsureSchema()
+  let rnd = query("SELECT due_date FROM osp_bench_rounds ORDER BY due_date DESC LIMIT 1", [])
+  if length(rnd) == 0.0 then { return "BENCH|засеянных раундов нет — начните с /cron/osp-bench-ingest?due=ГГГГ-ММ-ДД" }
+  let due = to_string(json_get(get(rnd, 0.0), "due_date", ""))
+  let run = OSPBenchRunRound(due)
+  let res = OSPBenchResolve(due)
+  return "BENCH|раунд " + due + "\n" + run + "\n" + res
+}
+
+// ── Фикстуры W3: сырой SQL только в паттерне (гвард №312) ──
+
+pattern OSPW3SeedRound(due: String, nrows: Float) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let _ = db_execute("INSERT INTO osp_bench_rounds (due_date, question_set, n_questions, n_market, n_dataset, n_blocked, n_rows, license, ingested_at) VALUES (?, 'fixture', 0, 0, 0, 0, ?, 'CC BY-SA 4.0 · forecastingresearch/forecastbench-datasets', datetime('now'))", [due, to_string(nrows)])
+  return "ok"
+}
+
+pattern OSPW3SeedQuestion(due: String, qid: String, source: String, question: String, freeze: String, freeze_value: String, res_dates: String) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let hz = OSPBenchHorizons(res_dates)
+  let nhz = 1.0
+  if hz != "" then { let nhz = length(split(hz, ";")) }
+  let crowd = OSPBenchCrowd(source, freeze_value)
+  // res_dates приходит в исходной форме: массив JSON или строка N/A
+  let mut rd = "\"N/A\""
+  if starts_with(res_dates, "[") then { rd = res_dates }
+  let _ = db_execute("INSERT INTO osp_bench_questions (qid, due_date, source, question, freeze_datetime, crowd_p, horizons, model_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [qid, due, source, question, freeze, to_string(crowd), to_string(nhz), OSPBenchBuildPayload("{\"id\": \"" + qid + "\", \"source\": \"" + source + "\", \"question\": \"" + question + "\", \"resolution_criteria\": \"Критерий наблюдаемый: официальная публикация итогового значения по адресу\", \"freeze_datetime\": \"" + freeze + "\", \"freeze_datetime_value\": \"" + freeze_value + "\", \"resolution_dates\": " + rd + "}")])
+  return "ok"
+}
+
+pattern OSPW3SeedBenchRow(qid: String, res_date: String, p: Float, config: String) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let bench_qid = qid + "|" + res_date
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_raw, p_ensemble, p_final, kent_label, cal_bucket, bench_qid, resolution_date, resolve_by, gate_report, models_json, created_at) VALUES ('bench', ?, 'watching', ?, ?, ?, 'примерно равные шансы (35-65%)', 5, ?, ?, ?, '{\"g1\":\"PASS\"}', ?, datetime('now'))", ["fixture-вопрос " + bench_qid, to_string(p), to_string(p), to_string(p), bench_qid, res_date, res_date, "{\"config\":\"" + config + "\"}"])
+  return "ok"
+}
+
+pattern OSPW3Setting(key: String, value: String) -> String {
+  let _ = OSPBenchEnsureSchema()
+  let ex = query("SELECT key FROM system_settings WHERE key = ?", [key])
+  if length(ex) == 0.0 then {
+    let _ = db_execute("INSERT INTO system_settings (key, value) VALUES (?, ?)", [key, value])
+  } else {
+    let _ = db_execute("UPDATE system_settings SET value = ? WHERE key = ?", [value, key])
+  }
+  return "ok"
+}
+
 
 
 test "n469 гейт: согласованные сценарии (сумма 100, смежные диапазоны) — PASS" {
@@ -2770,4 +3344,223 @@ test "n625 monthly: писатель monthly_reviews через strftime — с�
       assert_contains(OSPMonthlyReview("2025-01", "n625test"), "разрешённых прогнозов нет")
       // кривой период — отказ по форме
       assert_contains(OSPMonthlyReview("2026-1", "n625test"), "NO|период не ГГГГ-ММ")
+  }}
+
+// Фикстура owner-карточки для вахты
+pattern OSPW3SeedOwnerCard(status: String, resolve_by: String, with_outcome: Bool) -> String {
+  let _ = OSPFEnsureSchema()
+  if with_outcome then {
+    let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_raw, p_final, kent_label, cal_bucket, resolve_by, outcome, created_at) VALUES ('owner', ?, ?, 0.5, 0.5, 'примерно равные шансы (35-65%)', 5, ?, 1.0, datetime('now'))", ["n626 вахта-вопрос " + status + " " + resolve_by + " с исходом", status, resolve_by])
+  } else {
+    let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_raw, p_final, kent_label, cal_bucket, resolve_by, created_at) VALUES ('owner', ?, ?, 0.5, 0.5, 'примерно равные шансы (35-65%)', 5, ?, datetime('now'))", ["n626 вахта-вопрос " + status + " " + resolve_by + " без исхода", status, resolve_by])
+  }
+  return "ok"
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Тесты W3 #626: бенчмарк-конвейер (фикстуры, ноль LLM и ноль сети)
+// ═══════════════════════════════════════════════════════════════════════
+
+test "n626 атрибуция и белый список: 8 полей, полей исхода нет" {
+  assert_contains(OSPBenchAttribution(), "CC BY-SA 4.0")
+  assert_contains(OSPBenchAttribution(), "forecastbench-datasets")
+  let wl = split(OSPBenchWhitelist(), ";")
+  assert_eq(length(wl), 8.0)
+  // MUT-мишень наряда: убрать белый список — payload получит поле исхода
+  let pl = OSPBenchBuildPayload("{\"question\": \"вопрос?\", \"resolved_to\": 1.0, \"url\": \"https://x\"}")
+  assert_contains(pl, "\"question\"")
+  assert_eq(to_string(json_get(parse_json(pl), "resolved_to", "АБСЕНТ")), "АБСЕНТ")
+}
+
+test "n626 утечка-гвард: чистый вопрос CLEAN, вопрос с resolved_to — BLOCK" {
+  // MUT-приёмка: подменить question_set на resolution_set — BLOCK, раунд стоит
+  assert_eq(OSPBenchHasForbidden("{\"id\": \"1\", \"question\": \"чисто\"}"), "CLEAN")
+  assert_contains(OSPBenchHasForbidden("{\"id\": \"1\", \"resolved_to\": 1.0}"), "BLOCK|resolved_to")
+  assert_contains(OSPBenchHasForbidden("{\"id\": \"1\", \"resolved\": true}"), "BLOCK|resolved")
+  assert_contains(OSPBenchHasForbidden("{\"id\": \"1\", \"direction\": \"up\"}"), "BLOCK|direction")
+}
+
+test "n626 горизонты: массив дат — CSV, N/A — один рыночный ряд" {
+  assert_eq(OSPBenchHorizons("[\"2026-11-01\", \"2026-11-24\"]"), "2026-11-01;2026-11-24")
+  assert_eq(OSPBenchHorizons("N/A"), "")
+  assert_eq(OSPBenchHorizons(""), "")
+}
+
+test "n626 crowd: вероятность только у рынков, у рядов -1" {
+  assert_eq(OSPBenchCrowd("kalshi", "0.61"), 0.61)
+  assert_eq(OSPBenchCrowd("metaculus", "0.1"), 0.1)
+  assert_eq(OSPBenchCrowd("polymarket", "0.4"), 0.4)
+  // MUT-мишень: убрать фильтр источника — уровень ряда принят за вероятность
+  assert_eq(OSPBenchCrowd("fred", "103.8443465423"), -1.0)
+  assert_eq(OSPBenchCrowd("serpapi", "0.5"), -1.0)
+  assert_eq(OSPBenchCrowd("kalshi", "мусор"), -1.0)
+}
+
+test "n626 ingest: 3 вопроса, market=2, rows=4; повторный ingest — SKIP" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let due = "2026-12-06"
+      let payload = "{\"forecast_due_date\": \"2026-12-06\", \"questions\": [{\"id\": \"m1\", \"source\": \"kalshi\", \"question\": \"Вопрос рынка m1 про инфляцию\", \"resolution_criteria\": \"Официальная публикация значения индекса CPI за период\", \"freeze_datetime\": \"2030-01-01\", \"freeze_datetime_value\": \"0.61\", \"resolution_dates\": \"N/A\"}, {\"id\": \"m2\", \"source\": \"polymarket\", \"question\": \"Вопрос рынка m2 про выборы\", \"resolution_criteria\": \"Официальная публикация итогов голосования комиссии\", \"freeze_datetime\": \"2030-01-01\", \"freeze_datetime_value\": \"0.4\", \"resolution_dates\": \"N/A\"}, {\"id\": \"d1\", \"source\": \"fred\", \"question\": \"Вопрос данных d1 про ставку\", \"resolution_criteria\": \"Публикация значения ряда FRED по ключевой ставке\", \"freeze_datetime\": \"2030-01-01\", \"freeze_datetime_value\": \"103.8\", \"resolution_dates\": [\"2031-01-01\", \"2031-04-01\"]}]}"
+      let r = OSPBenchIngestData(due, payload)
+      assert_contains(r, "OK|questions=3|market=2|dataset=1|")
+      assert_contains(r, "rows=4")
+      // приёмка наряда: повторный ingest того же due — SKIP
+      assert_contains(OSPBenchIngestData(due, payload), "SKIP|")
+      // строка раунда с атрибуцией
+      let rnd = query("SELECT license, n_rows FROM osp_bench_rounds WHERE due_date = ?", [due])
+      assert_contains(to_string(json_get(get(rnd, 0.0), "license", "")), "CC BY-SA 4.0")
+      assert_eq(to_float(to_string(json_get(get(rnd, 0.0), "n_rows", "0"))), 4.0)
+  }}
+
+test "n626 ingest: поле исхода в вопросе — BLOCK, раунд не записан" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let due = "2026-12-20"
+      let payload = "{\"questions\": [{\"id\": \"bad\", \"source\": \"kalshi\", \"question\": \"Вопрос с подменённым набором\", \"resolved_to\": 1.0}]}"
+      assert_contains(OSPBenchIngestData(due, payload), "BLOCK|")
+      let cnt = query("SELECT COUNT(*) AS c FROM osp_bench_questions WHERE due_date = ?", [due])
+      assert_eq(to_float(to_string(json_get(get(cnt, 0.0), "c", "0"))), 0.0)
+      let rnd = query("SELECT COUNT(*) AS c FROM osp_bench_rounds WHERE due_date = ?", [due])
+      assert_eq(to_float(to_string(json_get(get(rnd, 0.0), "c", "0"))), 0.0)
+  }}
+
+test "n626 выборка: детерминированная, первые по qid с источника, повторы совпадают" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let due = "2027-01-10"
+      let _ = OSPW3Setting("osp_bench_per_source", "2")
+      let _ = OSPW3SeedQuestion(due, OSPBenchQid("kalshi", "e", due), "kalshi", "вопрос e", "2030-01-01", "0.5", "N/A")
+      let _ = OSPW3SeedQuestion(due, OSPBenchQid("kalshi", "b", due), "kalshi", "вопрос b", "2030-01-01", "0.5", "N/A")
+      let _ = OSPW3SeedQuestion(due, OSPBenchQid("kalshi", "d", due), "kalshi", "вопрос d", "2030-01-01", "0.5", "N/A")
+      let _ = OSPW3SeedQuestion(due, OSPBenchQid("kalshi", "a", due), "kalshi", "вопрос a", "2030-01-01", "0.5", "N/A")
+      let _ = OSPW3SeedQuestion(due, OSPBenchQid("fred", "f2", due), "fred", "вопрос f2", "2030-01-01", "10.0", "N/A")
+      let s1 = OSPBenchSample(due)
+      let s2 = OSPBenchSample(due)
+      assert_eq(s1, s2)
+      assert_contains(s1, OSPBenchQid("kalshi", "a", due))
+      assert_contains(s1, OSPBenchQid("kalshi", "b", due))
+      assert_contains(s1, OSPBenchQid("fred", "f2", due))
+      // c, d, e — за пределами per_source=2
+      assert_eq(contains(s1, OSPBenchQid("kalshi", "c", due)), false)
+      assert_eq(contains(s1, OSPBenchQid("kalshi", "d", due)), false)
+      let _ = OSPW3Setting("osp_bench_per_source", "18")
+  }}
+
+test "n626 бюджет-гейт: OK, OVER с точным cap, UNLIMITED" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      let _ = kv_set("daily_budget_osp_used:" + OSPDayUtc(), "0")
+      // off в system_settings — enforcement снят (UNLIMITED §6.4)
+      let _ = OSPW3Setting("daily_budget_osp", "off")
+      assert_contains(OSPBenchBudgetGate(100.0), "UNLIMITED|")
+      // жёсткий лимит 0.01, стоимость строки 0.01 при выключенном ансамбле
+      let _ = OSPW3Setting("daily_budget_osp", "0.01")
+      assert_contains(OSPBenchBudgetGate(1.0), "OK|")
+      let over = OSPBenchBudgetGate(2.0)
+      assert_contains(over, "OVER|")
+      assert_contains(over, "cap=1 строк из 2")
+      let _ = OSPW3Setting("daily_budget_osp", "2.00")
+      let _ = kv_set("daily_budget_osp_used:" + OSPDayUtc(), "0")
+  }}
+
+test "n626 лимит: единая точка чтения — дефолт 2.0, system_settings приоритет" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      assert_eq(OSPLimitRead(), "2.00")
+      let _ = OSPW3Setting("daily_budget_osp", "5.00")
+      assert_eq(OSPLimitRead(), "5.00")
+      let _ = OSPW3Setting("daily_budget_osp", "off")
+      assert_eq(OSPLimitRead(), "off")
+      let _ = OSPW3Setting("daily_budget_osp", "2.00")
+      assert_eq(OSPLimitRead(), "2.00")
+  }}
+
+test "n626 временной заслон: прогноз после freeze не принимается (MUT-приёмка)" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      let due = "2027-02-01"
+      let qid = OSPBenchQid("kalshi", "past1", due)
+      let _ = OSPW3SeedQuestion(due, qid, "kalshi", "Вопрос с прошедшей заморозкой n626", "2020-01-01", "0.5", "N/A")
+      // MUT-приёмка: now позже freeze_datetime — прогноз не принят
+      let r = OSPBenchForecastRow(due, qid, "")
+      assert_contains(r, "SKIP|freeze прошёл")
+      let cnt = query("SELECT COUNT(*) AS c FROM osp_forecast WHERE bench_qid = ?", [qid + "|"])
+      assert_eq(to_float(to_string(json_get(get(cnt, 0.0), "c", "0"))), 0.0)
+      // freeze в будущем, но ансамбль выключен — честный пропуск без строки
+      let qid2 = OSPBenchQid("kalshi", "fut1", due)
+      let _ = OSPW3SeedQuestion(due, qid2, "kalshi", "Вопрос с будущей заморозкой n626", "2030-01-01", "0.5", "N/A")
+      assert_contains(OSPBenchForecastRow(due, qid2, ""), "SKIP|ансамбль недоступен")
+  }}
+
+test "n626 resolve: до прогнозов — BLOCK (правило Б)" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let due = "2027-03-01"
+      let _ = OSPW3SeedRound(due, 5.0)
+      let payload = "{\"resolutions\": [{\"id\": \"x\", \"source\": \"kalshi\", \"resolution_date\": \"2031-01-01\", \"resolved\": true, \"resolved_to\": 1.0}]}"
+      let r = OSPBenchResolveData(due, payload)
+      assert_contains(r, "BLOCK|раунд не прогнан")
+      assert_contains(r, "записано 0 из 5")
+  }}
+
+test "n626 resolve полный: исходы записаны, Brier, конфиг-непригодные помечены" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let due = "2027-04-01"
+      let _ = kv_set("osp_ensemble_models", "off")
+      let _ = OSPW3SeedRound(due, 2.0)
+      let qid1 = OSPBenchQid("kalshi", "r1", due)
+      let qid2 = OSPBenchQid("kalshi", "r2", due)
+      let _ = OSPW3SeedQuestion(due, qid1, "kalshi", "Резолв-вопрос r1 n626", "2030-01-01", "0.5", "N/A")
+      let _ = OSPW3SeedQuestion(due, qid2, "kalshi", "Резолв-вопрос r2 n626", "2030-01-01", "0.5", "N/A")
+      // наши строки: p=0.7 со СВЕЖЕЙ конфигурацией, p=0.2 со СТАРОЙ (поправка 3)
+      let _ = OSPW3SeedBenchRow(qid1, "2031-01-01", 0.7, OSPBenchConfigCurrent())
+      let _ = OSPW3SeedBenchRow(qid2, "2031-01-01", 0.2, "старая-конфигурация")
+      let payload = "{\"resolutions\": [{\"id\": \"r1\", \"source\": \"kalshi\", \"resolution_date\": \"2031-01-01\", \"resolved\": true, \"resolved_to\": 1.0}, {\"id\": \"r2\", \"source\": \"kalshi\", \"resolution_date\": \"2031-01-01\", \"resolved\": true, \"resolved_to\": 0.0}, {\"id\": \"zz\", \"source\": \"fred\", \"resolution_date\": \"2031-01-01\", \"resolved\": true, \"resolved_to\": 0.0}]}"
+      let r = OSPBenchResolveData(due, payload)
+      // Brier покрытых: (0.7−1)² и (0.2−0)² → среднее 0.065; нет нашего прогноза: 1 (fred zz); штраф +0.25
+      assert_contains(r, "RESOLVE|due=" + due)
+      assert_contains(r, "разрешено_наших=2")
+      assert_contains(r, "нет_нашего_прогноза=1")
+      assert_contains(r, "Brier_покрытых=0.065")
+      assert_contains(r, "покрытие=2/2")
+      assert_contains(r, "штраф_за_пропуски=+0.250")
+      assert_contains(r, "конфиг-несовместимых=1")
+      // строки: resolved, outcome, brier — float через OSPFmt3 (артефакты binary)
+      let rows = query("SELECT bench_qid, status, outcome, brier, gate_report FROM osp_forecast WHERE kind = 'bench' AND bench_qid LIKE ? ORDER BY bench_qid", [qid1 + "|%"])
+      assert_eq(OSPFmt3(to_float(to_string(json_get(get(rows, 0.0), "brier", "0")))), "0.090")
+      assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "resolved")
+      // повторный resolve — идемпотентен: разрешать нечего
+      let r2 = OSPBenchResolveData(due, payload)
+      assert_contains(r2, "разрешено_наших=0")
+  }}
+
+test "n626 вахта: due-карточки в списке, bench — отдельная строка, истёкшие архивируются" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let today = query("SELECT date('now') AS d, date('now', '-10 days') AS old, date('now', '-2 days') AS recent", [])
+      let dnow = to_string(json_get(get(today, 0.0), "d", ""))
+      let dold = to_string(json_get(get(today, 0.0), "old", ""))
+      let drec = to_string(json_get(get(today, 0.0), "recent", ""))
+      // due-owner-карточка без исхода — ждёт сверки
+      let _ = OSPW3SeedOwnerCard("watching", dold, false)
+      // bench-строка с наступившим горизонтом — строка про OSPBenchResolve
+      let _ = OSPW3SeedBenchRow(OSPBenchQid("kalshi", "w1", "2027-05-01"), dold, 0.5, OSPBenchConfigCurrent())
+      let w = OSPWatchDue(dnow)
+      assert_contains(w, "ждёт сверки")
+      assert_contains(w, "/osp resolve")
+      assert_contains(w, "bench")
+      // в грейсе (2 дня) и свежая due-карточка — старая (>7 дней) архивируется
+      let _ = OSPW3SeedOwnerCard("watching", drec, false)
+      let exp = OSPArchiveExpired(dnow)
+      assert_contains(exp, "истекла без исхода")
+      let ev = query("SELECT COUNT(*) AS c FROM osp_forecast_events WHERE to_status = 'expired' AND reason LIKE 'истекла без исхода%'", [])
+      assert_eq(to_float(to_string(json_get(get(ev, 0.0), "c", "0"))) >= 1.0, true)
+      // повторная архивация — уже терминальный статус, вахта чистая
+      assert_contains(OSPArchiveExpired(dnow), "вахта: истёкших нет")
+      // карточка в грейсе не тронута
+      let gr = query("SELECT COUNT(*) AS c FROM osp_forecast WHERE status = 'watching' AND resolve_by = ?", [drec])
+      assert_eq(to_float(to_string(json_get(get(gr, 0.0), "c", "0"))) >= 1.0, true)
   }}

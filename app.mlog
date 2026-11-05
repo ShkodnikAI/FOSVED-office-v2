@@ -2423,6 +2423,35 @@ mlogserver {
     NightTickCore(cron_secret)
   }
 
+  // ── #626 W3: ночная вахта ОСП — обход due-карточек + громкая архивация ──
+  // Логика в OSPWatchSlot (dept/osp.mlog); находки — в ночной отчёт 07:15
+  // через OutboxPut (механизм #550). Слот в реестре dept/schedules.mlog —
+  // выключен до решения владельца (№419); роут — ручной/внешний триггер.
+  route "/cron/osp-watch" method=GET {
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let r = OSPWatchSlot()
+    return respond("200 " + redact(substring(r, 0.0, 120.0), "all"))
+  }
+
+  // ── #626 W3: раунд ForecastBench — прогон выборки + попытка resolve ──
+  // Логика в OSPBenchSlot (dept/osp.mlog); ingest отдельным вызовом с due.
+  // Живой прогон стоит деньги — гейт бюджета внутри (daily_budget_osp, B.3).
+  route "/cron/osp-bench" method=GET {
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
+    let _ = InitDB()
+    let due = redact(query_param("due"), "all")
+    let mut out = ""
+    if redact(due, "hash_only") != redact("", "hash_only") then {
+      out = OSPBenchIngest(due)
+    } else {
+      out = OSPBenchSlot()
+    }
+    return respond("200 " + redact(substring(out, 0.0, 160.0), "all"))
+  }
+
   // ── Наряд №419: живая поверхность реестра заданий (нативный стор cron) ──
   // Авторизация — тот же CRON_SECRET-гвард, что у /cron/* (существующее
   // доверенное домено планирования; ротация секрета накрывает и эти роуты).
