@@ -27,7 +27,9 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MLOG = os.path.join(REPO, "bin", "mlog")
+# #655: MLOG_BIN — проверка КАНДИДАТА Metalogos на стенде офиса (rc_stand_check.sh);
+# пусто/не задано → боевой бинарь, как в CI.
+MLOG = os.environ.get("MLOG_BIN") or os.path.join(REPO, "bin", "mlog")
 APP = os.path.join(REPO, "app.mlog")
 DEFAULT_BASELINE = os.path.join(REPO, "docs", "office", "BASELINE_app_mlog.txt")
 

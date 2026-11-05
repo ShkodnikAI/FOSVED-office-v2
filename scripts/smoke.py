@@ -32,6 +32,19 @@ WAIT_SECONDS = int(os.environ.get("WAIT_SECONDS", "120"))
 # с тестовыми env), реальные LLM-сценарии и cron новостей невозможны —
 # проверяются только живость фасада и SEC-4 защита журнала.
 SMOKE_LOCAL = os.environ.get("SMOKE_LOCAL", "") == "1"
+# SMOKE_DEPTS=1 — цикл owner-команд по отделам (наряд #655, воскресная проверка
+# rc-кандидата): по одной команде на owner-отдел, критерий — вебхук принял.
+# Внутренние отделы без owner-команд (chain, context, miniapp, quest,
+# scheduler, templates, utils) в цикл не входят.
+SMOKE_DEPTS = os.environ.get("SMOKE_DEPTS", "") == "1"
+
+DEPT_PROBES = [
+    ("/admin", "admin"), ("/yana", "yana"), ("/osp", "osp"), ("/lz", "lz"),
+    ("/expert", "expert"), ("/marketing", "marketing"), ("/finance", "finance"),
+    ("/legal", "legal"), ("/dev", "dev"), ("/design", "design"),
+    ("/qa", "qa"), ("/visual", "visual"), ("/engineering", "engineering"),
+    ("/forge", "kavalnya"),
+]
 
 results = []
 
@@ -237,6 +250,10 @@ def main():
     record("новых ошибок нет", not errs,
            "; ".join(f"{e['action']}: {raw_of(e)[:60]}" for e in errs[:3]) if errs else "")
 
+    return finish()
+
+
+def finish():
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
     print("\n" + "=" * 60)
@@ -250,5 +267,45 @@ def main():
     return 0 if passed == total else 1
 
 
+def main_depts():
+    """Цикл owner-команд по отделам (наряд #655, воскресная rc-проверка).
+
+    Без LLM-сценариев и новостей: staging живёт на минималках (llm_proxy без
+    ключей — render.yaml), поэтому критерий каждой команды — вебхук принял
+    сообщение (200). Журнал и SEC-4 проверяются как в полном смоке.
+    """
+    if not OWNER or not BOT_TOKEN:
+        print("ОШИБКА: нужны OWNER_ID и BOT_TOKEN")
+        return 2
+
+    print(f"Офис: {BASE} — цикл owner-команд по отделам (наряд #655)")
+    print(f"Подпись initData: {'собрана' if INIT_DATA else 'НЕТ'}")
+    print(f"Секрет вебхука: {'задан' if WEBHOOK_SECRET else 'не задан'}\n")
+
+    print("Доступность:")
+    code, _ = http("GET", "/health")
+    record("/health отвечает", code == 200, f"код {code}")
+
+    code, _ = http("GET", "/audit/recent?limit=1", signed=True)
+    record("журнал читается с подписью", code == 200, f"код {code}")
+    if code != 200:
+        print("\nБез доступа к журналу цикл отделов невозможен.")
+        print("Проверь OWNER_ID и BOT_TOKEN — они должны совпадать с настройками офиса.")
+        return 1
+
+    check_sec4_no_data_without_signature()
+
+    stamp = int(time.time())
+    print("\nOwner-команды (по одной на отдел):")
+    for i, (cmd, dept) in enumerate(DEPT_PROBES):
+        c, _ = send_message(f"{cmd} rc-стенд: ответь одной строкой (smoke {stamp})",
+                            stamp * 100 + i)
+        record(f"{cmd} → {dept}: вебхук принял", c == 200, f"код {c}")
+
+    return finish()
+
+
 if __name__ == "__main__":
+    if SMOKE_DEPTS:
+        sys.exit(main_depts())
     sys.exit(main())
