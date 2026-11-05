@@ -45,6 +45,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 // DISCLOSURE — mandatory top disclaimer
 // ═══════════════════════════════════════════════════════════════════════
+db { url: env("DATABASE_URL") }
 pattern OSPDisclaimer() -> String {
   return "⚠️ ОСП: Аналитическая оценка для информирования решений владельца. Не является инвестиционной рекомендацией. Все вероятности по шкале Шермана Кента. Прогнозы подлежат обязательной верификации."
 }
@@ -890,7 +891,7 @@ pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
 pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id, 3)
-  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней. Если строишь сценарии изменения одной величины (цена, курс, индекс) — диапазоны взаимоисключающие без пересечений, вероятность в таблице сценариев форматом P=<число>% (точечная или узкая ≤15 п.п.), сумма середин = 100%. Шкала Кента — словесная метка К числу, не вместо числа. ACH и прогноз согласованы: выжила null-гипотеза — распределение широкое, без «likely» для одного направления."
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней. Если строишь сценарии изменения одной величины (цена, курс, индекс) — диапазоны взаимоисключающие без пересечений, вероятность в таблице сценариев форматом P=<число>% (точечная или узкая ≤15 п.п.), сумма середин = 100%. Шкала Кента — словесная метка К числу, не вместо числа. ACH и прогноз согласованы: выжила null-гипотеза — распределение широкое, без «likely» для одного направления.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\"}"
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
@@ -913,17 +914,38 @@ pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
   let reply = reply + "\n\n" + OSPDisclaimerBottom() + not_accepted
   // #469 A.3: в верификацию (Brier) попадает только согласованное
   // распределение — при повторном провале гейта запись прогноза не создаётся.
+  // (фикс затенения: aid присваивается в блоке, а не теряется — #624)
   let mut aid = -1.0
-  if not_accepted == "" then { let aid = OSPDraftAnalysis(query, "deep", domain, 3) }
-  let _ = RecordAssistantMessage(chat_id, "osp", reply)
-  let _ = AuditLog("osp_deep", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates + " scenario_gate=" + gate)
-  return reply
+  if not_accepted == "" then { aid = OSPDraftAnalysis(query, "deep", domain, 3) }
+  // W1 #624: карточка прогноза — структурный хвост CARD (G1), гейты G2/G5,
+  // единая точка записи; владельцу — проза + числовой хвост из строки БД
+  let mut card_line = ""
+  let mut body = reply
+  let card = OSPFExtractCard(reply)
+  if starts_with(card, "OK|") then {
+    body = OSPFStripCard(reply)
+    let cj = TryVal(try parse_json(substring(card, 3.0, length(card))))
+    if to_string(cj) != "()" then {
+      let p_raw = to_float(to_string(json_get(cj, "p", "-1")))
+      let crit = to_string(json_get(cj, "resolution_criteria", ""))
+      let as_of = to_string(json_get(cj, "as_of", ""))
+      let resolve_by = to_string(json_get(cj, "resolve_by", ""))
+      let src_json = OSPFSourcesToDB(context, aid, as_of)
+      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body)
+      if starts_with(saved, "OK|") or starts_with(saved, "GATED|") then {
+        card_line = "\n\n" + OSPFCardLine(to_float(get(split(saved, "|"), 1.0)))
+      }
+    }
+  }
+  let _ = RecordAssistantMessage(chat_id, "osp", body + card_line)
+  let _ = AuditLog("osp_deep", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates + " scenario_gate=" + gate + " card=" + substring(card, 0.0, 60.0))
+  return body + card_line
 }
 
 pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id, 4)
-  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез. Сценарии одной величины — взаимоисключающие непересекающиеся диапазоны; вероятности в таблице форматом P=<число>% (точечные или узкие ≤15 п.п.), сумма середин = 100% ±2. Шкала Кента — метка К числу. ACH согласован с прогнозом."
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез. Сценарии одной величины — взаимоисключающие непересекающиеся диапазоны; вероятности в таблице форматом P=<число>% (точечные или узкие ≤15 п.п.), сумма середин = 100% ±2. Шкала Кента — метка К числу. ACH согласован с прогнозом.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\"}"
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
@@ -945,11 +967,32 @@ pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
   let reply = reply + "\n\n" + OSPDisclaimerBottom() + not_accepted
   // #469 A.3: в верификацию (Brier) попадает только согласованное
   // распределение — при повторном провале гейта запись прогноза не создаётся.
+  // (фикс затенения: aid присваивается в блоке, а не теряется — #624)
   let mut aid = -1.0
-  if not_accepted == "" then { let aid = OSPDraftAnalysis(query, "full", domain, 4) }
-  let _ = RecordAssistantMessage(chat_id, "osp", reply)
-  let _ = AuditLog("osp_full", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates + " scenario_gate=" + gate)
-  return reply
+  if not_accepted == "" then { aid = OSPDraftAnalysis(query, "full", domain, 4) }
+  // W1 #624: карточка прогноза — структурный хвост CARD (G1), гейты G2/G5,
+  // единая точка записи; владельцу — проза + числовой хвост из строки БД
+  let mut card_line = ""
+  let mut body = reply
+  let card = OSPFExtractCard(reply)
+  if starts_with(card, "OK|") then {
+    body = OSPFStripCard(reply)
+    let cj = TryVal(try parse_json(substring(card, 3.0, length(card))))
+    if to_string(cj) != "()" then {
+      let p_raw = to_float(to_string(json_get(cj, "p", "-1")))
+      let crit = to_string(json_get(cj, "resolution_criteria", ""))
+      let as_of = to_string(json_get(cj, "as_of", ""))
+      let resolve_by = to_string(json_get(cj, "resolve_by", ""))
+      let src_json = OSPFSourcesToDB(context, aid, as_of)
+      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body)
+      if starts_with(saved, "OK|") or starts_with(saved, "GATED|") then {
+        card_line = "\n\n" + OSPFCardLine(to_float(get(split(saved, "|"), 1.0)))
+      }
+    }
+  }
+  let _ = RecordAssistantMessage(chat_id, "osp", body + card_line)
+  let _ = AuditLog("osp_full", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates + " scenario_gate=" + gate + " card=" + substring(card, 0.0, 60.0))
+  return body + card_line
 }
 
 pattern OSPWargame(query: String, chat_id: String) -> String {
@@ -1197,6 +1240,277 @@ pattern OSPCrossCountry(question: String) -> String {
   return r
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// W1 #624 — КАРТОЧКА ПРОГНОЗА И ЖИЗНЕННЫЙ ЦИКЛ (OSP_DESIGN_v1 §1, §3.2–3.3,
+// §4.1–4.2, §10; поправки владельца 02.11 — приоритет над дизайном).
+//   • Поправка 1: базовая частота — вход модели (промпт), НЕ механическое
+//     сжатие: OSPBlendPrior/OSPPriorWeight в W1 не пишутся, p_final = clip(p).
+//   • Прогон один (ансамбль — W2): p_ensemble = p_raw, n_runs = 1.
+//   • Гейты W1: G1 (структурный хвост, json_validate), G2 (критерий/даты),
+//     G5 (наблюдаемый источник); G3 — W2 (ансамбль), G4 — #469 без изменений,
+//     G6/W3 (рынок) — W2.
+//   • История отказов сохраняется: карточка создаётся в drafted ДО гейтов,
+//     каждый переход и каждый отказ — строка в osp_forecast_events (§3.5.4).
+// ═══════════════════════════════════════════════════════════════════════
+
+// Схема §3.2: таблицы карточки (osp_base_rates/osp_bench_* — волны 2–3)
+// + аддитивный ALTER-хвост §3.3 (один грант, гвардованный AlterColIfMissing).
+pattern OSPFEnsureSchema() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_forecast (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'owner', question TEXT NOT NULL, resolution_criteria TEXT, as_of TEXT, resolve_by TEXT, status TEXT NOT NULL DEFAULT 'drafted', p_raw REAL, p_ensemble REAL, p_median REAL, p_logit REAL, p_spread REAL, n_runs INTEGER DEFAULT 0, p_final REAL, crowd_p REAL, prior_rate REAL, prior_n INTEGER, outcome REAL, brier REAL, brier_base REAL, brier_crowd REAL, cal_bucket INTEGER, kent_label TEXT, analysis_id INTEGER, bench_qid TEXT, resolution_date TEXT, methods_json TEXT DEFAULT '[]', gate_report TEXT, models_json TEXT, sources_json TEXT, published_at TEXT, verified_at TEXT, updated_at TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
+  let _ = db_execute("CREATE INDEX IF NOT EXISTS idx_ospf_kind_status ON osp_forecast(kind, status)", [])
+  let _ = db_execute("CREATE INDEX IF NOT EXISTS idx_ospf_resolve ON osp_forecast(status, resolve_by)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_forecast_events (id INTEGER PRIMARY KEY AUTOINCREMENT, forecast_id INTEGER NOT NULL, from_status TEXT, to_status TEXT, reason TEXT, actor TEXT DEFAULT 'osp', created_at TEXT, FOREIGN KEY(forecast_id) REFERENCES osp_forecast(id))", [])
+  // try: изолированный python-гвард (mlog test dept/osp.mlog) не знает
+  // utils (AlterColIfMissing) — UNDEFINED_FUNCTION глотается, миграционная
+  // часть проверяется в полном прогоне app.mlog; в serve — резолвится глобально
+  let mig = grant_issue("db:alter:*", 120, "n", 51)
+  let _ = try AlterColIfMissing(mig, "analysis", "osp_forecast_id", "ALTER TABLE analysis ADD COLUMN osp_forecast_id INTEGER")
+  let _ = try AlterColIfMissing(mig, "analysis_verifications", "osp_forecast_id", "ALTER TABLE analysis_verifications ADD COLUMN osp_forecast_id INTEGER")
+  let _ = try AlterColIfMissing(mig, "watchlist_scenarios", "osp_forecast_id", "ALTER TABLE watchlist_scenarios ADD COLUMN osp_forecast_id INTEGER")
+  let _ = try AlterColIfMissing(mig, "watchlist_scenarios", "threshold_json", "ALTER TABLE watchlist_scenarios ADD COLUMN threshold_json TEXT")
+  let _ = try AlterColIfMissing(mig, "indicator", "osp_forecast_id", "ALTER TABLE indicator ADD COLUMN osp_forecast_id INTEGER")
+  let _ = try AlterColIfMissing(mig, "research_source", "as_of", "ALTER TABLE research_source ADD COLUMN as_of TEXT")
+  return "ok"
+}
+
+// G1: структурный хвост ответа — строка `CARD: {json}` в конце прозы.
+// Извлечение — split по маркеру (LLM не зовётся, runtime ±0); форма —
+// json_validate под try: «не JSON» = провал прогона, а не 0.5 молча (§4.1).
+pattern OSPFCardSchema() -> String {
+  return "{\"type\":\"object\",\"properties\":{\"p\":{\"type\":\"number\"},\"resolution_criteria\":{\"type\":\"string\"},\"resolve_by\":{\"type\":\"string\"},\"as_of\":{\"type\":\"string\"}},\"required\":[\"p\",\"resolution_criteria\",\"resolve_by\",\"as_of\"]}"
+}
+
+// OK|<json> — хвост есть и валиден; FAIL|<причина> — брак формы; MISS — нет.
+pattern OSPFExtractCard(reply: String) -> String {
+  let parts = split(reply, "CARD:")
+  if length(parts) < 2.0 then { return "MISS" }
+  let tail = trim(to_string(get(split(to_string(get(parts, 1.0)), "\n"), 0.0)))
+  if tail == "" then { return "MISS" }
+  let r = try json_validate(OSPFCardSchema(), tail)
+  if r.ok == false then { return "FAIL|json не разобран: " + to_string(r.error.message) }
+  let v = r.value
+  if to_string(json_get(v, "valid", "false")) != "true" then {
+    return "FAIL|форма хвоста: " + to_string(json_get(v, "errors", ""))
+  }
+  return "OK|" + tail
+}
+
+// Владельцу уходит проза без машиночитаемого хвоста (формат ответа не меняется)
+pattern OSPFStripCard(reply: String) -> String {
+  let parts = split(reply, "CARD:")
+  if length(parts) < 2.0 then { return reply }
+  return to_string(get(parts, 0.0))
+}
+
+// Знаковые дни от сейчас до ISO-даты; -99999 = не распарсилось (приём card.mlog)
+pattern OSPFEpochOf(iso: String) -> Float {
+  let t = try date_parse_iso(trim(iso))
+  if to_string(t) == "()" then { return -1.0 }
+  return to_float(to_string(t))
+}
+
+// Гейты W1. G2: критерий ≥20 символов; resolve_by — ISO в будущем;
+// as_of — ISO не в будущем (инвариант 6). G5: есть наблюдаемый источник.
+pattern OSPCardGates(criteria: String, resolve_by: String, as_of: String, src_json: String) -> String {
+  if length(trim(criteria)) < 20.0 then { return "FAIL: G2 критерий исхода короче 20 символов — сверять нечем" }
+  let rb = OSPFEpochOf(resolve_by)
+  if rb < 0.0 then { return "FAIL: G2 resolve_by не ISO-дата: " + resolve_by }
+  if rb <= now_unix() then { return "FAIL: G2 resolve_by в прошлом — окно сверки уже наступило" }
+  let ao = OSPFEpochOf(as_of)
+  if ao < 0.0 then { return "FAIL: G2 as_of не ISO-дата: " + as_of }
+  if ao > now_unix() then { return "FAIL: G2 as_of в будущем — прогноз задним числом не публикуется" }
+  if trim(src_json) == "" or trim(src_json) == "[]" then { return "FAIL: G5 нет наблюдаемого источника — прогноз непроверяем (research_source/src_json пусты)" }
+  return "PASS"
+}
+
+// §5.3: клип [0.02, 0.98] — программа, не модель (инвариант 3)
+pattern OSPClip(p: Float) -> Float {
+  if p < 0.02 then { return 0.02 }
+  if p > 0.98 then { return 0.98 }
+  return p
+}
+
+// Метка Шермана Кента К числу — обратная OSPShermanKent (формат §9.4)
+pattern OSPKentOf(p: Float) -> String {
+  if p < 0.05 then { return "почти наверняка нет (0-5%)" }
+  if p < 0.20 then { return "очень маловероятно (5-20%)" }
+  if p < 0.35 then { return "маловероятно (20-35%)" }
+  if p < 0.65 then { return "примерно равные шансы (35-65%)" }
+  if p < 0.80 then { return "вероятно (65-80%)" }
+  if p < 0.95 then { return "очень вероятно (80-95%)" }
+  return "почти наверняка (95-100%)"
+}
+
+// Дециль калибровочной кривой: 1..10
+pattern OSPBucketOf(p: Float) -> Float {
+  let b = to_float(to_int(p * 10.0)) + 1.0
+  if b > 10.0 then { return 10.0 }
+  if b < 1.0 then { return 1.0 }
+  return b
+}
+
+// Автомат статусов (§3.2): drafted → gated → published → watching →
+// resolved | expired | superseded. Терминальные — история не переписывается;
+// drafted→published в карте НЕТ (инвариант 1: публикация только через гейты).
+pattern OSPCanTransition(from: String, to: String) -> String {
+  if from == to then { return "NO: переход в себя (" + from + ")" }
+  if from == "drafted" then {
+    if to == "gated" or to == "superseded" then { return "OK" }
+    return "NO: drafted → " + to + " — публикация только через гейты"
+  }
+  if from == "gated" then {
+    if to == "published" or to == "drafted" or to == "superseded" then { return "OK" }
+    return "NO: gated → " + to
+  }
+  if from == "published" then {
+    if to == "watching" or to == "resolved" or to == "expired" or to == "superseded" then { return "OK" }
+    return "NO: published → " + to
+  }
+  if from == "watching" then {
+    if to == "resolved" or to == "expired" or to == "superseded" then { return "OK" }
+    return "NO: watching → " + to
+  }
+  return "NO: " + from + " — терминальный статус (история не переписывается)"
+}
+
+// Переход + событие с причиной; отказ — тоже событие REFUSED> (инвариант 4:
+// «аудит не зависит от памяти модели»). MUT1-мишень: убрать INSERT события.
+pattern OSPTransition(forecast_id: Float, to: String, reason: String, actor: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let rows = query("SELECT status FROM osp_forecast WHERE id = ?", [to_string(forecast_id)])
+  if length(rows) == 0.0 then { return "NO|карточка " + to_string(forecast_id) + " не найдена" }
+  let from = to_string(json_get(get(rows, 0.0), "status", ""))
+  let allowed = OSPCanTransition(from, to)
+  if allowed != "OK" then {
+    let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))", [to_string(forecast_id), from, "REFUSED>" + to, allowed + " (причина: " + reason + ")", actor])
+    return "NO|" + allowed
+  }
+  let _ = db_execute("UPDATE osp_forecast SET status = ?, updated_at = datetime('now') WHERE id = ?", [to, to_string(forecast_id)])
+  if to == "published" then { let _ = db_execute("UPDATE osp_forecast SET published_at = datetime('now') WHERE id = ?", [to_string(forecast_id)]) }
+  let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))", [to_string(forecast_id), from, to, reason, actor])
+  return "OK|" + from + " → " + to
+}
+
+// Следующее действие по статусу карточки — для владельца и ночной вахты (W3)
+pattern OSPNextAction(forecast_id: Float) -> String {
+  let _ = OSPFEnsureSchema()
+  let rows = query("SELECT status, resolve_by FROM osp_forecast WHERE id = ?", [to_string(forecast_id)])
+  if length(rows) == 0.0 then { return "карточка не найдена" }
+  let st = to_string(json_get(get(rows, 0.0), "status", ""))
+  let rb = to_string(json_get(get(rows, 0.0), "resolve_by", ""))
+  if st == "drafted" then { return "дождаться гейтов и публикации (сейчас drafted)" }
+  if st == "gated" then { return "устранить причину гейта — последнее событие REFUSED в osp_forecast_events" }
+  if st == "published" then { return "перевести в вахту (watching) — прогноз ждёт окна сверки " + rb }
+  if st == "watching" then { return "ждать исхода; сверка после " + rb + " (OSPVerifyCard — W2)" }
+  if st == "resolved" then { return "исход записан; Brier — в /osp score (W2)" }
+  if st == "expired" then { return "карточка истекла без исхода — громкая архивация" }
+  return "superseded — заменена новой карточкой"
+}
+
+// URL из строки: посимвольно до разделителя (regex в mlog нет; формат
+// «https://… — заголовок» и markdown-скобки — оба обрезаются честно)
+pattern OSPFURLTill(seg: String) -> String {
+  let mut out = ""
+  let mut i = 0.0
+  while i < length(seg) {
+    let ch = substring(seg, i, i + 1.0)
+    if ch == " " or ch == ")" or ch == "]" or ch == "," or ch == ";" or ch == "\"" or ch == "'" then { return out }
+    out = out + ch
+    i = i + 1.0
+  }
+  return out
+}
+
+// URL-ы из контекста прогона (factpack ЛЗ, FRED, news) — CSV через ";"
+pattern OSPFURLsFrom(context: String) -> String {
+  let lines = split(context, "\n")
+  let mut urls = ""
+  each l in lines {
+    let line = trim(to_string(l))
+    if contains(line, "http") then {
+      let parts = split(line, "http")
+      if length(parts) >= 2.0 {
+        let u = "http" + OSPFURLTill(to_string(get(parts, 1.0)))
+        if length(u) > 10.0 and contains(urls, u) == false and length(urls) < 1800.0 {
+          urls = urls + u + ";"
+        }
+      }
+    }
+  }
+  return urls
+}
+
+// Первый писатель research_source (§9.2): URL из живого контекста, с as_of.
+// Возвращает src_json ([] если живого поиска не было — тогда G5 честно
+// оставит карточку в gated).
+pattern OSPFSourcesToDB(context: String, analysis_id: Int, as_of: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let urls = split(OSPFURLsFrom(context), ";")
+  let mut n = 0.0
+  let mut json_arr = "["
+  each u in urls {
+    let url = trim(to_string(u))
+    if url != "" then {
+      let _ = db_execute("INSERT INTO research_source (analysis_id, url, title, tier, as_of) VALUES (?, ?, ?, 'secondary', ?)", [to_string(analysis_id), substring(url, 0.0, 300.0), substring(url, 0.0, 120.0), as_of])
+      if n > 0.0 then { json_arr = json_arr + "," }
+      json_arr = json_arr + "\"" + url + "\""
+      n = n + 1.0
+    }
+  }
+  if n == 0.0 then { return "[]" }
+  return json_arr + "]"
+}
+
+// ── ЕДИНСТВЕННАЯ точка записи карточки (§3.2, §9.1; ответ владельцу —
+// из строки БД, OSPFCardLine). Провал гейта — карточка в gated с причиной
+// в событиях: тихих отказов нет. MUT2-мишень: OSPCanTransition drafted→published.
+pattern OSPSaveCard(question: String, p_raw: Float, criteria: String, as_of: String, resolve_by: String, src_json: String, analysis_id: Int, prose: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, resolution_criteria, as_of, resolve_by, status, p_raw, p_ensemble, n_runs, sources_json, analysis_id, models_json, gate_report) VALUES ('owner', ?, ?, ?, ?, 'drafted', ?, ?, 1, ?, ?, '{\"n_runs\":1}', '')", [question, criteria, as_of, resolve_by, to_string(p_raw), to_string(p_raw), src_json, to_string(analysis_id)])
+  let rows = query("SELECT id FROM osp_forecast WHERE question = ? ORDER BY id DESC LIMIT 1", [question])
+  let id = to_float(to_string(json_get(get(rows, 0.0), "id", "0")))
+  let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, '', 'drafted', 'карточка создана (прогон 1; поправка 1 владельца: без сжатия к базовой частоте)', 'osp', datetime('now'))", [to_string(id)])
+  // связь с analysis (§3.3) + первый писатель analysis.full_result (§9.6)
+  if to_float(to_string(analysis_id)) > 0.0 then {
+    let _ = db_execute("UPDATE analysis SET osp_forecast_id = ?, full_result = ? WHERE id = ?", [to_string(id), substring(prose, 0.0, 8000.0), to_string(analysis_id)])
+  }
+  // G1-арифметика: p ∈ [0,1] (схема типа number это не гарантирует)
+  if p_raw < 0.0 or p_raw > 1.0 then {
+    let g = OSPTransition(id, "gated", "FAIL: G1 p вне [0,1]: " + to_string(p_raw), "osp")
+    return "GATED|" + to_string(id) + "|FAIL: G1 p вне [0,1]: " + to_string(p_raw)
+  }
+  let gates = OSPCardGates(criteria, resolve_by, as_of, src_json)
+  if gates != "PASS" then {
+    let g = OSPTransition(id, "gated", gates, "osp")
+    return "GATED|" + to_string(id) + "|" + gates
+  }
+  let _ = OSPTransition(id, "gated", "G2, G5 PASS", "osp")
+  let p = OSPClip(p_raw)
+  let _ = db_execute("UPDATE osp_forecast SET p_final = ?, kent_label = ?, cal_bucket = ?, gate_report = ? WHERE id = ?", [to_string(p), OSPKentOf(p), to_string(OSPBucketOf(p)), "{\"g1\":\"PASS\",\"g2\":\"PASS\",\"g5\":\"PASS\"}", to_string(id)])
+  let pub = OSPTransition(id, "published", "гейты пройдены, p_final=" + to_string(p), "osp")
+  return "OK|" + to_string(id) + "|published|p_final=" + to_string(p)
+}
+
+// Тест-стенд самодостаточен: таблицы app.mlog с уже добавленными колонками
+// (прод: CREATE в InitDB + ALTER в OSPFEnsureSchema; изолированный python-гвард
+// гоняет файл без app.mlog — здесь таблицы создаются сразу полными)
+pattern OSPFTestTables() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS analysis (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT, full_result TEXT, status TEXT DEFAULT 'drafted', verification_date TEXT, confidence TEXT, created_at TEXT DEFAULT (datetime('now')), mode TEXT, published_at TEXT, superseded_by_id TEXT, topic_slug TEXT, watch_until TEXT, osp_forecast_id INTEGER)", [])
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS research_source (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, url TEXT, title TEXT, tier TEXT DEFAULT 'secondary', claim TEXT, created_at TEXT DEFAULT (datetime('now')), as_of TEXT)", [])
+  return "ok"
+}
+
+// Числовой хвост ответу владельцу — ТОЛЬКО из строки БД (инвариант 8)
+pattern OSPFCardLine(forecast_id: Float) -> String {
+  let rows = query("SELECT id, status, p_final, kent_label, resolve_by FROM osp_forecast WHERE id = ?", [to_string(forecast_id)])
+  if length(rows) == 0.0 then { return "" }
+  let r = get(rows, 0.0)
+  let st = to_string(json_get(r, "status", "?"))
+  let pf = to_string(json_get(r, "p_final", ""))
+  if pf == "" then { return "🎲 Карточка прогноза #" + to_string(forecast_id) + ": статус " + st + " — вероятность не опубликована (причина в gated-событиях)" }
+  return "🎲 Карточка прогноза #" + to_string(forecast_id) + ": p=" + pf + " — " + to_string(json_get(r, "kent_label", "")) + ", проверка " + to_string(json_get(r, "resolve_by", "")) + ", статус " + st
+}
+
 
 test "n469 гейт: согласованные сценарии (сумма 100, смежные диапазоны) — PASS" {
   let out = "| A | Рост +10…+25% | P=65% |\n| B | Боковик −10…+10% | P=30% |\n| C | Обвал −25…−10% | P=5% |"
@@ -1388,3 +1702,153 @@ test "n474 гейт: поиск вернул 0 — тоже нет свежих 
   let g = OSPFreshnessGate("вероятность эпидемии чумы в Иркутске", "(живой поиск вернул 0 результатов)", true)
   assert_eq(contains(g, "СВЕЖИХ ДАННЫХ НЕТ"), true)
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// ТЕСТЫ n624 (W1): карточка прогноза — G1/G2/G5, клип, Кент, автомат,
+// события, писатели analysis.full_result и research_source
+// ═══════════════════════════════════════════════════════════════════════
+
+test "n624: G1 хвост — валидный, MISS, битый JSON, неполная форма" {
+  let ok = "Проза прогноза.\nCARD: {\"p\":0.25,\"resolution_criteria\":\"Верхняя граница диапазона FOMC ниже 3.50% по итогам заседания\",\"resolve_by\":\"2027-06-30\",\"as_of\":\"2026-11-01\"}"
+  assert_contains(OSPFExtractCard(ok), "OK|")
+  assert_eq(OSPFExtractCard("Проза без хвоста."), "MISS")
+  assert_contains(OSPFExtractCard("Проза.\nCARD: {\"p\":0.25, незакрыто"), "FAIL|json не разобран")
+  assert_contains(OSPFExtractCard("Проза.\nCARD: {\"p\":0.25}"), "FAIL|форма хвоста")
+  assert_eq(contains(OSPFStripCard(ok), "CARD:"), false)
+  assert_contains(OSPFStripCard(ok), "Проза прогноза.")
+}
+
+test "n624: клип, метка Кента, дециль — программа, не модель" {
+  assert_eq(OSPClip(0.5), 0.5)
+  assert_eq(OSPClip(0.001), 0.02)
+  assert_eq(OSPClip(0.999), 0.98)
+  assert_eq(OSPKentOf(0.202), "маловероятно (20-35%)")
+  assert_eq(OSPKentOf(0.72), "вероятно (65-80%)")
+  assert_eq(OSPKentOf(0.99), "почти наверняка (95-100%)")
+  assert_eq(OSPBucketOf(0.05), 1.0)
+  assert_eq(OSPBucketOf(0.15), 2.0)
+  assert_eq(OSPBucketOf(0.25), 3.0)
+  assert_eq(OSPBucketOf(0.99), 10.0)
+}
+
+test "n624: гейты G2/G5 — короткий критерий, даты, пустые источники" {
+  // Изолированный python-гвард запускает файл без DATABASE_URL: БД нет —
+  // честный SKIP; полная проверка — в прогоне mlog test app.mlog (CI)
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+
+      let crit = "Верхняя граница целевого диапазона FOMC по итогам последнего заседания 2026 года ниже 3.50%"
+      let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao, date('now', '-400 days') AS old, date('now', '+10 days') AS future", [])
+      let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
+      let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
+      let old = to_string(json_get(get(drows, 0.0), "old", ""))
+      let future = to_string(json_get(get(drows, 0.0), "future", ""))
+      assert_contains(OSPCardGates("коротко", rb, ao, "[\"https://x\"]"), "FAIL: G2 критерий")
+      assert_contains(OSPCardGates(crit, old, ao, "[\"https://x\"]"), "FAIL: G2 resolve_by в прошлом")
+      assert_contains(OSPCardGates(crit, "31.12.2026", ao, "[\"https://x\"]"), "FAIL: G2 resolve_by не ISO")
+      assert_contains(OSPCardGates(crit, rb, future, "[\"https://x\"]"), "FAIL: G2 as_of в будущем")
+      assert_contains(OSPCardGates(crit, rb, "завтра", "[\"https://x\"]"), "FAIL: G2 as_of не ISO")
+      assert_contains(OSPCardGates(crit, rb, ao, "[]"), "FAIL: G5")
+      assert_eq(OSPCardGates(crit, rb, ao, "[\"https://fred.stlouisfed.org/series/DFF\"]"), "PASS")
+
+  }}
+
+test "n624: автомат — инвариант 1 (публикация мимо гейтов невозможна), терминальные" {
+  assert_eq(OSPCanTransition("drafted", "gated"), "OK")
+  assert_eq(OSPCanTransition("gated", "published"), "OK")
+  assert_eq(OSPCanTransition("gated", "drafted"), "OK")
+  assert_eq(OSPCanTransition("published", "watching"), "OK")
+  assert_eq(OSPCanTransition("watching", "resolved"), "OK")
+  assert_contains(OSPCanTransition("drafted", "published"), "NO")
+  assert_contains(OSPCanTransition("resolved", "published"), "NO: resolved — терминальный")
+  assert_contains(OSPCanTransition("watching", "watching"), "NO: переход в себя")
+}
+
+test "n624: OSPSaveCard сквозной — p_final, Кент, дециль, события, analysis, full_result" {
+  // Изолированный python-гвард запускает файл без DATABASE_URL: БД нет —
+  // честный SKIP; полная проверка — в прогоне mlog test app.mlog (CI)
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+
+      let _ = OSPFTestTables()
+      let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
+      let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
+      let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
+      let aid = OSPDraftAnalysis("n624 сквозной вопрос о ставке", "deep", "monetary", 3)
+      let saved = OSPSaveCard("n624 сквозной вопрос о ставке (карточка)", 0.25, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://fred.stlouisfed.org/series/DFF\"]", aid, "проза прогона для visual")
+      assert_contains(saved, "OK|")
+      assert_contains(saved, "|published|p_final=0.25")
+      let id = to_float(get(split(saved, "|"), 1.0))
+      let rows = query("SELECT status, p_final, kent_label, cal_bucket, p_ensemble, n_runs FROM osp_forecast WHERE id = ?", [to_string(id)])
+      assert_eq(length(rows), 1.0)
+      let r = get(rows, 0.0)
+      assert_eq(to_string(json_get(r, "status", "?")), "published")
+      assert_eq(to_float(to_string(json_get(r, "p_final", "0"))), 0.25)
+      assert_eq(to_string(json_get(r, "kent_label", "?")), "маловероятно (20-35%)")
+      assert_eq(to_float(to_string(json_get(r, "cal_bucket", "0"))), 3.0)
+      assert_eq(to_float(to_string(json_get(r, "p_ensemble", "0"))), 0.25)
+      assert_eq(to_float(to_string(json_get(r, "n_runs", "0"))), 1.0)
+      // ≥2 события (создание + gated + published) — инвариант 4
+      let ev = query("SELECT COUNT(*) AS n FROM osp_forecast_events WHERE forecast_id = ?", [to_string(id)])
+      assert_eq(to_float(to_string(json_get(get(ev, 0.0), "n", "0"))) >= 2.0, true)
+      // связь analysis ↔ карточка + первый писатель full_result
+      let arows = query("SELECT osp_forecast_id, full_result FROM analysis WHERE id = ?", [to_string(aid)])
+      assert_eq(to_string(json_get(get(arows, 0.0), "osp_forecast_id", "?")), to_string(id))
+      assert_eq(to_string(json_get(get(arows, 0.0), "full_result", "?")), "проза прогона для visual")
+      // отказ перехода — тоже событие (REFUSED>)
+      let ref1 = OSPTransition(id, "gated", "проба прямого перевода", "n624")
+      assert_contains(ref1, "NO|")
+      let refused = query("SELECT COUNT(*) AS n FROM osp_forecast_events WHERE forecast_id = ? AND to_status LIKE 'REFUSED>%'", [to_string(id)])
+      assert_eq(to_float(to_string(json_get(get(refused, 0.0), "n", "0"))) >= 1.0, true)
+      // вахта и подсказка следующего действия
+      let _ = OSPTransition(id, "watching", "вахта по горизонту", "n624")
+      assert_contains(OSPNextAction(id), "ждать исхода")
+      // ответ владельцу — из строки БД
+      assert_contains(OSPFCardLine(id), "p=0.25")
+      assert_contains(OSPFCardLine(id), "watching")
+
+  }}
+
+test "n624: G2-провал — карточка в gated, p_final не пишется, причина в событиях" {
+  // Изолированный python-гвард запускает файл без DATABASE_URL: БД нет —
+  // честный SKIP; полная проверка — в прогоне mlog test app.mlog (CI)
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+
+      let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
+      let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
+      let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
+      let saved = OSPSaveCard("n624 gated-вопрос уникальный", 0.6, "коротко", ao, rb, "[\"https://x\"]", -1, "")
+      assert_contains(saved, "GATED|")
+      assert_contains(saved, "FAIL: G2 критерий")
+      let id = to_float(get(split(saved, "|"), 1.0))
+      let rows = query("SELECT status, p_final FROM osp_forecast WHERE id = ?", [to_string(id)])
+      assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "gated")
+      // p_final не пишется: json_get на NULL возвращает дефолт — дефолт вернулся
+      assert_eq(to_string(json_get(get(rows, 0.0), "p_final", "NOTNULL")), "NOTNULL")
+      // и p вне [0,1] — тоже gated (G1-арифметика)
+      let saved2 = OSPSaveCard("n624 p-вне-диапазона уникальный", 1.5, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://x\"]", -1, "")
+      assert_contains(saved2, "GATED|")
+      assert_contains(saved2, "p вне [0,1]")
+
+  }}
+
+test "n624: писатель research_source — URL из живого контекста, с as_of" {
+  // Изолированный python-гвард запускает файл без DATABASE_URL: БД нет —
+  // честный SKIP; полная проверка — в прогоне mlog test app.mlog (CI)
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+
+      let _ = OSPFTestTables()
+      let ctx = "=== Консультация: lz/factpack ===\n[LIVE]\n• https://fred.stlouisfed.org/series/DFF — эффективная ставка ФРС\n• https://www.reuters.com/markets/xyz-abc — сводка рынка\nбез ссылки здесь\n"
+      let aid = OSPDraftAnalysis("n624 research-вопрос", "deep", "monetary", 3)
+      let sj = OSPFSourcesToDB(ctx, aid, "2026-11-04")
+      assert_contains(sj, "https://fred.stlouisfed.org/series/DFF")
+      assert_contains(sj, "https://www.reuters.com/markets/xyz-abc")
+      let rows = query("SELECT COUNT(*) AS n FROM research_source WHERE analysis_id = ? AND as_of = '2026-11-04'", [to_string(aid)])
+      assert_eq(to_float(to_string(json_get(get(rows, 0.0), "n", "0"))), 2.0)
+      // пустой контекст → [] → G5 честно оставит карточку в gated
+      assert_eq(OSPFURLsFrom("текст без ссылок"), "")
+      assert_eq(OSPFSourcesToDB("текст без ссылок", aid, "2026-11-04"), "[]")
+
+  }}
