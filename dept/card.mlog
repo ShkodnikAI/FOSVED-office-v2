@@ -1132,9 +1132,10 @@ test "покрытие: доля ответов, ставших карточка
 }
 
 test "бюджет: ключ daily_budget_<dept> проверяется до записи" {
-  // OR IGNORE: #626 W3 сеет daily_budget_osp=2.00 в OSPBenchEnsureSchema —
-  // ключ может уже существовать к моменту этого теста (порядок dept-тестов)
+  // #664: лимит выставляется ЯВНО (INSERT + UPDATE) — тест не зависит от
+  // сева/миграции (#626/#664 сеют 10.00, порядок dept-тестов не важен)
   let _ = db_execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('daily_budget_osp', '2.00')", [])
+  let _ = db_execute("UPDATE system_settings SET value = '2.00' WHERE key = 'daily_budget_osp'", [])
   let ok = CardSave("osp", "number", "Прогноз в пределах бюджета", "0.6", "{\"value\":0.6,\"horizon_days\":30}", "2026-12-31", "stated", "osp", "no", "", "{}", 1.5)
   assert_contains(ok, "OK|")
   let over = CardSave("osp", "number", "Прогноз сверх бюджета", "0.7", "{\"value\":0.7,\"horizon_days\":30}", "2026-12-31", "stated", "osp", "no", "", "{}", 1.5)
@@ -1143,6 +1144,9 @@ test "бюджет: ключ daily_budget_<dept> проверяется до з�
 }
 
 test "форма прошла, бюджет исчерпан → gated (регрессия на склейку отчёта)" {
+  // #664: явный лимит (не зависим от порядка dept-тестов), в конце — возврат 10.00
+  let _ = db_execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('daily_budget_osp', '2.00')", [])
+  let _ = db_execute("UPDATE system_settings SET value = '2.00' WHERE key = 'daily_budget_osp'", [])
   let r = CardSave("osp", "number", "Прогноз после исчерпания бюджета", "0.5",
     "{\"value\":0.5,\"horizon_days\":30}", "2026-12-31", "stated", "osp", "no", "", "{}", 5.0)
   assert_contains(r, "GATED|")
@@ -1150,6 +1154,8 @@ test "форма прошла, бюджет исчерпан → gated (регр
   let rows = query("SELECT status, gate_report FROM dept_archive WHERE topic = 'Прогноз после исчерпания бюджета'", [])
   assert_eq(to_string(json_get(get(rows, 0.0), "status", "?")), "gated")
   assert_contains(to_string(json_get(get(rows, 0.0), "gate_report", "?")), "B1 дневной бюджет osp исчерпан")
+  // гигиена: вернуть боевой бюджет ОСП (10.00 — решение владельца 03.11/05.11)
+  let _ = db_execute("UPDATE system_settings SET value = '10.00' WHERE key = 'daily_budget_osp'", [])
 }
 
 test "грант: разрушающая уборка только с grant_issue" {
