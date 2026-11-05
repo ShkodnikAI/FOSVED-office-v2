@@ -60,6 +60,11 @@ pattern CardEnsureSchema() -> String {
   return CardMigrate()
 }
 
+// B3 #640: колонки card_kind/contour/claim_json/… — БЕЗ DEFAULT: SQLite
+// ALTER TABLE ADD COLUMN с константным DEFAULT заполняет ВСЕ существующие
+// строки, старые записи (наряды и пр.) получали card_kind='number' и
+// contour='owner' и попадали в карточные метрики. NULL-дефолт даёт честный
+// предикат «карточка = card_kind IS NOT NULL»; CardSave пишет все поля явно.
 // Форма прода: ColumnExists через pragma_table_info (dept/utils.mlog:382) и
 // один грант db:alter:* на всю миграцию (app.mlog:158, ADR-0155 §3.1).
 pattern CardColumnExists(table: String, column: String) -> Bool {
@@ -78,31 +83,31 @@ pattern CardMigrate() -> String {
   let mig = grant_issue("db:alter:*", 120, "n", 40)
   let mut added = 0.0
   let mut failed = 0.0
-  let r = CardAlter(mig, "dept_archive", "card_kind", "ALTER TABLE dept_archive ADD COLUMN card_kind TEXT DEFAULT 'number'")
+  let r = CardAlter(mig, "dept_archive", "card_kind", "ALTER TABLE dept_archive ADD COLUMN card_kind TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
-  let r = CardAlter(mig, "dept_archive", "contour", "ALTER TABLE dept_archive ADD COLUMN contour TEXT DEFAULT 'owner'")
+  let r = CardAlter(mig, "dept_archive", "contour", "ALTER TABLE dept_archive ADD COLUMN contour TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
-  let r = CardAlter(mig, "dept_archive", "claim_json", "ALTER TABLE dept_archive ADD COLUMN claim_json TEXT DEFAULT '{}'")
+  let r = CardAlter(mig, "dept_archive", "claim_json", "ALTER TABLE dept_archive ADD COLUMN claim_json TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
-  let r = CardAlter(mig, "dept_archive", "provenance", "ALTER TABLE dept_archive ADD COLUMN provenance TEXT DEFAULT 'stated'")
+  let r = CardAlter(mig, "dept_archive", "provenance", "ALTER TABLE dept_archive ADD COLUMN provenance TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
-  let r = CardAlter(mig, "dept_archive", "review_status", "ALTER TABLE dept_archive ADD COLUMN review_status TEXT DEFAULT 'approved'")
+  let r = CardAlter(mig, "dept_archive", "review_status", "ALTER TABLE dept_archive ADD COLUMN review_status TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
-  let r = CardAlter(mig, "dept_archive", "source", "ALTER TABLE dept_archive ADD COLUMN source TEXT DEFAULT ''")
+  let r = CardAlter(mig, "dept_archive", "source", "ALTER TABLE dept_archive ADD COLUMN source TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
   let r = CardAlter(mig, "dept_archive", "dissent_reason", "ALTER TABLE dept_archive ADD COLUMN dissent_reason TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
-  let r = CardAlter(mig, "dept_archive", "gate_report", "ALTER TABLE dept_archive ADD COLUMN gate_report TEXT DEFAULT '{}'")
+  let r = CardAlter(mig, "dept_archive", "gate_report", "ALTER TABLE dept_archive ADD COLUMN gate_report TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
-  let r = CardAlter(mig, "dept_archive", "payload_json", "ALTER TABLE dept_archive ADD COLUMN payload_json TEXT DEFAULT '{}'")
+  let r = CardAlter(mig, "dept_archive", "payload_json", "ALTER TABLE dept_archive ADD COLUMN payload_json TEXT")
   if r == "added" then { added = added + 1.0 }
   if r == "FAILED" then { failed = failed + 1.0 }
   let r = CardAlter(mig, "dept_archive", "rework_count", "ALTER TABLE dept_archive ADD COLUMN rework_count INTEGER DEFAULT 0")
@@ -738,6 +743,193 @@ pattern CardAuditOrphans() -> String {
 
 
 // ══════════════════════════════════════════════════════════════════════════
+// B3 #640 — ШОВ ОТВЕТА ОТДЕЛА (D4) + БЮДЖЕТЫ-ПРЕДОХРАНИТЕЛИ + СТАНДАРТ D9
+// ══════════════════════════════════════════════════════════════════════════
+
+// Засев предохранителей (решение владельца 03.11 п.1: ОСП 10.00, остальные
+// 3.00 USD/день). INSERT OR IGNORE — уже выставленный ключ не перезаписывает.
+// card_seam_enabled НЕ засевается: нет ключа = off (fail-closed) — шов
+// включается владельцем после замера «20 вопросов на отдел, ≥80% валидных
+// хвостов» (D4/план v2), замер требует живых LLM-ответов отделов.
+pattern CardSeedBudgets() -> String {
+  let depts = "yana|osp|lz|expert|marketing|finance|legal|dev|design|qa|visual|engineering|kavalnya|team|admin"
+  each d in split(depts, "|") {
+    let dept = trim(to_string(d))
+    let mut limit = "3.00"
+    if dept == "osp" then { limit = "10.00" }
+    let _ = db_execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)", ["daily_budget_" + dept, limit])
+  }
+  return "seeded"
+}
+
+// Kill-switch: ключ card_seam_enabled = 'on'; ключа нет = off (fail-closed).
+pattern CardSeamEnabled() -> Bool {
+  let _ = CardEnsureSchema()
+  let _ = CardSeedBudgets()
+  let rows = query("SELECT value FROM system_settings WHERE key = 'card_seam_enabled'", [])
+  if length(rows) == 0.0 then { return false }
+  return to_string(json_get(get(rows, 0.0), "value", "")) == "on"
+}
+
+// Маркер строгий и один на офис: ```card … ``` (probe_d4_tail, 6/6).
+// Извлечение — ПРОГРАММОЙ (split по маркеру), LLM не зовётся.
+pattern CardTailExtract(text: String) -> String {
+  let parts = split(text, "```card")
+  if length(parts) < 2.0 then { return "" }
+  let rest = split(to_string(get(parts, 1.0)), "```")
+  return trim(to_string(get(rest, 0.0)))
+}
+
+// Текст без хвоста — владельцу уходит только человеческая часть ответа.
+// Чистая функция: вызывается только при исходах OK/FAIL (хвост был).
+pattern CardTailStrip(text: String) -> String {
+  let parts = split(text, "```card")
+  if length(parts) < 2.0 then { return text }
+  let head = to_string(get(parts, 0.0))
+  let rest = split(to_string(get(parts, 1.0)), "```")
+  if length(rest) < 2.0 then { return head }
+  return head
+}
+
+// Форма хвоста — тот же валидатор, что у call_llm_schema («shape before use»):
+// kind — словарь контракта, claim/verify_by обязательны (probe_d4_tail).
+pattern CardTailSchema() -> String {
+  return "{\"type\":\"object\",\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"number\",\"flag\",\"check\",\"receipt\"]},\"claim\":{\"type\":\"string\"},\"verify_by\":{\"type\":\"string\"},\"value\":{\"type\":\"number\"},\"dissent\":{\"type\":\"string\"},\"dissent_reason\":{\"type\":\"string\"}},\"required\":[\"kind\",\"claim\",\"verify_by\"]}"
+}
+
+// Три исхода различаются честно (FAIL ≠ BARE — иначе покрытие врёт):
+//   OK|<json> — хвост есть и валиден; FAIL|<причина> — брак формы; BARE — нет.
+pattern CardTailValidate(text: String) -> String {
+  let tail = CardTailExtract(text)
+  if tail == "" then { return "BARE" }
+  let r = try json_validate(CardTailSchema(), tail)
+  if r.ok == false then { return "FAIL|json не разобран: " + to_string(r.error.message) }
+  let v = r.value
+  if to_string(json_get(v, "valid", "false")) != "true" then {
+    return "FAIL|форма хвоста: " + to_string(json_get(v, "errors", ""))
+  }
+  return "OK|" + tail
+}
+
+// Ответ отдела, который НЕ стал карточкой из-за брака формы (FAIL): отдельный
+// маркер — «почти ответил» видно программно, покрытие не приукрашивается.
+pattern CardLogFailAnswer(dept: String, reason: String) -> String {
+  let _ = CardEnsureSchema()
+  let _ = db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('0', 'assistant', ?1, ?2)", [dept, "fail|" + substring(reason, 0.0, 200.0)])
+  return "ok"
+}
+
+// ── СТАНДАРТ ОТВЕТА ВЛАДЕЛЬЦУ D9 (решение 03.11): кратко, таблицы, акценты.
+// Проверка — программная, предупреждением (поправка 2: блокируется только
+// форма карточки, не стиль): (а) первый блок длиннее 3 строк; (б) чисел ≥3,
+// а таблицы нет; (в) сырые числа с >2 знаками после запятой.
+pattern CardD9Check(reply: String) -> String {
+  let mut warns = ""
+  // (а) первый блок: строки до первой пустой строки
+  let lines = split(trim(reply), "\n")
+  let mut first_block = 0.0
+  each l in lines {
+    if trim(to_string(l)) == "" then { return CardD9Finish(warns) }
+    first_block = first_block + 1.0
+  }
+  if first_block > 3.0 then { warns = warns + "первый блок " + to_string(first_block) + " строк (>3); " }
+  // (б) числа ≥3 и нет таблицы-разделителя
+  let mut nums = 0.0
+  let toks = split(reply, " ")
+  each t in toks {
+    let tk = trim(to_string(t))
+    let f = to_float_or(tk, -999999.0)
+    if f != -999999.0 then { nums = nums + 1.0 }
+  }
+  let has_table = contains(reply, "|") and (contains(reply, "---") or contains(reply, "—"))
+  if nums >= 3.0 and has_table == false then { warns = warns + "чисел ≥3 без таблицы; " }
+  // (в) сырые числа с >2 знаками после точки (5.26315 — нарушение; 5.26 — норма)
+  each t in toks {
+    let tk = trim(to_string(t))
+    let pp = split(tk, ".")
+    if length(pp) == 2.0 {
+      let frac = trim(to_string(get(pp, 1.0)))
+      if length(frac) > 2.0 {
+        let fv = to_float_or("0." + frac, -999999.0)
+        if fv > 0.0 then { warns = warns + "число с >2 знаками: " + tk + "; " }
+      }
+    }
+  }
+  return CardD9Finish(warns)
+}
+
+pattern CardD9Finish(warns: String) -> String {
+  if trim(warns) == "" then { return "OK" }
+  return "WARN: " + trim(warns)
+}
+
+// D9-маркер в журнал ответов — источник доли прошедших для /score.
+pattern CardD9Log(dept: String, reply: String) -> String {
+  let verdict = CardD9Check(reply)
+  let _ = CardEnsureSchema()
+  if verdict == "OK" then {
+    let _ = db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('0', 'assistant', ?1, 'd9ok|')", [dept])
+    return "OK"
+  }
+  let _ = db_execute("INSERT INTO dialog_history (chat_id, role, dept, content) VALUES ('0', 'assistant', ?1, ?2)", [dept, "d9warn|" + substring(verdict, 0.0, 180.0)])
+  return verdict
+}
+
+// Доля ответов в стандарте D9 — для /score <dept> (D9, метрика).
+pattern CardD9Share(dept: String) -> String {
+  let _ = CardEnsureSchema()
+  let all = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = ? AND role = 'assistant' AND (content LIKE 'd9ok|%' OR content LIKE 'd9warn|%')", [dept])
+  let n = to_float(to_string(json_get(get(all, 0.0), "n", "0")))
+  if n == 0.0 then { return "в стандарте D9: данных нет" }
+  let ok = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = ? AND role = 'assistant' AND content LIKE 'd9ok|%'", [dept])
+  let n_ok = to_float(to_string(json_get(get(ok, 0.0), "n", "0")))
+  return "в стандарте D9: " + to_string(n_ok / n * 100.0) + "% (n=" + to_string(n) + ")"
+}
+
+// ── САМ ШОВ: вызывается отделом (HandleDeptQuery/HandleOSP) на готовом
+// ответе. Возвращает исход строкой:
+//   "OFF" — kill-switch выключен: ничего не пишет, ответ не меняет;
+//   "BARE" — хвоста нет (консультация); записан bare-маркер;
+//   "OK|<id>|<status>" — карточка записана (published/gated);
+//   "FAIL|<причина>" — хвост был, форма браком; записан fail-маркер.
+// Исходы OK/FAIL → вызывающий показывает владельцу CardTailStrip(reply).
+// cost — стоимость вызова отдела в USD; mlog-сторона её не знает, пока
+// передаётся 0.0 (предохранитель CardBudgetOk готов, писатель стоимости —
+// фаза C/D); ключи предохранителей засеяны CardSeedBudgets.
+pattern CardSeamVerdict(dept: String, reply: String, cost: Float) -> String {
+  if CardSeamEnabled() == false then { return "OFF" }
+  let v = CardTailValidate(reply)
+  if v == "BARE" then {
+    let _ = CardLogBareAnswer(dept, substring(trim(reply), 0.0, 80.0))
+    let _ = CardD9Log(dept, reply)
+    return "BARE"
+  }
+  if starts_with(v, "FAIL|") then {
+    let reason = substring(v, 5.0, length(v))
+    let _ = CardLogFailAnswer(dept, reason)
+    let _ = CardD9Log(dept, CardTailStrip(reply))
+    return v
+  }
+  // OK|<json>: хвост валиден — карточка собирается из строки БД (CardSave)
+  let tail = substring(v, 3.0, length(v))
+  let j = TryVal(try parse_json(tail))
+  if to_string(j) == "()" then { return "FAIL|json не пере-распарсен (внутренняя)" }
+  let kind = to_string(json_get(j, "kind", ""))
+  let claim = to_string(json_get(j, "claim", ""))
+  let verify_by = to_string(json_get(j, "verify_by", ""))
+  let mut dissent = to_string(json_get(j, "dissent", "no"))
+  if trim(dissent) == "" then { dissent = "no" }
+  let dissent_reason = to_string(json_get(j, "dissent_reason", ""))
+  let topic = substring(trim(claim), 0.0, 80.0)
+  let saved = CardSave(dept, kind, topic, claim, tail, verify_by, "stated", "seam:" + dept, dissent, dissent_reason, "{}", cost)
+  let _ = CardD9Log(dept, CardTailStrip(reply))
+  let parts = split(saved, "|")
+  if to_string(get(parts, 0.0)) == "GATED" then { return "OK|" + to_string(get(parts, 1.0)) + "|gated" }
+  return "OK|" + to_string(get(parts, 1.0)) + "|published"
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
 // ТЕСТЫ
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -1047,7 +1239,10 @@ test "D1: сирота невозможна — FK отвергает факт �
   let before = CardEmptyClaims()
   let _ = db_execute("INSERT INTO dept_archive (dept, topic, card_kind, status) VALUES ('orphanaudit', 'Карточка без claim_json', 'number', 'drafted')", [])
   assert_eq(CardEmptyClaims(), before + 1.0)
-  assert_contains(CardAuditOrphans(), "no_contour=0")
+  // карточка без контура — тоже брак, виден программно (B3 #640: колонки без
+  // DEFAULT — DEFAULT 'owner' молча маскировал бы такой брак под «норму»)
+  let nc = query("SELECT COUNT(*) AS n FROM dept_archive WHERE card_kind IS NOT NULL AND (contour IS NULL OR contour = '')", [])
+  assert_eq(to_float(to_string(json_get(get(nc, 0.0), "n", "0"))) >= 1.0, true)
 }
 
 test "D1: ScoreDept без правки не видит карточных статусов — нужен CardScoreBlock" {
@@ -1157,4 +1352,118 @@ test "n639: legacy ComputeFinanceMAPE — знаменатель только п
   assert_contains(s, "MAPE (калиброванная)")
   // n в ответе — число вычислимых пар; нулевой факт знаменатель не раздувает
   assert_contains(s, "(n=" + to_string(to_int(n_ok_all)) + ")")
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ТЕСТЫ n640 — шов (D4), kill-switch, бюджеты-предохранители, стандарт D9
+// ══════════════════════════════════════════════════════════════════════════
+
+test "n640: хвост извлекается и вырезается программой — валидный JSON" {
+  let ans = "Прогноз готов.\n```card\n{\"kind\":\"number\",\"claim\":\"Выручка декабря 210000 BYN\",\"verify_by\":\"2026-12-31\",\"value\":210000}\n```"
+  assert_contains(CardTailValidate(ans), "OK|")
+  assert_eq(CardTailExtract(ans), "{\"kind\":\"number\",\"claim\":\"Выручка декабря 210000 BYN\",\"verify_by\":\"2026-12-31\",\"value\":210000}")
+  let stripped = CardTailStrip(ans)
+  assert_eq(stripped, "Прогноз готов.\n")
+  assert_eq(contains(stripped, "```card"), false)
+}
+
+test "n640: битый JSON в хвосте — FAIL, а не BARE (FAIL ≠ BARE)" {
+  let ans = "Прогноз готов.\n```card\n{\"kind\":\"number\",\"claim\":незакрытая строка}\n```"
+  assert_contains(CardTailValidate(ans), "FAIL|json не разобран")
+  // kind вне словаря и нет verify_by — FAIL по форме, с точным путём поля
+  let ans2 = "Ответ.\n```card\n{\"kind\":\"horoscope\",\"claim\":\"всё будет хорошо\"}\n```"
+  assert_contains(CardTailValidate(ans2), "FAIL|форма хвоста")
+  // хвоста нет — BARE, и только BARE
+  assert_eq(CardTailValidate("Справка: ставка 9.5%."), "BARE")
+}
+
+test "n640: kill-switch — нет ключа = off, off не пишет и не меняет ответ" {
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+  let ans = "Ответ отдела.\n```card\n{\"kind\":\"flag\",\"claim\":\"оценка риска\",\"verify_by\":\"2026-12-31\",\"allowed\":\"clean\"}\n```"
+  assert_eq(CardSeamVerdict("seamoff", ans, 0.0), "OFF")
+  let n = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = 'seamoff'", [])
+  assert_eq(to_float(to_string(json_get(get(n, 0.0), "n", "1"))), 0.0)
+  // ключ off — то же самое
+  let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('card_seam_enabled', 'off')", [])
+  assert_eq(CardSeamVerdict("seamoff", ans, 0.0), "OFF")
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+}
+
+test "n640: шов OK — валидный хвост становится карточкой, ответ без хвоста" {
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+  let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let ans = "Прогноз кассового разрыва готов.\n```card\n{\"kind\":\"number\",\"claim\":\"Кассовый разрыв декабрь 120000 BYN\",\"verify_by\":\"2026-12-31\",\"value\":120000}\n```"
+  let v = CardSeamVerdict("seamok", ans, 0.0)
+  assert_contains(v, "OK|")
+  assert_contains(v, "|published")
+  // карточка в столе — из строки БД, ответ владельцу без машиночитаемого хвоста
+  let rows = query("SELECT id, card_kind, status, source FROM dept_archive WHERE dept = 'seamok'", [])
+  assert_eq(length(rows), 1.0)
+  assert_eq(to_string(json_get(get(rows, 0.0), "card_kind", "?")), "number")
+  assert_eq(to_string(json_get(get(rows, 0.0), "source", "?")), "seam:seamok")
+  assert_eq(contains(CardTailStrip(ans), "```card"), false)
+  // журнал ответов: один card-маркер (покрытие 1/1)
+  assert_contains(CardCoverage("seamok"), "1/1 ответов стали карточками")
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+}
+
+test "n640: шов FAIL — брак формы громко, карточки нет, маркер fail" {
+  let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let ans = "Прогноз готов.\n```card\n{\"kind\":\"number\",\"claim\":незакрытая строка}\n```"
+  let v = CardSeamVerdict("seamfail", ans, 0.0)
+  assert_contains(v, "FAIL|json не разобран")
+  let rows = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = 'seamfail'", [])
+  assert_eq(to_float(to_string(json_get(get(rows, 0.0), "n", "1"))), 0.0)
+  let marks = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = 'seamfail' AND content LIKE 'fail|%'", [])
+  assert_eq(to_float(to_string(json_get(get(marks, 0.0), "n", "0"))), 1.0)
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+}
+
+test "n640: шов BARE — консультация без утверждения, bare-маркер, ответ цел" {
+  let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let ans = "Справка: ставка рефинансирования 9.5%."
+  assert_eq(CardSeamVerdict("seambare", ans, 0.0), "BARE")
+  let marks = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = 'seambare' AND content LIKE 'bare|%'", [])
+  assert_eq(to_float(to_string(json_get(get(marks, 0.0), "n", "0"))), 1.0)
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+}
+
+test "n640: бюджеты-предохранители засеяны — 15 отделов, ОСП дороже прочих" {
+  let _ = CardSeamEnabled()
+  let n = query("SELECT COUNT(*) AS n FROM system_settings WHERE key LIKE 'daily_budget_%'", [])
+  assert_eq(to_float(to_string(json_get(get(n, 0.0), "n", "0"))) >= 15.0, true)
+  let yana = query("SELECT value FROM system_settings WHERE key = 'daily_budget_yana'", [])
+  assert_eq(to_string(json_get(get(yana, 0.0), "value", "?")), "3.00")
+  // идемпотентность: повторный CardSeedBudgets не плодит дублей
+  let _ = CardSeedBudgets()
+  let n2 = query("SELECT COUNT(*) AS n FROM system_settings WHERE key LIKE 'daily_budget_%'", [])
+  assert_eq(to_string(json_get(get(n, 0.0), "n", "?")), to_string(json_get(get(n2, 0.0), "n", "?")))
+}
+
+test "n640: стандарт D9 — короткий ответ OK, длинный/сырой — WARN" {
+  assert_eq(CardD9Check("Короткий вывод одним предложением."), "OK")
+  assert_contains(CardD9Check("Строка 1\nСтрока 2\nСтрока 3\nСтрока 4"), "WARN: первый блок")
+  assert_contains(CardD9Check("Точность 5.26315 процента"), "WARN: число с >2 знаками: 5.26315")
+  assert_contains(CardD9Check("Показатели: 10 20 30 единиц"), "WARN: чисел ≥3 без таблицы")
+  // таблица снимает предупреждение о числах
+  assert_eq(CardD9Check("Вывод: см. таблицу.\n\n| a | b | c |\n|---|---|---|\n| 10 | 20 | 30 |"), "OK")
+  // маркеры и доля: один ok, один warn → 50%
+  let _ = CardD9Log("d9probe", "Короткий вывод одним предложением.")
+  let _ = CardD9Log("d9probe", "Строка 1\nСтрока 2\nСтрока 3\nСтрока 4")
+  assert_contains(CardD9Share("d9probe"), "в стандарте D9: 50% (n=2)")
+}
+
+test "n640: /score — старые строки без card_kind не попадают, карточный блок есть" {
+  // старая запись (наряды и пр.) — без card_kind
+  let _ = db_execute("INSERT INTO dept_archive (dept, topic, status) VALUES ('scoresdept', 'Старая запись без контракта', 'verified')", [])
+  let r = CardSave("scoresdept", "flag", "Карточка для проверки скоринга", "clean", "{\"allowed\":\"clean\"}", "2027-01-31", "stated", "n640", "no", "", "{}", 0.0)
+  assert_contains(r, "OK|")
+  let s = TryVal(try ScoreDept("scoresdept"))
+  assert_contains(s, "Всего карточек: 1")
+  assert_contains(s, "Опубликовано: 1")
+  assert_contains(s, "Карточки (контур владельца): 1")
+  assert_contains(s, "покрытие scoresdept")
+  assert_contains(s, "в стандарте D9: данных нет")
+  // старой строки в счётчиках нет
+  assert_eq(contains(s, "Всего карточек: 2"), false)
 }
