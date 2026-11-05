@@ -1290,10 +1290,12 @@ pattern ComputeLegalCleanRate() -> String {
 }
 
 pattern ScoreDept(dept: String) -> String {
-  let d1 = TryVal(try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ?", [dept]))
+  // B3 #640: старые строки dept_archive без card_kind (наряды и пр.) в
+  // метрики не попадают — счётчики считают только карточки контракта
+  let d1 = TryVal(try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND card_kind IS NOT NULL", [dept]))
   if to_string(d1) == "()" then { return "Score: " + dept + "\n[Ошибка запроса к БД]" }
-  let d2 = TryVal(try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'verified'", [dept]))
-  let d3 = TryVal(try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND status = 'drafted'", [dept]))
+  let d2 = TryVal(try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND card_kind IS NOT NULL AND status = 'resolved'", [dept]))
+  let d3 = TryVal(try query("SELECT COUNT(*) as cnt FROM dept_archive WHERE dept = ? AND card_kind IS NOT NULL AND status = 'published'", [dept]))
   // №422: COUNT(*) приходит числом — redact(число) = рантайм-ошибка; to_string до мойки
   let g1 = redact(to_string(TryVal(try json_get(d1[0], "cnt", "0"))), "all")
   let mut g2 = "0"
@@ -1303,7 +1305,9 @@ pattern ScoreDept(dept: String) -> String {
   let total = to_string(g1)
   let verified = to_string(g2)
   let drafted = to_string(g3)
-  let base = "Score: " + dept + "\nВсего записей: " + total + "\nВерифицировано: " + verified + "\nВ ожидании: " + drafted
+  // B3 #640: счётчики — только карточки (без card_kind не попадают),
+  // в конце — карточный блок и доля D9 (D1.1/D9)
+  let base = "Score: " + dept + "\nВсего карточек: " + total + "\nРазрешено: " + verified + "\nОпубликовано: " + drafted + "\n" + CardScoreBlock(dept) + "\n" + CardD9Share(dept)
 
   // Narad 8 — append calibrated metric for Finance and Legal
   if dept == "finance" then {
@@ -1627,6 +1631,11 @@ pattern HandleDeptQuery(dept: String, query: String, chat_id: String) -> String 
   let final_reply = reply + footer
   // TEAM-2 #481 A.5: источники — консультации по карте потребностей
   if auto_block != "" then { let final_reply = final_reply + TeamFooterFromBlock(auto_block) }
+  // B3 #640: шов карточки — хвост ```card``` → CardSave/bare/fail (D4);
+  // kill-switch card_seam_enabled (нет ключа = off, ответ не меняется);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста
+  let seam = TryVal(try CardSeamVerdict(dept, final_reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then { let final_reply = CardTailStrip(final_reply) }
   let _ = RecordAssistantMessage(chat_id, dept, final_reply)
   // №603: слой 2 — вспомогательные логи не должны рвать ответ отдела
   let _ = TryVal(try YanaAutoMemorize(query, reply, chat_id))
@@ -2010,7 +2019,11 @@ mlogserver {
     if redact(chat_id, "hash_only") == redact("", "hash_only") then { return respond("400 no chat_id") }
     let _ = InitDB()
     let _ = AuditLog("osp_analyze", "osp", "bridge source=" + redact(to_string(json_get(data, "source", "?")), "all") + " type=" + redact(to_string(json_get(data, "type", "")), "all") + " domain=" + redact(to_string(json_get(data, "domain", "")), "all"))
-    let reply = HandleOSP(query, chat_id)
+    // B3 #640: шов карточки на ответе ОСП (kill-switch card_seam_enabled):
+    // при OK/FAIL хвост ```card``` уходит в карточку, владельцу — чистый ответ
+    let mut reply = HandleOSP(query, chat_id)
+    let seam = TryVal(try CardSeamVerdict("osp", reply, 0.0))
+    if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then { reply = CardTailStrip(reply) }
     // #401 A.1: отчёт ОСП уходит через SendReport — как у прямых запросов ОСП
     // (архив miniapp_responses + превью с кнопкой). Прямая отправка полным
     // текстом не делит сообщение: >4096 символов Telegram отклонил бы — длинный
@@ -4595,7 +4608,9 @@ pattern WebhookBody() -> String {
       // гейтов). Было HandleDeptQuery — generic LLM в обход хард-гейтов ОСП;
       // прямые команды отдела не доходили до его диспетчера. HandleOSP ждёт
       // полный текст с префиксом /osp — передаём text, а не strip-нутый query.
-      let reply = TryVal(try HandleOSP(text, chat_id))
+      let mut reply = TryVal(try HandleOSP(text, chat_id))
+      let seam = TryVal(try CardSeamVerdict("osp", to_string(reply), 0.0))
+      if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then { reply = CardTailStrip(to_string(reply)) }
       if to_string(reply) == "()" or reply == "" then {
         let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
       } else {
@@ -4754,7 +4769,10 @@ return respond("200 ok") }
     }
     if dept == "osp" then {
       let _ = RecordUserMessage(chat_id, "osp", text)
-      let reply = HandleOSP(query, chat_id)
+      // B3 #640: шов карточки на ответе ОСП (kill-switch card_seam_enabled)
+      let mut reply = HandleOSP(query, chat_id)
+      let seam = TryVal(try CardSeamVerdict("osp", reply, 0.0))
+      if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then { reply = CardTailStrip(reply) }
       let _ = SendVoiceReply(chat_id, reply, "osp")
       let _ = SendReport(reply, "osp", query, "2.0", chat_id)
       let handled = 1.0
