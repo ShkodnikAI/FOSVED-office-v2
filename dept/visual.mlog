@@ -429,19 +429,21 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   if src_type == "report" then { let badge = "ОТЧЁТ" }
 
   // ── Build card using SVG primitives ──
-  // #543 A.1: стимпанк-палитра (решение владельца 17.10). Цвета уходят
-  // полями card в /render-card-pdf (accent/paper/ink/dim/rule + новые
-  // title/heading/verdict_c) — python-сторона НЕ хардкодит. Контраст
-  // посчитан аудитором (наряд #543): пергамент на латуни 5.91, ink 13.02,
-  // медь 6.82, латунь 8.77, dim 7.73 — все ≥ 4.5.
-  let accent = "#6E4F22"   // шапка 0–72 — старая латунь
-  let paper = "#1C140E"    // фон карточки — тёмный орех
-  let ink = "#E8D9B8"      // основной текст
-  let dim_c = "#C9A36A"    // второстепенный текст
-  let rule = "#5A4228"     // линии
-  let title_c = "#F3E3C3"  // заголовок и бейдж — пергамент
-  let heading_c = "#D98E3A" // заголовки разделов — медь
-  let verdict_c = "#D4AF6A" // вердикт — латунь
+  // Monolith F (решение владельца 04.11), контраст посчитан аудитором в #640:
+  // ink на paper 17.03, dim 7.38, heading 10.18, verdict 13.4, title на accent 9.1 —
+  // все ≥ 4.5; rule (1.83) — только линии, текстом не использовать. Цвета уходят
+  // полями card в /render-card-pdf (accent/paper/ink/dim/rule +
+  // title/heading/verdict_c) — python-сторона НЕ хардкодит. Шрифты Unbounded/Manrope
+  // и градиенты/текстура камня/огненная трещина рендером карточки не держатся
+  // (pymupdf + DejaVu, /render-card-pdf) — плоские цвета, см. отчёт #640.
+  let accent = "#24282E"   // шапка 0–72 — каменная грань
+  let paper = "#0A0D12"    // фон карточки — тёмный камень
+  let ink = "#EEF0F2"      // основной текст
+  let dim_c = "#9AA0A8"    // второстепенный текст
+  let rule = "#3A3F46"     // линии (декоративные)
+  let title_c = "#FFC04D"  // заголовок и бейдж — огненное золото
+  let heading_c = "#E0B56A" // заголовки разделов
+  let verdict_c = "#FFCF7A" // вердикт
 
   // ── шапка 0–72: бейдж + тема в две строки ──
   // #521 A.4: заголовок чистится и переносится по ширине с многоточием
@@ -460,8 +462,8 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
 
   // ── статус-бар 72–96 ──
   // #521 A.5: служебный «Статус: sent» убран; уверенность — понятным словом.
-  // #543 A.1: фон статус-бара — paper (фон единый, тёмный орех), сверху
-  // тонкая линия rule — так двойная латунная линия под шапкой видна.
+  // #543 A.1 → #640 п.6: фон статус-бара — paper (фон единый, тёмный камень),
+  // сверху тонкая линия rule — граница под шапкой видна.
   let conf_label = CardConfLabel(confidence)
   let mut status_text = "Уверенность: " + conf_label
   if conf_label == "" then { let status_text = "" }
@@ -548,11 +550,21 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   let svg = svg_canvas(360.0, 504.0, "0 0 360 504", [header, status_bar, body_group, footer])
 
   // #499 A.4: гейт QA — заполненность/контраст проверяются до отправки;
-  // непрошедшая карточка не рендерится и не уходит в чат
+  // непрошедшая карточка не рендерится и не уходит в чат.
+  // #640 п.6: предупреждение saturation («design system recommends 1-2 focal
+  // accents») — НЕ блок: палитра Monolith F владельца (04.11) несёт три
+  // насыщенных золота (#FFC04D/#FFCF7A/#E0B56A, контраст ≥ 4.5 посчитан
+  // аудитором) — прежний reject по любой находке делал ЛЮБУЮ карточку новой
+  // палитры невозможной; контраст/заполненность остаются блокирующими,
+  // предупреждение уходит в audit (card_qa_warn) на усмотрение владельца.
   let qa = infographic_qa(svg)
   if contains(to_string(qa), "passed: false") then {
-    let _ = AuditLog("card_qa_reject", "visual", src_id + ": " + substring(to_string(qa), 0.0, 140.0))
-    return ""
+    if contains(to_string(qa), "saturation:") then {
+      let _ = AuditLog("card_qa_warn", "visual", src_id + ": " + substring(to_string(qa), 0.0, 140.0))
+    } else {
+      let _ = AuditLog("card_qa_reject", "visual", src_id + ": " + substring(to_string(qa), 0.0, 140.0))
+      return ""
+    }
   }
 
   // #499 A.5: PDF верстает python-сторона (/render-card-pdf, pymupdf +
@@ -579,6 +591,22 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
 // ═══════════════════════════════════════════════════════════════════════
 // TYPE 1 — Compression Visual (анализ → dashboard SVG)
 // ═══════════════════════════════════════════════════════════════════════
+
+// Monolith Paint (#640 п.6): builtin DiagramStyle кастомные цвета не принимает
+// (color_palette — только 6 интентов × темы), а chart_* градиенты не эмитят —
+// поэтому готовый SVG перекрашивается заменой hex-ов палитры energy/light
+// (сняты пробом: f5f5f4/bd7328/32261b/ded9d3/8c8073) на Monolith F:
+// заливка столбцов и долей #FFA733 — плоский фолбэк градиента #E2560A → #FFB547
+// (chart_* градиенты не держат — проб /tmp/probe_palette.mlog, отчёт #640);
+// подложка шкалы #1A1D22; вторичная доля/текст #9AA0A8 (dim); сетка #3A3F46 (rule).
+pattern MonolithPaint(svg: String) -> String {
+  let s = replace(svg, "#f5f5f4", "#1A1D22")
+  let s = replace(s, "#bd7328", "#FFA733")
+  let s = replace(s, "#32261b", "#9AA0A8")
+  let s = replace(s, "#ded9d3", "#3A3F46")
+  let s = replace(s, "#8c8073", "#9AA0A8")
+  return s
+}
 
 // Сжимает анализ в dashboard: KPI блок + 2-3 чарта
 pattern GenerateCompressionVisual(src_type: String, src_id: String, chat_id: String) -> String {
@@ -616,10 +644,10 @@ pattern GenerateCompressionVisual(src_type: String, src_id: String, chat_id: Str
   let accent = redact(to_string(json_get(style, "accent", "#c9a961")), "all")
   let paper = redact(to_string(json_get(style, "paper", "#ffffff")), "all")
 
-  // Generate native SVG charts
-  let bar_svg = redact(chart_bar(json_get(viz_data, "bar_data", []), style), "all")
-  let line_svg = redact(chart_line(json_get(viz_data, "line_data", []), style), "all")
-  let donut_svg = redact(chart_donut(json_get(viz_data, "donut_data", []), style), "all")
+  // Generate native SVG charts — Monolith Paint: ряды и доли в Monolith F (#640 п.6)
+  let bar_svg = redact(MonolithPaint(chart_bar(json_get(viz_data, "bar_data", []), style)), "all")
+  let line_svg = redact(MonolithPaint(chart_line(json_get(viz_data, "line_data", []), style)), "all")
+  let donut_svg = redact(MonolithPaint(chart_donut(json_get(viz_data, "donut_data", []), style)), "all")
 
   // KPI header
   let kpi_data = redact(to_string(json_get(viz_data, "kpi", [])), "all")

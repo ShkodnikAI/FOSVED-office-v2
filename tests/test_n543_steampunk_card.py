@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Наряд #543: карточка Визуала — стиль «стимпанк», заголовок целиком, все сценарии.
+"""Наряд #543 → #640 п.6: карточка Визуала — заголовок целиком, все сценарии.
+
+Палитра: стимпанк (#543, 17.10) заменена Monolith F (решение владельца
+04.11, наряд #640 п.6) — тест гвардит ТЕКУЩУЮ палитру.
 
 Гварды:
-- A.1 пиксельный тест: рендер карточки со стимпанк-палитрой (поля card) →
-  PNG через page.get_pixmap: фон (W/2, H−20) = #1C140E ±2; шапка (10, 36) =
-  #6E4F22 ±2; центр шестерни (W−40, 36) = #6E4F22 ±2; зуб (W−22, 36) =
-  #5A4228 ±2;
+- A.1 пиксельный тест: рендер карточки с палитрой Monolith F (поля card) →
+  PNG через page.get_pixmap: фон (W/2, H−20) = #0A0D12 ±2; шапка (10, 36) =
+  #24282E ±2; центр шестерни (W−40, 36) = #24282E ±2; зуб (W−22, 36) =
+  #3A3F46 ±2;
 - A.1 палитра через поля card: python НЕ хардкодит цвета (статгвард: ни
   одного стимпанк-hex в routes_tail.py; фолбэки — прежняя тема);
 - A.2 заголовок: полная тема «OSP: прогноз на ближайшие 6 месяцев, будет
@@ -39,10 +42,10 @@ TAIL_SRC = (ROOT / "proxy" / "routes_tail.py").read_text(encoding="utf-8")
 
 TOPIC_FULL = "OSP: прогноз на ближайшие 6 месяцев, будет ли обвал доллара"
 
-STEAMPUNK = {
-    "accent": "#6E4F22", "paper": "#1C140E", "ink": "#E8D9B8",
-    "dim": "#C9A36A", "rule": "#5A4228", "title": "#F3E3C3",
-    "heading": "#D98E3A", "verdict_c": "#D4AF6A",
+MONOLITH = {
+    "accent": "#24282E", "paper": "#0A0D12", "ink": "#EEF0F2",
+    "dim": "#9AA0A8", "rule": "#3A3F46", "title": "#FFC04D",
+    "heading": "#E0B56A", "verdict_c": "#FFCF7A",
 }
 
 
@@ -54,7 +57,7 @@ def _card(**over):
         "probs": "Укрепление — 45%\nУмеренное укрепление — 20%\nБоковик — 10%",
         "domains": "", "terms": "", "check_date": "",
     }
-    base.update(STEAMPUNK)
+    base.update(MONOLITH)
     base.update(over)
     return base
 
@@ -81,27 +84,27 @@ def test_a1_pixel_background_and_header(tmp_path):
     doc, page, pix = _render_png(_card(), tmp_path)
     W, H = page.rect.width, page.rect.height
     assert (W, H) == (360.0, 504.0)
-    _close(pix, W / 2, H - 20, "#1C140E")   # фон карточки — тёмный орех
-    _close(pix, 10, 36, "#6E4F22")          # шапка — старая латунь
+    _close(pix, W / 2, H - 20, "#0A0D12")   # фон карточки — тёмный камень
+    _close(pix, 10, 36, "#24282E")          # шапка — каменная грань
 
 
 def test_a1_pixel_gear_ornament(tmp_path):
     doc, page, pix = _render_png(_card(), tmp_path)
     W = page.rect.width
-    _close(pix, W - 40, 36, "#6E4F22")      # центр шестерни — цвет шапки
-    _close(pix, W - 22, 36, "#5A4228")      # зуб шестерни — rule
+    _close(pix, W - 40, 36, "#24282E")      # центр шестерни — цвет шапки
+    _close(pix, W - 22, 36, "#3A3F46")      # зуб шестерни — rule
 
 
 def test_a1_palette_not_hardcoded_in_python():
-    """#543: цвета передаются полями card — стимпанк-hex в python запрещены."""
-    for hexc in ("#6E4F22", "#1C140E", "#E8D9B8", "#C9A36A", "#F3E3C3", "#D98E3A", "#D4AF6A"):
+    """#543 → #640 п.6: цвета передаются полями card — hex палитры в python запрещены."""
+    for hexc in ("#24282E", "#0A0D12", "#EEF0F2", "#9AA0A8", "#E0B56A", "#FFC04D", "#FFCF7A"):
         assert hexc not in TAIL_SRC, f"палитра захардкожена в python: {hexc}"
 
 
 def test_a1_mlog_palette_fields():
-    """mlog-шаблон несёт стимпанк-палитру и передаёт новые поля card."""
-    for lit in ('"#6E4F22"', '"#1C140E"', '"#E8D9B8"', '"#C9A36A"', '"#5A4228"',
-                '"#F3E3C3"', '"#D98E3A"', '"#D4AF6A"'):
+    """mlog-шаблон несёт палитру Monolith F (#640 п.6) и передаёт поля card."""
+    for lit in ('"#24282E"', '"#0A0D12"', '"#EEF0F2"', '"#9AA0A8"', '"#3A3F46"',
+                '"#FFC04D"', '"#E0B56A"', '"#FFCF7A"'):
         assert lit in VISUAL_SRC, f"нет цвета {lit} в dept/visual.mlog"
     assert "pattern RenderCardPdfViaProxy" in VISUAL_SRC
     sig = VISUAL_SRC[VISUAL_SRC.index("pattern RenderCardPdfViaProxy"):]
