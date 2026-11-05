@@ -76,8 +76,10 @@ def test_gate_wired_into_generation(pattern_name, depth):
 @pytest.mark.parametrize("pattern_name", ["OSPDeepAnalyze", "OSPFullAnalyze"])
 def test_draft_skipped_when_not_accepted(pattern_name):
     body = _pattern_body(OSP_MLOG, pattern_name)
-    # #469 A.3: запись прогноза (Brier) — только при согласованном распределении
-    assert 'if not_accepted == "" then { let aid = OSPDraftAnalysis(' in body
+    # #469 A.3: запись прогноза (Brier) — только при согласованном распределении.
+    # #624: строка обновлена фикс-ом затенения — aid присваивается реально
+    # (раньше let внутри if терял присваивание, aid всегда был -1 в AuditLog)
+    assert 'if not_accepted == "" then { aid = OSPDraftAnalysis(' in body
     assert "scenario_gate=" in body, "гейт обязан попадать в audit-лог"
     idx_draft = body.index("OSPDraftAnalysis")
     idx_notacc = body.index("ПРОГНОЗ НЕ ПРИНЯТ К ВЕРИФИКАЦИИ")
