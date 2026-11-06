@@ -137,16 +137,23 @@ def test_a5_wrap_respects_width_and_marks_truncation():
 
 
 def test_a5_no_html_to_pdf_in_card_delivery_path():
-    """В GenerateAnalysisCard больше нет html_to_pdf — delivery через прокси-рендер."""
-    start = VISUAL_SRC.index("pattern GenerateAnalysisCard(")
+    """В GenerateAnalysisCard(Ex) больше нет html_to_pdf — delivery через прокси-рендер.
+
+    #673: тело карточки переехало в GenerateAnalysisCardEx (обёртка со старой
+    сигнатурой сохранена для роутов/авто-хуков), PNG-first (#673) рядом с PDF.
+    Гард #499 проверяет тело Ex: html_to_pdf нет, python-рендер есть,
+    сбой журналируется, QA-гейт до рендеров.
+    """
+    start = VISUAL_SRC.index("pattern GenerateAnalysisCardEx(")
     end = VISUAL_SRC.index("pattern ", start + 10)
     card_body = VISUAL_SRC[start:end]
     assert "html_to_pdf(" not in card_body, \
         "карточка не должна рендериться движковым html_to_pdf (кириллица теряется)"
     assert "RenderCardPdfViaProxy(output_path" in card_body, "нет вызова python-рендера"
     assert '"card_render_fail"' in card_body, "сбой рендера не журналируется"
-    # порядок: QA-гейт → рендер → только потом отправка
+    # порядок: QA-гейт → PNG-рендер → (фолбэк) PDF-рендер → отправка
     qa = card_body.index('contains(to_string(qa), "passed: false")')
+    png = card_body.index("RenderCardPngViaProxy(png_path")
     render = card_body.index("RenderCardPdfViaProxy(output_path")
     send = card_body.index("SendVisualDocument(chat_id, output_path")
-    assert qa < render < send, "QA-гейт обязан стоять до рендера и отправки"
+    assert qa < png < render < send, "QA-гейт обязан стоять до рендеров и отправки"
