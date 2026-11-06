@@ -11,6 +11,10 @@
 //   разовое задание: { name, at: <epoch seconds>, target|note, enabled }
 //     — регистрируется через remind() (доставка в ReminderCheck);
 //       epoch — однозначное дата-время без парсера (recipe в README-runbook).
+//   optional: true — запись для входа, в чьём неймспейсе target может
+//     отсутствовать (двухвходовая архитектура офиса): при неизвестном
+//     target бутстрап даёт NO-TARGET (громкая отметка), не FAIL —
+//     наряд #671: kk-ask живёт в app.mlog (боевые сборщики отделов).
 //
 // Правила (границы наряда):
 //   • НОВЫЕ записи по умолчанию создаются выключенными (enabled: false) —
@@ -62,6 +66,15 @@ pattern SchedulesRegistry() -> List {
     // в ночной отчёт 07:15 (OutboxPut). enabled: true — решение владельца
     // 05.11 (наряд #664); №419 «новые выключенными» перекрыто явным указанием.
     { name: "osp-watch",     cron: "40 4 * * *",  tz: "Europe/Moscow", target: "OSPWatchSlot",     catch_up: "skip", enabled: true },
+    // #671 KK-1: ежедневный тренировочный контур Кавальни. Регистрация
+    // бутстрапом — прямое указание наряда (smoke: kk-ask, kk-resolve
+    // зарегистрированы, failed=0); правило №419 «новые выключенными»
+    // перекрыто явным указанием наряда, контур гейтится выключателем
+    // system_settings kk_enabled (нет ключа = off; /kk on — владелец).
+    // kk-ask (боевые сборщики отделов) — app.mlog, запись optional:
+    // в dogfood-неймспейсе цели нет → NO-TARGET, не FAIL.
+    { name: "kk-ask",        cron: "10 6 * * *",  tz: "Europe/Moscow", target: "KKAskSlot",        catch_up: "run_once", enabled: true, optional: true },
+    { name: "kk-resolve",    cron: "0 7 * * *",   tz: "Europe/Moscow", target: "KKResolveSlot",    catch_up: "run_once", enabled: true },
     // #626 W3: раунд ForecastBench — вторник/суббота после субботнего кандидата
     // и вторничного обновления наборов; живой прогон стоит денег — гейт
     // daily_budget_osp внутри. Выключен до решения владельца (№419).
@@ -198,8 +211,16 @@ pattern BootstrapSchedules() -> String {
       // Повторяемое задание: validate target (известный zero-arg паттерн).
       let probe = inspect(target)
       if to_string(probe) == "()" then {
-        let failed = failed + 1.0
-        let report = report + " FAIL(" + name + ": unknown target pattern " + target + ")"
+        // optional-записи: target вне этого неймспейса — NO-TARGET, не FAIL
+        // (#671: kk-ask живёт только в app.mlog; dogfood-стенд честно
+        // отмечает отсутствие, контур в проде).
+        let optional_s = redact(to_string(json_get(rec, "optional", false)), "all")
+        if optional_s == "true" then {
+          let report = report + " NO-TARGET(" + name + ")"
+        } else {
+          let failed = failed + 1.0
+          let report = report + " FAIL(" + name + ": unknown target pattern " + target + ")"
+        }
       } else if redact(cron_expr, "hash_only") == redact("", "hash_only") then {
         let failed = failed + 1.0
         let report = report + " FAIL(" + name + ": empty cron expression)"
