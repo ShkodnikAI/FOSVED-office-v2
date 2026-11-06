@@ -78,6 +78,7 @@ def test_config_inventory_complete():
     владельца 27.10, waker.yml удалён в Metalogos №827; исключений нет.)"""
     providers_py = (REPO_ROOT / "proxy" / "providers.py").read_text(encoding="utf-8")
     eng = (REPO_ROOT / "dept" / "engineering.mlog").read_text(encoding="utf-8")
+    card = (REPO_ROOT / "dept" / "card.mlog").read_text(encoding="utf-8")
     # tier-файлы читаются динамическим путём "config/tier_" + tier + ".txt"
     assert 'config/tier_' in APP
     readers = {
@@ -87,6 +88,9 @@ def test_config_inventory_complete():
         "tier_deep.txt": ["config/tier_"],
         "engineering_normbase.txt": [eng],
         "engineering_min_safety_factor.txt": [eng],
+        # #669: каталог вопросов замера шва; читатель — dept/card.mlog,
+        # динамический путь "config/seam_probe/" + dept + ".txt"
+        "seam_probe": [card],
     }
     orphans = []
     for f in (REPO_ROOT / "config").iterdir():

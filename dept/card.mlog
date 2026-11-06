@@ -57,6 +57,11 @@ pattern CardEnsureSchema() -> String {
   let _ = db_execute("CREATE TABLE IF NOT EXISTS dept_verification (id INTEGER PRIMARY KEY AUTOINCREMENT, archive_id INTEGER, actual_outcome TEXT, error_diagnosis TEXT, verified_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(archive_id) REFERENCES dept_archive(id))", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS dialog_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, role TEXT, dept TEXT, content TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)", [])
+  // #669 A.3: единственная запись замера шва — строка в seam_probe_runs
+  // (писатель — CardSeamRecord, читатели — /seam on и таблица /seam).
+  // Остальные журналы замер не трогает: dept_archive, dialog_history,
+  // trace_log, сессии и память остаются без изменений.
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS seam_probe_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT NOT NULL, ts TEXT DEFAULT (datetime('now')), n INTEGER, ok INTEGER, fail INTEGER, bare INTEGER, reasons_json TEXT, models_json TEXT)", [])
   return CardMigrate()
 }
 
@@ -762,13 +767,20 @@ pattern CardSeedBudgets() -> String {
   return "seeded"
 }
 
-// Kill-switch: ключ card_seam_enabled = 'on'; ключа нет = off (fail-closed).
-pattern CardSeamEnabled() -> Bool {
+// Kill-switch по отделам (наряд #669 A.1): шов активен только при ОБОИХ
+// ключах — глобальный выключатель card_seam_enabled = 'on' И покомпонентный
+// card_seam_enabled:<dept> = 'on'. Нет любого из ключей = off (fail-closed).
+// Глобальный ключ один на офис; департаментский ставит только /seam on <dept>
+// после пройденного замера (порог 80 процентов, окно 7 дней) — программно.
+pattern CardSeamEnabled(dept: String) -> Bool {
   let _ = CardEnsureSchema()
   let _ = CardSeedBudgets()
   let rows = query("SELECT value FROM system_settings WHERE key = 'card_seam_enabled'", [])
   if length(rows) == 0.0 then { return false }
-  return to_string(json_get(get(rows, 0.0), "value", "")) == "on"
+  if to_string(json_get(get(rows, 0.0), "value", "")) != "on" then { return false }
+  let dept_rows = query("SELECT value FROM system_settings WHERE key = ?1", ["card_seam_enabled:" + dept])
+  if length(dept_rows) == 0.0 then { return false }
+  return to_string(json_get(get(dept_rows, 0.0), "value", "")) == "on"
 }
 
 // Маркер строгий и один на офис: ```card … ``` (probe_d4_tail, 6/6).
@@ -897,7 +909,8 @@ pattern CardD9Share(dept: String) -> String {
 // передаётся 0.0 (предохранитель CardBudgetOk готов, писатель стоимости —
 // фаза C/D); ключи предохранителей засеяны CardSeedBudgets.
 pattern CardSeamVerdict(dept: String, reply: String, cost: Float) -> String {
-  if CardSeamEnabled() == false then { return "OFF" }
+  // #669 A.1: шов включается по отделам — вердикт передаёт отдел дальше
+  if CardSeamEnabled(dept) == false then { return "OFF" }
   let v = CardTailValidate(reply)
   if v == "BARE" then {
     let _ = CardLogBareAnswer(dept, substring(trim(reply), 0.0, 80.0))
@@ -926,6 +939,256 @@ pattern CardSeamVerdict(dept: String, reply: String, cost: Float) -> String {
   let parts = split(saved, "|")
   if to_string(get(parts, 0.0)) == "GATED" then { return "OK|" + to_string(get(parts, 1.0)) + "|gated" }
   return "OK|" + to_string(get(parts, 1.0)) + "|published"
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// #669 A.3 — ЗАМЕР ХВОСТОВ ПО ОТДЕЛАМ (B3.1, решение владельца 06.11: вариант А)
+// Замер строит контекст тем же сборщиком, что боевой путь отдела, и зовёт
+// тот же вызов LLM: HandleDeptQuery-отделы — BuildContext + CallLLMResilient;
+// finance — BuildFinanceContext + call_llm; osp — BuildOSPContext с
+// OSPClassifyDomain/OSPAutoEscalate + call_llm. Единственная запись замера —
+// строка в seam_probe_runs; dept_archive, dialog_history, trace_log, сессии
+// и память замер не трогает (запрет прохода). Шов включается владельцем
+// командой /seam on <dept> — замер его не включает.
+// ══════════════════════════════════════════════════════════════════════════
+
+// Отделы замера: все, чей боевой ответ идёт через HandleDeptQuery, плюс osp
+// (финансы идут и своим HandleFinance — их боевой сборщик учитан отдельно).
+// Полный список отделов и сборщиков — в отчёте наряда #669.
+pattern CardSeamDepts() -> List {
+  return ["osp", "lz", "expert", "marketing", "finance", "legal", "dev", "design", "qa", "visual", "engineering", "kavalnya"]
+}
+
+// Стандартная инструкция хвоста для вопросов замера (единая для всех
+// отделов и вопросов; словарь kind — тот же контракт CardTailSchema).
+// Правка шаблонов отделов и РАСШИРЕНИЕ контракта (horizon_days и пр.) —
+// НЕ здесь и НЕ в этом наряде (запрет прохода #669; расширение — территория
+// наряда #670 по финансовой карточке).
+pattern CardSeamTailInstruction() -> String {
+  return "В самом конце ответа добавь отдельным блоком машиночитаемый хвост для программной проверки: строка с тремя обратными кавычками и словом card, затем JSON с полями kind (одно из: number, flag, check, receipt), claim — проверяемое утверждение из ответа одной фразой, verify_by — дата проверки в формате YYYY-MM-DD; для kind=number добавь value — число утверждения. После JSON закрой блок теми же тремя кавычками."
+}
+
+// Строка списка отделов — для подсказок владельцу в командах /seam*.
+pattern CardSeamDeptsList() -> String {
+  let mut out = ""
+  each d in CardSeamDepts() {
+    if out == "" then { let out = to_string(d) } else { let out = out + ", " + to_string(d) }
+  }
+  return out
+}
+
+// Сырьё вопросов: config/seam_probe/<dept>.txt, непустые строки без
+// #-комментариев. Шапка файла — «черновик исполнителя, владелец может
+// заменить» (строки с # замером не читаются). Файла нет / меньше 20
+// вопросов — пустая строка, замер откажет громко.
+// (read_file — недоверенный источник: моем redact ДО решения — идиома
+// GetBrandContract/BuildFinanceContext для library-файлов.)
+pattern CardSeamQuestionsRaw(dept: String) -> String {
+  let raw = redact(to_string(TryVal(try read_file("config/seam_probe/" + dept + ".txt"))), "all")
+  if raw == "()" or raw == "" then { return "" }
+  return raw
+}
+
+// Число валидных вопросов отдела (непустые строки без #).
+pattern CardSeamQuestionsCount(dept: String) -> Float {
+  let raw = CardSeamQuestionsRaw(dept)
+  if raw == "" then { return 0.0 }
+  let mut n = 0.0
+  each line in split(raw, "\n") {
+    let s = trim(to_string(line))
+    if s != "" and starts_with(s, "#") == false then { let n = n + 1.0 }
+  }
+  return n
+}
+
+// Один вопрос замера: боевой сборщик контекста отдела + боевой вызов LLM.
+// К вопросу замера прикладывается стандартная инструкция хвоста — единый
+// источник в коде (CardSeamTailInstruction): правка шаблонов отделов —
+// отдельный наряд по результату замера (запрет прохода #669). Возвращает
+// JSON с полями reply и model; отказ ИИ — reply пустой (счётчик запишет
+// fail с причиной «LLM недоступен»).
+pattern CardSeamProbeOne(dept: String, question: String) -> String {
+  // инструкция хвоста едет с сообщением пользователя; системный контекст —
+  // боевой, без изменений (замер мерит тот же промпт отдела)
+  let q2 = question + "\n\n" + CardSeamTailInstruction()
+  let mut reply = ""
+  let mut model = ""
+  if dept == "finance" then {
+    // боевой путь: HandleFinance → BuildFinanceContext(query, jurisdiction, business_form, chat_id) → call_llm
+    // (ответ сети — недоверенный: моем redact «all» ДО решения — идиома HandleFinance)
+    let jx = FinanceExtractJurisdiction(question)
+    let bf = FinanceExtractBusinessForm(question)
+    let context = BuildFinanceContext(question, jx, bf, "seam-probe")
+    let r = redact(to_string(TryVal(try call_llm(context, q2))), "all")
+    if to_string(r) != "()" then { let reply = r }
+  } else if dept == "osp" then {
+    // боевой путь: HandleOSP → домен/глубина программой → BuildOSPContext → call_llm
+    let _ = TeamBudgetReset()
+    let domain = OSPClassifyDomain(question)
+    let depth = OSPAutoEscalate(question, 1)
+    let context = BuildOSPContext(question, domain, "seam-probe", depth)
+    let r = redact(to_string(TryVal(try call_llm(context, q2))), "all")
+    if to_string(r) != "()" then { let reply = r }
+  } else {
+    // боевой путь: HandleDeptQuery → BuildContext + CallLLMResilient
+    let context = BuildContext(dept, question, "seam-probe")
+    let messages = json_encode([{role: "system", content: context}, {role: "user", content: q2}])
+    let proxy_result = TryVal(try CallLLMResilient(dept, messages))
+    if to_string(proxy_result) != "()" then {
+      let parsed = TryVal(try parse_json(proxy_result))
+      if to_string(parsed) != "()" then {
+        let err = redact(to_string(json_get(parsed, "error", "")), "all")
+        if err == "" then {
+          let reply = redact(to_string(json_get(parsed, "reply", "")), "all")
+          let model = redact(to_string(json_get(parsed, "model", "")), "all")
+        }
+      }
+    }
+  }
+  return json_encode({reply: reply, model: model})
+}
+
+// Счётчик замера: чистая функция над JSON-списком ответов. Каждый ответ —
+// тот же валидатор, что боевой шов (CardTailValidate); исходы OK/FAIL/BARE
+// различаются честно, FAIL в OK не засчитывается (мутационная проверка
+// наряда #669: «считать FAIL как OK» — тест красный).
+// Формат: "ok=<N> fail=<M> bare=<K>|reasons=<json-массив до 5 причин FAIL>".
+pattern CardSeamCount(replies_json: String) -> String {
+  let parsed = TryVal(try parse_json(replies_json))
+  if to_string(parsed) == "()" then { return "ok=0 fail=0 bare=0|reasons=[\"bad_json\"]" }
+  let mut ok = 0.0
+  let mut fail = 0.0
+  let mut bare = 0.0
+  let mut reasons_json = ""
+  let mut rc = 0.0
+  each r in parsed {
+    let v = CardTailValidate(to_string(r))
+    if v == "BARE" then { let bare = bare + 1.0 }
+    else if starts_with(v, "OK|") then { let ok = ok + 1.0 }
+    else if starts_with(v, "FAIL|") then {
+      let fail = fail + 1.0
+      if rc < 5.0 then {
+        let reason = substring(v, 5.0, length(v))
+        if rc == 0.0 then { let reasons_json = json_encode(reason) } else { let reasons_json = reasons_json + "," + json_encode(reason) }
+        let rc = rc + 1.0
+      }
+    } else {
+      // неизвестный исход — честный fail, не OK
+      let fail = fail + 1.0
+    }
+  }
+  return "ok=" + to_string(ok) + " fail=" + to_string(fail) + " bare=" + to_string(bare) + "|reasons=[" + reasons_json + "]"
+}
+
+// Писатель результата замера — ЕДИНСТВЕННЫЙ для seam_probe_runs.
+pattern CardSeamRecord(dept: String, n: Float, ok: Float, fail: Float, bare: Float, reasons_json: String, models_json: String) -> String {
+  let _ = CardEnsureSchema()
+  let _ = db_execute("INSERT INTO seam_probe_runs (dept, n, ok, fail, bare, reasons_json, models_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", [dept, n, ok, fail, bare, reasons_json, models_json])
+  return "ok"
+}
+
+// Последний замер отдела — читатель для /seam on (порог и свежесть) и
+// таблицы /seam. Возвращает JSON с полями ts, n, ok, fail, bare; замера
+// нет — пустая строка.
+pattern CardSeamLastRun(dept: String) -> String {
+  let _ = CardEnsureSchema()
+  let rows = query("SELECT ts, n, ok, fail, bare FROM seam_probe_runs WHERE dept = ?1 ORDER BY id DESC LIMIT 1", [dept])
+  if length(rows) == 0.0 then { return "" }
+  let r = get(rows, 0.0)
+  return json_encode({ts: to_string(json_get(r, "ts", "")), n: to_string(json_get(r, "n", "0")), ok: to_string(json_get(r, "ok", "0")), fail: to_string(json_get(r, "fail", "0")), bare: to_string(json_get(r, "bare", "0"))})
+}
+
+// Свежесть последнего замера: не старше 7 дней (окно наряда #669 A.4).
+pattern CardSeamLastRunFresh(dept: String) -> Bool {
+  let fresh = query("SELECT COUNT(*) AS c FROM seam_probe_runs WHERE dept = ?1 AND ts >= datetime('now', '-7 days')", [dept])
+  return to_float(json_get(get(fresh, 0.0), "c", "0")) > 0.0
+}
+
+// Текст результата для владельца — формат наряда #669 A.4:
+// "<dept>: ok 17/20 (85%) — порог 80% пройден | fail 2: <причины> | bare 1".
+pattern CardSeamResultText(dept: String, n: Float, ok: Float, fail: Float, bare: Float, reasons_json: String) -> String {
+  let mut verdict = "порог 80% не пройден"
+  if n > 0.0 and ok / n >= 0.80 then { let verdict = "порог 80% пройден" }
+  let mut out = dept + ": ok " + to_string(ok) + "/" + to_string(n) + " (" + to_string(ok / n * 100.0) + "%) — " + verdict
+  if fail > 0.0 then {
+    let out = out + " | fail " + to_string(fail) + ": " + reasons_json
+  } else {
+    let out = out + " | fail 0"
+  }
+  let out = out + " | bare " + to_string(bare)
+  return out
+}
+
+// Замер отдела — драйвер по одному вопросу за вызов. Каждый вызов делает
+// ОДИН боевой вызов LLM (тип планировщика: короткий тик, не 20 вызовов
+// подряд), состояние — в kv; последний вызов возвращает текст результата,
+// промежуточные — пустую строку. kv-ключи: seam_probe_idx (номер следующего
+// вопроса), seam_probe_replies и seam_probe_models (накопленные JSON-списки).
+// Отказ файла вопросов — громкий "SEAM-PROBE FAIL: ..." без записи строки.
+pattern CardSeamProbe(dept: String) -> String {
+  let raw = CardSeamQuestionsRaw(dept)
+  if raw == "" then { return "SEAM-PROBE FAIL: нет файла вопросов config/seam_probe/" + dept + ".txt" }
+  let nq = CardSeamQuestionsCount(dept)
+  if nq < 20.0 then { return "SEAM-PROBE FAIL: файл вопросов " + dept + " неполный: " + to_string(nq) + "/20" }
+  let mut idx = to_float_or(kv_get("seam_probe_idx"), 0.0)
+  if idx >= nq then { let idx = 0.0 }
+  let target = idx + 1.0
+  // взять target-й валидный вопрос файла
+  let mut seen = 0.0
+  let mut done = 0.0
+  each line in split(raw, "\n") {
+    if done == 0.0 then {
+      let s = trim(to_string(line))
+      if s != "" and starts_with(s, "#") == false then {
+        let seen = seen + 1.0
+        if seen == target then {
+          let one = CardSeamProbeOne(dept, s)
+          let one_parsed = TryVal(try parse_json(one))
+          if to_string(one_parsed) == "()" then {
+            // сбой обёртки — честный пустой ответ, счётчик запишет fail
+            let reply = ""
+            let model = ""
+          } else {
+            let reply = redact(to_string(json_get(one_parsed, "reply", "")), "all")
+            let model = redact(to_string(json_get(one_parsed, "model", "")), "all")
+          }
+          // накопление ответов (JSON-список строкой — конкатенация с экранированием json_encode)
+          let prev_r = kv_get("seam_probe_replies")
+          let rj = json_encode(reply)
+          if trim(prev_r) == "" then { kv_set("seam_probe_replies", rj) } else { kv_set("seam_probe_replies", prev_r + "," + rj) }
+          if model != "" then {
+            let prev_m = kv_get("seam_probe_models")
+            if trim(prev_m) == "" then { kv_set("seam_probe_models", json_encode(model)) } else { kv_set("seam_probe_models", prev_m + "," + json_encode(model)) }
+          }
+          kv_set("seam_probe_idx", to_string(target))
+          let done = 1.0
+        }
+      }
+    }
+  }
+  if done == 0.0 then { return "SEAM-PROBE FAIL: вопрос " + to_string(target) + " не найден в файле " + dept }
+  if target < nq then { return "" }
+  // финал: посчитать, записать единственную строку замера, вернуть текст
+  let replies_json = "[" + kv_get("seam_probe_replies") + "]"
+  let models_json = "[" + kv_get("seam_probe_models") + "]"
+  let counted = CardSeamCount(replies_json)
+  let bar = index_of(counted, "|")
+  let head = substring(counted, 0.0, bar)
+  let rest = substring(counted, bar + 1.0, length(counted))
+  let toks = split(head, " ")
+  let ok = to_float_or(substring(trim(to_string(get(toks, 0.0))), 3.0, length(trim(to_string(get(toks, 0.0))))), 0.0)
+  let fail = to_float_or(substring(trim(to_string(get(toks, 1.0))), 5.0, length(trim(to_string(get(toks, 1.0))))), 0.0)
+  let bare = to_float_or(substring(trim(to_string(get(toks, 2.0))), 5.0, length(trim(to_string(get(toks, 2.0))))), 0.0)
+  let ridx = index_of(rest, "reasons=[")
+  let reasons_json = substring(rest, ridx + 9.0, length(rest))
+  let _ = CardSeamRecord(dept, nq, ok, fail, bare, reasons_json, models_json)
+  let text = CardSeamResultText(dept, nq, ok, fail, bare, reasons_json)
+  // уборка состояния (очередь отделов ведёт слот в app.mlog)
+  kv_set("seam_probe_idx", "0")
+  kv_set("seam_probe_replies", "")
+  kv_set("seam_probe_models", "")
+  return text
 }
 
 
@@ -1398,8 +1661,10 @@ test "n640: kill-switch — нет ключа = off, off не пишет и не
 }
 
 test "n640: шов OK — валидный хвост становится карточкой, ответ без хвоста" {
-  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
-  let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key LIKE 'card_seam_enabled%'", [])
+  // #669 A.1: шов по отделам — нужны ОБА ключа: глобальный и департаментский
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled:seamok', 'on')", [])
   let ans = "Прогноз кассового разрыва готов.\n```card\n{\"kind\":\"number\",\"claim\":\"Кассовый разрыв декабрь 120000 BYN\",\"verify_by\":\"2026-12-31\",\"value\":120000}\n```"
   let v = CardSeamVerdict("seamok", ans, 0.0)
   assert_contains(v, "OK|")
@@ -1412,11 +1677,12 @@ test "n640: шов OK — валидный хвост становится ка�
   assert_eq(contains(CardTailStrip(ans), "```card"), false)
   // журнал ответов: один card-маркер (покрытие 1/1)
   assert_contains(CardCoverage("seamok"), "1/1 ответов стали карточками")
-  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key LIKE 'card_seam_enabled%'", [])
 }
 
 test "n640: шов FAIL — брак формы громко, карточки нет, маркер fail" {
-  let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled:seamfail', 'on')", [])
   let ans = "Прогноз готов.\n```card\n{\"kind\":\"number\",\"claim\":незакрытая строка}\n```"
   let v = CardSeamVerdict("seamfail", ans, 0.0)
   assert_contains(v, "FAIL|json не разобран")
@@ -1424,20 +1690,21 @@ test "n640: шов FAIL — брак формы громко, карточки �
   assert_eq(to_float(to_string(json_get(get(rows, 0.0), "n", "1"))), 0.0)
   let marks = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = 'seamfail' AND content LIKE 'fail|%'", [])
   assert_eq(to_float(to_string(json_get(get(marks, 0.0), "n", "0"))), 1.0)
-  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key LIKE 'card_seam_enabled%'", [])
 }
 
 test "n640: шов BARE — консультация без утверждения, bare-маркер, ответ цел" {
-  let _ = db_execute("INSERT INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled:seambare', 'on')", [])
   let ans = "Справка: ставка рефинансирования 9.5%."
   assert_eq(CardSeamVerdict("seambare", ans, 0.0), "BARE")
   let marks = query("SELECT COUNT(*) AS n FROM dialog_history WHERE dept = 'seambare' AND content LIKE 'bare|%'", [])
   assert_eq(to_float(to_string(json_get(get(marks, 0.0), "n", "0"))), 1.0)
-  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key = 'card_seam_enabled'", [])
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key LIKE 'card_seam_enabled%'", [])
 }
 
 test "n640: бюджеты-предохранители засеяны — 15 отделов, ОСП дороже прочих" {
-  let _ = CardSeamEnabled()
+  let _ = CardSeamEnabled("osp")
   let n = query("SELECT COUNT(*) AS n FROM system_settings WHERE key LIKE 'daily_budget_%'", [])
   assert_eq(to_float(to_string(json_get(get(n, 0.0), "n", "0"))) >= 15.0, true)
   let yana = query("SELECT value FROM system_settings WHERE key = 'daily_budget_yana'", [])
@@ -1474,4 +1741,87 @@ test "n640: /score — старые строки без card_kind не попа�
   assert_contains(s, "в стандарте D9: данных нет")
   // старой строки в счётчиках нет
   assert_eq(contains(s, "Всего карточек: 2"), false)
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// #669 — замер хвостов и шов по отделам
+// ══════════════════════════════════════════════════════════════════════════
+
+test "n669 A.1: шов по отделам — глобальный on, отдел без ключа = OFF" {
+  let _ = CardEnsureSchema()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  // seamnodept никогда не получает департаментский ключ — отсутствие = off
+  assert_eq(CardSeamEnabled("seamnodept"), false)
+  assert_eq(CardSeamVerdict("seamnodept", "ответ отдела без хвоста", 0.0), "OFF")
+}
+
+test "n669 A.1: оба ключа on — шов даёт вердикт; глобальный off — OFF при отделе on" {
+  let _ = CardEnsureSchema()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled:seamtest', 'on')", [])
+  assert_eq(CardSeamEnabled("seamtest"), true)
+  let good = "Текст ответа отдела.\n```card\n{\"kind\":\"number\",\"claim\":\"Кассовый разрыв по тесту шва отдела\",\"verify_by\":\"2027-12-31\",\"value\":100000}\n```"
+  let v = CardSeamVerdict("seamtest", good, 0.0)
+  assert_contains(v, "OK|")
+  // глобальный выключатель глушит ВСЕ отделы, даже с ключом on
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled', 'off')", [])
+  assert_eq(CardSeamEnabled("seamtest"), false)
+  assert_eq(CardSeamVerdict("seamtest", good, 0.0), "OFF")
+  // уборка: возврат к fail-closed (ключей нет)
+  let g = grant_issue("db:delete:system_settings", 3600.0, "n", 40)
+  let _ = db_execute_with_grant(g, "DELETE FROM system_settings WHERE key LIKE 'card_seam_enabled%'", [])
+  assert_eq(CardSeamEnabled("seamtest"), false)
+}
+
+test "n669 A.3: CardSeamCount — фикстура 20 ответов: ok=16 fail=2 bare=2" {
+  let good = "Текст ответа отдела.\n```card\n{\"kind\":\"number\",\"claim\":\"Кассовый разрыв по тесту счётчика\",\"verify_by\":\"2027-12-31\",\"value\":100000}\n```"
+  let bad_form = "Ответ с браком формы.\n```card\n{\"kind\":\"forecast\"}\n```"
+  let bad_json = "Ответ с неразборчивым хвостом.\n```card\nсовсем не json\n```"
+  let bare = "Ответ без хвоста вообще."
+  let fixture = [good, good, good, good, good, good, good, good, good, good, good, good, good, good, good, good, bad_form, bad_json, bare, bare]
+  let c = CardSeamCount(json_encode(fixture))
+  assert_contains(c, "ok=16")
+  assert_contains(c, "fail=2")
+  assert_contains(c, "bare=2")
+  // причины FAIL — до 5, обе попали
+  assert_contains(c, "reasons=[")
+  // мутационная проверка наряда: «считать FAIL как OK» делает тест красным —
+  // ok стало бы 18, и assert выше падает.
+}
+
+test "n669 A.3: CardSeamCount — битый JSON списка не превращается в OK" {
+  assert_contains(CardSeamCount("не json"), "ok=0 fail=0 bare=0")
+  assert_contains(CardSeamCount("не json"), "bad_json")
+}
+
+test "n669 A.4: текст результата — формат и порог 80 процентов" {
+  let t = CardSeamResultText("finance", 20.0, 17.0, 2.0, 1.0, "[\"форма хвоста: enum\"]")
+  assert_contains(t, "finance: ok 17/20 (85%) — порог 80% пройден")
+  assert_contains(t, "fail 2: [\"форма хвоста: enum\"]")
+  assert_contains(t, "bare 1")
+  let below = CardSeamResultText("marketing", 20.0, 12.0, 0.0, 8.0, "[]")
+  assert_contains(below, "marketing: ok 12/20 (60%) — порог 80% не пройден")
+  assert_contains(below, "fail 0 | bare 8")
+}
+
+test "n669 A.4: seam_probe_runs — запись, чтение последнего замера, свежесть" {
+  let _ = CardSeamRecord("seamprobecheck", 20.0, 17.0, 2.0, 1.0, "[]", "[\"deepseek-chat\"]")
+  let last = CardSeamLastRun("seamprobecheck")
+  assert_contains(last, "\"ok\":\"17\"")
+  assert_contains(last, "\"n\":\"20\"")
+  // свежий замер только что — окно 7 дней пройдено
+  assert_eq(CardSeamLastRunFresh("seamprobecheck"), true)
+  // у отдела без замеров — пусто и не свежо
+  assert_eq(CardSeamLastRun("seamprobe-none"), "")
+  assert_eq(CardSeamLastRunFresh("seamprobe-none"), false)
+}
+
+test "n669 A.2: вопросы замера — ровно 20 в каждом файле отделов" {
+  let _ = CardEnsureSchema()
+  each d in CardSeamDepts() {
+    let n = CardSeamQuestionsCount(to_string(d))
+    assert_eq(n, 20.0)
+  }
+  // несуществующий отдел — громкий ноль, не падение
+  assert_eq(CardSeamQuestionsCount("noseamdept"), 0.0)
 }
