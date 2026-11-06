@@ -1,0 +1,395 @@
+// ══════════════════════════════════════════════════════════════════════════
+// Fosved Office v2 — РАЗМЕЧЕННЫЙ НАБОР МАРШРУТИЗАЦИИ (A5 эпика #632)
+// Наряд #638 (актуализация аудитора 06.11, решение владельца — вариант А):
+// кандидатов собирает КОД НА ПРОДЕ по команде владельца (доступа к прод-БД
+// у исполнителя нет); владелец утверждает кнопками в Telegram; freeze
+// фиксирует неизменяемую версию с ~30% holdout.
+//
+// Таблица (наряд A.1, колонки — буква наряда):
+//   route_eval_set (id, text_hash, text_redacted, dept_proposed,
+//                   dept_expected, status, version, holdout, created_at,
+//                   decided_at)
+//   status: candidate → approved / corrected / rejected
+//
+// Источники текстов владельца: dialog_history (role='user', chat_id
+// владельца). Факт-чек trace_log: чекпоинты FO-007 не содержат текстов
+// владельца (dept/yana.mlog — маркеры вида cal_step_*), поэтому тексты
+// берутся из dialog_history; расхождение с буквой наряда зафиксировано
+// в отчёте.
+//
+// dept_proposed — то, что выдаёт текущая маршрутизация на текст: боевой
+// паттерн DetectDepartment (app.mlog) — те же правила, что в боевом пути.
+// Спорность — программная: рейтинг весового скоринга python-маршрутизации
+// (POST /detect-dept/scores — тот же detect_dept, но с полным рейтингом);
+// спорный = два и более отделов с разницей первых двух ≤ 1, либо свободный
+// текст, ушедший в отдел по умолчанию (пустой рейтинг, не команда).
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── Схема. CREATE IF NOT EXISTS + уникальный индекс дедупликации по hash ──
+pattern RouteEnsureSchema() -> String {
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS route_eval_set (id INTEGER PRIMARY KEY AUTOINCREMENT, text_hash TEXT NOT NULL, text_redacted TEXT, dept_proposed TEXT, dept_expected TEXT, status TEXT DEFAULT 'candidate', version TEXT DEFAULT '', holdout INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), decided_at TEXT)", [])
+  let _ = db_execute("CREATE UNIQUE INDEX IF NOT EXISTS route_eval_hash ON route_eval_set(text_hash)", [])
+  return "ok"
+}
+
+// Отделы разметки маршрутизации: все боевые отделения + yana (отдел по
+// умолчанию) + admin. Один источник для кнопок альтернатив и валидации.
+pattern RouteDepts() -> List {
+  return ["osp", "lz", "expert", "marketing", "finance", "legal", "dev", "design", "qa", "visual", "engineering", "kavalnya", "yana", "admin"]
+}
+
+pattern RouteDeptsList() -> String {
+  let mut out = ""
+  each d in RouteDepts() {
+    if out == "" then { let out = to_string(d) } else { let out = out + ", " + to_string(d) }
+  }
+  return out
+}
+
+// ── Маскирование телефонов и почты (наряд A.2: redact «all» ПЛЮС маска) ──
+// Токен с @ → <email>; токен с 10+ цифрами → <phone> (дата 2026-11-06 —
+// 8 цифр — переживает; страховочная маска честно шире строгого определения
+// телефона, документировано в отчёте; первые 48 символов токена).
+// Чистые функции — мутационная проверка наряда «не маскировать» красит
+// тест RouteMaskPII.
+pattern RouteDigitsOnly(s: String) -> String {
+  let mut out = ""
+  let idxs = parse_json("[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]")
+  each i in idxs {
+    let f = to_float(i)
+    if f < length(s) then {
+      let c = substring(s, f, f + 1.0)
+      if c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7" or c == "8" or c == "9" then {
+        let out = out + c
+      }
+    }
+  }
+  return out
+}
+
+pattern RouteMaskPII(text: String) -> String {
+  let parts = split(text, " ")
+  let mut out = ""
+  let mut n = 0.0
+  each t in parts {
+    let tok = to_string(t)
+    let mut masked = tok
+    if contains(tok, "@") then { let masked = "<email>" }
+    else {
+      let digits = RouteDigitsOnly(tok)
+      if length(digits) >= 10.0 then { let masked = "<phone>" }
+    }
+    if n == 0.0 then { let out = masked } else { let out = out + " " + masked }
+    let n = n + 1.0
+  }
+  return out
+}
+
+// text_redacted — redact «all» плюс маскирование телефонов и почты (наряд A.2).
+pattern RouteRedactText(text: String) -> String {
+  return RouteMaskPII(redact(text, "all"))
+}
+
+// ── Спорность (наряд A.2): тот же скоринг, что в боевом пути, с рейтингом ──
+// python /detect-dept/scores — тот же detect_dept, но возвращает рейтинг
+// всех отделов с ненулевым счётом. Правила:
+//   пустой рейтинг И текст не команда → ушёл в отдел по умолчанию — спорный;
+//   два и более отделов в рейтинге с разницей первых двух ≤ 1 — спорный.
+// Ответ сети — недоверенный: redact ДО решений (идиома PollJobStatus).
+pattern RouteAmbiguous(text: String) -> String {
+  let body = json_encode({text: text})
+  let raw = TryVal(try http_post("http://127.0.0.1:4000/detect-dept/scores", body, "application/json", 10.0))
+  if to_string(raw) == "()" then { return "no" }
+  let parsed = TryVal(try parse_json(redact(to_string(raw), "all")))
+  if to_string(parsed) == "()" then { return "no" }
+  let rl = TryVal(try parse_json(to_string(json_get(parsed, "ranking", "[]"))))
+  if to_string(rl) == "()" then { return "no" }
+  let n = length(rl)
+  if n == 0.0 then {
+    // свободный текст без единого правила — отдел по умолчанию
+    if starts_with(text, "/") then { return "no" }
+    return "yes"
+  }
+  if n >= 2.0 then {
+    let s1 = to_float(json_get(get(rl, 0.0), "score", "0"))
+    let s2 = to_float(json_get(get(rl, 1.0), "score", "0"))
+    if s1 - s2 <= 1.0 then { return "yes" }
+  }
+  return "no"
+}
+
+// dept_proposed — боевой маршрутизатор на этот текст (тот же паттерн, что
+// в боевом пути владельца). Пустой ответ DetectDepartment = отдел по
+// умолчанию: боевой путь отправляет текст в yana — в наборе это "yana".
+pattern RouteProposed(text: String) -> String {
+  let d = DetectDepartment(text)
+  if d == "" then { return "yana" }
+  return d
+}
+
+// ── A.2 Сбор: выборка очередной пачки текстов владельца из dialog_history ──
+// Возвращает JSON {max_id, count, items:[{hash, text, amb}]} — INSERT делает
+// вызывающий (слот в app.mlog), чтобы выборка была тестируемой отдельно.
+// Мета-команды офиса в набор не попадают.
+pattern RouteSelectBatch(chat_id: String, cursor: Float, limit: Float) -> String {
+  let rows = query("SELECT id, content FROM dialog_history WHERE role = 'user' AND chat_id = ?1 AND id > ?2 AND length(content) >= 12 ORDER BY id ASC LIMIT ?3", [chat_id, cursor, limit])
+  let mut items = ""
+  let mut count = 0.0
+  let mut max_id = cursor
+  each r in rows {
+    let rid = to_float(json_get(r, "id", "0"))
+    if rid > max_id then { let max_id = rid }
+    let text = redact(to_string(json_get(r, "content", "")), "all")
+    let mut skip = "no"
+    if starts_with(text, "/route") then { let skip = "yes" }
+    if starts_with(text, "/seam") then { let skip = "yes" }
+    if starts_with(text, "/help") then { let skip = "yes" }
+    if starts_with(text, "/status") then { let skip = "yes" }
+    if starts_with(text, "/наряд") then { let skip = "yes" }
+    if starts_with(text, "/cron") then { let skip = "yes" }
+    if skip == "no" then {
+      let h = redact(text, "hash_only")
+      let item = json_encode({hash: h, text: text, amb: RouteAmbiguous(text)})
+      if count == 0.0 then { let items = item } else { let items = items + "," + item }
+      let count = count + 1.0
+    }
+  }
+  return json_encode({max_id: max_id, count: count, items: "[" + items + "]"})
+}
+
+// ── A.3 Кнопка: решение владельца по кандидату ────────────────────────────
+// Пишет dept_expected, status, decided_at. Строка решённая или замороженная
+// не переписывается (версия неизменяема — наряд A.4). approved фиксирует
+// dept_expected = dept_proposed (владелец подтвердил предложение).
+pattern RouteWriteDecision(id: Float, dept_expected: String, status: String) -> String {
+  let _ = RouteEnsureSchema()
+  let rows = query("SELECT status, version FROM route_eval_set WHERE id = ?1", [id])
+  if length(rows) == 0.0 then { return "no_such" }
+  let r = get(rows, 0.0)
+  if to_string(json_get(r, "version", "")) != "" then { return "frozen" }
+  if to_string(json_get(r, "status", "")) != "candidate" then { return "already" }
+  if status == "approved" then {
+    let _ = db_execute("UPDATE route_eval_set SET dept_expected = dept_proposed, status = 'approved', decided_at = datetime('now') WHERE id = ?1", [id])
+    return "ok"
+  }
+  if status == "corrected" or status == "rejected" then {
+    let _ = db_execute("UPDATE route_eval_set SET dept_expected = ?1, status = ?2, decided_at = datetime('now') WHERE id = ?3", [dept_expected, status, id])
+    return "ok"
+  }
+  return "bad_status"
+}
+
+// Очередная порция на ревью: до 20 кандидатов по id (наряд A.3).
+pattern RouteReviewPortion() -> String {
+  let _ = RouteEnsureSchema()
+  return json_encode(query("SELECT id, text_redacted, dept_proposed FROM route_eval_set WHERE status = 'candidate' AND version = '' ORDER BY id ASC LIMIT 20", []))
+}
+
+// Три альтернативных отдела для кнопок: следующие за предложенным по кругу;
+// предложенное вне списка — первые три по канону.
+pattern RouteAlternatives(proposed: String) -> List {
+  let depts = RouteDepts()
+  let n = length(depts)
+  let mut pi = 0.0
+  let mut found = "no"
+  let mut i = 0.0
+  each d in depts {
+    if to_string(d) == proposed then {
+      let pi = i
+      let found = "yes"
+    }
+    let i = i + 1.0
+  }
+  if found == "no" then {
+    return [to_string(get(depts, 0.0)), to_string(get(depts, 1.0)), to_string(get(depts, 2.0))]
+  }
+  let mut i1 = pi + 1.0
+  if i1 >= n then { let i1 = i1 - n }
+  let mut i2 = pi + 2.0
+  if i2 >= n then { let i2 = i2 - n }
+  let mut i3 = pi + 3.0
+  if i3 >= n then { let i3 = i3 - n }
+  return [to_string(get(depts, i1)), to_string(get(depts, i2)), to_string(get(depts, i3))]
+}
+
+// Доля спорных в наборе — чистая функция над JSON-списком кандидатов
+// (наряд A.2: спорных ≥ 20 процентов). items_json — список с полем amb.
+// Пустой список — нет (нечего мерить).
+pattern RouteAmbShareOk(items_json: String) -> String {
+  let items = TryVal(try parse_json(items_json))
+  if to_string(items) == "()" then { return "no" }
+  let n = length(items)
+  if n == 0.0 then { return "no" }
+  let mut amb = 0.0
+  each it in items {
+    if to_string(json_get(it, "amb", "no")) == "yes" then { let amb = amb + 1.0 }
+  }
+  if amb / n >= 0.2 then { return "yes" }
+  return "no"
+}
+
+// ── A.4 Прогресс: /route-set ──────────────────────────────────────────────
+pattern RouteProgress() -> String {
+  let _ = RouteEnsureSchema()
+  let cand = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE status = 'candidate' AND version = ''", [])
+  let appr = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE status IN ('approved', 'corrected') AND version = ''", [])
+  let rej = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE status = 'rejected'", [])
+  let hold = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE holdout = 1", [])
+  let mut versions = ""
+  let vrows = query("SELECT DISTINCT version FROM route_eval_set WHERE version != '' ORDER BY version ASC", [])
+  each v in vrows {
+    let versions = versions + to_string(json_get(v, "version", "")) + " "
+  }
+  return "Разметка маршрутизации: утверждено " + to_string(json_get(get(appr, 0.0), "n", "0")) + " / кандидатов " + to_string(json_get(get(cand, 0.0), "n", "0")) + " (отклонено " + to_string(json_get(get(rej, 0.0), "n", "0")) + ") / holdout " + to_string(json_get(get(hold, 0.0), "n", "0")) + ". Версии: " + versions + "(freeze — от 100 утверждённых, holdout ~30%)"
+}
+
+// Freeze версии (наряд A.4): ≥ 100 утверждённых (approved+corrected) в
+// несвязанной части; детерминированно по text_hash ~30% получают holdout=1;
+// замороженная часть неизменяема (RouteWriteDecision отказывает).
+pattern RouteFreeze(version: String) -> String {
+  let _ = RouteEnsureSchema()
+  if version == "" then { return "Отказ: укажите имя версии: /route-set freeze v1" }
+  let dup = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE version = ?1", [version])
+  if to_float(json_get(get(dup, 0.0), "n", "0")) > 0.0 then { return "Отказ: версия " + version + " уже зафиксирована и неизменяема." }
+  let appr = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE status IN ('approved', 'corrected') AND version = ''", [])
+  let n = to_float(json_get(get(appr, 0.0), "n", "0"))
+  if n < 100.0 then { return "Отказ: утверждено " + to_string(n) + " < 100 — freeze отказан. Продолжайте: /route-review" }
+  let _ = db_execute("UPDATE route_eval_set SET version = ?1 WHERE status IN ('approved', 'corrected') AND version = ''", [version])
+  // holdout ~30%: детерминированно по text_hash (порядок ASC)
+  let hold_n = to_int(n * 0.3)
+  let _ = db_execute("UPDATE route_eval_set SET holdout = 1 WHERE version = ?1 AND id IN (SELECT id FROM route_eval_set WHERE version = ?2 ORDER BY text_hash ASC, id ASC LIMIT ?3)", [version, version, hold_n])
+  let hold = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE version = ?1 AND holdout = 1", [version])
+  let hn = to_float(json_get(get(hold, 0.0), "n", "0"))
+  return "Версия " + version + " зафиксирована: " + to_string(n) + " строк, holdout " + to_string(hn) + " (~30%). Версия неизменяема."
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ТЕСТЫ
+// ══════════════════════════════════════════════════════════════════════════
+
+test "n638: маскирование — телефон и почта, дата и сумма переживают" {
+  let m = RouteMaskPII("Позвони +375291234567 или напиши ivan@mail.ru, счёт 100000 BYN к 2026-11-06")
+  assert_contains(m, "<phone>")
+  assert_contains(m, "<email>")
+  assert_eq(contains(m, "375291234567"), false)
+  assert_eq(contains(m, "ivan@mail.ru"), false)
+  assert_contains(m, "100000 BYN")
+  assert_contains(m, "2026-11-06")
+}
+
+test "n638: redact-конвейер — ПДн замаскирован" {
+  let r = RouteRedactText("почта owner@fosved.io телефон 80291234567")
+  assert_eq(contains(r, "owner@fosved.io"), false)
+  assert_eq(contains(r, "80291234567"), false)
+}
+
+// Уборка тестовых строк route_eval_set — идемпотентность батареи на
+// персистентной БД (тот же приём, что у шва #669: grant db:delete).
+pattern RouteTestCleanup() -> String {
+  let g = grant_issue("db:delete:route_eval_set", 3600.0, "n", 500)
+  let _ = db_execute_with_grant(g, "DELETE FROM route_eval_set WHERE text_hash LIKE 'n638%'", [])
+  return "ok"
+}
+
+test "n638: RouteWriteDecision — кнопка пишет решение и дату" {
+  let _ = RouteEnsureSchema()
+  let _ = RouteTestCleanup()
+  let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed) VALUES ('n638hash1', 'текст кандидата', 'finance')", [])
+  let rows = query("SELECT id FROM route_eval_set WHERE text_hash = 'n638hash1'", [])
+  let id = to_float(json_get(get(rows, 0.0), "id", "0"))
+  // corrected: альтернатива владельца пишется в dept_expected
+  assert_eq(RouteWriteDecision(id, "osp", "corrected"), "ok")
+  let after = query("SELECT status, dept_expected, decided_at FROM route_eval_set WHERE id = ?1", [id])
+  assert_eq(to_string(json_get(get(after, 0.0), "status", "?")), "corrected")
+  assert_eq(to_string(json_get(get(after, 0.0), "dept_expected", "?")), "osp")
+  assert_eq(to_string(json_get(get(after, 0.0), "decided_at", "")) != "", true)
+  // approved: dept_expected = dept_proposed
+  let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed) VALUES ('n638hash2', 'текст два', 'legal')", [])
+  let rows2 = query("SELECT id FROM route_eval_set WHERE text_hash = 'n638hash2'", [])
+  let id2 = to_float(json_get(get(rows2, 0.0), "id", "0"))
+  assert_eq(RouteWriteDecision(id2, "", "approved"), "ok")
+  let after2 = query("SELECT status, dept_expected FROM route_eval_set WHERE id = ?1", [id2])
+  assert_eq(to_string(json_get(get(after2, 0.0), "status", "?")), "approved")
+  assert_eq(to_string(json_get(get(after2, 0.0), "dept_expected", "?")), "legal")
+  // повторное решение не переписывает
+  assert_eq(RouteWriteDecision(id, "qa", "corrected"), "already")
+  let again = query("SELECT dept_expected FROM route_eval_set WHERE id = ?1", [id])
+  assert_eq(to_string(json_get(get(again, 0.0), "dept_expected", "?")), "osp")
+  // rejected — убрать
+  let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed) VALUES ('n638hash3', 'текст три', 'qa')", [])
+  let rows3 = query("SELECT id FROM route_eval_set WHERE text_hash = 'n638hash3'", [])
+  let id3 = to_float(json_get(get(rows3, 0.0), "id", "0"))
+  assert_eq(RouteWriteDecision(id3, "", "rejected"), "ok")
+  let after3 = query("SELECT status FROM route_eval_set WHERE id = ?1", [id3])
+  assert_eq(to_string(json_get(get(after3, 0.0), "status", "?")), "rejected")
+}
+
+test "n638: freeze отказывает при < 100 утверждённых" {
+  let _ = RouteEnsureSchema()
+  let _ = RouteTestCleanup()
+  let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed, status) VALUES ('n638fz1', 'т', 'yana', 'approved')", [])
+  let fz = RouteFreeze("n638testv")
+  assert_contains(fz, "отказан")
+  assert_contains(fz, "< 100")
+}
+
+test "n638: freeze при 100 утверждённых — версия неизменяема, holdout около 30 процентов" {
+  let _ = RouteEnsureSchema()
+  let _ = RouteTestCleanup()
+  let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed, status) VALUES ('n638fz1', 'т', 'yana', 'approved')", [])
+  let cur = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE status IN ('approved', 'corrected') AND version = '' AND text_hash LIKE 'n638fz%'", [])
+  let have = to_float(json_get(get(cur, 0.0), "n", "0"))
+  let need = 100.0 - have
+  let idxs = parse_json("[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119]")
+  each i in idxs {
+    let f = to_float(i)
+    if f < need then {
+      let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed, status) VALUES (?1, 'т', 'yana', 'approved')", ["n638fz" + to_string(1000.0 + f)])
+    }
+  }
+  let cnt = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE status IN ('approved', 'corrected') AND version = '' AND text_hash LIKE 'n638fz%'", [])
+  assert_eq(to_float(json_get(get(cnt, 0.0), "n", "0")), 100.0)
+  let fz = RouteFreeze("n638testv")
+  assert_contains(fz, "зафиксирована")
+  // holdout ~30%: от 25 до 35 из 100
+  let hold = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE version = 'n638testv' AND holdout = 1", [])
+  let hn = to_float(json_get(get(hold, 0.0), "n", "0"))
+  assert_eq(hn >= 25.0 and hn <= 35.0, true)
+  // неизменяемость: решение по замороженной строке отказывает
+  let frozen = query("SELECT id FROM route_eval_set WHERE version = 'n638testv' LIMIT 1", [])
+  let fid = to_float(json_get(get(frozen, 0.0), "id", "0"))
+  assert_eq(RouteWriteDecision(fid, "qa", "corrected"), "frozen")
+  // повторный freeze той же версии — отказ
+  assert_contains(RouteFreeze("n638testv"), "уже зафиксирована")
+}
+
+test "n638: порция ревью — только кандидаты, без решённых и замороженных" {
+  let _ = RouteEnsureSchema()
+  let _ = RouteTestCleanup()
+  let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed) VALUES ('n638rv1', 'кандидат ревью порции', 'legal')", [])
+  let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed, status) VALUES ('n638rv2', 'уже решён', 'legal', 'approved')", [])
+  let portion = RouteReviewPortion()
+  assert_contains(portion, "кандидат ревью порции")
+  assert_eq(contains(portion, "уже решён"), false)
+}
+
+test "n638: альтернативы для кнопок — три отдела после предложенного по кругу" {
+  let alts = RouteAlternatives("finance")
+  assert_eq(length(alts), 3.0)
+  assert_eq(to_string(get(alts, 0.0)), "legal")
+  // цикл: последние отделы заворачивают в начало списка
+  let alts_tail = RouteAlternatives("admin")
+  assert_eq(to_string(get(alts_tail, 0.0)), "osp")
+  // предложенное вне списка — первые три
+  let alts_out = RouteAlternatives("неотдел")
+  assert_eq(to_string(get(alts_out, 0.0)), "osp")
+}
+
+test "n638: доля спорных — порог 20 процентов" {
+  let items = parse_json("[{\"amb\":\"yes\"},{\"amb\":\"no\"},{\"amb\":\"no\"},{\"amb\":\"yes\"},{\"amb\":\"no\"}]")
+  assert_eq(RouteAmbShareOk(json_encode(items)), "yes")
+  let few = parse_json("[{\"amb\":\"no\"},{\"amb\":\"no\"},{\"amb\":\"no\"},{\"amb\":\"yes\"},{\"amb\":\"no\"},{\"amb\":\"no\"}]")
+  assert_eq(RouteAmbShareOk(json_encode(few)), "no")
+  assert_eq(RouteAmbShareOk("[]"), "no")
+  assert_eq(RouteAmbShareOk("не json"), "no")
+}

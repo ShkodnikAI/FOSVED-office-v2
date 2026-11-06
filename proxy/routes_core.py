@@ -27,7 +27,7 @@ from proxy.core import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_ARCHIVE_CHANNEL_ID,
     memory, require_telegram, _TG_BOOTSTRAP_PAGE, _verify_init_data, _verify_webhook_secret,
     auto_enrich, _has_enricher, _auto_enrich_fn,
-    detect_dept, get_dept_prompt, CONDENSED_PROMPTS, FORMAT_INSTRUCTION, COMMAND_DEPT,
+    detect_dept, detect_dept_ranking, get_dept_prompt, CONDENSED_PROMPTS, FORMAT_INSTRUCTION, COMMAND_DEPT,
     DEPT_COLORS, DEPT_NAMES, DEPT_HASHTAGS,
 )
 from proxy.providers import (
@@ -167,6 +167,16 @@ def detect_dept_endpoint():
     text = d.get("text", "")
     dept = detect_dept(text)
     return jsonify({"dept": dept})
+
+@app.post("/detect-dept/scores")
+def detect_dept_scores_endpoint():
+    """#638 A.2: тот же боевой скоринг маршрутизации, но с полным рейтингом
+    отделов — источник программной спорности кандидатов разметки
+    (два и более отделов с близким счётом; пустой рейтинг = дефолт)."""
+    d = request.get_json(force=True)
+    text = d.get("text", "")
+    dept, ranking = detect_dept_ranking(text)
+    return jsonify({"dept": dept, "ranking": ranking})
 
 @app.post("/ask")
 def ask():

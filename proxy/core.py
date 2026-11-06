@@ -799,12 +799,23 @@ KEYWORD_WEIGHTS = {
               'электромобиль': 4, 'завод': 2, 'производств': 2, 'сборк': 2, 'локализац': 3},
 }
 
-def detect_dept(text):
+def detect_dept_ranking(text):
+    """#638 A.2: маршрутизация с ПОЛНЫМ рейтингом — (dept, ranking), где
+    ranking — список {dept, score} по убыванию счёта.
+
+    Поведение detect_dept не меняется (dept = ranking[0].dept, если рейтинг
+    непуст); полный рейтинг нужен сборщику кандидатов разметки для
+    программной спорности
+    («текст подходит под правила двух и более отделов» = два и более отделов
+    с ненулевым счётом и разницей первых двух ≤ 1; пустой рейтинг у
+    свободного текста = ушёл в отдел по умолчанию).
+    Командные префиксы и обращения — однозначные: рейтинг из одного элемента.
+    """
     text_lower = text.lower().strip()
     # Phase 1: Explicit command prefix (exact match, no scoring needed)
     for cmd, dept in sorted(COMMAND_DEPT.items(), key=lambda x: -len(x[0])):
         if text_lower.startswith(cmd) and (len(text_lower) == len(cmd) or text_lower[len(cmd)] in ' \n/'):
-            return dept
+            return dept, [{"dept": dept, "score": 999}]
 
     # Phase 1.5 (#404): прямое обращение к отделу в начале текста — раньше
     # подсчёта ключевых слов по всему тексту. Совпадение только в начале
@@ -814,7 +825,7 @@ def detect_dept(text):
         if text_lower.startswith(name):
             rest = text_lower[len(name):]
             if rest == '' or rest[0] in ',: \n\t':
-                return dept
+                return dept, [{"dept": dept, "score": 999}]
 
     # Phase 2: Weighted keyword scoring across ALL departments
     # Each dept scores points for matching keywords; highest score wins.
@@ -837,14 +848,18 @@ def detect_dept(text):
         # Sort by score descending; on tie, prefer expert > osp > others
         _PRIORITY = {'expert': 0, 'osp': 1, 'lz': 2, 'finance': 3, 'marketing': 4, 'legal': 5,
                      'dev': 6, 'engineering': 7, 'design': 8, 'qa': 9, 'visual': 10, 'kavalnya': 11, 'admin': 12}
-        best = sorted(scores.items(), key=lambda x: (-x[1][0], _PRIORITY.get(x[0], 99)))[0]
-        best_dept = best[0]
-        best_score = best[1][0]
-        best_keywords = best[1][1]
+        ranked = sorted(scores.items(), key=lambda x: (-x[1][0], _PRIORITY.get(x[0], 99)))
+        best_dept = ranked[0][0]
+        best_score = ranked[0][1][0]
+        best_keywords = ranked[0][1][1]
         log.info(f"[detect_dept] scored: { {d: s[0] for d, s in scores.items()} } → {best_dept} (score={best_score}, kw={best_keywords})")
-        return best_dept
+        return best_dept, [{"dept": d, "score": s[0]} for d, s in ranked]
 
-    return 'yana'
+    return 'yana', []
+
+
+def detect_dept(text):
+    return detect_dept_ranking(text)[0]
 
 # ──────────────────────────── CONDENSED PROMPTS ────────────────────────────
 CONDENSED_PROMPTS = {

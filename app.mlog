@@ -96,6 +96,7 @@ import dept/kavalnya
 import dept/team
 import dept/admin
 import dept/card
+import dept/route_eval
 
 // ============================================================
 // MEMORY — SQLite via db_execute() in InitDB()
@@ -2968,6 +2969,46 @@ pattern WebhookBody() -> String {
         let res = NaradAccept(narad_id, "ok", cb_chat_id, "по кнопке")
         let _ = SendTelegramReply(cb_chat_id, "Наряд " + narad_id + ": " + res)
       }
+      // ── #638: разметка набора маршрутизации — rq:<id>:<выбор> ──
+      // ok = подтвердить предложенное; <отдел> = исправить; other = ввести
+      // отдел командой /route-dept; drop = убрать. Жмёт только владелец
+      // (та же проверка, что у rt:).
+      if starts_with(cb_data, "rq:") then {
+        let rq_user = redact(to_string(json_get(data, "callback_query.from.id", "0")), "all")
+        if rq_user != redact(env("OWNER_TELEGRAM_ID"), "all") then {
+          let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id, text: "Размечать может только владелец офиса", show_alert: false}), "application/json"))
+          return respond("200 ok")
+        }
+        let rq_parts = split(substring(cb_data, 3.0, length(cb_data)), ":")
+        if length(rq_parts) == 2.0 then {
+          let rq_id = to_float_or(trim(to_string(get(rq_parts, 0.0))), 0.0)
+          let rq_choice = trim(to_string(get(rq_parts, 1.0)))
+          let mut txt = ""
+          if rq_choice == "ok" then {
+            let res = RouteWriteDecision(rq_id, "", "approved")
+            if res == "ok" then { let txt = "Записано: утверждено (approved)" } else { let txt = "Не записано: " + res }
+          }
+          if rq_choice == "drop" then {
+            let res = RouteWriteDecision(rq_id, "", "rejected")
+            if res == "ok" then { let txt = "Записано: убрано (rejected)" } else { let txt = "Не записано: " + res }
+          }
+          if rq_choice == "other" then {
+            let txt = "Ответьте сообщением: /route-dept " + to_string(rq_id) + " <отдел>. Отделы: " + RouteDeptsList()
+          }
+          let mut is_dept = "no"
+          each d in RouteDepts() {
+            if to_string(d) == rq_choice then { let is_dept = "yes" }
+          }
+          if is_dept == "yes" then {
+            let res = RouteWriteDecision(rq_id, rq_choice, "corrected")
+            if res == "ok" then { let txt = "Записано: " + rq_choice + " (corrected)" } else { let txt = "Не записано: " + res }
+          }
+          if txt == "" then { let txt = "Кнопка не распознана." }
+          let _ = AuditLog("route_review_decision", "routing", "id=" + to_string(rq_id) + " choice=" + rq_choice)
+          let _ = TryVal(try http_post("https://api.telegram.org/bot" + token + "/answerCallbackQuery", json_encode({callback_query_id: cb_id, text: substring(txt, 0.0, 180.0), show_alert: false}), "application/json"))
+        }
+        return respond("200 ok")
+      }
       // FO-020: review-очередь выведенного (approve/decline/undo)
       // callback_data: rv_<decision>_<source>_<id>, напр. rv_approve_fact_12
       if starts_with(cb_data, "rv_approve_") or starts_with(cb_data, "rv_decline_") or starts_with(cb_data, "rv_undo_") then {
@@ -3037,7 +3078,7 @@ pattern WebhookBody() -> String {
 
     // /help
     if text == "/help" then {
-      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam /osp bet /osp watch /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg | /lz digest [часы]\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /stats /cost /costs /budget /model\nAnalytics: /stats-aggregate /model-cost\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nCard seam: /seam — таблица | /seam on|off <dept> | /seam off all | /seam-probe <dept>\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — нарядная очередь\n  /наряд готов <ID> — закрыть (только после приёмки) | /наряд отмена <ID>\n  /наряд план|критерии|исполнитель|приоритет <ID> <значение>\n  /наряд в-очередь|в-работу|в-тест|разблок <ID> | /наряд блок <ID> <причина>\n  /наряд приёмка <ID> ok|fail <комментарий> — вердикт приёмки (гейт done)\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nDev-MCP (FO-014): /issue <repo> <текст> — открыть issue через MCP\n  /ci <repo> [ветка] — CI-статус через MCP\n  /docs list | /docs read <path> | /docs write <path> <текст> — документы (песочница)\n\nSend any message and it will be routed automatically.")
+      let _ = SendTelegramReply(chat_id, "Commands:\n\nDepartments: /yana /osp /lz /expert /marketing /finance /legal /dev /design /design-image /qa /visual /visual-image /engineering /forge\n\nImage: /design-image <prompt> — generate an image via design dept\n  /visual-image <prompt> — generate an image via visual dept\n  Or say: нарисуй, сгенерируй изображение, создай картинку (auto-detected in design & visual)\n\nOSP modes: /osp quick | /osp deep | /osp full | /osp wargame\nOSP domains: /osp regime | /osp cantillon | /osp narrative\nOSP tools: /osp tavily | /osp tg /osp profile <actor>\nOSP verification: /osp verify | /osp score | /osp recalibrate\nOSP actions: /osp redteam /osp bet /osp watch /osp unwatch\n\nLZ modes: /lz <query> | /lz scan | /lz deep | /lz all\nLZ domains: /lz politics | /lz economics | /lz geopolitics | /lz event\nLZ tools: /lz tavily | /lz tg | /lz digest [часы]\nLZ channels: /lz_channel add <id> [cat] | /lz_channels | /lz_monitor <topic>\n\nGeneral: /status /office /lockdown /unlock\n\nVoice: /voice on|off|male|female\n\nLearning: /fix <text> /good /learning /debrief <dept> /yana-metrics\n\nEconomy: /stats /cost /costs /budget /model\nAnalytics: /stats-aggregate /model-cost\n\nChain: /chain dept1+dept2 <query>\n\nArchive: /archive [doc_id|<dept> [filter]] /verify <dept> <id> <исход> /score <dept> /autoarchive on|off /search <query>\n  Structured verify: /verify finance <id> actual=<число> | /verify legal <id> outcome=clean|rewrite_required\n\nCard seam: /seam — таблица | /seam on|off <dept> | /seam off all | /seam-probe <dept>\n\nRoute eval (#638): /route-candidates [N] | /route-review | /route-dept <id> <отдел> | /route-set [freeze v1]\n\nScheduler: /brief /digest /review\n\nOther: /dept /audit /rate /remember /narads\n\nНаряды: /наряд <описание> — записать баг/задачу\n  /наряды — нарядная очередь\n  /наряд готов <ID> — закрыть (только после приёмки) | /наряд отмена <ID>\n  /наряд план|критерии|исполнитель|приоритет <ID> <значение>\n  /наряд в-очередь|в-работу|в-тест|разблок <ID> | /наряд блок <ID> <причина>\n  /наряд приёмка <ID> ok|fail <комментарий> — вердикт приёмки (гейт done)\n\nAdmin: /admin [status|build|fix|analyze|scan|tour|docs|graph|impact|proposals|narads|rollback|report|health]\nFactory: /factory\n\nDev-MCP (FO-014): /issue <repo> <текст> — открыть issue через MCP\n  /ci <repo> [ветка] — CI-статус через MCP\n  /docs list | /docs read <path> | /docs write <path> <текст> — документы (песочница)\n\nSend any message and it will be routed automatically.")
       return respond("200 ok")
     }
 
@@ -4092,6 +4133,103 @@ pattern WebhookBody() -> String {
         return respond("200 ok")
       }
       let _ = SendTelegramReply(chat_id, "Usage: /seam — таблица замеров и швов\n/seam on <dept> | /seam off <dept> | /seam off all\n/seam-probe <dept> — запустить замер")
+      return respond("200 ok")
+    }
+
+    // ── #638: разметка набора маршрутизации — команды владельца ──
+    // /route-candidates [N=200] — сбор кандидатов кодом на проде (разовое
+    //   задание планировщика, по пачке за тик; вебхук отвечает сразу).
+    // /route-review — 20 кандидатов по одному сообщению с кнопками.
+    // /route-dept <id> <отдел> — кнопка «другой…».
+    // /route-set [freeze <v>] — прогресс / фиксация версии.
+    if starts_with(text, "/route-candidates") then {
+      let arg = trim(substring(text, 17.0, length(text)))
+      let mut n = to_float_or(arg, 200.0)
+      if n < 20.0 then { let n = 20.0 }
+      if n > 500.0 then { let n = 500.0 }
+      kv_set("route_eval_target", to_string(n))
+      kv_set("route_eval_active", "1")
+      kv_set("route_eval_cursor", "0")
+      kv_set("route_eval_amb", "0")
+      let cron_err = RouteCronEnsure()
+      if cron_err != "" then {
+        let _ = SendTelegramReply(chat_id, "Задание планировщика не зарегистрировано: " + cron_err + " — сбор не запущен.")
+        return respond("200 ok")
+      }
+      let _ = AuditLog("route_candidates_cmd", "routing", "target=" + to_string(n))
+      let _ = SendTelegramReply(chat_id, "Сбор кандидатов запущен: цель " + to_string(n) + " текстов владельца. Прогресс — /route-set; разметка — /route-review.")
+      return respond("200 ok")
+    }
+    if starts_with(text, "/route-review") then {
+      let portion = TryVal(try RouteReviewPortion())
+      if to_string(portion) == "()" then {
+        let _ = SendTelegramReply(chat_id, "Порция ревью недоступна (сбой RouteReviewPortion) — повторите.")
+        return respond("200 ok")
+      }
+      let rows = TryVal(try parse_json(to_string(portion)))
+      if to_string(rows) == "()" or length(rows) == 0.0 then {
+        let _ = SendTelegramReply(chat_id, "Неразмеченных кандидатов нет. Запустите /route-candidates.")
+        return respond("200 ok")
+      }
+      let token = TgToken()
+      let mut sent = 0.0
+      each r in rows {
+        let id_s = to_string(json_get(r, "id", "0"))
+        let proposed = redact(to_string(json_get(r, "dept_proposed", "yana")), "all")
+        let text_short = substring(redact(to_string(json_get(r, "text_redacted", "")), "all"), 0.0, 300.0)
+        let alts = RouteAlternatives(proposed)
+        // клавиатура: подтверждение, 3 альтернативы, «другой…», «убрать»
+        let row1 = json_encode([{text: "✓ " + proposed, callback_data: "rq:" + id_s + ":ok"}])
+        let row2 = json_encode([{text: to_string(get(alts, 0.0)), callback_data: "rq:" + id_s + ":" + to_string(get(alts, 0.0))}, {text: to_string(get(alts, 1.0)), callback_data: "rq:" + id_s + ":" + to_string(get(alts, 1.0))}, {text: to_string(get(alts, 2.0)), callback_data: "rq:" + id_s + ":" + to_string(get(alts, 2.0))}])
+        let row3 = json_encode([{text: "другой…", callback_data: "rq:" + id_s + ":other"}, {text: "убрать", callback_data: "rq:" + id_s + ":drop"}])
+        let msg = "{\"chat_id\": " + to_string(to_float(chat_id)) + ", \"text\": " + json_encode("Кандидат " + id_s + " (предложено: " + proposed + "):\n" + text_short) + ", \"reply_markup\": {\"inline_keyboard\": [" + row1 + "," + row2 + "," + row3 + "]}}"
+        let resp = TryVal(try http_post("https://api.telegram.org/bot" + token + "/sendMessage", msg, "application/json"))
+        if to_string(resp) != "()" then { let sent = sent + 1.0 }
+      }
+      let _ = AuditLog("route_review", "routing", "sent=" + to_string(sent))
+      let _ = SendTelegramReply(chat_id, "Отправлено " + to_string(sent) + " кандидатов. Отмечайте кнопками; следующая порция — снова /route-review.")
+      return respond("200 ok")
+    }
+    if starts_with(text, "/route-dept ") then {
+      // кнопка «другой…»: /route-dept <id> <отдел>
+      let rest2 = substring(text, 12.0, length(text))
+      let parts2 = split(rest2, " ")
+      if length(parts2) < 2.0 then {
+        let _ = SendTelegramReply(chat_id, "Usage: /route-dept <id> <отдел>. Отделы: " + RouteDeptsList())
+        return respond("200 ok")
+      }
+      let rid = to_float_or(trim(to_string(get(parts2, 0.0))), 0.0)
+      let dept2 = trim(to_string(get(parts2, 1.0)))
+      let mut known = "no"
+      each d in RouteDepts() {
+        if to_string(d) == dept2 then { let known = "yes" }
+      }
+      if known == "no" then {
+        let _ = SendTelegramReply(chat_id, "Отдел " + dept2 + " не в списке маршрутизации. Отделы: " + RouteDeptsList())
+        return respond("200 ok")
+      }
+      let res = RouteWriteDecision(rid, dept2, "corrected")
+      if res == "ok" then {
+        let _ = SendTelegramReply(chat_id, "Записано: кандидат " + to_string(rid) + " → " + dept2 + " (corrected).")
+      } else {
+        let _ = SendTelegramReply(chat_id, "Не записано: " + res + " (already — уже решён; frozen — версия зафиксирована; no_such — нет кандидата).")
+      }
+      return respond("200 ok")
+    }
+    if text == "/route-set" or starts_with(text, "/route-set ") then {
+      let rest3 = trim(substring(text, 10.0, length(text)))
+      if rest3 == "" then {
+        let _ = SendTelegramReply(chat_id, RouteProgress())
+        return respond("200 ok")
+      }
+      if starts_with(rest3, "freeze ") then {
+        let version = trim(substring(rest3, 7.0, length(rest3)))
+        let res = RouteFreeze(version)
+        let _ = AuditLog("route_freeze", "routing", substring(res, 0.0, 120.0))
+        let _ = SendTelegramReply(chat_id, res)
+        return respond("200 ok")
+      }
+      let _ = SendTelegramReply(chat_id, "Usage: /route-set — прогресс; /route-set freeze v1 — фиксация версии (от 100 утверждённых).")
       return respond("200 ok")
     }
 
@@ -5357,6 +5495,83 @@ pattern SeamProbeSlot() -> String {
     return "seam-probe: done " + dept
   }
   return "seam-probe: tick " + dept
+}
+
+// ── #638: разовое задание сбора кандидатов разметки ────────────────────────
+// /route-candidates ставит kv route_eval_active=1 и регистрирует
+// самоснимающееся задание нативного cron («* * * * *», target
+// RouteCandidatesSlot, catch_up skip). Один тик — одна пачка до 40 текстов
+// (дешёвая эвристика маршрутизации, без LLM); итог — сообщение владельцу;
+// цель достигнута или источник исчерпан — задание снимает само.
+pattern RouteCronEnsure() -> String {
+  let jobs = cron_list()
+  let mut present = "no"
+  each j in jobs {
+    if to_string(json_get(j, "prompt", "")) == "RouteCandidatesSlot" then { let present = "yes" }
+  }
+  if present == "yes" then { return "" }
+  let added_job = TryVal(try cron_add("* * * * *", "RouteCandidatesSlot", "Europe/Moscow", "skip"))
+  if to_string(added_job) == "()" then { return "cron_add не ответил" }
+  let _ = AuditLog("route_candidates_cron", "system", "slot registered")
+  return ""
+}
+
+pattern RouteCandidatesSlot() -> String {
+  let _ = InitDB()
+  if trim(kv_get("route_eval_active")) != "1" then {
+    let jobs = cron_list()
+    each j in jobs {
+      if to_string(json_get(j, "prompt", "")) == "RouteCandidatesSlot" then {
+        let _ = cron_remove(redact(to_string(json_get(j, "id", "")), "all"))
+      }
+    }
+    return "route-candidates: inactive, slot removed"
+  }
+  let chat = OwnerTelegramId()
+  let target = to_float_or(kv_get("route_eval_target"), 200.0)
+  let cursor = to_float_or(kv_get("route_eval_cursor"), 0.0)
+  let batch = TryVal(try RouteSelectBatch(chat, cursor, 40.0))
+  if to_string(batch) == "()" then { return "route-candidates: batch failed" }
+  let bp = TryVal(try parse_json(to_string(batch)))
+  if to_string(bp) == "()" then { return "route-candidates: batch unparsable" }
+  let max_id = to_float(json_get(bp, "max_id", "0"))
+  let items = TryVal(try parse_json(to_string(json_get(bp, "items", "[]"))))
+  if to_string(items) == "()" then { return "route-candidates: items unparsable" }
+  let mut amb = to_float_or(kv_get("route_eval_amb"), 0.0)
+  each it in items {
+    let h = to_string(json_get(it, "hash", ""))
+    if h != "" then {
+      let exists = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE text_hash = ?1", [h])
+      if to_float(json_get(get(exists, 0.0), "n", "0")) == 0.0 then {
+        let text = to_string(json_get(it, "text", ""))
+        let proposed = RouteProposed(text)
+        let _ = db_execute("INSERT OR IGNORE INTO route_eval_set (text_hash, text_redacted, dept_proposed) VALUES (?1, ?2, ?3)", [h, RouteRedactText(text), proposed])
+        if to_string(json_get(it, "amb", "no")) == "yes" then { let amb = amb + 1.0 }
+      }
+    }
+  }
+  kv_set("route_eval_cursor", to_string(max_id))
+  kv_set("route_eval_amb", to_string(amb))
+  let total = query("SELECT COUNT(*) AS n FROM route_eval_set WHERE version = ''", [])
+  let tn = to_float(json_get(get(total, 0.0), "n", "0"))
+  if tn >= target or max_id <= cursor then {
+    kv_set("route_eval_active", "")
+    let jobs = cron_list()
+    each j in jobs {
+      if to_string(json_get(j, "prompt", "")) == "RouteCandidatesSlot" then {
+        let _ = cron_remove(redact(to_string(json_get(j, "id", "")), "all"))
+      }
+    }
+    let mut share = 0.0
+    if tn > 0.0 then { let share = amb / tn * 100.0 }
+    let share_ok = RouteAmbShareOk(json_encode([{amb: "yes"}, {amb: "no"}]))
+    let mut note = "доля спорных ≥ 20%: да"
+    if share < 20.0 then { let note = "доля спорных ниже 20% — спорных текстов мало, расширьте выборку" }
+    let _ = AuditLog("route_candidates_done", "routing", "total=" + to_string(tn) + " amb=" + to_string(amb))
+    let _ = SendTelegramReply(chat, "Сбор кандидатов завершён: " + to_string(tn) + " из цели " + to_string(target) + " (спорных " + to_string(amb) + " — " + to_string(share) + "%; " + note + "). Разметка: /route-review; прогресс: /route-set; freeze: /route-set freeze v1.")
+    return "route-candidates: done " + to_string(tn) + " share=" + share_ok
+  }
+  return "route-candidates: batch processed"
 }
 
 pattern NightTickCore(cron_secret: String) -> String {
