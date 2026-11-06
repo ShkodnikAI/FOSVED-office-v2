@@ -218,6 +218,20 @@ def dept_fail_line_24h():
         return ""
 
 
+def kk_brief_line(d: dict) -> str:
+    """#671 KK-1: строка тренировочного контура Кавальни из payload брифа.
+
+    SSOT строки — mlog (KKLine24h, dept/kk_training.mlog): поле kk_line_24h
+    payload (включая честные «не работала — выключена» и «нет данных»). Пусто
+    в payload (старый mlog-клиент) — строки в брифе не будет (fallback-расчёта
+    на python-стороне нет, чтобы не плодить вторую реализацию строки).
+    """
+    try:
+        return (d.get("kk_line_24h") or "").strip()
+    except Exception:  # noqa: BLE001 — payload не словарь, строка не роняет бриф
+        return ""
+
+
 @app.post("/scheduler/morning-brief")
 def scheduler_morning_brief():
     """
@@ -355,6 +369,9 @@ def scheduler_morning_brief():
         # приходит полем dept_fails_24h в payload; локальный расчёт — fallback
         # (старый mlog-клиент или пустое поле). Дубля строки в брифе нет.
         dept_fail_line = d.get("dept_fails_24h") or dept_fail_line_24h()
+        # #671 KK-1: строка тренировочного контура Кавальни — из payload
+        # (KKLine24h в dept/scheduler.mlog); пусто — строки в брифе нет.
+        kk_line = kk_brief_line(d)
         # FO-036 (наряд #134): задачи FORGE от агентов — только proposed,
         # владелец подтверждает пачкой по утреннему брифу (A.5)
         forge_proposed = ""
@@ -439,6 +456,7 @@ def scheduler_morning_brief():
 {narads_queue_line}
 Коррекций за сутки: {corrections_24h}
 {dept_fail_line}
+{kk_line}
 {metrics_text}
 
 === FORGE: ЗАДАЧИ ОТ АГЕНТОВ, ЖДУЩИЕ ПОДТВЕРЖДЕНИЯ (proposed) ===
