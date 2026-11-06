@@ -520,7 +520,7 @@ pattern FinanceCashflowForecast(query: String, chat_id: String) -> String {
   let now_date = format_date("%Y-%m-%d", now())
   let verification_date = format_date("%Y-%m-%d", add_days(now(), period))
 
-  let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: CASHFLOW FORECAST\n\nПараметры:\n- Горизонт: " + to_string(period) + " дней\n- Юрисдикция: " + jurisdiction + "\n- Форма бизнеса: " + business_form + "\n- Verification date: " + verification_date + "\n\nСтруктура ответа:\n1. Opening balance (на сегодня)\n2. Недельный/месячный breakdown: inflows, outflows, net, cumulative\n3. Closing balance (через " + to_string(period) + " дней)\n4. Риски: что может пойти не так (3 сценария: optimistic/base/pessimistic)\n5. Кассовый разрыв?: да/нет, когда, сколько не хватает\n6. Рекомендации: конкретные действия\n7. Verification date: " + verification_date + " — именно в этот день сверим прогноз с фактом\n\nПРАВИЛА:\n- Все суммы с точностью до копеек\n- Конвертация по курсу на дату операции\n- Если данных не хватает — честно укажи, какие данные нужны\n- Не округляй под комфортный отчёт"
+  let prompt = disclaimer_top + "\n\n" + context + "\n\nРЕЖИМ: CASHFLOW FORECAST\n\nПараметры:\n- Горизонт: " + to_string(period) + " дней\n- Юрисдикция: " + jurisdiction + "\n- Форма бизнеса: " + business_form + "\n- Verification date: " + verification_date + "\n\nСтруктура ответа:\n1. Opening balance (на сегодня)\n2. Недельный/месячный breakdown: inflows, outflows, net, cumulative\n3. Closing balance (через " + to_string(period) + " дней)\n4. Риски: что может пойти не так (3 сценария: optimistic/base/pessimistic)\n5. Кассовый разрыв?: да/нет, когда, сколько не хватает\n6. Рекомендации: конкретные действия\n7. Verification date: " + verification_date + " — именно в этот день сверим прогноз с фактом\n\nПРАВИЛА:\n- Все суммы с точностью до копеек\n- Конвертация по курсу на дату операции\n- Если данных не хватает — честно укажи, какие данные нужны\n- Не округляй под комфортный отчёт\n\nХВОСТ ДЛЯ КАРТОЧКИ (#670 A.1): в самом конце ответа добавь отдельным блоком машиночитаемый хвост для программной проверки: строка с тремя обратными кавычками и словом card, затем JSON с полями kind: number, claim — прогноз одной фразой, verify_by — verification date из параметров выше, value — прогнозная сумма closing balance числом, horizon_days — период прогноза в днях (" + to_string(period) + "). После JSON закрой блок теми же тремя кавычками."
 
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
@@ -533,6 +533,15 @@ pattern FinanceCashflowForecast(query: String, chat_id: String) -> String {
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
   let reply = reply + "\n\n" + disclaimer_bottom
   let reply = FinanceFinalSafetyCheck(reply)
+  // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
   let _ = AuditLog("finance_forecast", "finance", "period=" + to_string(period) + " jx=" + jurisdiction + " bf=" + business_form + " vdate=" + verification_date)
   return reply
@@ -563,7 +572,16 @@ pattern FinanceInvoiceHandler(query: String, chat_id: String) -> String {
     if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
     if to_string(llm_result) == "()" then { return "📭 Инвойсов нет. Используйте /finance-invoice для списка." }
     let reply = to_string(llm_result)
-    let _ = RecordAssistantMessage(chat_id, "finance", reply)
+    // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
+  let _ = RecordAssistantMessage(chat_id, "finance", reply)
     return reply
   }
 
@@ -578,6 +596,15 @@ pattern FinanceInvoiceHandler(query: String, chat_id: String) -> String {
   let reply = to_string(llm_result)
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
   let reply = reply + "\n\n" + disclaimer_bottom
+  // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
   let _ = AuditLog("finance_invoice", "finance", "filter=" + filter_status + " count=" + to_string(length(invoices)))
   return reply
@@ -618,6 +645,12 @@ pattern FinanceInvoiceTransition(invoice_id: String, new_status: String, reason:
   if new_status == "written_off" then { let valid = "true" }
   // partially_paid → paid
   if current == "partially_paid" and new_status == "paid" then { let valid = "true" }
+  // #670 A.2: поздняя оплата — просроченные статусы гасятся (paid и partially_paid),
+  // причина обязательна: без неё счёт «оплачен молча», история теряет смысл
+  if (current == "overdue" or current == "escalation" or current == "pre_legal") and (new_status == "paid" or new_status == "partially_paid") then {
+    if trim(reason) == "" then { return "FAIL: причина обязательна для поздней оплаты (" + current + " → " + new_status + ")" }
+    let valid = "true"
+  }
 
   if valid == "false" then { return "FAIL: transition " + current + " → " + new_status + " is not allowed" }
 
@@ -660,6 +693,15 @@ pattern FinanceTaxCalc(query: String, chat_id: String) -> String {
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
   let reply = reply + "\n\n" + disclaimer_bottom
   let reply = FinanceFinalSafetyCheck(reply)
+  // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
   let _ = AuditLog("finance_tax", "finance", "jx=" + jurisdiction + " bf=" + business_form)
   return reply
@@ -679,6 +721,15 @@ pattern FinanceVerifyForecast(query: String, chat_id: String) -> String {
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
+  // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
   let _ = AuditLog("finance_verify", "finance", "query: " + substring(query, 0, 100))
   return reply
@@ -698,9 +749,43 @@ pattern FinanceArchiveSearch(query: String, chat_id: String) -> String {
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
+  // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
   let _ = AuditLog("finance_archive", "finance", "query: " + substring(query, 0, 100))
   return reply
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RECOVERY TIME (#670 A.3) — время возврата просроченной задолженности
+// ═══════════════════════════════════════════════════════════════════════
+// По invoice_status_history: счета, у которых был переход в overdue и ЗАТЕМ
+// в paid — дни между ПЕРВЫМ overdue и paid (мутационная проверка наряда:
+// «считать от sent» красит тест). Медиана и число счетов; числа через
+// round(x*100)/100. Нет таких счетов — честное «нет данных».
+pattern FinanceRecoveryDays() -> String {
+  let rows = query("SELECT julianday(MAX(CASE WHEN to_status = 'paid' THEN changed_at END)) - julianday(MIN(CASE WHEN to_status = 'overdue' THEN changed_at END)) AS days FROM invoice_status_history GROUP BY invoice_id HAVING MIN(CASE WHEN to_status = 'overdue' THEN changed_at END) IS NOT NULL AND MAX(CASE WHEN to_status = 'paid' THEN changed_at END) IS NOT NULL AND MAX(CASE WHEN to_status = 'paid' THEN changed_at END) > MIN(CASE WHEN to_status = 'overdue' THEN changed_at END) ORDER BY days ASC", [])
+  let n = length(rows)
+  if n == 0.0 then { return "время возврата: нет данных" }
+  // медиана упорядоченного списка: нечётное n — средний элемент, чётное — среднее двух средних
+  let mid1 = to_int((n - 1.0) / 2.0)
+  let d1 = to_float(to_string(json_get(get(rows, to_float(mid1)), "days", "0")))
+  let mut median = d1
+  let even = to_int(n / 2.0) * 2.0 == n
+  if even then {
+    let mid2 = to_int(n / 2.0)
+    let d2 = to_float(to_string(json_get(get(rows, to_float(mid2)), "days", "0")))
+    let median = (d1 + d2) / 2.0
+  }
+  let med_r = round(median * 100.0) / 100.0
+  return "время возврата: медиана " + to_string(med_r) + " дней (n=" + to_string(n) + ")"
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -745,7 +830,8 @@ pattern FinanceScore(chat_id: String) -> String {
   let report = report + "1. MAPE-cashflow (30d): " + avg_mape + " (n=" + to_string(mape_n) + ", target ≤5%)\n"
   let report = report + "2. Overdue invoice ratio: " + overdue_ratio + " (target ≤10%)\n"
   let report = report + "3. Overdue invoices: " + to_string(overdue_inv) + " / Total open: " + to_string(total_inv) + "\n"
-  let report = report + "4. Missed tax deadlines: " + to_string(missed_tax) + " (target 0)\n\n"
+  let report = report + "4. Missed tax deadlines: " + to_string(missed_tax) + " (target 0)\n"
+  let report = report + "5. " + FinanceRecoveryDays() + " (target ≤14 дней)\n\n"
   let report = report + "Целевые показатели:\n- MAPE 30d: ≤5%, 60d: ≤10%, 90d: ≤15%\n- Overdue ratio: ≤10%\n- Recovery time: ≤14 дней\n- Tax filing on-time: 100%"
 
   let _ = RecordAssistantMessage(chat_id, "finance", report)
@@ -777,6 +863,15 @@ pattern FinanceRunwayCalc(query: String, chat_id: String) -> String {
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
   let reply = reply + "\n\n" + disclaimer_bottom
   let reply = FinanceFinalSafetyCheck(reply)
+  // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
   let _ = AuditLog("finance_runway", "finance", "jx=" + jurisdiction + " bf=" + business_form)
   return reply
@@ -806,6 +901,15 @@ pattern FinanceUnitEconomics(query: String, chat_id: String) -> String {
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
   let reply = reply + "\n\n" + disclaimer_bottom
   let reply = FinanceFinalSafetyCheck(reply)
+  // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
   let _ = AuditLog("finance_unit", "finance", "jx=" + jurisdiction + " bf=" + business_form)
   return reply
@@ -832,6 +936,15 @@ pattern FinanceMrrArr(query: String, chat_id: String) -> String {
   let disclaimer_bottom = FinanceDisclaimerBottom(jurisdiction, business_form)
   let reply = reply + "\n\n" + disclaimer_bottom
   let reply = FinanceFinalSafetyCheck(reply)
+  // #670 A.1: шов карточки на ответе финансов — как в HandleDeptQuery (app.mlog:1637);
+  // при OK/FAIL владельцу уходит ответ без машиночитаемого хвоста, OFF/BARE — без изменений
+  let seam = TryVal(try CardSeamVerdict("finance", reply, 0.0))
+  if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+    // strip под try — портируемость модуля: в замыкании без dept/card
+    // (dogfood_staging) шов fail-closed в OFF, ветка не выполняется
+    let stripped = TryVal(try CardTailStrip(reply))
+    if to_string(stripped) != "()" then { let reply = to_string(stripped) }
+  }
   let _ = RecordAssistantMessage(chat_id, "finance", reply)
   let _ = AuditLog("finance_mrr", "finance", "jx=" + jurisdiction)
   return reply
@@ -1189,3 +1302,121 @@ pattern FinanceCalc(question: String) -> String {
   return r
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════
+// ТЕСТЫ (#670)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Уборка тестовых следов — идемпотентность батареи на персистентной БД.
+pattern FinanceN670Cleanup() -> String {
+  let g1 = grant_issue("db:delete:invoice_status_history", 3600.0, "n", 200)
+  let _ = db_execute_with_grant(g1, "DELETE FROM invoice_status_history WHERE reason LIKE 'n670%' OR changed_at = '2026-10-01 12:00:00' OR changed_at = '2026-10-03 12:00:00' OR changed_at = '2026-10-11 12:00:00' OR changed_at = '2026-10-31 12:00:00' OR changed_at = '2026-09-27 12:00:00' OR changed_at = '2026-09-20 12:00:00'", [])
+  let g2 = grant_issue("db:delete:invoices", 3600.0, "n", 200)
+  let _ = db_execute_with_grant(g2, "DELETE FROM invoices WHERE invoice_number LIKE 'n670-%'", [])
+  let g3 = grant_issue("db:delete:dept_archive", 3600.0, "n", 200)
+  let _ = db_execute_with_grant(g3, "DELETE FROM dept_archive WHERE claim_json LIKE '%n670%'", [])
+  return "ok"
+}
+
+test "n670 A.1: шов off — ответ финансов не меняется, карточек не прибавляется" {
+  let _ = InitDB()
+  let _ = CardEnsureSchema()
+  let _ = FinanceN670Cleanup()
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key LIKE 'card_seam_enabled%'", [])
+  let before = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = 'finance'", [])
+  let nb = to_float(json_get(get(before, 0.0), "n", "0"))
+  let reply = "Прогноз готов.\n```card\n{\"kind\":\"number\",\"claim\":\"n670 кассовый разрыв 150000 BYN\",\"verify_by\":\"2027-01-31\",\"value\":150000,\"horizon_days\":30}\n```"
+  assert_eq(CardSeamVerdict("finance", reply, 0.0), "OFF")
+  let after = query("SELECT COUNT(*) AS n FROM dept_archive WHERE dept = 'finance'", [])
+  assert_eq(to_float(json_get(get(after, 0.0), "n", "0")), nb)
+}
+
+test "n670 A.1: шов on — карточка finance, forecast_value заполнен, владельцу текст без хвоста" {
+  let _ = InitDB()
+  let _ = CardEnsureSchema()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled', 'on')", [])
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('card_seam_enabled:finance', 'on')", [])
+  let reply = "Прогноз готов.\n```card\n{\"kind\":\"number\",\"claim\":\"n670 кассовый разрыв 150000 BYN\",\"verify_by\":\"2027-01-31\",\"value\":150000,\"horizon_days\":30}\n```"
+  let v = CardSeamVerdict("finance", reply, 0.0)
+  assert_contains(v, "OK|")
+  // владельцу уходит текст без машиночитаемого хвоста
+  let stripped = CardTailStrip(reply)
+  assert_eq(contains(stripped, "```card"), false)
+  // карточка finance в dept_archive, forecast_value = 150000
+  let rows = query("SELECT id, forecast_value FROM dept_archive WHERE dept = 'finance' AND claim_json LIKE '%n670%'", [])
+  assert_eq(length(rows), 1.0)
+  assert_eq(to_float(to_string(json_get(get(rows, 0.0), "forecast_value", "0"))), 150000.0)
+  // уборка: fail-closed
+  let _ = db_execute_with_grant(grant_issue("db:delete:system_settings", 60.0, "once"), "DELETE FROM system_settings WHERE key LIKE 'card_seam_enabled%'", [])
+  let _ = FinanceN670Cleanup()
+}
+
+test "n670 A.2: поздняя оплата — sent → overdue → escalation → paid, история 3 строки" {
+  let _ = InitDB()
+  let _ = FinanceN670Cleanup()
+  let _ = db_execute("INSERT INTO invoices (invoice_number, client_name, amount, status, due_date) VALUES ('n670-t1', 'Клиент теста', 1000.0, 'sent', '2027-01-31')", [])
+  let rows = query("SELECT id FROM invoices WHERE invoice_number = 'n670-t1'", [])
+  let id = to_string(json_get(get(rows, 0.0), "id", "0"))
+  assert_contains(FinanceInvoiceTransition(id, "overdue", "n670 просрочен по дате"), "OK")
+  assert_contains(FinanceInvoiceTransition(id, "escalation", "n670 14 дней просрочки"), "OK")
+  assert_contains(FinanceInvoiceTransition(id, "paid", "n670 оплачен позже срока"), "OK")
+  let hist = query("SELECT COUNT(*) AS n FROM invoice_status_history WHERE invoice_id = ?1", [id])
+  assert_eq(to_float(json_get(get(hist, 0.0), "n", "0")), 3.0)
+  // обратный переход по-прежнему отвергается
+  assert_contains(FinanceInvoiceTransition(id, "overdue", "n670 попытка реверса"), "FAIL")
+  let _ = FinanceN670Cleanup()
+}
+
+test "n670 A.2: поздняя оплата без причины — отказ; sent → overdue → partially_paid — ok" {
+  let _ = InitDB()
+  let _ = FinanceN670Cleanup()
+  let _ = db_execute("INSERT INTO invoices (invoice_number, client_name, amount, status, due_date) VALUES ('n670-t2', 'Клиент теста 2', 2000.0, 'overdue', '2027-01-31')", [])
+  let rows = query("SELECT id FROM invoices WHERE invoice_number = 'n670-t2'", [])
+  let id = to_string(json_get(get(rows, 0.0), "id", "0"))
+  assert_contains(FinanceInvoiceTransition(id, "paid", ""), "причина обязательна")
+  assert_contains(FinanceInvoiceTransition(id, "paid", "n670 частичная оплата позже срока"), "OK")
+  // частичная оплата из просрочки тоже легальна
+  let _ = db_execute("INSERT INTO invoices (invoice_number, client_name, amount, status, due_date) VALUES ('n670-t3', 'Клиент теста 3', 3000.0, 'escalation', '2027-01-31')", [])
+  let rows3 = query("SELECT id FROM invoices WHERE invoice_number = 'n670-t3'", [])
+  let id3 = to_string(json_get(get(rows3, 0.0), "id", "0"))
+  assert_contains(FinanceInvoiceTransition(id3, "partially_paid", "n670 часть долга"), "OK")
+  let _ = FinanceN670Cleanup()
+}
+
+test "n670 A.3: время возврата — три счета 2/10/30 дней, медиана 10" {
+  let _ = InitDB()
+  let _ = FinanceN670Cleanup()
+  // три счёта: sent → (+4 дня) overdue → (+2/+10/+30 дней) paid.
+  // Зазор sent→overdue ненулевой у всех — мутация «считать от sent»
+  // сдвигает медиану (14 вместо 10) и красит тест.
+  let _ = db_execute("INSERT INTO invoices (invoice_number, client_name, amount, status, due_date) VALUES ('n670-r1', 'Клиент', 100.0, 'paid', '2027-01-31')", [])
+  let _ = db_execute("INSERT INTO invoices (invoice_number, client_name, amount, status, due_date) VALUES ('n670-r2', 'Клиент', 200.0, 'paid', '2027-01-31')", [])
+  let _ = db_execute("INSERT INTO invoices (invoice_number, client_name, amount, status, due_date) VALUES ('n670-r3', 'Клиент', 300.0, 'paid', '2027-01-31')", [])
+  let r1 = query("SELECT id FROM invoices WHERE invoice_number = 'n670-r1'", [])
+  let id1 = to_string(json_get(get(r1, 0.0), "id", "0"))
+  let r2 = query("SELECT id FROM invoices WHERE invoice_number = 'n670-r2'", [])
+  let id2 = to_string(json_get(get(r2, 0.0), "id", "0"))
+  let r3 = query("SELECT id FROM invoices WHERE invoice_number = 'n670-r3'", [])
+  let id3 = to_string(json_get(get(r3, 0.0), "id", "0"))
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'issued', 'sent', 'n670', '2026-09-20 12:00:00')", [id1])
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'sent', 'overdue', 'n670', '2026-09-27 12:00:00')", [id1])
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'overdue', 'paid', 'n670', '2026-09-29 12:00:00')", [id1])
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'issued', 'sent', 'n670', '2026-09-20 12:00:00')", [id2])
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'sent', 'overdue', 'n670', '2026-09-27 12:00:00')", [id2])
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'overdue', 'paid', 'n670', '2026-10-07 12:00:00')", [id2])
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'issued', 'sent', 'n670', '2026-09-20 12:00:00')", [id3])
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'sent', 'overdue', 'n670', '2026-09-27 12:00:00')", [id3])
+  let _ = db_execute("INSERT INTO invoice_status_history (invoice_id, from_status, to_status, reason, changed_at) VALUES (?1, 'overdue', 'paid', 'n670', '2026-10-27 12:00:00')", [id3])
+  let res = FinanceRecoveryDays()
+  assert_contains(res, "медиана 10 дней (n=3)")
+  // строка в /finance score
+  let s = FinanceScore("000000000")
+  assert_contains(s, "время возврата:")
+  let _ = FinanceN670Cleanup()
+}
+
+test "n670 A.3: пустая история — честное нет данных" {
+  let _ = InitDB()
+  let _ = FinanceN670Cleanup()
+  assert_eq(FinanceRecoveryDays(), "время возврата: нет данных")
+}
