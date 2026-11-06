@@ -82,7 +82,9 @@ def test_report_source_branch():
 
 def test_pdf_delivery_not_regressed():
     """Наряд-361: все 4 генератора шлют PDF документом в TG (не путём строкой)."""
-    for gen in ("GenerateAnalysisCard", "GenerateCompressionVisual",
+    # #673: тело карточки переехало в GenerateAnalysisCardEx (PNG-first + PDF),
+    # обёртка GenerateAnalysisCard сохранена для роутов/авто-хуков.
+    for gen in ("GenerateAnalysisCardEx", "GenerateCompressionVisual",
                 "GenerateMemorableInfographic", "GenerateReferenceSheet"):
         seg = VISUAL[VISUAL.index(f"pattern {gen}"):]
         seg = seg[:seg.index("\npattern ", 10)] if "\npattern " in seg[10:] else seg

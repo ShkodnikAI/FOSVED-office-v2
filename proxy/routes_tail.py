@@ -846,6 +846,295 @@ def render_card_pdf_endpoint():
     return jsonify({'status': 'ok', 'path': str(target), 'size': size})
 
 
+# ── #673 MF-2: карточка Monolith F — PNG 1080×1350 по макету владельца ──────
+# Макет: каменная буква F (фон — готовый растр proxy/assets, A.2), текст
+# огненно-золотой; шрифты Unbounded (заголовки, wordmark) + Manrope (текст),
+# OFL, proxy/fonts/ (A.1). Страница 360×450 pt, растр ×3 = ровно 1080×1350.
+# PDF-путь (/render-card-pdf) остаётся как есть — PNG добавляется рядом.
+_MONOLITH_FONT_CANDIDATES = {
+    "heading": "proxy/fonts/Unbounded-SemiBold.ttf",
+    "heading_xb": "proxy/fonts/Unbounded-ExtraBold.ttf",
+    "body": "proxy/fonts/Manrope-Regular.ttf",
+    "body_b": "proxy/fonts/Manrope-Bold.ttf",
+}
+
+
+def _monolith_fonts():
+    """A.1: Unbounded/Manrope или громкий откат на DejaVu (log.warning)."""
+    base = Path.cwd().resolve()
+    resolved = {}
+    missing = []
+    for key, rel in _MONOLITH_FONT_CANDIDATES.items():
+        p = (base / rel) if not Path(rel).is_absolute() else Path(rel)
+        if p.is_file():
+            resolved[key] = str(p)
+        else:
+            missing.append(rel)
+    if missing:
+        # громко, не тихо: карточка верстается, но шрифт не тот
+        log.warning("monolith fonts missing (%s) — falling back to DejaVu", ", ".join(missing))
+        dejavu = _find_cyrillic_fontfile()
+        bold = dejavu.replace("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
+        resolved = {
+            "heading": dejavu,
+            "heading_xb": bold if os.path.isfile(bold) else dejavu,
+            "body": dejavu,
+            "body_b": bold if os.path.isfile(bold) else dejavu,
+        }
+    return resolved
+
+
+def _monolith_bg_path():
+    p = Path.cwd().resolve() / "proxy" / "assets" / "monolith_bg_1080x1350.png"
+    return str(p) if p.is_file() else ""
+
+
+_MONOLITH_PROB_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+_MONOLITH_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})\s*$")
+
+
+def _render_card_monolith(card: dict, out_path: str) -> int:
+    """Верстает карточку Monolith F 360×450 pt → PNG ровно 1080×1350 (×3).
+
+    Блоки по макету владельца: шапка (wordmark + «Аналитическая карточка» +
+    дата), тема, ключевой вывод (панель), два сценария в две колонки со
+    шкалами, индикаторы с датами, подвал «Отдел … / ID …». Все тексты приходят
+    из mlog уже после redact — повторной цензуры нет (§7 #408, как в PDF).
+    Переполнение — обрезка с «…» существующей _wrap_pdf_text, блоки не наложены
+    (курсор y с потолком подвала). Возвращает размер файла в байтах.
+    """
+    import fitz  # pymupdf — лениво: нужен только Визуалу
+
+    W, H = 360.0, 450.0
+    ML, MR = 24.0, 24.0      # поля 72 px / 3
+    MT = 27.0                # поле 80 px / 3 ≈ 26.7
+    MB = 21.5                # поле 64 px / 3 ≈ 21.3
+    # Палитра — полями card (гард #543/#640: hex палитры Monolith F в python
+    # запрещены; mlog присылает цвета в card_json). Фолбэки — дефолты PDF-пути.
+    ink = _hex_to_rgb01(card.get("ink") or "#ebeaec")
+    dim = _hex_to_rgb01(card.get("dim") or "#908198")
+    gold = _hex_to_rgb01(card.get("title") or card.get("accent") or "#c9a961")
+    label_c = _hex_to_rgb01(card.get("heading") or card.get("dim") or "#908198")
+    date_c = _hex_to_rgb01(card.get("verdict_c") or card.get("accent") or "#c9a961")
+    paper_fb = _hex_to_rgb01(card.get("paper") or "#100e11")
+    # акценты макета Monolith F (#673), в защищённую палитру #640 не входят:
+    border_c = _hex_to_rgb01("#FFAA50")
+    bar_from = _hex_to_rgb01("#E2560A")
+    bar_to = _hex_to_rgb01("#FFB547")
+    rhombus_c = _hex_to_rgb01("#FFA733")
+
+    fonts = _monolith_fonts()
+    f_head = fitz.Font(fontfile=fonts["heading"])
+    f_head_xb = fitz.Font(fontfile=fonts["heading_xb"])
+    f_body = fitz.Font(fontfile=fonts["body"])
+    f_body_b = fitz.Font(fontfile=fonts["body_b"])
+
+    doc = fitz.open()
+    try:
+        page = doc.new_page(width=W, height=H)
+        bg = _monolith_bg_path()
+        if bg:
+            page.insert_image(page.rect, filename=bg)
+        else:
+            # фона нет — плоский тёмный камень (paper из полей card), громко в лог
+            log.warning("monolith background asset missing — flat paper fallback used")
+            page.draw_rect(fitz.Rect(0, 0, W, H), fill=paper_fb, color=None)
+
+        def put(x, y, text, size, color, font=None, opacity=1.0):
+            f = font or f_body
+            tw = fitz.TextWriter(page.rect, opacity=opacity)
+            tw.append(fitz.Point(x, y), text, font=f, fontsize=size)
+            tw.write_text(page, color=color)
+            return f.text_length(text, fontsize=size)
+
+        # ── шапка: wordmark + подпись, справа дата ──
+        y = MT + 10.0
+        put(ML, y, "M O N O L I T H   F", 11.0, ink, font=f_head)
+        put(ML, y + 13.0, "АНАЛИТИЧЕСКАЯ КАРТОЧКА", 6.8, label_c, font=f_body_b)
+        created = str(card.get("created_at") or "")[:16]
+        d_label = "Дата"
+        put(W - MR - f_body.text_length(created, fontsize=7.5), y + 13.0, created, 7.5, date_c)
+        put(W - MR - f_body.text_length(created, fontsize=7.5) - f_body.text_length(d_label + "  ", fontsize=6.5), y + 13.0, d_label, 6.5, label_c)
+        y += 26.0
+
+        # ── тема анализа ──
+        topic = str(card.get("topic") or "").strip()
+        if topic:
+            put(ML, y, "ТЕМА АНАЛИЗА", 6.5, label_c, font=f_body_b)
+            y += 12.0
+            for row in _wrap_pdf_text(topic, f_head_xb, 14.5, W - ML - MR, 2):
+                put(ML, y, row, 14.5, gold, font=f_head_xb)
+                y += 17.0
+            y += 8.0
+
+        # ── ключевой вывод: панель rgba(8,10,13,0.72), рамка #FFAA50 28% ──
+        verdict = str(card.get("verdict") or "").strip()
+        if verdict:
+            rows = _wrap_pdf_text(verdict, f_body, 9.5, W - ML - MR - 16.0, 3)
+            panel_h = 22.0 + len(rows) * 12.5
+            page.draw_rect(fitz.Rect(ML, y, W - MR, y + panel_h), fill=_hex_to_rgb01("#080A0D"),
+                           color=border_c, width=1.0, fill_opacity=0.72, stroke_opacity=0.28)
+            put(ML + 8.0, y + 13.0, "КЛЮЧЕВОЙ ВЫВОД", 6.5, label_c, font=f_body_b)
+            ry = y + 25.0
+            for row in rows:
+                put(ML + 8.0, ry, row, 9.5, ink)
+                ry += 12.5
+            y += panel_h + 12.0
+
+        # ── два сценария в две колонки (первые две строки probs) ──
+        probs_lines = [l.strip() for l in str(card.get("probs") or "").split("\n") if l.strip()]
+        scenarios = []
+        for line in probs_lines[:2]:
+            m = _MONOLITH_PROB_RE.search(line)
+            pct = float(m.group(1).replace(",", ".")) if m else None
+            if pct is not None:
+                pct = max(0.0, min(100.0, pct))
+            head = line[:m.start()].strip(" —–-") if m else line
+            tail = line[m.end():].strip(" ()—–-") if m else ""
+            scenarios.append((head[:60], pct, tail[:90]))
+        if len(scenarios) >= 2:
+            put(ML, y, "СЦЕНАРИИ", 6.5, label_c, font=f_body_b)
+            y += 11.0
+            col_w = (W - ML - MR - 14.0) / 2.0
+            block_top = y
+            for i, (name, pct, desc) in enumerate(scenarios):
+                cx = ML + i * (col_w + 14.0)
+                for j, row in enumerate(_wrap_pdf_text(name, f_body_b, 8.0, col_w, 1)):
+                    put(cx, block_top + j * 10.0, row, 8.0, ink, font=f_body_b)
+                py = block_top + 14.0
+                pct_text = ("—" if pct is None else (str(int(pct)) if float(pct).is_integer() else str(pct)) + "%")
+                put(cx, py + 15.0, pct_text, 13.0, gold, font=f_head_xb)
+                # шкала: подложка #FFFFFF 8%, заливка #E2560A → #FFB547 по доле
+                bar_y = py + 20.0
+                page.draw_rect(fitz.Rect(cx, bar_y, cx + col_w - 24.0, bar_y + 5.0),
+                               fill=(1, 1, 1), color=None, fill_opacity=0.08)
+                if pct is not None and pct > 0:
+                    frac = pct / 100.0
+                    strips = 12
+                    seg_w = (col_w - 24.0) * frac / strips
+                    for s in range(strips):
+                        t = s / max(strips - 1, 1)
+                        c = tuple(bar_from[k] * (1 - t) + bar_to[k] * t for k in range(3))
+                        page.draw_rect(fitz.Rect(cx + s * seg_w, bar_y, cx + (s + 1) * seg_w, bar_y + 5.0),
+                                       fill=c, color=None)
+                dy = bar_y + 14.0
+                if desc:
+                    for row in _wrap_pdf_text(desc, f_body, 7.0, col_w, 2):
+                        put(cx, dy, row, 7.0, dim)
+                        dy += 9.0
+            y = block_top + 46.0 + (18.0 if any(d for _, _, d in scenarios) else 0.0)
+
+        # ── индикаторы для проверки: до 3 строк terms/check_date ──
+        ind_lines = []
+        for t in str(card.get("terms") or "").split("\n"):
+            t = t.strip()
+            if t:
+                ind_lines.append(t)
+        if not ind_lines and str(card.get("check_date") or "").strip():
+            ind_lines.append("Проверка прогноза — " + str(card.get("check_date")).strip())
+        ind_lines = ind_lines[:3]
+        if ind_lines and y < H - MB - 40.0:
+            put(ML, y, "ИНДИКАТОРЫ ДЛЯ ПРОВЕРКИ", 6.5, label_c, font=f_body_b)
+            y += 11.0
+            for line in ind_lines:
+                m = _MONOLITH_DATE_RE.search(line)
+                d_txt = m.group(1) if m else ""
+                txt = line[:m.start()].strip(" —–-") if m else line
+                # ромб 4 pt
+                cxm, cym = ML + 3.0, y - 2.5
+                page.draw_polyline(
+                    [fitz.Point(cxm, cym - 3.4), fitz.Point(cxm + 3.4, cym), fitz.Point(cxm, cym + 3.4), fitz.Point(cxm - 3.4, cym)],
+                    color=None, fill=rhombus_c, closePath=True)
+                put(ML + 12.0, y, txt, 8.0, ink)
+                if d_txt:
+                    put(W - MR - f_body.text_length(d_txt, fontsize=7.5), y, d_txt, 7.5, date_c)
+                y += 13.0
+
+        # ── подвал: линия 22%, отдел и id ──
+        fy = H - MB - 8.0
+        page.draw_line(fitz.Point(ML, fy), fitz.Point(W - MR, fy), color=border_c, width=0.8, stroke_opacity=0.22)
+        dept_lbl = str(card.get("dept") or "").strip() or "visual"
+        doc_lbl = str(card.get("doc_id") or "").strip()
+        put(ML, fy + 12.0, ("Отдел " + dept_lbl)[:60], 7.0, dim)
+        if doc_lbl:
+            put(W - MR - f_body.text_length("ID " + doc_lbl, fontsize=7.0), fy + 12.0, "ID " + doc_lbl, 7.0, dim)
+
+        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+        pix.save(out_path)
+    finally:
+        doc.close()
+    return os.path.getsize(out_path)
+
+
+@app.route('/render-card-png', methods=['POST'])
+def render_card_png_endpoint():
+    """#673 A.4: вёрстка PNG-карточки Monolith F 1080×1350 (mlog SendVisualPhoto).
+
+    Request: {path, card: {...те же поля, что у /render-card-pdf, плюс
+    dept, doc_id для подвала}}. path — как в /send-document.
+    Returns: {status: 'ok', path, size} | {status: 'error', error}
+    Пустое тело (нет verdict/theses/probs) → 422 — тот же гейт, что у PDF.
+    """
+    d = request.get_json(force=True) or {}
+    fpath = str(d.get('path', ''))
+    card = d.get('card')
+    if not fpath or not isinstance(card, dict):
+        return jsonify({'status': 'error', 'error': 'path and card are required'}), 400
+    base = Path.cwd().resolve()
+    target = Path(fpath)
+    if not target.is_absolute():
+        target = base / target
+    target = target.resolve()
+    allowed_roots = [base, Path('/tmp')]
+    if not any(str(target).startswith(str(r)) for r in allowed_roots):
+        return jsonify({'status': 'error', 'error': 'path outside allowed roots'}), 403
+    if not any(str(card.get(k) or '').strip() for k in ('verdict', 'theses', 'probs')):
+        return jsonify({'status': 'error', 'error': 'card body is empty (A.3)'}), 422
+    parent = target.parent
+    if not parent.is_dir():
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return jsonify({'status': 'error', 'error': 'cannot create visuals dir: ' + str(e)[:200]}), 500
+    try:
+        size = _render_card_monolith(card, str(target))
+    except Exception as e:  # noqa: BLE001 — честный 500, mlog уходит в PDF-фолбэк
+        log.error(f"render-card-png failed: {e}")
+        return jsonify({'status': 'error', 'error': str(e)[:300]}), 500
+    _log_audit('card_png_rendered', {'path': str(target)[:200], 'size': size}, dept='visual')
+    return jsonify({'status': 'ok', 'path': str(target), 'size': size})
+
+
+@app.route('/send-photo', methods=['POST'])
+def send_photo_endpoint():
+    """#673 A.4: отправка существующего файла картинкой (Telegram sendPhoto).
+
+    Зеркало /send-document с _tg_send_photo (multipart). Request:
+    {path, chat_id, caption?} → {status, tg_msg_id?} | {status: error}.
+    """
+    d = request.get_json(force=True) or {}
+    fpath = str(d.get('path', ''))
+    chat_id = str(d.get('chat_id', ''))
+    caption = d.get('caption', '')
+    if not fpath or not chat_id:
+        return jsonify({'status': 'error', 'error': 'path and chat_id are required'}), 400
+    base = Path.cwd().resolve()
+    target = Path(fpath)
+    if not target.is_absolute():
+        target = base / target
+    target = target.resolve()
+    allowed_roots = [base, Path('/tmp')]
+    if not any(str(target).startswith(str(r)) for r in allowed_roots):
+        return jsonify({'status': 'error', 'error': 'path outside allowed roots'}), 403
+    if not target.is_file():
+        return jsonify({'status': 'error', 'error': 'file not found'}), 404
+    msg_id = _tg_send_photo(chat_id, str(target), caption or None)
+    if msg_id is None:
+        return jsonify({'status': 'error', 'error': 'telegram send failed'}), 502
+    _log_audit('photo_sent', {'path': str(target)[:200], 'chat_id': chat_id, 'tg_msg_id': msg_id}, dept='visual')
+    return jsonify({'status': 'ok', 'tg_msg_id': msg_id})
+
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  MAIN

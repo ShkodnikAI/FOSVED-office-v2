@@ -74,6 +74,19 @@ pattern SendVisualDocument(chat_id: String, fpath: String, caption: String) -> S
   return redact(to_string(json_get(parsed, "status", "")), "all")
 }
 
+// ── #673 A.4: отправка КАРТИНКОЙ (Telegram sendPhoto) ─────────────────
+// Зеркало SendVisualDocument с новым /send-photo (multipart photo + caption).
+// Ошибка доставки НЕ ломает генерацию — вызывающий решает фолбэк.
+pattern SendVisualPhoto(chat_id: String, fpath: String, caption: String) -> String {
+  if chat_id == "" then { return "" }
+  let body = json_encode({path: fpath, chat_id: to_float(chat_id), caption: caption})
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/send-photo", body, "application/json", 90.0))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "" }
+  return redact(to_string(json_get(parsed, "status", "")), "all")
+}
+
 // ── #499 A.1/A.2: выборка и вёрстка содержимого отчёта в теле карточки ──
 // Прежде область 96–474 SVG-карточки не заполнялась ничем — содержимое
 // отчёта (miniapp_responses.raw_text по doc_id) в карточку не передавалось.
@@ -294,6 +307,12 @@ pattern CardWrapText(text: String, max_chars: Float, max_rows: Float) -> String 
 // src_type: "analysis" | "expert" | "lz"
 // src_id: ID записи в БД
 pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) -> String {
+  // #673: старая сигнатура сохранена (роуты /visual*, авто-хуки); для подвала
+  // карточки «Отдел …» настоящий отдел передаёт GenerateAnalysisCardEx.
+  return GenerateAnalysisCardEx(src_type, src_id, chat_id, "")
+}
+
+pattern GenerateAnalysisCardEx(src_type: String, src_id: String, chat_id: String, dept_hint: String) -> String {
   let _ = InitDB()
 
   // Загрузить данные источника из БД
@@ -571,6 +590,21 @@ pattern GenerateAnalysisCard(src_type: String, src_id: String, chat_id: String) 
   // DejaVu Sans) — движковый html_to_pdf физически теряет кириллицу и
   // срезает вёрстку (см. докстринг RenderCardPdfViaProxy). SVG выше —
   // источник QA-гейта (заполненность/контраст до отправки).
+
+  // ── #673 A.4: PNG по макету Monolith F (1080×1350) — ОСНОВНОЙ путь ──
+  // card_json — те же поля, что у PDF-пути, плюс dept (подвал «Отдел …»)
+  // и doc_id (подвал «ID …»); состав выборки содержимого не менялся.
+  let card_json = json_encode({badge: badge, topic: CardCleanLine(topic), status: status, confidence: conf_label, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, terms: terms, dept: dept_hint, doc_id: src_id, accent: accent, ink: ink, paper: paper, dim: dim_c, rule: rule, title: title_c, heading: heading_c, verdict_c: verdict_c})
+  let png_path = "visuals/card_" + src_type + "_" + src_id + ".png"
+  let png_res = RenderCardPngViaProxy(png_path, card_json)
+  if png_res == "ok" then {
+    let _ = TryVal(try db_execute("INSERT INTO visual_artifacts (type, source_type, source_id, path, created_at) VALUES (?, ?, ?, ?, datetime('now'))", ["card_png", src_type, src_id, png_path]))
+    let _ = SendVisualPhoto(chat_id, png_path, "Визуал: карточка анализа")
+    return png_path
+  }
+  // PNG не вышел — PDF как раньше, причина громко (audit + приладка в отчёте)
+  let _ = AuditLog("card_png_fallback", "visual", src_id + ": " + substring(png_res, 0.0, 140.0))
+
   let output_path = "visuals/card_" + src_type + "_" + src_id + ".pdf"
   let rendered = RenderCardPdfViaProxy(output_path, badge, CardCleanLine(topic), status, conf_label, created_at, verdict, theses, probs, domains, check_date, terms, accent, ink, paper, dim_c, rule, title_c, heading_c, verdict_c)
   if rendered != "ok" then {
@@ -1008,12 +1042,27 @@ pattern RenderSvgPdfViaProxy(fpath: String, svg: String, width: Float, height: F
   return ""
 }
 
+// ── #673 A.4: PNG-рендер карточки Monolith F (/render-card-png) ────────
+// Возвращает «ok» или причину сбоя (уходит в audit card_png_fallback);
+// python-сторона рендерит 1080×1350 и хранит те же гейты (422 пустое тело).
+pattern RenderCardPngViaProxy(fpath: String, card_json: String) -> String {
+  if fpath == "" then { return "" }
+  let body = "{\"path\": " + json_encode(fpath) + ", \"card\": " + card_json + "}"
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/render-card-png", body, "application/json", 90.0))
+  if to_string(resp) == "()" then { return "сбой вызова /render-card-png" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "ответ /render-card-png не разобран" }
+  if redact(to_string(json_get(parsed, "status", "")), "all") == "ok" then { return "ok" }
+  return substring(redact(to_string(json_get(parsed, "error", "сбой рендера")), "all"), 0.0, 140.0)
+}
+
 // ── naryad #379: авто-hook Type 3 — карточка завершённого отчёта ──
 // Вызывается из SendReport (dept/miniapp.mlog) для аналитических отделов.
 // Fire-and-forget по контракту: вызывающий оборачивает в TryVal(try ...).
 pattern VisualAutoCardFromReport(dept: String, doc_id: String, chat_id: String) -> String {
   if doc_id == "" then { return "" }
-  let result = GenerateAnalysisCard("report", doc_id, chat_id)
+  // #673: настоящий отдел уходит в подвал карточки («Отдел …»)
+  let result = GenerateAnalysisCardEx("report", doc_id, chat_id, dept)
   let _ = AuditLog("visual_auto_hook", "visual", "dept=" + dept + " doc=" + doc_id + " result=" + substring(result, 0.0, 80.0))
   return result
 }
