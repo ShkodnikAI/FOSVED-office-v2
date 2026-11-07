@@ -87,12 +87,6 @@ pattern OSPShermanKent(label: String) -> String {
   if l == "почти наверняка" then { return "0.97 [95-100%]" }
   return "UNMAPPED — use only Kent-approved terms"
 }
-pattern OSPValidateProbability(text: String) -> String {
-  let t = lower(text)
-  if contains(t, "likely") or contains(t, "unlikely") or contains(t, "certain") or contains(t, "вероятно") or contains(t, "наверняка") or contains(t, "маловероятно") or contains(t, "%") then { return "PASS" }
-  return "FAIL: uncalibrated probability"
-}
-
 // ── Сценарный гейт качества (наряд #469) ────────────────────────────────
 // Вероятности сценариев ИЗМЕНЕНИЯ ОДНОЙ ВЕЛИЧИНЫ (цена, курс, индекс) —
 // взаимоисключающие исходы: они обязаны образовывать исчерпывающее
@@ -253,14 +247,6 @@ pattern OSPComputePotential(A: Float, R: Float, S: Float, L: Float, E: Float, E_
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// BRIER SCORE — native computation
-// ═══════════════════════════════════════════════════════════════════════
-pattern OSPComputeBrier(forecast_prob: Float, actual_outcome: Float) -> Float {
-  let diff = forecast_prob - actual_outcome
-  return diff * diff
-}
-
-// ═══════════════════════════════════════════════════════════════════════
 // LIFECYCLE STATE MACHINE
 // ═══════════════════════════════════════════════════════════════════════
 pattern OSPDraftAnalysis(topic: String, mode: String, domain: String, depth: Int) -> Int {
@@ -272,61 +258,12 @@ pattern OSPDraftAnalysis(topic: String, mode: String, domain: String, depth: Int
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// PROGRAMMATIC QUALITY GATES (12 gates)
+// Гейты качества — W4 #627: старый OSPCheckQualityGates g1–g12 удалён
+// (§7.3 дизайна: поиск подстрок в прозе, два гейта всегда true, результат
+// только в журнал). Замена — живые проверки: карточный контур G1/G2/G3/G5/G6′
+// (OSPCardGates/OSPEnsembleApply), сценарный гейт #469, структурные проверки
+// методик OSPMethodsGate (§7.2), финальный OSPFinalSafetyCheck.
 // ═══════════════════════════════════════════════════════════════════════
-pattern OSPCheckQualityGates(output: String, depth: Int) -> String {
-  let gates = "{"
-  // Gate 1: awareness frame
-  let g1 = "true"
-  if contains(output, "AWARENESS") == false then { if contains(output, "ОСОЗНАНИЕ") == false then { if contains(output, "SUBJECT:") == false then { let g1 = "false" } } }
-  let gates = gates + "\"g1_awareness\":" + g1
-  // Gate 2: topology 5 levels
-  let g2 = "true"
-  if contains(output, "Leaves") == false then { if contains(output, "Листья") == false then { let g2 = "false" } }
-  if contains(output, "Roots") == false then { if contains(output, "Корни") == false then { let g2 = "false" } }
-  if contains(output, "Fruit") == false then { if contains(output, "Плод") == false then { let g2 = "false" } }
-  let gates = gates + ",\"g2_topology\":" + g2
-  // Gate 3: forces P=
-  let g3 = "true"
-  if contains(output, "P =") == false then { if contains(output, "FORCES") == false then { if contains(output, "СИЛЫ") == false then { let g3 = "false" } } }
-  let gates = gates + ",\"g3_forces\":" + g3
-  // Gate 4: two paths
-  let g4 = "true"
-  if depth >= 1 then { if contains(output, "Path A") == false then { if contains(output, "Путь А") == false then { let g4 = "false" } } }
-  let gates = gates + ",\"g4_twoPaths\":" + g4
-  // Gate 5: falsifiable indicators
-  let g5 = "true"
-  if contains(output, "Indicator") == false then { if contains(output, "Индикатор") == false then { let g5 = "false" } }
-  let gates = gates + ",\"g5_indicators\":" + g5
-  // Gate 6: Sherman Kent
-  let g6 = "true"
-  if OSPValidateProbability(output) != "PASS" then { let g6 = "false" }
-  let gates = gates + ",\"g6_kentProb\":" + g6
-  // Gate 7: confidence labels
-  let g7 = "true"
-  if contains(output, "ФАКТ") == false then { if contains(output, "FACT") == false then { let g7 = "false" } }
-  let gates = gates + ",\"g7_confLabels\":" + g7
-  // Gate 8: premortem (depth≥2)
-  let g8 = "true"
-  if depth >= 2 then { if contains(output, "Premortem") == false then { if contains(output, "премортем") == false then { let g8 = "false" } } }
-  let gates = gates + ",\"g8_premortem\":" + g8
-  // Gate 9: ACH hypotheses (depth≥2)
-  let g9 = "true"
-  if depth >= 2 then { if contains(output, "H1") == false then { if contains(output, "Гипотеза 1") == false then { let g9 = "false" } } }
-  let gates = gates + ",\"g9_achHypo\":" + g9
-  // Gate 10: spillover check
-  let g10 = "true"
-  let gates = gates + ",\"g10_spillover\":" + g10
-  // Gate 11: compact summary
-  let g11 = "true"
-  let gates = gates + ",\"g11_compact\":" + g11
-  // Gate 12: no uncalibrated probability
-  let g12 = "true"
-  if contains(output, "возможно") or contains(output, "может быть") then { let g12 = "false" }
-  let gates = gates + ",\"g12_noUncalib\":" + g12
-  let gates = gates + "}"
-  return gates
-}
 
 // ── Final safety check ──
 pattern OSPFinalSafetyCheck(output: String) -> String {
@@ -401,6 +338,9 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   // OSPCalibrationScore — модель сочиняла оценку — заменён (§7.3)
   if starts_with(t, "/osp score") or starts_with(t, "/osp brier") then { return OSPScoreCommand(chat_id) }
   if starts_with(t, "/osp recalibrate") then { return OSPRecalibrate(chat_id) }
+  // #627 W4: кривая калибровки (картинка chart_line документом) и доска A/B
+  if starts_with(t, "/osp curve") then { return OSPCurveCommand(substring(query, 10, 300), chat_id) }
+  if starts_with(t, "/osp methods") or starts_with(t, "/osp ab") then { return OSPMethodABCommand(chat_id) }
   if starts_with(t, "/osp bet") then { return OSPRegisterBet(substring(query, 8, 300), chat_id) }
 
   // ── Red team ──
@@ -430,7 +370,8 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   // до гейтов качества; маркеры не доходят владельцу
   let enhanced = TeamSecondPass(dept, query, context, reply)
   if enhanced != "" then { let reply = enhanced }
-  let gates = OSPCheckQualityGates(reply, depth)
+  // W4 #627: g1–g12 удалены (§7.3) — структурные проверки живут в карточном
+  // контуре (OSPSaveCard → OSPMethodsGate), здесь — safety и LLM-verifier
   let safety = OSPFinalSafetyCheck(reply)
   if safety != "PASS" then { let reply = reply + "\n\n[SAFETY: " + safety + "]" }
   // ── LLM-Verifier: confidence scoring for strategic analysis ──
@@ -443,7 +384,7 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   }
   let reply = reply + "\n\n" + OSPDisclaimerBottom() + OSPSourcesFooter(context)
   let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=" + to_string(depth) + " gates=" + gates + " safety=" + safety + " verify=" + to_string(ov_score))
+  let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=" + to_string(depth) + " safety=" + safety + " verify=" + to_string(ov_score))
   return reply
 }
 
@@ -896,7 +837,7 @@ pattern OSPQuickAnalyze(query: String, chat_id: String) -> String {
 pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id, 3)
-  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней. Если строишь сценарии изменения одной величины (цена, курс, индекс) — диапазоны взаимоисключающие без пересечений, вероятность в таблице сценариев форматом P=<число>% (точечная или узкая ≤15 п.п.), сумма середин = 100%. Шкала Кента — словесная метка К числу, не вместо числа. ACH и прогноз согласованы: выжила null-гипотеза — распределение широкое, без «likely» для одного направления.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\", \"market_dissent_reason\": \"<если твой p расходится с рыночной ценой из контекста сильнее чем на 35 п.п. — один проверяемый аргумент: ряд, число, дата; иначе поле не добавляй>\"}"
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nГЛУБОКОЕ ПРЕПАРИРОВАНИЕ (depth=3). 4 фазы. [ФАКТ]/[ИНТЕРПРЕТАЦИЯ]/[СПЕКУЛЯЦИЯ]. Sherman Kent. Two-paths. Индикаторы 30/60/90/180/365 дней. Если строишь сценарии изменения одной величины (цена, курс, индекс) — диапазоны взаимоисключающие без пересечений, вероятность в таблице сценариев форматом P=<число>% (точечная или узкая ≤15 п.п.), сумма середин = 100%. Шкала Кента — словесная метка К числу, не вместо числа. ACH и прогноз согласованы: выжила null-гипотеза — распределение широкое, без «likely» для одного направления.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\", \"market_dissent_reason\": \"<если твой p расходится с рыночной ценой из контекста сильнее чем на 35 п.п. — один проверяемый аргумент: ряд, число, дата; иначе поле не добавляй>\", \"methods\": {<опционально — ТОЛЬКО реально построенные тобой методики>: \"cg_chain\": {\"cg\": \"<центр тяжести>\", \"cc\": \"<критическая capability>\", \"cr\": \"<требование>\", \"cv\": \"<уязвимость>\"}; \"matrix\": [{\"a\": \"<фактор>\", \"b\": \"<фактор>\", \"sign\": \"+|-\", \"weight\": 0.0–1.0}]; \"forces\": {\"A\": 0.0–1.0, \"R\": 0.0–1.0, \"S\": 0.0–1.0, \"L\": 0.0–1.0, \"E\": 0.0–1.0, \"E_mod\": 0.5–1.5}; \"tree\": [{\"node\": \"<имя>\", \"parent\": \"<имя родителя или пусто>\", \"question\": \"<условие>\", \"p_cond\": 0.02–0.98, \"event\": \"true|false\" — у листьев, сумма произведений ветвей ≈ p}]; \"narratives\": [ровно 2: {\"name\": \"<сценарий>\", \"if_true_indicators\": [≥2 на каждый: {\"indicator\": \"<наблюдаемый>\", \"verify_date\": \"ГГГГ-ММ-ДД\", \"confirms_what\": \"<что подтверждает>\"}]}]}, \"assumptions\": [≥3: {\"text\": \"<допущение>\", \"confidence\": 0.0–1.0 числом, \"evidence_url\": \"<источник или пусто>\", \"if_wrong\": \"<что если неверно>\"} — без источника метка [СПЕКУЛЯЦИЯ] в text]}. Если методика не строилась — поле не добавляй; проверяются структурой, дерево обязано сходиться с p (расхождение >0.15 блокирует публикацию)."
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
@@ -913,7 +854,8 @@ pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
   let gate = OSPScenarioGateCheck(reply)
   let mut not_accepted = ""
   if starts_with(gate, "FAIL") then { let not_accepted = "\n\n[ПРОГНОЗ НЕ ПРИНЯТ К ВЕРИФИКАЦИИ: " + gate + " — вероятности не согласованы, запись в Brier не выполняется (наряд #469)]" }
-  let gates = OSPCheckQualityGates(reply, 3)
+  // W4 #627: g1–g12 удалены (§7.3) — структурные проверки методик теперь
+  // в OSPSaveCard → OSPMethodsGate; здесь — safety (аналитический контур)
   let safety = OSPFinalSafetyCheck(reply)
   if safety != "PASS" then { let reply = reply + "\n\n[SAFETY: " + safety + "]" }
   let reply = reply + "\n\n" + OSPDisclaimerBottom() + not_accepted
@@ -940,21 +882,28 @@ pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
       // гейты рынка молчат; обоснование расхождения — из CARD, если модель
       // видела рыночную цену и не согласна (поправка 2)
       let dissent = to_string(json_get(cj, "market_dissent_reason", ""))
-      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body, -1.0, dissent)
+      // #627 W4: методики как структуры — опциональные CARD-поля §7.2
+      let mv = json_get(cj, "methods", "")
+      let methods = "{}"
+      if to_string(mv) != "()" and to_string(mv) != "" then { let methods = to_string(json_encode(mv)) }
+      let av = json_get(cj, "assumptions", "")
+      let assum = "[]"
+      if to_string(av) != "()" and to_string(av) != "" then { let assum = to_string(json_encode(av)) }
+      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body, -1.0, dissent, methods, assum, 3)
       if starts_with(saved, "OK|") or starts_with(saved, "GATED|") then {
         card_line = "\n\n" + OSPFCardLine(to_float(get(split(saved, "|"), 1.0)))
       }
     }
   }
   let _ = RecordAssistantMessage(chat_id, "osp", body + card_line)
-  let _ = AuditLog("osp_deep", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates + " scenario_gate=" + gate + " card=" + substring(card, 0.0, 60.0))
+  let _ = AuditLog("osp_deep", "osp", "domain=" + domain + " aid=" + to_string(aid) + " scenario_gate=" + gate + " card=" + substring(card, 0.0, 60.0))
   return body + card_line
 }
 
 pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
   let domain = OSPClassifyDomain(query)
   let context = BuildOSPContext(query, domain, chat_id, 4)
-  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез. Сценарии одной величины — взаимоисключающие непересекающиеся диапазоны; вероятности в таблице форматом P=<число>% (точечные или узкие ≤15 п.п.), сумма середин = 100% ±2. Шкала Кента — метка К числу. ACH согласован с прогнозом.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\", \"market_dissent_reason\": \"<если твой p расходится с рыночной ценой из контекста сильнее чем на 35 п.п. — один проверяемый аргумент: ряд, число, дата; иначе поле не добавляй>\"}"
+  let prompt = OSPDisclaimer() + "\n\n" + context + "\n\nПОЛНЫЙ АНАЛИЗ (depth=4). depth=3 + Red team + I&W + Verification dates + Asymmetric bet + Premortem 3mo/12mo + ACH 5+ гипотез. Сценарии одной величины — взаимоисключающие непересекающиеся диапазоны; вероятности в таблице форматом P=<число>% (точечные или узкие ≤15 п.п.), сумма середин = 100% ±2. Шкала Кента — метка К числу. ACH согласован с прогнозом.\n\nВ САМОМ КОНЦЕ ответа добавь ОДНУ строку — машиночитаемая карточка прогноза (владелец её не видит):\nCARD: {\"p\": <итоговая вероятность 0.02–0.98>, \"resolution_criteria\": \"<наблюдаемый критерий исхода — как именно проверять>\", \"resolve_by\": \"ГГГГ-ММ-ДД\", \"as_of\": \"ГГГГ-ММ-ДД\", \"market_dissent_reason\": \"<если твой p расходится с рыночной ценой из контекста сильнее чем на 35 п.п. — один проверяемый аргумент: ряд, число, дата; иначе поле не добавляй>, \"methods\": {<опционально, форма как в deep — ТОЛЬКО реально построенные методики: cg_chain, frame {P,M,E,S,I,IT,PH,T — при depth≥2 заполнено ≥6/8}, matrix, forces, tree (сходится с p, иначе блок публикации), narratives [ровно 2, у каждого ≥2 датированных индикатора]}, \"assumptions\": [≥3: {text, confidence числом, evidence_url или [СПЕКУЛЯЦИЯ], if_wrong}]}. Если методика не строилась — поле не добавляй.\"}"
   let llm_result = redact(to_string(TryVal(try call_llm(prompt, query))), "all")
   if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
   if to_string(llm_result) == "()" then { return "Сервис недоступен." }
@@ -970,7 +919,7 @@ pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
   let gate = OSPScenarioGateCheck(reply)
   let mut not_accepted = ""
   if starts_with(gate, "FAIL") then { let not_accepted = "\n\n[ПРОГНОЗ НЕ ПРИНЯТ К ВЕРИФИКАЦИИ: " + gate + " — вероятности не согласованы, запись в Brier не выполняется (наряд #469)]" }
-  let gates = OSPCheckQualityGates(reply, 4)
+  // W4 #627: g1–g12 удалены (§7.3) — safety (аналитический контур)
   let safety = OSPFinalSafetyCheck(reply)
   if safety != "PASS" then { let reply = reply + "\n\n[SAFETY: " + safety + "]" }
   let reply = reply + "\n\n" + OSPDisclaimerBottom() + not_accepted
@@ -995,14 +944,21 @@ pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
       let src_json = OSPFSourcesToDB(context, aid, as_of)
       // #625 W2: crowd_p = -1 — линии рынка предсказаний нет (A.9, см. deep)
       let dissent = to_string(json_get(cj, "market_dissent_reason", ""))
-      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body, -1.0, dissent)
+      // #627 W4: методики как структуры — опциональные CARD-поля §7.2
+      let mv = json_get(cj, "methods", "")
+      let methods = "{}"
+      if to_string(mv) != "()" and to_string(mv) != "" then { let methods = to_string(json_encode(mv)) }
+      let av = json_get(cj, "assumptions", "")
+      let assum = "[]"
+      if to_string(av) != "()" and to_string(av) != "" then { let assum = to_string(json_encode(av)) }
+      let saved = OSPSaveCard(query, p_raw, crit, as_of, resolve_by, src_json, aid, body, -1.0, dissent, methods, assum, 4)
       if starts_with(saved, "OK|") or starts_with(saved, "GATED|") then {
         card_line = "\n\n" + OSPFCardLine(to_float(get(split(saved, "|"), 1.0)))
       }
     }
   }
   let _ = RecordAssistantMessage(chat_id, "osp", body + card_line)
-  let _ = AuditLog("osp_full", "osp", "domain=" + domain + " aid=" + to_string(aid) + " gates=" + gates + " scenario_gate=" + gate + " card=" + substring(card, 0.0, 60.0))
+  let _ = AuditLog("osp_full", "osp", "domain=" + domain + " aid=" + to_string(aid) + " scenario_gate=" + gate + " card=" + substring(card, 0.0, 60.0))
   return body + card_line
 }
 
@@ -1095,6 +1051,10 @@ pattern OSPRecalibrate(chat_id: String) -> String {
   // §5.4 #625: прежний OSPRecalibrate падал молча на to_char в INSERT
   // monthly_reviews — писатель теперь OSPMonthlyReview (strftime), проза
   // модели идёт после программного пересчёта
+  // #627 W4: перед обзором — Platt и сжатие (поправка 1) судятся данными;
+  // нехватка данных — честно REJECTED (идентичность), вердикты — владельцу
+  let platt = OSPPlattFit("owner")
+  let prior = OSPPriorFit("owner")
   let prev = query("SELECT strftime('%Y-%m', 'now', '-1 month') AS p", [])
   let period = to_string(json_get(get(prev, 0.0), "p", ""))
   let mr = OSPMonthlyReview(period, "owner")
@@ -1106,7 +1066,7 @@ pattern OSPRecalibrate(chat_id: String) -> String {
   let reply = to_string(llm_result)
   let _ = RecordAssistantMessage(chat_id, "osp", reply)
   let _ = AuditLog("osp_recalibrate", "osp", "monthly=" + substring(mr, 0.0, 80.0))
-  return reply
+  return "⚙️ Калибровка Platt: " + substring(platt, 3.0, length(platt)) + "\n⚙️ Сжатие к базовой частоте (поправка 1): " + substring(prior, 3.0, length(prior)) + "\n\n" + reply
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1278,9 +1238,14 @@ pattern OSPFEnsureSchema() -> String {
   // (списки колонок 1:1 с app.mlog:280/:402/:443); в изолированном прогоне
   // dept-файла app.mlog недоступен — без этого тесты верификации падают
   let _ = db_execute("CREATE TABLE IF NOT EXISTS brier_score_log (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, forecast_probability REAL, actual_outcome REAL, brier_score REAL, cumulative_brier REAL, total_forecasts INTEGER, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(analysis_id) REFERENCES analysis(id))", [])
-  let _ = db_execute("CREATE TABLE IF NOT EXISTS analysis_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id INTEGER, scenario_outcomes TEXT, brier_scores TEXT, brier_total REAL, error_category TEXT, error_note TEXT, improvements_for_next TEXT, biases_active_in_analysis TEXT DEFAULT '[]', indicators_triggered INTEGER DEFAULT 0, indicators_total INTEGER DEFAULT 0, verified_at TEXT DEFAULT (datetime('now')), verified_by TEXT DEFAULT 'system')", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS monthly_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER DEFAULT 0, year_month TEXT UNIQUE, forecasts_verified INTEGER DEFAULT 0, brier_average REAL, brier_trend REAL, hit_rate_high_conf REAL, surprise_index REAL, calibration_curve TEXT DEFAULT '[]', error_clusters TEXT, dominant_error TEXT, improvements TEXT DEFAULT '[]', improvements_applied INTEGER DEFAULT 0, flags_for_quarterly TEXT, created_at TEXT DEFAULT (datetime('now')))", [])
   let _ = db_execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)", [])
+  // #627 W4 (§7.4): седьмая таблица — A/B методологий. Каждый прогон ансамбля
+  // пишет (forecast_id, method, p_i, family); после разрешения исхода карточки
+  // OSPMethodAB группирует с полом n≥10 → skill_reviews.success_rate
+  let _ = db_execute("CREATE TABLE IF NOT EXISTS osp_forecast_method_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, forecast_id INTEGER NOT NULL, method TEXT NOT NULL, p_i REAL NOT NULL, family TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY(forecast_id) REFERENCES osp_forecast(id))", [])
+  let _ = db_execute("CREATE INDEX IF NOT EXISTS idx_ospmr_method ON osp_forecast_method_runs(method)", [])
+  let _ = db_execute("CREATE INDEX IF NOT EXISTS idx_ospmr_fid ON osp_forecast_method_runs(forecast_id)", [])
   // try: изолированный python-гвард (mlog test dept/osp.mlog) не знает
   // utils (AlterColIfMissing) — UNDEFINED_FUNCTION глотается, миграционная
   // часть проверяется в полном прогоне app.mlog; в serve — резолвится глобально
@@ -1292,6 +1257,8 @@ pattern OSPFEnsureSchema() -> String {
   let _ = try AlterColIfMissing(mig, "indicator", "osp_forecast_id", "ALTER TABLE indicator ADD COLUMN osp_forecast_id INTEGER")
   let _ = try AlterColIfMissing(mig, "research_source", "as_of", "ALTER TABLE research_source ADD COLUMN as_of TEXT")
   let _ = try AlterColIfMissing(mig, "osp_forecast", "market_dissent_reason", "ALTER TABLE osp_forecast ADD COLUMN market_dissent_reason TEXT")
+  // #627 W4 §7.2: допущения Key Assumptions Check — на карточку (структура)
+  let _ = try AlterColIfMissing(mig, "osp_forecast", "assumptions_json", "ALTER TABLE osp_forecast ADD COLUMN assumptions_json TEXT")
   return "ok"
 }
 
@@ -1299,7 +1266,10 @@ pattern OSPFEnsureSchema() -> String {
 // Извлечение — split по маркеру (LLM не зовётся, runtime ±0); форма —
 // json_validate под try: «не JSON» = провал прогона, а не 0.5 молча (§4.1).
 pattern OSPFCardSchema() -> String {
-  return "{\"type\":\"object\",\"properties\":{\"p\":{\"type\":\"number\"},\"resolution_criteria\":{\"type\":\"string\"},\"resolve_by\":{\"type\":\"string\"},\"as_of\":{\"type\":\"string\"},\"market_dissent_reason\":{\"type\":\"string\"}},\"required\":[\"p\",\"resolution_criteria\",\"resolve_by\",\"as_of\"]}"
+  // #627 W4: methods (§7.2 — cg_chain/frame/matrix/forces/tree/narratives)
+  // и assumptions — ОПЦИОНАЛЬНЫЕ поля: старые хвосты без них валидны,
+  // required не тронут — форма существующих ответов не меняется
+  return "{\"type\":\"object\",\"properties\":{\"p\":{\"type\":\"number\"},\"resolution_criteria\":{\"type\":\"string\"},\"resolve_by\":{\"type\":\"string\"},\"as_of\":{\"type\":\"string\"},\"market_dissent_reason\":{\"type\":\"string\"},\"methods\":{\"type\":\"object\"},\"assumptions\":{\"type\":\"array\"}},\"required\":[\"p\",\"resolution_criteria\",\"resolve_by\",\"as_of\"]}"
 }
 
 // OK|<json> — хвост есть и валиден; FAIL|<причина> — брак формы; MISS — нет.
@@ -1489,7 +1459,13 @@ pattern OSPFSourcesToDB(context: String, analysis_id: Int, as_of: String) -> Str
 // #625 W2: до публикации — ансамбль (OSPEnsemble→OSPEnsembleApply: поля
 // p_ensemble/p_spread, G3) и гейты рынка (G6′/W6/W3, поправка 2). crowd_p —
 // линия рынка предсказаний; -1 = линии нет (A.9) — гейты рынка молчат.
-pattern OSPSaveCard(question: String, p_raw: Float, criteria: String, as_of: String, resolve_by: String, src_json: String, analysis_id: Int, prose: String, crowd_p: Float, dissent: String) -> String {
+// #627 W4: p_final — по цепочке сжатие к базовой частоте (OSPPriorApply,
+// только при ADOPTED по правилу §5.2 — поправка 1) → clip → Platt
+// (OSPPlattApply, только при ADOPTED; при REJECTED — идентичность побитово);
+// методики §7.2 — структурный гейт OSPMethodsGate (дерево — блок, остальное
+// — марки gate_report); narratives пишут строки indicator.
+// methods_json/assumptions_json — из CARD-хвоста (опциональные поля §7.2).
+pattern OSPSaveCard(question: String, p_raw: Float, criteria: String, as_of: String, resolve_by: String, src_json: String, analysis_id: Int, prose: String, crowd_p: Float, dissent: String, methods_json: String, assumptions_json: String, depth: Int) -> String {
   let _ = OSPFEnsureSchema()
   let _ = db_execute("INSERT INTO osp_forecast (kind, question, resolution_criteria, as_of, resolve_by, status, p_raw, p_ensemble, n_runs, crowd_p, sources_json, analysis_id, models_json, gate_report) VALUES ('owner', ?, ?, ?, ?, 'drafted', ?, ?, 1, ?, ?, ?, '{\"n_runs\":1}', '')", [question, criteria, as_of, resolve_by, to_string(p_raw), to_string(p_raw), to_string(crowd_p), src_json, to_string(analysis_id)])
   let rows = query("SELECT id FROM osp_forecast WHERE question = ? ORDER BY id DESC LIMIT 1", [question])
@@ -1529,8 +1505,24 @@ pattern OSPSaveCard(question: String, p_raw: Float, criteria: String, as_of: Str
   if trim(dissent) != "" then {
     let _ = db_execute("UPDATE osp_forecast SET market_dissent_reason = ? WHERE id = ?", [substring(dissent, 0.0, 500.0), to_string(id)])
   }
-  let p = OSPClip(p_base)
-  let _ = db_execute("UPDATE osp_forecast SET p_final = ?, kent_label = ?, cal_bucket = ?, gate_report = ? WHERE id = ?", [to_string(p), OSPKentOf(p), to_string(OSPBucketOf(p)), "{\"g1\":\"PASS\",\"g2\":\"PASS\",\"g5\":\"PASS\"" + marks + "}", to_string(id)])
+  // W4 #627: цепочка итоговой вероятности — сжатие (если ADOPTED) → clip →
+  // Platt (если ADOPTED); при выключенных — p_final = clip(p_ensemble) побитово
+  let p_blend = OSPPriorApply(id, p_base)
+  let pc = OSPClip(p_blend)
+  let p = OSPPlattApply(pc)
+  // W4 #627: методики как структуры — дерево не сходится (G7) — блок;
+  // остальные — марки в gate_report; narratives — строки indicator
+  let mg = OSPMethodsGate(methods_json, assumptions_json, src_json, depth, p, id, analysis_id)
+  if starts_with(mg, "BLOCK|") then {
+    let reason = substring(mg, 6.0, length(mg))
+    let _ = db_execute("UPDATE osp_forecast SET gate_report = ? WHERE id = ?", [reason, to_string(id)])
+    let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, 'gated', 'REFUSED>published', ?, 'osp', datetime('now'))", [to_string(id), reason])
+    return "GATED|" + to_string(id) + "|" + reason
+  }
+  if trim(assumptions_json) != "" and trim(assumptions_json) != "[]" {
+    let _ = db_execute("UPDATE osp_forecast SET assumptions_json = ? WHERE id = ?", [substring(trim(assumptions_json), 0.0, 6000.0), to_string(id)])
+  }
+  let _ = db_execute("UPDATE osp_forecast SET p_final = ?, kent_label = ?, cal_bucket = ?, gate_report = ? WHERE id = ?", [to_string(p), OSPKentOf(p), to_string(OSPBucketOf(p)), "{\"g1\":\"PASS\",\"g2\":\"PASS\",\"g5\":\"PASS\"" + marks + to_string(get(split(mg, "|"), 1.0)) + "}", to_string(id)])
   let pub = OSPTransition(id, "published", "гейты пройдены, p_final=" + to_string(p), "osp")
   return "OK|" + to_string(id) + "|published|p_final=" + to_string(p)
 }
@@ -1856,6 +1848,26 @@ pattern OSPEnsembleApply(forecast_id: Float, ens: String, crowd_p: Float, dissen
     let skipped = to_string(get(pp, 6.0))
     let mj = to_string(get(pp, 7.0))
     let _ = db_execute("UPDATE osp_forecast SET p_ensemble = ?, p_median = ?, p_logit = ?, p_spread = ?, n_runs = ?, models_json = ? WHERE id = ?", [to_string(mean), to_string(median), to_string(lp), to_string(spread), to_string(nv), mj, to_string(forecast_id)])
+    // #627 W4 A.5: писатель osp_forecast_method_runs — каждый валидный прогон
+    // ансамбля → (forecast_id, method, p_i, family); GROUP BY — OSPMethodAB
+    let mjo = try parse_json(mj)
+    if to_string(mjo) != "()" {
+      if mjo.ok == true {
+      let runs = json_get(mjo.value, "runs", [])
+      if to_string(runs) != "()" and length(runs) > 0.0 {
+        each r in runs {
+          let rstatus = to_string(json_get(r, "status", ""))
+          if rstatus == "PASS" {
+            let model = to_string(json_get(r, "model", ""))
+            let rp = to_string(json_get(r, "p", ""))
+            if model != "" and rp != "" and OSPStrIsNumber(rp) {
+              let _ = db_execute("INSERT INTO osp_forecast_method_runs (forecast_id, method, p_i, family) VALUES (?, ?, ?, ?)", [to_string(forecast_id), substring(model, 0.0, 120.0), rp, OSPFamilyOf(model)])
+            }
+          }
+        }
+      }
+      }
+    }
     if nv >= 3.0 then {
       if spread > 0.25 then {
         return "GATED|" + to_string(forecast_id) + "|FAIL: G3 разброс ансамбля " + OSPFmt3(spread) + " больше 0.25 при " + to_string(nv) + " валидных прогонах — модели отвечают на разные вопросы"
@@ -2044,6 +2056,13 @@ pattern OSPScoreBlock(kind: String) -> String {
   } else {
     out = out + "\nHit-rate при p ≥ 80%: недостаточно данных (" + to_string(nh) + "/" + to_string(OSPMinN()) + ")"
   }
+  // #627 W4 §5.4: строка калибровки Platt — вердикт из system_settings
+  let cal = query("SELECT value FROM system_settings WHERE key = 'osp_cal_note'", [])
+  if length(cal) > 0.0 then {
+    out = out + "\nКалибровка Platt: " + trim(to_string(json_get(get(cal, 0.0), "value", "")))
+  } else {
+    out = out + "\nКалибровка Platt: не запускалась (/osp recalibrate)"
+  }
   return out
 }
 
@@ -2080,6 +2099,733 @@ pattern OSPMonthlyReview(period: String, kind: String) -> String {
   }
   let _ = try AuditLog("osp_monthly_review", "osp", p + " n=" + to_string(n) + " brier=" + OSPFmt3(ab))
   return "OK|" + p + "|verified=" + to_string(n) + "|brier=" + OSPFmt3(ab)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// W4 #627: ОБУЧЕНИЕ И МЕТОДИКИ — Platt (§5.2), сжатие к базовой частоте
+// (поправка 1 владельца: то же правило включения, что у Platt), калибровочная
+// кривая (§5.4), методики как структуры (§7.2), A/B методологий (§7.4).
+// Общий каркас: отложенная выборка — хвост архива ПО ВРЕМЕНИ (30 новейших
+// разрешённых строк по verified_at), обучение — всё, что старше; «подсмотреть
+// ответ» невозможно конструкцией. Данных нет — вердикт честно REJECTED
+// (указание владельца по наряду #627: нехватка данных ≠ придуманные числа).
+// ═══════════════════════════════════════════════════════════════════════
+
+// Формат числа — 4 знака (порог выигрыша 0.005 на 3 знаках неразличим)
+pattern OSPFmt4(x: Float) -> String {
+  let mut neg = ""
+  let mut v = x
+  if v < 0.0 then {
+    neg = "-"
+    v = 0.0 - v
+  }
+  let n = to_int(v * 10000.0 + 0.5)
+  let ip = to_int(to_float(to_string(n)) / 10000.0)
+  let frac = n - ip * 10000
+  let mut fs = to_string(frac)
+  if frac < 10 then { fs = "000" + to_string(frac) }
+  if frac >= 10 and frac < 100 then { fs = "00" + to_string(frac) }
+  if frac >= 100 and frac < 1000 then { fs = "0" + to_string(frac) }
+  return neg + to_string(ip) + "." + fs
+}
+
+// Логит с клипом [0.02, 0.98] (§5.3: клип до Platt — крайние вероятности
+// дают непропорциональный log-loss на единственной ошибке)
+pattern OSPCalLogit(p: Float) -> Float {
+  let mut pc = p
+  if pc < 0.02 then { pc = 0.02 }
+  if pc > 0.98 then { pc = 0.98 }
+  return ln(pc / (1.0 - pc))
+}
+
+// UPSERT настройки — INSERT при первом появлении ключа, UPDATE после
+// (голый UPDATE при отсутствии строки пишет молча в никуда)
+pattern OSPSettingUpsert(key: String, value: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let ex = query("SELECT key FROM system_settings WHERE key = ?", [key])
+  if length(ex) == 0.0 then {
+    let _ = db_execute("INSERT INTO system_settings (key, value) VALUES (?, ?)", [key, value])
+  } else {
+    let _ = db_execute("UPDATE system_settings SET value = ? WHERE key = ?", [value, key])
+  }
+  return "ok"
+}
+
+// Platt-применение: p' = sigmoid(a·logit(p) + b) при ADOPTED; иначе вход
+// ПОБИТОВО без изменений (инвариант наряда: при REJECTED p_final = clip(p))
+pattern OSPPlattApply(p: Float) -> Float {
+  let rows = query("SELECT value FROM system_settings WHERE key = 'osp_cal_note'", [])
+  if length(rows) == 0.0 then { return p }
+  let note = trim(to_string(json_get(get(rows, 0.0), "value", "")))
+  if starts_with(note, "ADOPTED") == false then { return p }
+  let ra = query("SELECT value FROM system_settings WHERE key = 'osp_cal_a'", [])
+  let rb = query("SELECT value FROM system_settings WHERE key = 'osp_cal_b'", [])
+  if length(ra) == 0.0 or length(rb) == 0.0 then { return p }
+  let a = to_float(to_string(json_get(get(ra, 0.0), "value", "1")))
+  let b = to_float(to_string(json_get(get(rb, 0.0), "value", "0")))
+  return sigmoid(a * OSPCalLogit(p) + b)
+}
+
+// Platt-fit (§5.2). Отложка = 30 новейших разрешённых строк (verified_at DESC),
+// обучение = старше. Строки с пометкой "unfit-config" (поправка 3: конфиг
+// прогона отличается от боевого) в выборку НЕ идут. Обучение — градиентный
+// спуск по log-loss (400 итераций, lr 0.05; только ln/exp/sigmoid registry).
+// Правило включения единственное: ADOPTED при n_train≥60 AND n_hold≥30 AND
+// Brier_hold(a,b) ≤ Brier_hold(1,0) − 0.005; иначе идентичность a=1,b=0.
+// Вердикт и коэффициенты — system_settings osp_cal_a/osp_cal_b/osp_cal_note:
+// «почему сегодня сжато/не сжато» видно запросом к БД (§5.2).
+pattern OSPPlattFit(kind: String) -> String {
+  let _ = OSPFEnsureSchema()
+  // SQL — литералы (audit SQL_DYNAMIC): строки, непригодные для калибровки
+  // owner (поправка 3, пометка unfit-config в gate_report), в выборку не идут
+  let holdq = query("SELECT p_final, outcome FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final IS NOT NULL AND outcome IS NOT NULL AND gate_report NOT LIKE '%unfit-config%' ORDER BY verified_at DESC, id DESC LIMIT 30", [kind])
+  let trainq = query("SELECT p_final, outcome FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final IS NOT NULL AND outcome IS NOT NULL AND id NOT IN (SELECT id FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final IS NOT NULL AND outcome IS NOT NULL AND gate_report NOT LIKE '%unfit-config%' ORDER BY verified_at DESC, id DESC LIMIT 30) AND gate_report NOT LIKE '%unfit-config%' ORDER BY verified_at ASC", [kind, kind])
+  let nt = length(trainq)
+  let nh = length(holdq)
+  if nt < 60.0 or nh < 30.0 then {
+    let note = "REJECTED gain=0.0000 holdout_n=" + to_string(nh) + " train_n=" + to_string(nt) + " недостаточно данных (нужно train≥60, hold≥30) — идентичность a=1 b=0"
+    let _ = OSPSettingUpsert("osp_cal_note", note)
+    let _ = OSPSettingUpsert("osp_cal_a", "1.0")
+    let _ = OSPSettingUpsert("osp_cal_b", "0.0")
+    let _ = try AuditLog("osp_platt_fit", "osp", kind + " REJECTED n=" + to_string(nt) + "/" + to_string(nh))
+    return "OK|" + note
+  }
+  // GD по log-loss на обучении; данные в массиве — SQL внутри цикла нет
+  let mut a = 1.0
+  let mut b = 0.0
+  let lr = 0.05
+  let mut it = 0.0
+  while it < 400.0 {
+    let mut ga = 0.0
+    let mut gb = 0.0
+    let mut i = 0.0
+    while i < nt {
+      let row = get(trainq, i)
+      let p = to_float(to_string(json_get(row, "p_final", "0.5")))
+      let y = to_float(to_string(json_get(row, "outcome", "0")))
+      let z = OSPCalLogit(p)
+      let s = sigmoid(a * z + b)
+      let err = s - y
+      ga = ga + err * z
+      gb = gb + err
+      i = i + 1.0
+    }
+    a = a - lr * ga / nt
+    b = b - lr * gb / nt
+    it = it + 1.0
+  }
+  // Brier на отложке: обученный (a,b) против идентичности (1,0)
+  let mut bab = 0.0
+  let mut bid = 0.0
+  let mut j = 0.0
+  while j < nh {
+    let row = get(holdq, j)
+    let p = to_float(to_string(json_get(row, "p_final", "0.5")))
+    let y = to_float(to_string(json_get(row, "outcome", "0")))
+    let z = OSPCalLogit(p)
+    let s = sigmoid(a * z + b)
+    let d1 = s - y
+    let d2 = p - y
+    bab = bab + d1 * d1
+    bid = bid + d2 * d2
+    j = j + 1.0
+  }
+  bab = bab / nh
+  bid = bid / nh
+  let gain = bid - bab
+  let mut verdict = "REJECTED"
+  if gain >= 0.005 then { let verdict = "ADOPTED" }
+  let note = verdict + " gain=" + OSPFmt4(gain) + " holdout_n=" + to_string(nh) + " train_n=" + to_string(nt)
+  if verdict == "REJECTED" then {
+    let note = note + " — идентичность a=1 b=0 (выигрыш меньше 0.005)"
+    let _ = OSPSettingUpsert("osp_cal_a", "1.0")
+    let _ = OSPSettingUpsert("osp_cal_b", "0.0")
+  } else {
+    let _ = OSPSettingUpsert("osp_cal_a", to_string(a))
+    let _ = OSPSettingUpsert("osp_cal_b", to_string(b))
+  }
+  let _ = OSPSettingUpsert("osp_cal_note", note)
+  let _ = try AuditLog("osp_platt_fit", "osp", kind + " " + substring(note, 0.0, 100.0))
+  return "OK|" + note
+}
+
+// Вес базовой частоты (§9.3): w = n/(n+10)
+pattern OSPPriorWeight(n: Float) -> Float {
+  return n / (n + 10.0)
+}
+
+// Поправка 1: механическое сжатие к базовой частоте — ТО ЖЕ правило включения,
+// что у Platt (§5.2). Сжатие p' = w·rate + (1−w)·p (w = OSPPriorWeight) по
+// строкам, у которых есть prior_rate с prior_n ≥ 10; ADOPTED только при
+// n_train≥60 AND n_hold≥30 AND выигрыш ≥0.005 Brier на отложке. Класс
+// сравнения — вопросы того же типа (домен — OSPBaseRate), n<10 не входит.
+pattern OSPPriorFit(kind: String) -> String {
+  let _ = OSPFEnsureSchema()
+  // SQL — литералы (audit SQL_DYNAMIC)
+  let holdq = query("SELECT p_final, outcome, prior_rate, prior_n FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final IS NOT NULL AND outcome IS NOT NULL AND prior_rate IS NOT NULL AND prior_n IS NOT NULL AND prior_n >= 10 ORDER BY verified_at DESC, id DESC LIMIT 30", [kind])
+  let trainq = query("SELECT p_final, outcome, prior_rate, prior_n FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final IS NOT NULL AND outcome IS NOT NULL AND prior_rate IS NOT NULL AND prior_n IS NOT NULL AND prior_n >= 10 AND id NOT IN (SELECT id FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND p_final IS NOT NULL AND outcome IS NOT NULL AND prior_rate IS NOT NULL AND prior_n IS NOT NULL AND prior_n >= 10 ORDER BY verified_at DESC, id DESC LIMIT 30) ORDER BY verified_at ASC", [kind, kind])
+  let nt = length(trainq)
+  let nh = length(holdq)
+  if nt < 60.0 or nh < 30.0 then {
+    let note = "REJECTED gain=0.0000 holdout_n=" + to_string(nh) + " train_n=" + to_string(nt) + " недостаточно данных (нужно train≥60, hold≥30) — сжатие выключено (поправка 1)"
+    let _ = OSPSettingUpsert("osp_prior_note", note)
+    let _ = try AuditLog("osp_prior_fit", "osp", kind + " REJECTED n=" + to_string(nt) + "/" + to_string(nh))
+    return "OK|" + note
+  }
+  let mut bab = 0.0
+  let mut bid = 0.0
+  let mut j = 0.0
+  while j < nh {
+    let row = get(holdq, j)
+    let p = to_float(to_string(json_get(row, "p_final", "0.5")))
+    let y = to_float(to_string(json_get(row, "outcome", "0")))
+    let rate = to_float(to_string(json_get(row, "prior_rate", "0.5")))
+    let pn = to_float(to_string(json_get(row, "prior_n", "10")))
+    let w = OSPPriorWeight(pn)
+    let d1 = (w * rate + (1.0 - w) * p) - y
+    let d2 = p - y
+    bab = bab + d1 * d1
+    bid = bid + d2 * d2
+    j = j + 1.0
+  }
+  bab = bab / nh
+  bid = bid / nh
+  let gain = bid - bab
+  let mut verdict = "REJECTED"
+  if gain >= 0.005 then { let verdict = "ADOPTED" }
+  let note = verdict + " gain=" + OSPFmt4(gain) + " holdout_n=" + to_string(nh) + " train_n=" + to_string(nt)
+  if verdict == "REJECTED" then {
+    let note = note + " — сжатие выключено (поправка 1: выигрыш меньше 0.005)"
+  }
+  let _ = OSPSettingUpsert("osp_prior_note", note)
+  let _ = try AuditLog("osp_prior_fit", "osp", kind + " " + substring(note, 0.0, 100.0))
+  return "OK|" + note
+}
+
+// Применение сжатия к карточке: только при osp_prior_note ADOPTED и наличии
+// на карточке prior_rate с prior_n ≥ 10; иначе вход побитово
+pattern OSPPriorApply(forecast_id: Float, p: Float) -> Float {
+  let rows = query("SELECT value FROM system_settings WHERE key = 'osp_prior_note'", [])
+  if length(rows) == 0.0 then { return p }
+  let note = trim(to_string(json_get(get(rows, 0.0), "value", "")))
+  if starts_with(note, "ADOPTED") == false then { return p }
+  let fc = query("SELECT prior_rate, prior_n FROM osp_forecast WHERE id = ?", [to_string(forecast_id)])
+  if length(fc) == 0.0 then { return p }
+  let pr = to_string(json_get(get(fc, 0.0), "prior_rate", ""))
+  let pn = to_float(to_string(json_get(get(fc, 0.0), "prior_n", "0")))
+  if pr == "" or pn < 10.0 then { return p }
+  let rate = to_float(pr)
+  let w = OSPPriorWeight(pn)
+  return w * rate + (1.0 - w) * p
+}
+
+// Калибровочная кривая (§5.1/§5.4): GROUP BY cal_bucket → {bucket, n, mean_p,
+// mean_y}; пол — ≥3 бакета с n≥5. JSON — monthly_reviews.calibration_curve;
+// при svg_path непустом — chart_line + write_file (картинка к ответу владельцу).
+// Числа mean_y — по разрешённым исходам периода (verified_at LIKE период%).
+pattern OSPCalibrationCurve(kind: String, period: String, svg_path: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let p = trim(period)
+  if length(p) != 7.0 then { return "NO|период не ГГГГ-ММ: " + period }
+  let rows = query("SELECT cal_bucket AS b, COUNT(*) AS n, AVG(p_final) AS mp, AVG(outcome) AS my FROM osp_forecast WHERE kind = ? AND status = 'resolved' AND outcome IS NOT NULL AND p_final IS NOT NULL AND verified_at LIKE ? || '%' GROUP BY cal_bucket ORDER BY b", [kind, p])
+  // годные бакеты — с n ≥ 5 (§5.1)
+  let mut ok_n = 0.0
+  let mut tot = 0.0
+  let mut items = "["
+  let mut labels = "["
+  let mut first = true
+  let mut i = 0.0
+  while i < length(rows) {
+    let r = get(rows, i)
+    let bn = to_float(to_string(json_get(r, "n", "0")))
+    tot = tot + bn
+    if bn >= 5.0 then {
+      ok_n = ok_n + 1.0
+      let bucket = to_float(to_string(json_get(r, "b", "0")))
+      let mp = to_float(to_string(json_get(r, "mp", "0")))
+      let my = to_float(to_string(json_get(r, "my", "0")))
+      let mut lab = "бакет"
+      if bucket >= 1.0 and bucket <= 10.0 then {
+        let lo = (bucket - 1.0) * 10.0
+        let hi = bucket * 10.0
+        lab = to_string(to_int(lo)) + "-" + to_string(to_int(hi)) + "%"
+      }
+      if first then { first = false } else {
+        items = items + ","
+        labels = labels + ","
+      }
+      items = items + "{\"label\":\"" + lab + "\",\"n\":" + to_string(bn) + ",\"mean_p\":" + OSPFmt4(mp) + ",\"mean_y\":" + OSPFmt4(my) + "}"
+      labels = labels + "{\"label\":\"" + lab + "\",\"value\":" + OSPFmt4(my) + "}"
+    }
+    i = i + 1.0
+  }
+  items = items + "]"
+  labels = labels + "]"
+  if ok_n < 3.0 then {
+    return "NO|недостаточно данных для кривой (бакетов с n≥5: " + to_string(ok_n) + "/3, всего разрешено " + to_string(tot) + ")"
+  }
+  let ex = query("SELECT id FROM monthly_reviews WHERE year_month = ?", [p])
+  if length(ex) == 0.0 then {
+    let _ = db_execute("INSERT INTO monthly_reviews (year_month, calibration_curve) VALUES (?, ?)", [p, items])
+  } else {
+    let _ = db_execute("UPDATE monthly_reviews SET calibration_curve = ? WHERE year_month = ?", [items, p])
+  }
+  let mut svg = ""
+  if trim(svg_path) != "" then {
+    // chart_line требует List<Struct{label,value}> (проверено §5.4); стиль —
+    // Monolith F тёмная тема (как в dept/visual.mlog MonolithPaint)
+    let style = diagram_style({paper: "#1A1D22", ink: "#ebeaec", accent: "#FFA733", muted: "#9AA0A8", rule: "#3A3F46"})
+    let svg_res = TryVal(try chart_line(parse_json(labels), style))
+    if to_string(svg_res) != "()" then {
+      let w = TryVal(try write_file(trim(svg_path), redact(to_string(svg_res), "all")))
+      if to_string(w) != "()" then { svg = trim(svg_path) }
+    }
+  }
+  let _ = try AuditLog("osp_calibration_curve", "osp", kind + " " + p + " buckets=" + to_string(ok_n))
+  return "OK|" + p + "|бакетов=" + to_string(ok_n) + "|строк=" + to_string(tot) + "|svg=" + svg
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// W4 #627 A.4 — МЕТОДИКИ КАК СТРУКТУРЫ (§7.2). Принцип §7.1: результат
+// методики — число или структура → проверяется программой; ход мысли →
+// скилл-промпт; что можно посчитать — код, модель не считает. Все семь
+// методик живут в methods_json/assumptions_json карточки — новых таблиц
+// не требуется. Не заявлена методика → SKIP (проверка не выдумывает
+// претензий); заявлена криво → W-марка; дерево, не сходящееся с ответом
+// (расхождение > 0.15) → G-гейт — единственная методичная блокировка.
+// ═══════════════════════════════════════════════════════════════════════
+
+// 1. Key Assumptions Check: ≥3 допущения; у каждого evidence_url или метка
+// [СПЕКУЛЯЦИЯ]; confidence — число, а не слово. Данные — assumptions_json:
+// [{text, confidence, evidence_url, if_wrong}]
+pattern OSPAssumptionsGate(assumptions_json: String) -> String {
+  let t = trim(assumptions_json)
+  if t == "" or t == "[]" or t == "()" then { return "SKIP|не заявлено" }
+  let d = try parse_json(t)
+  if to_string(d) == "()" then { return "W: допущения не JSON" }
+  if d.ok == false then { return "W: допущения не JSON" }
+  // корневой массив — само значение разбора (не по ключу)
+  let arr = d.value
+  let n = length(arr)
+  if n == 0.0 then { return "SKIP|не заявлено" }
+  if n < 3.0 then { return "W: допущений " + to_string(n) + ", методика требует ≥3" }
+  let mut bad_url = 0.0
+  let mut bad_conf = 0.0
+  let mut i = 0.0
+  while i < n {
+    let a = get(arr, i)
+    let text = to_string(json_get(a, "text", ""))
+    let conf = to_string(json_get(a, "confidence", ""))
+    let url = to_string(json_get(a, "evidence_url", ""))
+    if text != "" {
+      // [СПЕКУЛАЦИЯ] — метка честной спекуляции; lower() в mlog не понижает
+      // кириллицу — проверяем оба написания
+      if url == "" and contains(text, "[СПЕКУЛАЦИЯ]") == false and contains(lower(text), "[спекуляция]") == false then { bad_url = bad_url + 1.0 }
+      if conf != "" and OSPStrIsNumber(conf) == false then { bad_conf = bad_conf + 1.0 }
+    }
+    i = i + 1.0
+  }
+  if bad_url > 0.0 or bad_conf > 0.0 then {
+    return "W: допущения неструктурны (без evidence_url/[СПЕКУЛЯЦИЯ]: " + to_string(bad_url) + "; confidence не число: " + to_string(bad_conf) + ")"
+  }
+  return "PASS|допущений=" + to_string(n)
+}
+
+// 2. Deception Detection: W-гейт — единственный источник с tier='primary' и
+// заинтересованный автор {interested:true} → предупреждение, не блокировка.
+// Строки-URL (текущий формат sources_json) данных о tier не несут — молчание.
+pattern OSPDeceptionGate(src_json: String) -> String {
+  let t = trim(src_json)
+  if t == "" or t == "[]" or t == "()" then { return "" }
+  let d = try parse_json(t)
+  if to_string(d) == "()" then { return "" }
+  if d.ok == false then { return "" }
+  let arr = d.value
+  if length(arr) != 1.0 then { return "" }
+  let s = get(arr, 0.0)
+  let tier = to_string(json_get(s, "tier", ""))
+  let interested = to_string(json_get(s, "interested", "false"))
+  if tier == "primary" and interested == "true" then {
+    return "W: единственный источник primary и заинтересованная сторона — риск обмана (§7.2)"
+  }
+  return ""
+}
+
+// 3. Центр тяжести по Стрейнджу: cg_chain = {cg, cc, cr, cv} — все 4 элемента
+// непустые, иначе «заявлено, но не построено» (частота → skill_reviews)
+pattern OSPCGGate(methods_json: String) -> String {
+  let t = trim(methods_json)
+  if t == "" or t == "[]" or t == "{}" or t == "()" then { return "" }
+  let d = try parse_json(t)
+  if to_string(d) == "()" then { return "" }
+  if d.ok == false then { return "" }
+  let cg = json_get(d.value, "cg_chain", "")
+  if to_string(cg) == "{}" or to_string(cg) == "()" or to_string(cg) == "" then { return "" }
+  let mut empty = ""
+  each k in ["cg", "cc", "cr", "cv"] {
+    if length(trim(to_string(json_get(cg, to_string(k), "")))) == 0.0 then {
+      if empty == "" then { empty = to_string(k) } else { empty = empty + "," + to_string(k) }
+    }
+  }
+  if empty != "" then { return "W: центр тяжести заявлен, но не построен (пустые: " + empty + ")" }
+  return "PASS|CG→CC→CR→CV построена"
+}
+
+// 4. PMESII-PT: frame = {P,M,E,S,I,IT,PH,T} — при depth≥2 заполнено ≥6 из 8
+pattern OSPMesiiGate(methods_json: String, depth: Int) -> String {
+  if depth < 2 then { return "" }
+  let t = trim(methods_json)
+  if t == "" or t == "[]" or t == "{}" or t == "()" then { return "" }
+  let d = try parse_json(t)
+  if to_string(d) == "()" then { return "" }
+  if d.ok == false then { return "" }
+  let fr = json_get(d.value, "frame", "")
+  if to_string(fr) == "{}" or to_string(fr) == "()" or to_string(fr) == "" then { return "" }
+  let mut filled = 0.0
+  each k in ["P", "M", "E", "S", "I", "IT", "PH", "T"] {
+    if length(trim(to_string(json_get(fr, to_string(k), "")))) > 0.0 then { filled = filled + 1.0 }
+  }
+  if filled < 6.0 then { return "W: PMESII-PT заявлен, заполнено " + to_string(filled) + "/8 (нужно ≥6 при depth≥2)" }
+  return "PASS|PMESII-PT " + to_string(filled) + "/8"
+}
+
+// 5. Cross-Impact: matrix = [{a, b, sign, weight}] — программа ловит
+// противоречия (A→B + при B→A − без пометки feedback); из methods.forces
+// {A,R,S,L,E,E_mod} потенциал P = A×R×S×L×E×E_mod считается программой
+// (OSPComputePotential), а не прозой
+pattern OSPMatrixGate(methods_json: String) -> String {
+  let t = trim(methods_json)
+  if t == "" or t == "[]" or t == "{}" or t == "()" then { return "" }
+  let d = try parse_json(t)
+  if to_string(d) == "()" then { return "" }
+  if d.ok == false then { return "" }
+  let mut out = ""
+  let mx = json_get(d.value, "matrix", [])
+  if to_string(mx) != "()" and to_string(mx) != "[]" and length(mx) > 0.0 {
+    let n = length(mx)
+    let mut i = 0.0
+    while i < n {
+      let x = get(mx, i)
+      let xa = to_string(json_get(x, "a", ""))
+      let xb = to_string(json_get(x, "b", ""))
+      let sx = to_string(json_get(x, "sign", ""))
+      let fx = to_string(json_get(x, "feedback", "false"))
+      let mut j = 0.0
+      while j < n {
+        let y = get(mx, j)
+        let ya = to_string(json_get(y, "a", ""))
+        let yb = to_string(json_get(y, "b", ""))
+        let sy = to_string(json_get(y, "sign", ""))
+        let fy = to_string(json_get(y, "feedback", "false"))
+        if ya == xb and yb == xa and fx == "false" and fy == "false" {
+          let mut opp = false
+          if (sx == "+" and sy == "-") or (sx == "-" and sy == "+") { let opp = true }
+          if (sx == "+" and sy == "−") or (sx == "−" and sy == "+") { let opp = true }
+          if opp then {
+            if contains(out, xa + "↔" + xb) == false and contains(out, xb + "↔" + xa) == false {
+              if out == "" then { out = "W: противоречие матрицы без feedback: " + xa + "↔" + xb } else { out = out + "; " + xa + "↔" + xb }
+            }
+          }
+        }
+        j = j + 1.0
+      }
+      i = i + 1.0
+    }
+  }
+  let f = json_get(d.value, "forces", "")
+  if to_string(f) != "()" and to_string(f) != "{}" and to_string(f) != "" {
+    let fa = to_string(json_get(f, "A", ""))
+    let fr2 = to_string(json_get(f, "R", ""))
+    let fs = to_string(json_get(f, "S", ""))
+    let fl = to_string(json_get(f, "L", ""))
+    let fe = to_string(json_get(f, "E", ""))
+    let fem = to_string(json_get(f, "E_mod", "1.0"))
+    if OSPStrIsNumber(fa) and OSPStrIsNumber(fr2) and OSPStrIsNumber(fs) and OSPStrIsNumber(fl) and OSPStrIsNumber(fe) and OSPStrIsNumber(fem) then {
+      let pot = OSPComputePotential(to_float(fa), to_float(fr2), to_float(fs), to_float(fl), to_float(fe), to_float(fem))
+      out = out + "|потенциал P=" + OSPFmt4(pot) + " (программа из матрицы сил)"
+    }
+  }
+  if out == "" then { return "" }
+  return out
+}
+
+// 6. Условные деревья (FRI): tree = [{node, parent, question, p_cond, event}]
+// — программа перемножает p_cond вдоль ветвей, проверяет сумму терминальных
+// ≤ 1 и сверяет Σ ветвей с event=true против p_final; расхождение > 0.15 →
+// G-гейт «дерево не сходится с ответом»
+pattern OSPTreeGate(methods_json: String, p_final: Float) -> String {
+  let t = trim(methods_json)
+  if t == "" or t == "[]" or t == "{}" or t == "()" then { return "SKIP" }
+  let d = try parse_json(t)
+  if to_string(d) == "()" then { return "SKIP" }
+  if d.ok == false then { return "SKIP" }
+  let tr = json_get(d.value, "tree", [])
+  if to_string(tr) == "()" or to_string(tr) == "[]" then { return "SKIP" }
+  let n = length(tr)
+  if n == 0.0 then { return "SKIP" }
+  // произведения вдоль цепочек родителей
+  let mut prods = "["
+  let mut i = 0.0
+  while i < n {
+    let node = get(tr, i)
+    let pc = to_float(to_string(json_get(node, "p_cond", "1.0")))
+    let mut prod = pc
+    let mut parent = to_string(json_get(node, "parent", ""))
+    let mut guard = 0.0
+    while parent != "" and guard < 20.0 {
+      guard = guard + 1.0
+      let mut found = false
+      let mut k = 0.0
+      while k < n {
+        let cand = get(tr, k)
+        if to_string(json_get(cand, "node", "")) == parent {
+          prod = prod * to_float(to_string(json_get(cand, "p_cond", "1.0")))
+          parent = to_string(json_get(cand, "parent", ""))
+          found = true
+        }
+        k = k + 1.0
+      }
+      if found == false then { parent = "" }
+    }
+    if i > 0.0 { prods = prods + "," }
+    prods = prods + to_string(prod)
+    i = i + 1.0
+  }
+  prods = prods + "]"
+  let pv = try parse_json(prods)
+  if to_string(pv) == "()" then { return "SKIP" }
+  if pv.ok == false then { return "SKIP" }
+  // терминалы — узлы, на которые никто не ссылается как parent
+  let mut sum_term = 0.0
+  let mut sum_event = 0.0
+  let mut has_event = false
+  let mut i2 = 0.0
+  while i2 < n {
+    let node = get(tr, i2)
+    let name = to_string(json_get(node, "node", ""))
+    let mut is_parent = false
+    let mut k2 = 0.0
+    while k2 < n {
+      if to_string(json_get(get(tr, k2), "parent", "")) == name { is_parent = true }
+      k2 = k2 + 1.0
+    }
+    if is_parent == false {
+      let pr = to_float(to_string(get(pv.value, i2)))
+      sum_term = sum_term + pr
+      let ev = to_string(json_get(node, "event", ""))
+      if ev != "" {
+        has_event = true
+        if ev == "true" or ev == "1" or ev == "yes" or ev == "да" then { sum_event = sum_event + pr }
+      }
+    }
+    i2 = i2 + 1.0
+  }
+  if sum_term > 1.02 then { return "FAIL|сумма терминальных ветвей " + OSPFmt4(sum_term) + " > 1" }
+  if has_event then {
+    let diff = sum_event - p_final
+    if diff < 0.0 then { let diff = 0.0 - diff }
+    if diff > 0.15 then {
+      return "FAIL|дерево не сходится с ответом: сумма ветвей event=true " + OSPFmt4(sum_event) + " против p_final " + OSPFmt4(p_final) + " (расхождение " + OSPFmt4(diff) + " > 0.15)"
+    }
+    return "PASS|дерево сходится: Σ(event)=" + OSPFmt4(sum_event) + " vs p_final=" + OSPFmt4(p_final)
+  }
+  return "W: у дерева нет event-разметки — сверка с p_final невозможна"
+}
+
+// 7. Contrasting Narratives / Red Hat: ровно 2 нарратива; у каждого ≥2
+// индикатора с датой → индикаторы становятся строками indicator с verify_date
+// и confirms_what (первый писатель таблицы — §7.2)
+pattern OSPNarrativesGate(methods_json: String, forecast_id: Float, analysis_id: Float) -> String {
+  let t = trim(methods_json)
+  if t == "" or t == "[]" or t == "{}" or t == "()" then { return "SKIP" }
+  let d = try parse_json(t)
+  if to_string(d) == "()" then { return "SKIP" }
+  if d.ok == false then { return "SKIP" }
+  let ns = json_get(d.value, "narratives", [])
+  if to_string(ns) == "()" or to_string(ns) == "[]" then { return "SKIP" }
+  let n = length(ns)
+  if n != 2.0 then { return "W: нарративов " + to_string(n) + ", методика требует ровно 2" }
+  let mut wrote = 0.0
+  let mut bad = 0.0
+  let mut i = 0.0
+  while i < n {
+    let nr = get(ns, i)
+    let inds = json_get(nr, "if_true_indicators", [])
+    if to_string(inds) == "()" or to_string(inds) == "[]" then {
+      bad = bad + 1.0
+    } else {
+      if length(inds) < 2.0 then {
+        bad = bad + 1.0
+      } else {
+        let mut k = 0.0
+        while k < length(inds) {
+          let ind = get(inds, k)
+          let desc = to_string(json_get(ind, "indicator", ""))
+          let vd = trim(to_string(json_get(ind, "verify_date", "")))
+          let cw = to_string(json_get(ind, "confirms_what", ""))
+          if desc != "" and vd != "" then {
+            // try: таблица indicator живёт в app.mlog (InitDB) — изолированный
+            // python-гвард dept-файла её не создаёт; в проде строка пишется
+            let _ = try db_execute("INSERT INTO indicator (analysis_id, description, verify_date, confirms_what, osp_forecast_id) VALUES (?, ?, ?, ?, ?)", [to_string(analysis_id), substring(desc, 0.0, 300.0), substring(vd, 0.0, 10.0), substring(cw, 0.0, 200.0), to_string(forecast_id)])
+            wrote = wrote + 1.0
+          } else {
+            bad = bad + 1.0
+          }
+          k = k + 1.0
+        }
+      }
+    }
+    i = i + 1.0
+  }
+  if wrote > 0.0 then { return "OK|индикаторов записано=" + to_string(wrote) }
+  if bad > 0.0 then { return "W: у нарративов нет ≥2 индикаторов с датой" }
+  return "W: нарративы без индикаторов"
+}
+
+// Сводный структурный гейт методик: собирает марки всех семи проверок.
+// Возврат: PASS|<фрагмент gate_report> | BLOCK|<причина> (только дерево)
+pattern OSPMethodsGate(methods_json: String, assumptions_json: String, src_json: String, depth: Int, p_final: Float, forecast_id: Float, analysis_id: Float) -> String {
+  let mut frag = ""
+  let mut block = ""
+  let ag = OSPAssumptionsGate(assumptions_json)
+  if starts_with(ag, "PASS|") then { frag = frag + ",\"assumptions\":\"" + substring(ag, 5.0, length(ag)) + "\"" }
+  if starts_with(ag, "W:") then { frag = frag + ",\"assumptions\":\"" + substring(ag, 3.0, length(ag)) + "\"" }
+  let dg = OSPDeceptionGate(src_json)
+  if dg != "" then { frag = frag + ",\"deception\":\"" + substring(dg, 3.0, length(dg)) + "\"" }
+  let cg = OSPCGGate(methods_json)
+  if starts_with(cg, "PASS|") then { frag = frag + ",\"cg\":\"" + substring(cg, 5.0, length(cg)) + "\"" }
+  if starts_with(cg, "W:") then { frag = frag + ",\"cg\":\"" + substring(cg, 3.0, length(cg)) + "\"" }
+  let ms = OSPMesiiGate(methods_json, depth)
+  if starts_with(ms, "PASS|") then { frag = frag + ",\"pmesii\":\"" + substring(ms, 5.0, length(ms)) + "\"" }
+  if starts_with(ms, "W:") then { frag = frag + ",\"pmesii\":\"" + substring(ms, 3.0, length(ms)) + "\"" }
+  let mg = OSPMatrixGate(methods_json)
+  if mg != "" then {
+    // потенциал — после первой «|»; противоречия — до неё
+    let parts = split(mg, "|")
+    if length(parts) > 1.0 {
+      frag = frag + ",\"matrix\":\"" + trim(to_string(get(parts, 0.0))) + "\",\"potential\":\"" + trim(to_string(get(parts, 1.0))) + "\""
+    } else {
+      frag = frag + ",\"matrix\":\"" + trim(mg) + "\""
+    }
+  }
+  let tg = OSPTreeGate(methods_json, p_final)
+  if starts_with(tg, "FAIL|") then { block = "G7 дерево: " + substring(tg, 5.0, length(tg)) }
+  if starts_with(tg, "PASS|") then { frag = frag + ",\"tree\":\"" + substring(tg, 5.0, length(tg)) + "\"" }
+  if starts_with(tg, "W:") then { frag = frag + ",\"tree\":\"" + substring(tg, 3.0, length(tg)) + "\"" }
+  let ng = OSPNarrativesGate(methods_json, forecast_id, analysis_id)
+  if starts_with(ng, "OK|") then { frag = frag + ",\"narratives\":\"" + substring(ng, 3.0, length(ng)) + "\"" }
+  if starts_with(ng, "W:") then { frag = frag + ",\"narratives\":\"" + substring(ng, 3.0, length(ng)) + "\"" }
+  if block != "" then { return "BLOCK|" + block }
+  return "PASS|" + frag
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// W4 #627 A.5 — A/B МЕТОДОЛОГИЙ (§7.4). Плоская таблица
+// osp_forecast_method_runs(forecast_id, method, p_i, family); писатель —
+// OSPEnsembleApply/OSPBenchForecastRow (каждый прогон ансамбля). После
+// разрешения исхода карточки — GROUP BY method с полом n≥10 → строки доски
+// + skill_reviews.success_rate. Ниже пола — «недостаточно данных», число не
+// публикуется (§5.1). Пункт приёмки «у ≥3 методик n≥10» — отложен владельцем:
+// механизм копит данные, приёмка — по факту набора.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Семейство модели: до "/" ("openai/gpt-oss-20b" → openai), иначе до "-"
+// ("deepseek-chat" → deepseek, "glm-4.6" → glm, "kimi-k3" → kimi)
+pattern OSPFamilyOf(model: String) -> String {
+  let m = trim(model)
+  let parts = split(m, "/")
+  if length(parts) >= 2.0 then { return to_string(get(parts, 0.0)) }
+  let pp = split(m, "-")
+  return to_string(get(pp, 0.0))
+}
+
+// Доска A/B: GROUP BY method по разрешённым карточкам; n≥10 → Brier и skill
+// vs «всегда 50%» + запись в skill_reviews (dept_name='osp'); n<10 — честно
+pattern OSPMethodAB(kind: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let rows = query("SELECT mr.method AS method, COUNT(*) AS n, AVG((mr.p_i - f.outcome) * (mr.p_i - f.outcome)) AS ab FROM osp_forecast_method_runs mr JOIN osp_forecast f ON f.id = mr.forecast_id WHERE f.kind = ? AND f.status = 'resolved' AND f.outcome IS NOT NULL GROUP BY mr.method ORDER BY ab", [kind])
+  if length(rows) == 0.0 then { return "A/B методологий (" + kind + "): прогонов нет — доска появится после разрешения карточек с прогонами" }
+  let mut out = "A/B методологий (" + kind + "):\n"
+  let mut i = 0.0
+  while i < length(rows) {
+    let r = get(rows, i)
+    let method = to_string(json_get(r, "method", "?"))
+    let n = to_float(to_string(json_get(r, "n", "0")))
+    if n >= OSPMinN() then {
+      let ab = to_float(to_string(json_get(r, "ab", "0")))
+      out = out + "· " + method + ": n=" + to_string(n) + ", Brier=" + OSPFmt3(ab) + ", skill vs 0.25=" + OSPFmt3(OSPSkillScore(ab, 0.25)) + "\n"
+      // skill_reviews — таблица app.mlog:452; try для изолированного гварда
+      let ex = try query("SELECT id FROM skill_reviews WHERE skill_name = ? AND dept_name = 'osp'", [method])
+      if to_string(ex) != "()" {
+        if ex.ok == true {
+          if length(ex.value) > 0.0 then {
+            let _ = try db_execute("UPDATE skill_reviews SET usage_count = ?, success_rate = ?, last_reviewed_at = datetime('now'), updated_at = datetime('now') WHERE skill_name = ? AND dept_name = 'osp'", [to_string(n), to_string(OSPSkillScore(ab, 0.25)), method])
+          } else {
+            let _ = try db_execute("INSERT INTO skill_reviews (skill_name, dept_name, usage_count, success_rate, last_reviewed_at, updated_at) VALUES (?, 'osp', ?, ?, datetime('now'), datetime('now'))", [method, to_string(n), to_string(OSPSkillScore(ab, 0.25))])
+          }
+        }
+      }
+    } else {
+      out = out + "· " + method + ": недостаточно данных (" + to_string(n) + "/" + to_string(OSPMinN()) + ") — число не публикуется\n"
+    }
+    i = i + 1.0
+  }
+  let _ = try AuditLog("osp_method_ab", "osp", kind + " methods=" + to_string(length(rows)))
+  return out
+}
+
+pattern OSPMethodABCommand(chat_id: String) -> String {
+  let owner = OSPMethodAB("owner")
+  return OSPDisclaimer() + "\n\n" + owner + "\n\nПол n≥10 на методику (§5.1); запись в skill_reviews — только при n≥10. Пункт приёмки «у ≥3 методик n≥10» отложен владельцем (#627): доска наполняется по мере разрешения прогонов."
+}
+
+// /osp curve [ГГГГ-ММ]: кривая калибровки владельцу — программный блок чисел
+// + SVG (chart_line) документом в чат (/send-document, путь от корня офиса).
+// Ошибка доставки/записи НЕ ломает ответ — числа приходят текстом.
+pattern OSPCurveCommand(rest: String, chat_id: String) -> String {
+  let arg = trim(substring(trim(rest), 0.0, 10.0))
+  let mut period = ""
+  if OSPStrIsNumber(replace(replace(arg, "-", ""), "", "")) == false or length(arg) < 7.0 {
+    let pm = query("SELECT strftime('%Y-%m', 'now') AS p", [])
+    period = to_string(json_get(get(pm, 0.0), "p", ""))
+  } else {
+    period = arg
+  }
+  let svg_path = "visuals/osp_calibration_owner_" + period + ".svg"
+  let cr = OSPCalibrationCurve("owner", period, svg_path)
+  let mut out = OSPDisclaimer() + "\n\n📐 Калибровочная кривая (owner, " + period + ")\n" + cr
+  if starts_with(cr, "OK|") {
+    // строка period из monthly_reviews — уже с кривой; доставляем SVG документом
+    let rows = query("SELECT calibration_curve FROM monthly_reviews WHERE year_month = ?", [period])
+    if length(rows) > 0.0 {
+      out = out + "\n\nКривая (бакет: n, средний p, частота исхода): " + to_string(json_get(get(rows, 0.0), "calibration_curve", ""))
+    }
+    if chat_id != "" and length(svg_path) > 0.0 and contains(cr, "|svg=" + svg_path) {
+      let body = json_encode({path: svg_path, chat_id: to_float(chat_id), caption: "Калибровочная кривая ОСП (owner, " + period + "): частота исходов по бакетам p_final"})
+      let resp = TryVal(try http_post("http://127.0.0.1:4000/send-document", body, "application/json", 90.0))
+      if to_string(resp) == "()" {
+        out = out + "\n\n(SVG не доставлен — сервис отправки не ответил; файл: " + svg_path + ")"
+      }
+    }
+  }
+  let _ = try AuditLog("osp_curve", "osp", period + " " + substring(cr, 0.0, 80.0))
+  return out
+}
+
+// Ежемесячный слот 1-го числа (наряд #627 п.3): метрики ПРОГРАММОЙ —
+// OSPMonthlyReview прошлого месяца + калибровочная кривая; находки —
+// в ночной отчёт 07:15 через OutboxPut (механизм #550, как osp-watch).
+// Ноль LLM-вызовов и ноль сети — деньги не тратит
+pattern OSPMonthlySlot() -> String {
+  let _ = OSPFEnsureSchema()
+  let pm = query("SELECT strftime('%Y-%m', 'now', '-1 month') AS p", [])
+  let period = to_string(json_get(get(pm, 0.0), "p", ""))
+  let mr = OSPMonthlyReview(period, "owner")
+  let cr = OSPCalibrationCurve("owner", period, "")
+  let rep = "📅 Ежемесячный обзор ОСП (" + period + "):\n" + mr + "\n" + cr
+  let _ = try OutboxPut("osp-monthly", rep)
+  let _ = try AuditLog("osp_monthly_slot", "osp", period)
+  return rep
 }
 
 // Касание владельца одной строкой: /osp resolve <id> да|нет [заметка]
@@ -2420,7 +3166,7 @@ pattern OSPBenchForecastRow(due: String, qid: String, res_date: String) -> Strin
   let lp = to_float(to_string(get(pp, 4.0)))
   let spread = to_float(to_string(get(pp, 5.0)))
   let mj = to_string(get(pp, 7.0))
-  let p = OSPClip(mean)
+  let p = OSPPlattApply(OSPClip(mean))
   let bench_qid = qid + "|" + res_date
   let mut g3s = "\"w2\":\"валидных прогонов мало\""
   if nv >= 3.0 and spread <= 0.25 then { g3s = "\"g3\":\"PASS\"" }
@@ -2428,6 +3174,26 @@ pattern OSPBenchForecastRow(due: String, qid: String, res_date: String) -> Strin
   let mjf = "{\"config\":" + json_encode(OSPBenchConfigCurrent()) + ",\"runs\":" + mj + "}"
   let _ = db_execute("INSERT INTO osp_forecast (kind, question, resolution_criteria, as_of, resolve_by, status, p_raw, p_ensemble, p_median, p_logit, p_spread, n_runs, crowd_p, p_final, kent_label, cal_bucket, bench_qid, resolution_date, gate_report, models_json, created_at) VALUES ('bench', ?, ?, ?, ?, 'watching', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))", [substring(qtext, 0.0, 2000.0), substring(crit, 0.0, 2000.0), freeze, res_date, to_string(mean), to_string(mean), to_string(median), to_string(lp), to_string(spread), to_string(nv), to_string(crowd), to_string(p), OSPKentOf(p), to_string(OSPBucketOf(p)), bench_qid, res_date, gr, substring(mjf, 0.0, 6000.0)])
   let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES ((SELECT id FROM osp_forecast WHERE bench_qid = ? ORDER BY id DESC LIMIT 1), '', 'watching', 'bench-прогноз записан (ансамбль, конфиг в models_json)', 'osp-bench', datetime('now'))", [bench_qid])
+  // #627 W4 A.5: прогоны bench-ансамбля — тоже в osp_forecast_method_runs
+  // (конфиг в models_json; непригодные для калибровки owner — поправка 3,
+  // помечает OSPBenchResolveData)
+  let mjo = try parse_json(mj)
+  if to_string(mjo) != "()" {
+    if mjo.ok == true {
+    let runs = json_get(mjo.value, "runs", [])
+    if to_string(runs) != "()" and length(runs) > 0.0 {
+      each r in runs {
+        if to_string(json_get(r, "status", "")) == "PASS" {
+          let model = to_string(json_get(r, "model", ""))
+          let rp = to_string(json_get(r, "p", ""))
+          if model != "" and rp != "" and OSPStrIsNumber(rp) {
+            let _ = db_execute("INSERT INTO osp_forecast_method_runs (forecast_id, method, p_i, family) VALUES ((SELECT id FROM osp_forecast WHERE bench_qid = ? ORDER BY id DESC LIMIT 1), ?, ?, ?)", [bench_qid, substring(model, 0.0, 120.0), rp, OSPFamilyOf(model)])
+          }
+        }
+      }
+    }
+    }
+  }
   return "OK|" + bench_qid + "|p_final=" + to_string(p)
 }
 
@@ -2973,7 +3739,7 @@ test "n624: OSPSaveCard сквозной — p_final, Кент, дециль, с
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
       let aid = OSPDraftAnalysis("n624 сквозной вопрос о ставке", "deep", "monetary", 3)
-      let saved = OSPSaveCard("n624 сквозной вопрос о ставке (карточка)", 0.25, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://fred.stlouisfed.org/series/DFF\"]", aid, "проза прогона для visual", -1.0, "")
+      let saved = OSPSaveCard("n624 сквозной вопрос о ставке (карточка)", 0.25, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://fred.stlouisfed.org/series/DFF\"]", aid, "проза прогона для visual", -1.0, "", "[]", "[]", 1)
       assert_contains(saved, "OK|")
       assert_contains(saved, "|published|p_final=0.25")
       let id = to_float(get(split(saved, "|"), 1.0))
@@ -3018,7 +3784,7 @@ test "n624: G2-провал — карточка в gated, p_final не пише
       let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
-      let saved = OSPSaveCard("n624 gated-вопрос уникальный", 0.6, "коротко", ao, rb, "[\"https://x\"]", -1, "", -1.0, "")
+      let saved = OSPSaveCard("n624 gated-вопрос уникальный", 0.6, "коротко", ao, rb, "[\"https://x\"]", -1, "", -1.0, "", "[]", "[]", 1)
       assert_contains(saved, "GATED|")
       assert_contains(saved, "FAIL: G2 критерий")
       let id = to_float(get(split(saved, "|"), 1.0))
@@ -3027,7 +3793,7 @@ test "n624: G2-провал — карточка в gated, p_final не пише
       // p_final не пишется: json_get на NULL возвращает дефолт — дефолт вернулся
       assert_eq(to_string(json_get(get(rows, 0.0), "p_final", "NOTNULL")), "NOTNULL")
       // и p вне [0,1] — тоже gated (G1-арифметика)
-      let saved2 = OSPSaveCard("n624 p-вне-диапазона уникальный", 1.5, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://x\"]", -1, "", -1.0, "")
+      let saved2 = OSPSaveCard("n624 p-вне-диапазона уникальный", 1.5, "Ставка ниже 3.50% по итогам последнего заседания FOMC 2026 года", ao, rb, "[\"https://x\"]", -1, "", -1.0, "", "[]", "[]", 1)
       assert_contains(saved2, "GATED|")
       assert_contains(saved2, "p вне [0,1]")
 
@@ -3178,7 +3944,7 @@ test "n625 G3: разброс больше 0.25 при трёх прогонах
       let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
-      let saved = OSPSaveCard("n625 G3-вопрос уникальный", 0.5, "Критерий наблюдаемый: значение индекса опубликовано Росстатом", ao, rb, "[\"https://rosstat.gov.ru\"]", -1, "", -1.0, "")
+      let saved = OSPSaveCard("n625 G3-вопрос уникальный", 0.5, "Критерий наблюдаемый: значение индекса опубликовано Росстатом", ao, rb, "[\"https://rosstat.gov.ru\"]", -1, "", -1.0, "", "[]", "[]", 1)
       let id = to_float(get(split(saved, "|"), 1.0))
       // MUT-мишень: порог G3 0.25 — при 0.367 карточка обязана остаться gated
       let g = OSPEnsembleApply(id, "OK|3|0.5|0.5|0.49|0.367|0|{\"runs\":[]}", -1.0, "")
@@ -3196,7 +3962,7 @@ test "n625 G3 pass: разброс 0.1 при трёх прогонах — p_ba
       let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
-      let saved = OSPSaveCard("n625 G3-pass вопрос уникальный", 0.4, "Критерий наблюдаемый: решение опубликовано протоколом комитета", ao, rb, "[\"https://example.org/n625\"]", -1, "", -1.0, "")
+      let saved = OSPSaveCard("n625 G3-pass вопрос уникальный", 0.4, "Критерий наблюдаемый: решение опубликовано протоколом комитета", ao, rb, "[\"https://example.org/n625\"]", -1, "", -1.0, "", "[]", "[]", 1)
       let id = to_float(get(split(saved, "|"), 1.0))
       let g = OSPEnsembleApply(id, "OK|3|0.55|0.5|0.54|0.1|0|{\"runs\":[]}", -1.0, "")
       assert_contains(g, "OK|0.55|")
@@ -3215,10 +3981,10 @@ test "n625 G6prime на карточке: 0.4 без обоснования — 
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
       // MUT-мишень наряда: убрать обязательность market_dissent_reason
-      let s1 = OSPSaveCard("n625 рынок-вопрос без обоснования уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt1\"]", -1, "", 0.1, "")
+      let s1 = OSPSaveCard("n625 рынок-вопрос без обоснования уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt1\"]", -1, "", 0.1, "", "[]", "[]", 1)
       assert_contains(s1, "GATED|")
       assert_contains(s1, "G6prime")
-      let s2 = OSPSaveCard("n625 рынок-вопрос с обоснованием уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt2\"]", -1, "", 0.1, "биржевой объём упал на 40% — котировка неинформативна")
+      let s2 = OSPSaveCard("n625 рынок-вопрос с обоснованием уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt2\"]", -1, "", 0.1, "биржевой объём упал на 40% — котировка неинформативна", "[]", "[]", 1)
       assert_contains(s2, "OK|")
       assert_contains(s2, "|published|p_final=0.5")
       let id2 = to_float(get(split(s2, "|"), 1.0))
@@ -3226,7 +3992,7 @@ test "n625 G6prime на карточке: 0.4 без обоснования — 
       assert_contains(to_string(json_get(get(rows, 0.0), "gate_report", "")), "w6")
       assert_contains(to_string(json_get(get(rows, 0.0), "market_dissent_reason", "")), "40%")
       // W3 — 0.25 внутри окна
-      let s3 = OSPSaveCard("n625 рынок-вопрос W3 уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt3\"]", -1, "", 0.25, "")
+      let s3 = OSPSaveCard("n625 рынок-вопрос W3 уникальный", 0.5, "Критерий: официальная котировка закрытия на бирже опубликована", ao, rb, "[\"https://example.org/mkt3\"]", -1, "", 0.25, "", "[]", "[]", 1)
       assert_contains(s3, "OK|")
       let id3 = to_float(get(split(s3, "|"), 1.0))
       let rows3 = query("SELECT gate_report FROM osp_forecast WHERE id = ?", [to_string(id3)])
@@ -3240,7 +4006,7 @@ test "n625 W4: короткий горизонт помечается в gate_re
       let drows = query("SELECT date('now', '+3 days') AS rb, date('now', '-1 day') AS ao", [])
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
-      let saved = OSPSaveCard("n625 короткий горизонт уникальный", 0.6, "Критерий: публикация отчёта агентства по итогам квартала", ao, rb, "[\"https://example.org/short\"]", -1, "", -1.0, "")
+      let saved = OSPSaveCard("n625 короткий горизонт уникальный", 0.6, "Критерий: публикация отчёта агентства по итогам квартала", ao, rb, "[\"https://example.org/short\"]", -1, "", -1.0, "", "[]", "[]", 1)
       assert_contains(saved, "OK|")
       let id = to_float(get(split(saved, "|"), 1.0))
       let rows = query("SELECT gate_report FROM osp_forecast WHERE id = ?", [to_string(id)])
@@ -3254,7 +4020,7 @@ test "n625 verify: да после resolve_by — resolved, строка brier_s
       let drows = query("SELECT date('now', '+30 days') AS rb, date('now', '-1 day') AS ao", [])
       let rb = to_string(json_get(get(drows, 0.0), "rb", ""))
       let ao = to_string(json_get(get(drows, 0.0), "ao", ""))
-      let saved = OSPSaveCard("n625 verify-вопрос уникальный", 0.25, "Критерий: ставка по итогу заседания опубликована пресс-релизом", ao, rb, "[\"https://fred.stlouisfed.org/series/DFF\"]", -1, "", -1.0, "")
+      let saved = OSPSaveCard("n625 verify-вопрос уникальный", 0.25, "Критерий: ставка по итогу заседания опубликована пресс-релизом", ao, rb, "[\"https://fred.stlouisfed.org/series/DFF\"]", -1, "", -1.0, "", "[]", "[]", 1)
       let id = to_float(get(split(saved, "|"), 1.0))
       // до горизонта — отказ
       assert_contains(OSPVerifyCard(id, "да", ""), "NO|горизонт не наступил")
@@ -3274,7 +4040,7 @@ test "n625 verify: да после resolve_by — resolved, строка brier_s
       assert_contains(OSPVerifyCard(id, "да", ""), "NO|статус resolved")
       // нераспознанный исход — отказ, модель не угадывает; горизонт в прошлом,
       // иначе rb-проверка сработает раньше парса
-      let saved2 = OSPSaveCard("n625 verify-вопрос второй уникальный", 0.6, "Критерий: отчёт опубликован агентством с датой выпуска", ao, rb, "[\"https://example.org/v2\"]", -1, "", -1.0, "")
+      let saved2 = OSPSaveCard("n625 verify-вопрос второй уникальный", 0.6, "Критерий: отчёт опубликован агентством с датой выпуска", ao, rb, "[\"https://example.org/v2\"]", -1, "", -1.0, "", "[]", "[]", 1)
       let id2 = to_float(get(split(saved2, "|"), 1.0))
       let _ = OSPW2ForcePast(id2)
       assert_contains(OSPVerifyCard(id2, "может быть", ""), "FAIL|исход не распознан")
@@ -3611,4 +4377,731 @@ test "n626 вахта: due-карточки в списке, bench — отде�
       // карточка в грейсе не тронута
       let gr = query("SELECT COUNT(*) AS c FROM osp_forecast WHERE status = 'watching' AND resolve_by = ?", [drec])
       assert_eq(to_float(to_string(json_get(get(gr, 0.0), "c", "0"))) >= 1.0, true)
+  }}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Тесты W4 #627: Platt (§5.2), сжатие поправки 1, кривая, методики §7.2,
+// A/B §7.4. Фикстуры подобраны симуляцией (scripts/n627_platt_sim.py):
+//   A: train/hold сильная связь → a=2.11, gain=0.0099 → ADOPTED
+//   B: hold нейтральный (p=0.5, y пополам) → gain=0.0000 → REJECTED
+//      (мутация порога 0.005→0: ADOPTED — тест красный)
+//   C: hold обратный → gain=−0.17 → REJECTED (честный fit);
+//      мутация «обучить на отложке» → gain=+0.81 ADOPTED — тест красный
+// ═══════════════════════════════════════════════════════════════════════
+
+// Фикстура: resolved-строка с исходом и verified_at N дней назад
+// (ORDER BY verified_at DESC, id DESC — хвост отложки всегда новее обучения)
+pattern OSPW27SeedCal(kind: String, p: Float, y: Float, days_ago: Float, gate: String) -> String {
+  let _ = OSPFEnsureSchema()
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_final, outcome, cal_bucket, verified_at, gate_report, created_at) VALUES (?, ?, 'resolved', ?, ?, 1, datetime('now', '-' || ? || ' days'), ?, datetime('now'))", [kind, "n627 cal-fixture " + kind + " p=" + to_string(p) + " y=" + to_string(y), to_string(p), to_string(y), to_string(days_ago), gate])
+  return "ok"
+}
+
+// Фикстура: resolved-строка с базовой частотой (для OSPPriorFit, поправка 1)
+pattern OSPW27SeedPrior(kind: String, p: Float, y: Float, rate: Float, n: Float, days_ago: Float) -> String {
+  let _ = OSPFEnsureSchema()
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_final, outcome, prior_rate, prior_n, cal_bucket, verified_at, created_at) VALUES (?, ?, 'resolved', ?, ?, ?, ?, 1, datetime('now', '-' || ? || ' days'), datetime('now'))", [kind, "n627 prior-fixture " + kind, to_string(p), to_string(y), to_string(rate), to_string(n), to_string(days_ago)])
+  return "ok"
+}
+
+// Фикстура: resolved-карточка + строка прогона ансамбля (для OSPMethodAB)
+pattern OSPW27SeedAB(kind: String, method: String, p_i: Float, y: Float) -> String {
+  let _ = OSPFEnsureSchema()
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_final, outcome, cal_bucket, verified_at, created_at) VALUES (?, ?, 'resolved', ?, ?, 1, datetime('now'), datetime('now'))", [kind, "n627 ab-fixture " + kind, to_string(p_i), to_string(y)])
+  let _ = db_execute("INSERT INTO osp_forecast_method_runs (forecast_id, method, p_i, family) VALUES ((SELECT id FROM osp_forecast WHERE question = ? AND kind = ? ORDER BY id DESC LIMIT 1), ?, ?, ?)", ["n627 ab-fixture " + kind, kind, method, to_string(p_i), OSPFamilyOf(method)])
+  return "ok"
+}
+
+test "n627 Platt ADOPTED: сильная связь train+hold, gain 0.0099 ≥ 0.005" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      if OSPW2SeedIfEmpty("n627cal") == "empty" then {
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 120.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 119.0, "")
+        // ... 60 строк обучения: 30 «да» + 30 «нет» (сильная связь)
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 118.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 117.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 116.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 115.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 114.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 113.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 112.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 111.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 110.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 109.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 108.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 107.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 106.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 105.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 104.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 103.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 102.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 101.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 100.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 99.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 98.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 97.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 96.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 95.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 94.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 93.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 92.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 91.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 90.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 89.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 88.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 87.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 86.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 85.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 84.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 83.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 82.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 81.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 80.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 79.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 78.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 77.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 76.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 75.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 74.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 73.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 72.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 71.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 70.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 69.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 68.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 67.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 66.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 65.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 64.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 63.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 121.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 122.0, "")
+        // ... 30 строк отложки (новее): та же сильная связь
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 62.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 61.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 60.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 59.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 58.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 57.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 56.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 55.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 54.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 53.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 52.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 51.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 50.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 49.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 48.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 47.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 46.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 45.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 44.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 43.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 42.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 41.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 39.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 38.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 37.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 36.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 35.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.9, 1.0, 34.0, "")
+        let _ = OSPW27SeedCal("n627cal", 0.1, 0.0, 33.0, "")
+      }
+      let r = OSPPlattFit("n627cal")
+      // ожидание из симуляции: a≈2.11, gain=0.00991 → ADOPTED
+      assert_contains(r, "ADOPTED gain=0.0099")
+      assert_contains(r, "holdout_n=30 train_n=60")
+      // ADOPTED → применение: p=0.9 тянется к краю (sigmoid(2.11·logit(0.9))≈0.990)
+      let ap = OSPPlattApply(0.9)
+      assert_eq(ap > 0.95, true)
+      let cn = query("SELECT value FROM system_settings WHERE key = 'osp_cal_note'", [])
+      assert_contains(to_string(json_get(get(cn, 0.0), "value", "")), "ADOPTED")
+  }}
+
+test "n627 Platt порог: слабый выигрыш 0.0040 < 0.005 → REJECTED (MUT порога 0 → красный)" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      if OSPW2SeedIfEmpty("n627thresh") == "empty" then {
+        // 60 строк обучения — сильная связь (как тест A)
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 120.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 119.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 118.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 117.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 116.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 115.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 114.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 113.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 112.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 111.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 110.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 109.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 108.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 107.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 106.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 105.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 104.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 103.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 102.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 101.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 100.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 99.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 98.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 97.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 96.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 95.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 94.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 93.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 92.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 91.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 90.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 89.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 88.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 87.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 86.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 85.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 84.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 83.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 82.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 81.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 80.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 79.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 78.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 77.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 76.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 75.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 74.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 73.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 72.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 71.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 70.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 69.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 68.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 67.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 66.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 65.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 64.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 63.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 62.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 61.0, "")
+        // 30 строк отложки: 4 сильные пары + 11 нейтральных пар → Platt
+        // помогает чуть-чуть: gain=0.0026 в (0, 0.005) → REJECTED,
+        // при мутации порога до 0 — ADOPTED (тест красный)
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.9, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.1, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627thresh", 0.5, 0.0, 40.0, "")
+      }
+      let r = OSPPlattFit("n627thresh")
+      // «нет выигрыша на отложке → REJECTED»: gain=0.0026 < 0.005
+      // (симуляция 0.002642; запас ×1.9 от дрейфа GD между python и mlog)
+      assert_contains(r, "REJECTED gain=0.0026")
+      // MUT-приёмка: снизить порог до 0 → ADOPTED → этот тест красный
+      // идентичность побитово: OSPPlattApply вернул вход без изменений
+      assert_eq(OSPPlattApply(0.42), 0.42)
+  }}
+
+test "n627 Platt утечка: обратный hold — REJECTED (MUT «обучить на отложке» → красный)" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      if OSPW2SeedIfEmpty("n627leak") == "empty" then {
+        // 60 строк обучения — сильная связь
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 120.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 119.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 118.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 117.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 116.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 115.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 114.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 113.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 112.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 111.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 110.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 109.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 108.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 107.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 106.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 105.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 104.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 103.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 102.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 101.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 100.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 99.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 98.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 97.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 96.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 95.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 94.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 93.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 92.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 91.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 90.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 89.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 88.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 87.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 86.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 85.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 84.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 83.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 82.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 81.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 80.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 79.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 78.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 77.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 76.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 75.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 74.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 73.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 72.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 71.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 70.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 69.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 68.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 67.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 66.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 65.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 64.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 63.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 1.0, 121.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 0.0, 122.0, "")
+        // 30 строк отложки — ОБРАТНАЯ связь: честный fit даёт gain −0.17
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.9, 0.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627leak", 0.1, 1.0, 40.0, "")
+      }
+      let r = OSPPlattFit("n627leak")
+      // разделение по времени защищает: связь отложки противоположна обучению
+      assert_contains(r, "REJECTED gain=-0.1709")
+      // MUT-приёмка: обучить на отложке вместо обучения → выигрыш +0.81
+      // на тех же данных → ADOPTED → тест красный (утечка поймана)
+      assert_eq(OSPPlattApply(0.42), 0.42)
+  }}
+
+test "n627 Platt нехватка: 10 строк — честный REJECTED, идентичность побитово" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      if OSPW2SeedIfEmpty("n627few") == "empty" then {
+        let _ = OSPW27SeedCal("n627few", 0.9, 1.0, 40.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.1, 0.0, 39.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.9, 1.0, 38.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.1, 0.0, 37.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.9, 1.0, 36.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.1, 0.0, 35.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.9, 1.0, 34.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.1, 0.0, 33.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.9, 1.0, 32.0, "")
+        let _ = OSPW27SeedCal("n627few", 0.1, 0.0, 31.0, "")
+      }
+      // указание владельца (#627): при нехватке данных калибровка честно REJECTED
+      let r = OSPPlattFit("n627few")
+      assert_contains(r, "REJECTED")
+      assert_contains(r, "недостаточно данных")
+      assert_contains(r, "holdout_n=10 train_n=0")
+      let ca = query("SELECT value FROM system_settings WHERE key = 'osp_cal_a'", [])
+      let cb = query("SELECT value FROM system_settings WHERE key = 'osp_cal_b'", [])
+      assert_eq(to_string(json_get(get(ca, 0.0), "value", "?")), "1.0")
+      assert_eq(to_string(json_get(get(cb, 0.0), "value", "?")), "0.0")
+      // идентичность ПОБИТОВО: p_final = clip(p_ensemble)
+      assert_eq(OSPPlattApply(0.77), 0.77)
+  }}
+
+test "n627 Platt поправка 3: unfit-config строки не идут в выборку" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      if OSPW2SeedIfEmpty("n627unfit") == "empty" then {
+        // 10 строк, все с пометкой непригодности конфигурации
+        let _ = OSPW27SeedCal("n627unfit", 0.9, 1.0, 40.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.1, 0.0, 39.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.9, 1.0, 38.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.1, 0.0, 37.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.9, 1.0, 36.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.1, 0.0, 35.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.9, 1.0, 34.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.1, 0.0, 33.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.9, 1.0, 32.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+        let _ = OSPW27SeedCal("n627unfit", 0.1, 0.0, 31.0, "{\"g1\":\"PASS\",\"calibration\":\"unfit-config\"}")
+      }
+      // unfit-строки не считаются: holdout_n=0 train_n=0 — не 10
+      let r = OSPPlattFit("n627unfit")
+      assert_contains(r, "holdout_n=0 train_n=0")
+  }}
+
+test "n627 сжатие поправки 1: нехватка — REJECTED, apply идентичен" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      if OSPW2SeedIfEmpty("n627prior") == "empty" then {
+        let _ = OSPW27SeedPrior("n627prior", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627prior", 0.55, 0.0, 0.5, 20.0, 39.0)
+        let _ = OSPW27SeedPrior("n627prior", 0.45, 1.0, 0.5, 20.0, 38.0)
+        let _ = OSPW27SeedPrior("n627prior", 0.55, 0.0, 0.5, 20.0, 37.0)
+        let _ = OSPW27SeedPrior("n627prior", 0.45, 1.0, 0.5, 20.0, 36.0)
+      }
+      let r = OSPPriorFit("n627prior")
+      assert_contains(r, "REJECTED")
+      assert_contains(r, "сжатие выключено")
+      assert_contains(r, "holdout_n=5 train_n=0")
+      // идентичность побитово при выключенном сжатии
+      assert_eq(OSPPriorApply(999999.0, 0.6), 0.6)
+  }}
+
+test "n627 сжатие поправки 1: ADOPTED — w=n/(n+10) применяется" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let _ = kv_set("osp_ensemble_models", "off")
+      if OSPW2SeedIfEmpty("n627priorok") == "empty" then {
+        // 60 строк обучения + 30 отложки: rate=0.5 близко к истинному, p шумное
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 120.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 119.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 118.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 117.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 116.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 115.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 114.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 113.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 112.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 111.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 110.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 109.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 108.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 107.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 106.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 105.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 104.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 103.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 102.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 101.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 100.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 99.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 98.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 97.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 96.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 95.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 94.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 93.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 92.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 91.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 90.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 89.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 88.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 87.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 86.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 85.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 84.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 83.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 82.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 81.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 80.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 79.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 78.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 77.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 76.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 75.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 74.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 73.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 72.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 71.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 70.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 69.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 68.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 67.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 66.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 65.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 64.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 63.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 121.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 122.0)
+        // 30 строк отложки — та же картина: сжатие помогает (gain 0.0356)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.45, 1.0, 0.5, 20.0, 40.0)
+        let _ = OSPW27SeedPrior("n627priorok", 0.55, 0.0, 0.5, 20.0, 40.0)
+      }
+      let r = OSPPriorFit("n627priorok")
+      // симуляция: gain=0.0356 ≥ 0.005 → ADOPTED
+      assert_contains(r, "ADOPTED gain=0.0356")
+      assert_eq(OSPPriorWeight(20.0), 0.6666666666666666)
+      // карточка с prior_rate=0.5, prior_n=20: p=0.6 → 0.667·0.5+0.333·0.6=0.5333
+      let fid = query("SELECT id, prior_rate, prior_n FROM osp_forecast WHERE kind = 'n627priorok' AND prior_rate IS NOT NULL ORDER BY id DESC LIMIT 1", [])
+      let idv = to_float(to_string(json_get(get(fid, 0.0), "id", "0")))
+      assert_eq(OSPFmt4(OSPPriorApply(idv, 0.6)), "0.5333")
+  }}
+
+
+// Фикстура кривой: resolved-строка с ЗАДАННЫМ cal_bucket (OSPW2SeedResolved
+// пишет bucket=1 всем — кривой нужен честный расклад по децилям)
+pattern OSPW27SeedBucket(kind: String, p: Float, y: Float, bucket: Float) -> String {
+  let _ = OSPFEnsureSchema()
+  let _ = db_execute("INSERT INTO osp_forecast (kind, question, status, p_final, outcome, cal_bucket, verified_at, created_at) VALUES (?, ?, 'resolved', ?, ?, ?, datetime('now'), datetime('now'))", [kind, "n627 curve-fixture " + kind + " p=" + to_string(p), to_string(p), to_string(y), to_string(bucket)])
+  return "ok"
+}
+
+test "n627 кривая: 3 бакета × 5 строк — JSON в monthly_reviews; нехватка — честный NO" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let pm = query("SELECT strftime('%Y-%m', 'now') AS p", [])
+      let period = to_string(json_get(get(pm, 0.0), "p", ""))
+      if OSPW2SeedIfEmpty("n627curve") == "empty" then {
+        // бакет 1 (p≈0.05): 5 строк, y=1 — верхняя кривая-ошибка переуверенности
+        let _ = OSPW27SeedBucket("n627curve", 0.05, 1.0, 1.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.05, 1.0, 1.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.05, 1.0, 1.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.05, 1.0, 1.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.05, 1.0, 1.0)
+        // бакет 5 (p=0.5): 5 строк, y=0
+        let _ = OSPW27SeedBucket("n627curve", 0.5, 0.0, 5.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.5, 0.0, 5.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.5, 0.0, 5.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.5, 0.0, 5.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.5, 0.0, 5.0)
+        // бакет 9 (p≈0.9): 5 строк, y=1
+        let _ = OSPW27SeedBucket("n627curve", 0.9, 1.0, 9.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.9, 1.0, 9.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.9, 1.0, 9.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.9, 1.0, 9.0)
+        let _ = OSPW27SeedBucket("n627curve", 0.9, 1.0, 9.0)
+      }
+      let r = OSPCalibrationCurve("n627curve", period, "")
+      assert_contains(r, "OK|" + period + "|бакетов=3|строк=15")
+      let row = query("SELECT calibration_curve FROM monthly_reviews WHERE year_month = ?", [period])
+      let cc = to_string(json_get(get(row, 0.0), "calibration_curve", ""))
+      assert_contains(cc, "0-10%")
+      assert_contains(cc, "40-50%")
+      assert_contains(cc, "80-90%")
+      assert_contains(cc, "\"mean_p\":0.05")
+      // кривой период — отказ по форме
+      assert_contains(OSPCalibrationCurve("n627curve", "2026-1", ""), "NO|период не ГГГГ-ММ")
+      // нехватка: 4 строки в новом контуре — бакетов 0/3
+      if OSPW2SeedIfEmpty("n627curve2") == "empty" then {
+        let _ = OSPW2SeedResolved("n627curve2", 0.5, 1.0)
+        let _ = OSPW2SeedResolved("n627curve2", 0.5, 0.0)
+        let _ = OSPW2SeedResolved("n627curve2", 0.5, 1.0)
+        let _ = OSPW2SeedResolved("n627curve2", 0.5, 0.0)
+      }
+      let r2 = OSPCalibrationCurve("n627curve2", period, "")
+      assert_contains(r2, "NO|недостаточно данных для кривой")
+  }}
+
+test "n627 методики: assumptions, deception, CG, PMESII — PASS/W/SKIP" {
+  // 1. Key Assumptions Check
+  assert_contains(OSPAssumptionsGate("[{\"text\":\"ставка снижена\",\"confidence\":0.7,\"evidence_url\":\"https://fred\",\"if_wrong\":\"инфляция\"},{\"text\":\"спрос устойчив\",\"confidence\":0.6,\"evidence_url\":\"https://x\",\"if_wrong\":\"спад\"},{\"text\":\"трейд-флоу положительный [СПЕКУЛЯЦИЯ]\",\"confidence\":0.5,\"evidence_url\":\"\",\"if_wrong\":\"отток\"}]"), "PASS|допущений=3")
+  assert_contains(OSPAssumptionsGate("[{\"text\":\"a\",\"confidence\":0.5,\"evidence_url\":\"\",\"if_wrong\":\"\"},{\"text\":\"b\",\"confidence\":0.6,\"evidence_url\":\"\",\"if_wrong\":\"\"}]"), "W: допущений 2")
+  assert_contains(OSPAssumptionsGate("[{\"text\":\"a\",\"confidence\":\"высокая\",\"evidence_url\":\"\",\"if_wrong\":\"\"},{\"text\":\"b\",\"confidence\":0.6,\"evidence_url\":\"\",\"if_wrong\":\"\"},{\"text\":\"c\",\"confidence\":0.5,\"evidence_url\":\"\",\"if_wrong\":\"\"}]"), "confidence не число: 1")
+  assert_contains(OSPAssumptionsGate("[{\"text\":\"a\",\"confidence\":0.5,\"evidence_url\":\"\",\"if_wrong\":\"\"},{\"text\":\"b\",\"confidence\":0.6,\"evidence_url\":\"\",\"if_wrong\":\"\"},{\"text\":\"c без источника и без метки\",\"confidence\":0.5,\"evidence_url\":\"\",\"if_wrong\":\"\"}]"), "без evidence_url")
+  assert_contains(OSPAssumptionsGate(""), "SKIP|не заявлено")
+  // 2. Deception Detection
+  assert_contains(OSPDeceptionGate("[{\"tier\":\"primary\",\"interested\":true}]"), "W: единственный источник primary")
+  assert_eq(OSPDeceptionGate("[{\"tier\":\"primary\",\"interested\":false}]"), "")
+  assert_eq(OSPDeceptionGate("[{\"tier\":\"primary\",\"interested\":true},{\"tier\":\"secondary\",\"interested\":false}]"), "")
+  assert_eq(OSPDeceptionGate("[\"https://example.org/a\"]"), "")
+  // 3. Центр тяжести CG→CC→CR→CV
+  assert_contains(OSPCGGate("{\"cg_chain\":{\"cg\":\"ПЛБ\",\"cc\":\"ПАВО\",\"cr\":\"речка\",\"cv\":\"мост\"}}"), "PASS|CG→CC→CR→CV")
+  assert_contains(OSPCGGate("{\"cg_chain\":{\"cg\":\"ПЛБ\",\"cc\":\"\",\"cr\":\"речка\",\"cv\":\"мост\"}}"), "W: центр тяжести заявлен, но не построен")
+  assert_eq(OSPCGGate("{}"), "")
+  // 4. PMESII-PT (только depth≥2)
+  assert_contains(OSPMesiiGate("{\"frame\":{\"P\":\"п\",\"M\":\"м\",\"E\":\"э\",\"S\":\"с\",\"I\":\"и\",\"IT\":\"ит\",\"PH\":\"фх\",\"T\":\"т\"}}", 2), "PASS|PMESII-PT 8/8")
+  assert_contains(OSPMesiiGate("{\"frame\":{\"P\":\"п\",\"M\":\"м\",\"E\":\"э\",\"S\":\"с\",\"I\":\"и\"}}", 3), "W: PMESII-PT заявлен, заполнено 5/8")
+  assert_eq(OSPMesiiGate("{\"frame\":{\"P\":\"п\"}}", 1), "")
+  assert_eq(OSPMesiiGate("{}", 4), "")
+}
+
+test "n627 методики: матрица противоречий, потенциал из сил, дерево, нарративы" {
+  // 5. Cross-Impact: противоречие без feedback
+  assert_contains(OSPMatrixGate("{\"matrix\":[{\"a\":\"инфляция\",\"b\":\"ставка\",\"sign\":\"+\",\"weight\":1.0},{\"a\":\"ставка\",\"b\":\"инфляция\",\"sign\":\"-\",\"weight\":1.0}]}"), "W: противоречие матрицы без feedback: инфляция↔ставка")
+  // с пометкой feedback противоречие легально
+  assert_eq(OSPMatrixGate("{\"matrix\":[{\"a\":\"инфляция\",\"b\":\"ставка\",\"sign\":\"+\",\"weight\":1.0,\"feedback\":true},{\"a\":\"ставка\",\"b\":\"инфляция\",\"sign\":\"-\",\"weight\":1.0,\"feedback\":false}]}"), "")
+  // потенциал из матрицы сил — программа (0.8·0.7·0.6·0.5·0.4·1.0 = 0.0672)
+  assert_contains(OSPMatrixGate("{\"forces\":{\"A\":0.8,\"R\":0.7,\"S\":0.6,\"L\":0.5,\"E\":0.4,\"E_mod\":1.0}}"), "потенциал P=0.0672")
+  assert_eq(OSPMatrixGate("{}"), "")
+  // 6. Дерево: сходится (Σevent=0.6 vs p_final=0.55)
+  let tree_ok = "{\"tree\":[{\"node\":\"A\",\"parent\":\"\",\"question\":\"корень\",\"p_cond\":1.0},{\"node\":\"B\",\"parent\":\"A\",\"question\":\"ветка да\",\"p_cond\":0.6,\"event\":\"true\"},{\"node\":\"C\",\"parent\":\"A\",\"question\":\"ветка нет\",\"p_cond\":0.4,\"event\":\"false\"}]}"
+  assert_contains(OSPTreeGate(tree_ok, 0.55), "PASS|дерево сходится")
+  // расхождение > 0.15 — G-гейт
+  assert_contains(OSPTreeGate(tree_ok, 0.85), "FAIL|дерево не сходится с ответом")
+  // сумма терминальных > 1
+  let tree_sum = "{\"tree\":[{\"node\":\"A\",\"parent\":\"\",\"question\":\"да\",\"p_cond\":0.7,\"event\":\"true\"},{\"node\":\"B\",\"parent\":\"\",\"question\":\"нет\",\"p_cond\":0.6,\"event\":\"false\"}]}"
+  assert_contains(OSPTreeGate(tree_sum, 0.7), "FAIL|сумма терминальных ветвей 1.3000 > 1")
+  // без event-разметки — честное W, выдуманной сверки нет
+  assert_contains(OSPTreeGate("{\"tree\":[{\"node\":\"A\",\"parent\":\"\",\"question\":\"x\",\"p_cond\":0.5}]}", 0.5), "W: у дерева нет event-разметки")
+  assert_eq(OSPTreeGate("{}", 0.5), "SKIP")
+  // 7. Нарративы: ровно 2, у каждого ≥2 индикаторов с датой
+  let narr_ok = "{\"narratives\":[{\"name\":\"эскалация\",\"if_true_indicators\":[{\"indicator\":\"передислокация бригад\",\"verify_date\":\"2026-12-01\",\"confirms_what\":\"эскалация\"},{\"indicator\":\"обмен ударами по базам\",\"verify_date\":\"2026-12-15\",\"confirms_what\":\"эскалация\"}]},{\"name\":\"деэскалация\",\"if_true_indicators\":[{\"indicator\":\"пресс-релиз о переговорах\",\"verify_date\":\"2026-12-05\",\"confirms_what\":\"деэскалация\"},{\"indicator\":\"снижение ОбО\",\"verify_date\":\"2026-12-20\",\"confirms_what\":\"деэскалация\"}]}]}"
+  assert_contains(OSPNarrativesGate(narr_ok, 1.0, -1.0), "OK|индикаторов записано=4")
+  assert_contains(OSPNarrativesGate("{\"narratives\":[{\"name\":\"один\",\"if_true_indicators\":[]}]}", 1.0, -1.0), "W: нарративов 1")
+  let narr_bad = "{\"narratives\":[{\"name\":\"а\",\"if_true_indicators\":[]},{\"name\":\"б\",\"if_true_indicators\":[]}]}"
+  assert_contains(OSPNarrativesGate(narr_bad, 1.0, -1.0), "W: у нарративов нет ≥2 индикаторов с датой")
+  assert_eq(OSPNarrativesGate("{}", 1.0, -1.0), "SKIP")
+}
+
+test "n627 OSPMethodsGate: дерево не сходится — BLOCK; пустые методы — PASS" {
+  let tree_bad = "{\"tree\":[{\"node\":\"A\",\"parent\":\"\",\"question\":\"корень\",\"p_cond\":1.0},{\"node\":\"B\",\"parent\":\"A\",\"question\":\"да\",\"p_cond\":0.9,\"event\":\"true\"},{\"node\":\"C\",\"parent\":\"A\",\"question\":\"нет\",\"p_cond\":0.1,\"event\":\"false\"}]}"
+  // Σevent=0.9 vs p_final=0.4 → расхождение 0.5 → публикация блокирована
+  assert_contains(OSPMethodsGate(tree_bad, "[]", "[]", 3, 0.4, 0.0, -1.0), "BLOCK|G7 дерево")
+  assert_contains(OSPMethodsGate("{}", "[]", "[]", 1, 0.5, 0.0, -1.0), "PASS|")
+  // сценные марки попадают в фрагмент gate_report
+  let mg = OSPMethodsGate("{\"cg_chain\":{\"cg\":\"1\",\"cc\":\"2\",\"cr\":\"3\",\"cv\":\"4\"}}", "[{\"text\":\"x\",\"confidence\":0.5,\"evidence_url\":\"https://x\",\"if_wrong\":\"y\"},{\"text\":\"y\",\"confidence\":0.6,\"evidence_url\":\"https://y\",\"if_wrong\":\"z\"},{\"text\":\"z [СПЕКУЛАЦИЯ]\",\"confidence\":0.4,\"evidence_url\":\"\",\"if_wrong\":\"w\"}]", "[]", 3, 0.5, 0.0, -1.0)
+  assert_contains(mg, "\"assumptions\":\"допущений=3\"")
+  assert_contains(mg, "\"cg\":\"CG→CC→CR→CV построена\"")
+}
+
+test "n627 A/B методологий: пол n≥10 — доска, skill_reviews, честный отказ" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      if OSPW2SeedIfEmpty("n627ab") == "empty" then {
+        // glm-4.6: 12 прогонов p_i=0.8, y=1 → Brier=0.04, skill vs 0.25=0.84
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "glm-4.6", 0.8, 1.0)
+        // kimi-k3: 9 прогонов — ниже пола
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 0.0)
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 0.0)
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 0.0)
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 1.0)
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 0.0)
+        let _ = OSPW27SeedAB("n627ab", "kimi-k3", 0.5, 1.0)
+      }
+      let board = OSPMethodAB("n627ab")
+      assert_contains(board, "glm-4.6: n=12, Brier=0.040, skill vs 0.25=0.840")
+      assert_contains(board, "kimi-k3: недостаточно данных (9/10) — число не публикуется")
+      // семейства моделей
+      assert_eq(OSPFamilyOf("openai/gpt-oss-20b"), "openai")
+      assert_eq(OSPFamilyOf("glm-4.6"), "glm")
+      assert_eq(OSPFamilyOf("kimi-k3"), "kimi")
+      assert_eq(OSPFamilyOf("gpt-oss-120b"), "gpt")
+      assert_eq(OSPFamilyOf("deepseek-chat"), "deepseek")
+  }}
+
+test "n627 слот и команды: ежемесячный обзор программой, /osp methods, /osp curve" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      let slot = OSPMonthlySlot()
+      assert_contains(slot, "Ежемесячный обзор ОСП")
+      // /osp methods — доска (контур owner; прогонов может не быть)
+      let ab = OSPMethodABCommand("111")
+      assert_contains(ab, "A/B методологий")
+      assert_contains(ab, "отложен владельцем")
+      // /osp curve — программный ответ без LLM (кривой период нормализуется
+      // к текущему; форма периода гвардится в OSPCalibrationCurve)
+      assert_contains(OSPCurveCommand("2026-1", "111"), "Калибровочная кривая (owner, ")
+      // строка калибровки в скор-блоке (при n≥10 — после метрик; n625test
+      // засеян n625-тестами: 12 разрешённых строк)
+      assert_contains(OSPScoreBlock("n625test"), "Калибровка Platt:")
+  }}
+
+test "n627 гигиена: боевые настройки калибровки восстановлены после тестов" {
+  let dbp = try query("SELECT 1 AS one", [])
+  if to_string(dbp) == "()" then { print("SKIP: БД недоступна в изолированном прогоне") } else {
+      // вердикты тестов не остаются боевыми: честная заглушка REJECTED
+      // (боевого ADOPTED в БД нет — фактический пересчёт /osp recalibrate)
+      let _ = OSPSettingUpsert("osp_cal_note", "REJECTED gain=0.0000 holdout_n=0 train_n=0 недостаточно данных (нужно train≥60, hold≥30) — идентичность a=1 b=0")
+      // коэффициенты — идентичность: боевых ADOPTED-данных в БД нет,
+      // фактический пересчёт — /osp recalibrate владельцем
+      let _ = OSPSettingUpsert("osp_cal_a", "1.0")
+      let _ = OSPSettingUpsert("osp_cal_b", "0.0")
+      // сжатие — тоже выключено
+      let _ = OSPSettingUpsert("osp_prior_note", "REJECTED gain=0.0000 holdout_n=0 train_n=0 недостаточно данных (нужно train≥60, hold≥30) — сжатие выключено (поправка 1)")
+      let cn = query("SELECT value FROM system_settings WHERE key = 'osp_cal_note'", [])
+      assert_contains(to_string(json_get(get(cn, 0.0), "value", "?")), "REJECTED")
+      // побитовая идентичность подтверждена
+      assert_eq(OSPPlattApply(0.33), 0.33)
+      assert_eq(OSPPriorApply(1.0, 0.44), 0.44)
   }}

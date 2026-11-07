@@ -118,7 +118,9 @@ def test_methodology_documented():
 
 
 def test_sherman_kent_scale_untouched():
-    # гвард #423: 12 гейтов ОСП не затронуты нарядом #469
-    gates = _pattern_body(OSP_MLOG, "OSPCheckQualityGates")
-    assert "g1_" in gates and "g12_noUncalib" in gates
-    assert "g13" not in gates, "сценарный гейт — отдельный механизм, не 13-й гейт"
+    # гвард #423/#469/#627: g1–g12 удалены (§7.3, наряд #627); сценарный гейт —
+    # ОТДЕЛЬНЫЙ механизм (не «13-й гейт»), живёт в OSPScenarioGateCheck
+    assert "pattern OSPCheckQualityGates" not in OSP_MLOG, "g1–g12 удалены нарядом #627 (§7.3)"
+    body = _pattern_body(OSP_MLOG, "OSPScenarioGateCheck")
+    assert "def " not in body and "sum" in body.lower() or "сумма" in body, "сценарный гейт на месте"
+    assert "pattern OSPCardGates" in OSP_MLOG, "карточные гейты публикации на месте"

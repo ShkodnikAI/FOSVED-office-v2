@@ -295,11 +295,11 @@ _(пополняется через `/debrief осп | <текст опыта>` 
 | 3 | claude-opus-4 | high | Глубокий анализ |
 | 4 | claude-opus-4 | high | Multi-turn, max reasoning |
 
-### Quality gates (программные)
+### Quality gates (программные, наряд #627 — по факту кода)
 
-- **BLOCKER** (failed → DRAFTED): awareness frame, no empty layers, topology has fruits, forces complete, both paths run, falsifiable indicators, chat summary ≤25 lines
-- **WARNING** (failed → DRAFTED, override possible): Layer 8 comparison, Layer 11 null hypothesis, ≥2 maneuvers, ≥3 fruits projected, divergence in tree
-- Gates проверяются через `OSPCheckQualityGates()` в osp.mlog после каждого анализа
+- **Блокируют публикацию карточки** (drafted → gated, причина в osp_forecast_events): G1 p∈[0,1] и структурный хвост CARD (json_validate); G2 критерий исхода ≥20 симв., resolve_by — ISO в будущем, as_of — не в будущем; G3 разброс ансамбля ≤0.25 при ≥3 прогонах; G5 есть наблюдаемый источник; G6prime расхождение с рынком >0.35 без market_dissent_reason; G7 дерево методик не сходится с p_final (расхождение >0.15) или сумма терминальных ветвей >1
+- **WARNING** (марки в gate_report, не блокировка): W1 отклонение от базовой частоты >0.3; W2 мало прогонов ансамбля; W3 расхождение с рынком 0.15–0.35; W6 расхождение >0.35 с обоснованием; W4 короткий горизонт (<7 дн); структурные проверки методик §7.2 — assumptions (≥3, evidence_url или [СПЕКУЛАЦИЯ], confidence числом), deception (единственный primary+interested источник), CG-цепочка (4 элемента), PMESII-PT (≥6/8 при depth≥2), матрица противоречий, нарративы (ровно 2 с ≥2 датированными индикаторами → строки indicator); сценарный гейт #469 (сумма середин сценариев 98–102%, непересекающиеся диапазоны)
+- Гейты живут в `dept/osp.mlog`: карточный контур `OSPCardGates`/`OSPEnsembleApply`/`OSPMethodsGate`, сценарный `OSPScenarioGateCheck`, финальный safety `OSPFinalSafetyCheck`; вердикты Platt/сжатия — `system_settings osp_cal_note/osp_prior_note`
 
 ### Auto-escalation triggers
 
