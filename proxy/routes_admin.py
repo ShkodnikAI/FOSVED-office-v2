@@ -2328,6 +2328,30 @@ def miniapp_redirect():
     from flask import redirect
     return redirect("/miniapp-spa", code=301)
 
+@app.get("/api/usage-by-key")
+def api_usage_by_key():
+    """#602: учёт использования по ключам отделов — лента вызовов и агрегаты
+    per-key. Shadow-контур: только чтение учётной ленты (usage_key_calls),
+    ключ исключительно маской (секрет никогда не возвращается), содержимое
+    запросов/ответов не логируется вовсе. days — окно агрегатов (1|7),
+    limit — глубина ленты."""
+    try:
+        days = max(1, min(int(request.args.get("days", "1")), 30))
+    except Exception:  # noqa: BLE001
+        days = 1
+    try:
+        limit = max(1, min(int(request.args.get("limit", "50")), 200))
+    except Exception:  # noqa: BLE001
+        limit = 50
+    try:
+        from proxy.usage_by_key import feed, agg_window, diff_window
+        return jsonify({"status": "ok", "agg": agg_window(days),
+                        "diff": diff_window(days), "feed": feed(limit)})
+    except Exception as e:  # noqa: BLE001
+        _log_error(f"usage-by-key api failed: {e}", dept="admin", kind="db_read")
+        return jsonify({"status": "error", "message": str(e)[:200]}), 500
+
+
 @app.get("/api/integrations")
 def api_integrations_list():
     """Список известных интеграций со статусом. Значение ключа никогда не отдаётся целиком.
