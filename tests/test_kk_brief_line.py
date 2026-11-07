@@ -45,8 +45,10 @@ class TestKkBriefLine:
         assert "let kk_line_24h = KKLine24h()" in SCHED
 
     def test_template_renders_kk_line(self):
-        # шаблон брифа содержит подстановку строки (после строки отказов)
-        assert "{kk_line}" in ROUTES
+        # #684 BRIEF-2: строка Кавальни — дословно после ответа модели, из
+        # промпта убрана (цифры не искажаются пересказом)
+        assert "{kk_line}" not in ROUTES
+        assert 'brief = brief + "\\n\\n" + kk_line' in ROUTES
         assert "kk_brief_line(d)" in ROUTES
 
     def test_kkline24h_sources_in_kk_module(self):
