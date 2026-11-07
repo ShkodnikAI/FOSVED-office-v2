@@ -341,7 +341,7 @@ class TestChainSkip:
         from proxy import providers as prov_mod
         calls = []
 
-        def fake_single(provider_name, model, messages, dept="yana", max_tokens=4096, is_internal=False):
+        def fake_single(provider_name, model, messages, dept="yana", max_tokens=4096, is_internal=False, **kw):  # #602: kwarg route
             calls.append((provider_name, model))
             if (provider_name, model) == ("groq", "openai/gpt-oss-20b"):
                 return None  # упал
