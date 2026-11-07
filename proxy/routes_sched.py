@@ -218,6 +218,111 @@ def dept_fail_line_24h():
         return ""
 
 
+# #684 A.1: фразы «всё хорошо» в тексте модели. Если список алертов непуст,
+# строка брифа с такой фразой вырезается — модель не может противоречить
+# данным (замечание владельца 07.11: «вмешательства не требуется» при двух
+# просроченных контурах и пустом резерве).
+_ATTENTION_FILTER_PHRASES = (
+    "вмешательств",
+    "не требует внимания",
+    "внимания не требуется",
+    "всё в порядке",
+    "все в порядке",
+    "всё нормально",
+    "все нормально",
+    "проблем нет",
+    "проблем не наблюдается",
+    "без происшествий",
+)
+
+
+def filter_model_conclusions(text: str, has_attention: bool):
+    """#684 A.1: фильтр «успокоительных» фраз модели при непустом списке алертов.
+
+    Вырезается вся строка, содержащая фразу из _ATTENTION_FILTER_PHRASES
+    (гранулярность строки сохраняет валидность Telegram MarkdownV2).
+    Возвращает (текст, список вырезанных строк). Список алертов пуст —
+    текст без изменений (модель вправе писать о порядке).
+    """
+    if not has_attention or not text:
+        return text, []
+    kept, removed = [], []
+    for ln in text.split("\n"):
+        low = ln.lower()
+        if any(p in low for p in _ATTENTION_FILTER_PHRASES):
+            removed.append(ln.strip()[:200])
+            continue
+        kept.append(ln)
+    if not removed:
+        return text, []
+    return "\n".join(kept), removed
+
+
+def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
+                            forge_backup_stale: bool, keys_line: str,
+                            dept_fail_line: str, kk_line: str,
+                            forge_attention: str, errors_digest: str) -> list:
+    """#684 A.1: алерты раздела «Что требует внимания» — программой.
+
+    Источники — те же сигналы, что и ниже в отчёте (модель их видит, но
+    раздел внимания собирается кодом). Полный список условий (наряд #684):
+      1. резерв FORGE не выполнен (сбой контура или нет строки итога);
+      2. последний итог резерва старше суток (свежий прогон не записан);
+      3. проверка ключей не выполнялась (>26 ч) или есть проблемные ключи;
+      4. отказы отделов за сутки > 0;
+      5. Кавальня «не работала» (выключена) или «сбор строки упал»;
+      6. висящие гейты/замечания FORGE (forge_attention непуст);
+      7. повторяющиеся ошибки офиса за сутки (errors_digest непуст).
+    Пустой список — валидный результат («Внимания не требуется»).
+    """
+    items = []
+    fbl = (forge_backup_line or "").strip()
+    if (not forge_backup_ok) or not fbl:
+        items.append("Резерв FORGE не выполнен" + (f" ({fbl[:160]})" if fbl else " (нет строки итога)"))
+    elif forge_backup_stale:
+        items.append("Последний итог резерва FORGE старше суток")
+    kl = (keys_line or "").strip()
+    if "НЕ выполнялась" in kl:
+        items.append("Проверка ключей не выполнялась (>26 ч)")
+    elif kl.startswith("🔑 Ключи: ⚠️"):
+        body = kl.replace("🔑 Ключи: ", "").strip()
+        items.append("Проблемы ключей: " + (body[:160] + "…" if len(body) > 160 else body))
+    dfl = (dept_fail_line or "").strip()
+    if dfl and "нет данных" not in dfl:
+        tail = dfl.rsplit(":", 1)[-1].strip() if ":" in dfl else dfl
+        if tail not in ("нет", "0"):
+            items.append(dfl)
+    kkl = (kk_line or "").strip()
+    if ("не работала" in kkl) or ("сбор строки упал" in kkl):
+        items.append("Кавальня: " + kkl.replace("Кавальня: ", ""))
+    fa = (forge_attention or "").strip()
+    if fa:
+        items.append("FORGE требует внимания:\n" + fa)
+    ed = (errors_digest or "").strip()
+    if ed:
+        items.append("Повторяющиеся ошибки офиса за сутки:\n" + ed)
+    return items
+
+
+def build_attention_section(items: list) -> str:
+    """#684 A.1: раздел внимания — дословно после ответа модели, не моделью.
+
+    Список пуст — честная строка «⚡ Внимания не требуется». Многострочные
+    элементы (гейты, ошибки) печатаются с отступом продолжения.
+    """
+    if not items:
+        return "⚡ Внимания не требуется"
+    lines = ["⚡ Что требует внимания:"]
+    for it in items:
+        sub = [s.strip() for s in str(it).split("\n") if s.strip()]
+        if not sub:
+            continue
+        lines.append("- " + sub[0])
+        for cont in sub[1:]:
+            lines.append("  " + cont)
+    return "\n".join(lines)
+
+
 def kk_brief_line(d: dict) -> str:
     """#671 KK-1: строка тренировочного контура Кавальни из payload брифа.
 
@@ -264,15 +369,30 @@ def scheduler_morning_brief():
     # + выгрузка forge_* документом. Запуск рядом с брифом — триггер BRIEF-1
     # (надёжный, подтверждён lz-daily); неудачи громкие (строка в брифе), не молчаливые.
     forge_backup_line = ""
+    # #684 A.1: факт выполнения резерва — для раздела внимания (программой)
+    forge_backup_ok = False
+    forge_backup_stale = False
     try:
         from proxy.forge_backup import run_forge_backup, store_backup_summary, export_forge_state
         backup_result = run_forge_backup()
         store_backup_summary(backup_result)
         forge_backup_line = backup_result.get("line", "")
+        forge_backup_ok = bool(backup_result.get("ok")) and bool(forge_backup_line.strip())
         export_forge_state(owner_id)  # документ владельцу; неудача не роняет бриф
     except Exception as e:
         log.warning(f"[morning_brief] forge backup/export failed (non-fatal): {e}")
         forge_backup_line = f"бэкап FORGE: сбой контура ({str(e)[:120]})"
+    # #684 A.1: «старше суток» — store_backup_summary пишет ts при каждом
+    # запуске; старый ts в system_settings = свежий итог не записан
+    try:
+        _srows = _query("SELECT value FROM system_settings WHERE key = 'forge_backup_summary'", fetch=True)
+        if _srows:
+            _ts = (json.loads(_srows[0]["value"]) or {}).get("ts", "")
+            if _ts:
+                _age_h = (datetime.utcnow() - datetime.fromisoformat(_ts).replace(tzinfo=None)).total_seconds() / 3600.0
+                forge_backup_stale = _age_h > 24.0
+    except Exception:
+        forge_backup_stale = False
 
     # FO-043 (наряд #150): недельный срез доли first-try — только по понедельникам
     forge_edit_line = ""
@@ -423,6 +543,20 @@ def scheduler_morning_brief():
         except Exception as e:
             log.warning(f"[morning_brief] error digest query failed: {e}")
 
+        # ── 2.5 #684 A.1: алерты раздела внимания — программой, до модели ──
+        # Источники — те же сигналы, что уходят в промпт ниже; список условий —
+        # в collect_attention_items. Пустой список — честное «Внимания не требуется».
+        attention_items = collect_attention_items(
+            forge_backup_ok=forge_backup_ok,
+            forge_backup_line=forge_backup_line,
+            forge_backup_stale=forge_backup_stale,
+            keys_line=keys_line,
+            dept_fail_line=dept_fail_line,
+            kk_line=kk_line,
+            forge_attention=forge_attention,
+            errors_digest=errors_digest,
+        )
+
         # ── 3. LZ daily findings (from memory) ──
         lz_findings = ""
         try:
@@ -456,7 +590,6 @@ def scheduler_morning_brief():
 {narads_queue_line}
 Коррекций за сутки: {corrections_24h}
 {dept_fail_line}
-{kk_line}
 {metrics_text}
 
 === FORGE: ЗАДАЧИ ОТ АГЕНТОВ, ЖДУЩИЕ ПОДТВЕРЖДЕНИЯ (proposed) ===
@@ -489,7 +622,8 @@ def scheduler_morning_brief():
 3. 🏢 Статус офиса — кратко, что происходит
 4. 🌍 Важные мировые события — ТОЛЬКО из раздела «Топ события за ночь» ниже, если он есть. Если раздела нет или он пуст — напиши буквально «За ночь значимых событий не зафиксировано» и не добавляй ничего от себя. ЗАПРЕЩЕНО придумывать события, даже правдоподобные.
 5. 🔍 Ключевые находки ЛЗ (если есть)
-6. ⚡ Что требует внимания хозяина (включая повторяющиеся ошибки офиса, если раздел непуст)
+
+#684: РАЗДЕЛ «ЧТО ТРЕБУЕТ ВНИМАНИЯ» ТЫ НЕ ПИШЕШЬ — он добавляется программой после твоего текста. ЗАПРЕЩЕНО писать выводы о необходимости вмешательства хозяина и фразы вида «всё в порядке», «не требует внимания», «проблем нет».
 
 ФОРМАТИРОВАНИЕ (Telegram MarkdownV2):
 ▸ Заголовки секций: *Жирный текст*
@@ -497,7 +631,7 @@ def scheduler_morning_brief():
 ▸ Подчёркивания важных пунктов: __подчёркнуто__
 ▸ Статусы: ✅ зелёный, ⚠️ жёлтый, ❌ красный
 ▸ НЕ используй кавычки " " или « » — они озвучиваются TTS
-▸ Эмодзи только как маркеры секций (📅🌤🏢🌍🔍⚡), не ставь эмодзи в середине предложений
+▸ Эмодзи только как маркеры секций (📅🌤🏢🌍🔍), не ставь эмодзи в середине предложений
 ▸ НЕ ставь # заголовки — Telegram их не рендерит
 
 Будь лаконичной но информативной. 7-12 предложений максимум."""
@@ -510,6 +644,17 @@ def scheduler_morning_brief():
         result = call_llm("yana", messages)
         brief = result["reply"]
 
+        # #684 A.1: фильтр «успокоительных» фраз модели — при непустом списке
+        # алертов строки «вмешательства не требуется» и т.п. вырезаются,
+        # срабатывание — в audit_log
+        brief, _filtered_phrases = filter_model_conclusions(brief, bool(attention_items))
+        if _filtered_phrases:
+            _log_audit("brief_attention_filter", {"removed": _filtered_phrases, "attention_items": len(attention_items)})
+
+        # #684 A.1: раздел внимания — дословно после ответа модели (собирает
+        # программа из тех же сигналов, что ниже в отчёте)
+        brief = brief + "\n\n" + build_attention_section(attention_items)
+
         # FO-042: строка резерва FORGE — точно в бриф (не через LLM, чтобы
         # цифры не искажались пересказом)
         if forge_backup_line:
@@ -520,6 +665,10 @@ def scheduler_morning_brief():
         # #486 A.4: раздел «Ключи» — дословно из последней проверки
         if keys_line:
             brief = brief + "\n\n" + keys_line
+        # #684 A.2: строка Кавальни — дословно (цифры не искажаются пересказом;
+        # из промпта строка убрана — наряд BRIEF-2)
+        if kk_line:
+            brief = brief + "\n\n" + kk_line
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         # №587 A.2: ряд оценки к брифу Яны (kind=brief)

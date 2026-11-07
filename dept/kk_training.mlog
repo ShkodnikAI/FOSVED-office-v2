@@ -161,6 +161,66 @@ pattern KKQuestionValid(kind: String, rule: String, src_page: String, horizon: F
   return "OK"
 }
 
+// ── #684 A.2: причины отклонений валидатора — человекочитаемые метки ──────
+// Метка не содержит запятых: накопитель причин — плоский список через запятую,
+// число вхождений — через split (метки не пересекаются как подстроки).
+pattern KKRejectLabel(code: String) -> String {
+  if code == "FAIL|kind" then { return "плохой тип" }
+  if code == "FAIL|rule" then { return "нет правила" }
+  if code == "FAIL|source_url" then { return "нет source_url" }
+  if code == "FAIL|horizon" then { return "плохой горизонт" }
+  if code == "FAIL|resolve_by" then { return "resolve_by в прошлом" }
+  if code == "FAIL|rule_json" then { return "rule не JSON" }
+  if code == "FAIL|rule_desc" then { return "нет desc" }
+  if code == "FAIL|rule_path" then { return "нет path" }
+  if code == "FAIL|rule_op" then { return "нет op" }
+  if code == "FAIL|rule_target" then { return "нет target" }
+  if code == "dup" then { return "дубль" }
+  if code == "plan" then { return "вне плана" }
+  return ""
+}
+
+// Дописать причину в плоский список (без ведущей запятой, пустая метка — no-op)
+pattern KKRejPush(rej: String, label: String) -> String {
+  if label == "" then { return rej }
+  if rej == "" then { return label }
+  return rej + "," + label
+}
+
+// Число вхождений метки в плоском списке
+pattern KKCountIn(joined: String, label: String) -> Float {
+  if joined == "" or label == "" then { return 0.0 }
+  return to_float(length(split(joined, label))) - 1.0
+}
+
+// Сегмент «метка (n)» — только при n > 0
+pattern KKAppendReason(acc: String, joined: String, label: String) -> String {
+  let n = KKCountIn(joined, label)
+  if n <= 0.0 then { return acc }
+  let part = label + " (" + to_string(n) + ")"
+  if acc == "" then { return part }
+  return acc + ", " + part
+}
+
+// Причины по плоскому списку: «нет source_url (2), дубль (1)» — порядок меток
+// фиксированный (от полей вопроса к плану)
+pattern KKReasonsFrom(flat: String) -> String {
+  let mut acc = ""
+  let acc = KKAppendReason(acc, flat, "нет source_url")
+  let acc = KKAppendReason(acc, flat, "нет правила")
+  let acc = KKAppendReason(acc, flat, "плохой тип")
+  let acc = KKAppendReason(acc, flat, "плохой горизонт")
+  let acc = KKAppendReason(acc, flat, "resolve_by в прошлом")
+  let acc = KKAppendReason(acc, flat, "rule не JSON")
+  let acc = KKAppendReason(acc, flat, "нет desc")
+  let acc = KKAppendReason(acc, flat, "нет path")
+  let acc = KKAppendReason(acc, flat, "нет op")
+  let acc = KKAppendReason(acc, flat, "нет target")
+  let acc = KKAppendReason(acc, flat, "дубль")
+  let acc = KKAppendReason(acc, flat, "вне плана")
+  return acc
+}
+
 // Нормализация для дедупа (наряд B.4): нижний регистр, одинарные пробелы.
 pattern KKNormalize(text: String) -> String {
   let t = lower(trim(text))
@@ -474,7 +534,7 @@ pattern KKResolveSlot() -> String {
     else if starts_with(to_string(res), "disputed") then { let disp = disp + 1.0 }
     else { let skipped = skipped + 1.0 }
   }
-  let summary = "resolved=" + to_string(done) + " disputed=" + to_string(disp) + " skipped=" + to_string(skipped)
+  let summary = "разрешено=" + to_string(done) + " спорных=" + to_string(disp) + " отложено=" + to_string(skipped)
   let _ = AuditLog("kk_resolve", "kavalnya", summary)
   return "kk-resolve: " + summary
 }
@@ -560,6 +620,57 @@ pattern KKWorstFails(dept: String) -> String {
   return out
 }
 
+// Отдел волны — человекочитаемое имя (наряд #684: разбивка в строке сводки)
+pattern KKDeptName(dept: String) -> String {
+  if dept == "osp" then { return "ОСП" }
+  if dept == "finance" then { return "финансы" }
+  if dept == "legal" then { return "юристы" }
+  return "ЛЗ"
+}
+
+// План дня отдела: 2 на завтра + 1 на неделю; понедельник +1 на месяц
+// (константы слота kk-ask: KKAskForDept в app.mlog вызывает KKSelectValid
+// с t1=2, t7=1, t30=понедельник)
+pattern KKPlanForToday() -> Float {
+  if KKIsMonday() == "yes" then { return 4.0 }
+  return 3.0
+}
+
+// Причина недобора отдела (наряд #684 A.2.3): валидатор (накопитель дня
+// kk_rej_flat, пишут вызовы KKSelectValid) → сбой генерации ИИ (kk_ai_fail)
+// → запись слота kk_ask → честное «не зафиксирована»
+pattern KKShortfallReason(dept: String) -> String {
+  let flat = kv_get("kk_rej_flat:" + dept + ":" + KKDayUtc())
+  let mut total_rej = 0.0
+  if flat != "" then { let total_rej = to_float(length(split(flat, ","))) }
+  if total_rej > 0.0 then {
+    let reasons_s = KKReasonsFrom(flat)
+    let mut word = "раза"
+    if total_rej > 4.0 or total_rej == 1.0 then { let word = "раз" }
+    let mut s = "валидатор отклонил " + to_string(total_rej) + " " + word
+    if reasons_s != "" then { let s = s + ": " + reasons_s }
+    return s
+  }
+  let ai_prev = kv_get("kk_ai_fail:" + dept + ":" + KKDayUtc())
+  if ai_prev != "" then {
+    if to_float(ai_prev) > 0.0 then { return "сбой генерации ИИ (" + to_string(to_float(ai_prev)) + ")" }
+  }
+  let arows = TryVal(try query("SELECT details FROM audit_log WHERE action = 'kk_ask' AND timestamp > datetime('now', '-1 day') ORDER BY id DESC LIMIT 1", []))
+  if to_string(arows) != "()" then {
+    if length(arows) > 0.0 then {
+      let details = to_string(json_get(get(arows, 0.0), "details", ""))
+      each part in split(details, "; ") {
+        let seg = trim(to_string(part))
+        if starts_with(seg, dept + ":") then {
+          let colon = index_of(seg, ":")
+          if colon >= 0.0 then { return trim(substring(seg, colon + 1.0, 300.0)) }
+        }
+      }
+    }
+  }
+  return "причина не зафиксирована"
+}
+
 // Строка сводки (наряд E): KKLine24h. Выключен или упал → «не работала —
 // причина»; пустая база → «нет данных» (тест F). Числа — round(x*100)/100.
 pattern KKLine24h() -> String {
@@ -575,6 +686,31 @@ pattern KKLine24hCore() -> String {
   let asked = query("SELECT COUNT(*) AS n FROM kk_questions WHERE asked_at > datetime('now', '-1 day')", [])
   let n = to_float(json_get(get(asked, 0.0), "n", "0"))
   if n == 0.0 then { return "" }
+  // #684 A.2: разбивка по отделам волны (все четыре, включая нули) и
+  // недоборы плана с причинами (KKShortfallReason: валидатор → сбой ИИ → слот)
+  let mut br = ""
+  let mut shortfalls = ""
+  let plan = KKPlanForToday()
+  each d in KKWaveDepts() {
+    let dept = to_string(d)
+    let dq = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = ?1 AND asked_at > datetime('now', '-1 day')", [dept])
+    let dn = to_float(json_get(get(dq, 0.0), "n", "0"))
+    if br == "" then { let br = KKDeptName(dept) + " " + to_string(dn) } else { let br = br + ", " + KKDeptName(dept) + " " + to_string(dn) }
+    if dn < plan then {
+      let line = KKDeptName(dept) + " " + to_string(dn) + " из " + to_string(plan) + " — " + KKShortfallReason(dept)
+      if shortfalls == "" then { let shortfalls = line } else { let shortfalls = shortfalls + "\n" + line }
+    }
+  }
+  // Ответы отделов за окно: валидная карточка (note пустой) / провал формы
+  let arows = query("SELECT COALESCE(SUM(CASE WHEN trim(note) = '' THEN 1 ELSE 0 END), 0) AS ok_n, COALESCE(SUM(CASE WHEN trim(note) != '' THEN 1 ELSE 0 END), 0) AS bad_n FROM kk_answers WHERE created_at > datetime('now', '-1 day')", [])
+  let x = to_float(json_get(get(arows, 0.0), "ok_n", "0"))
+  let y = to_float(json_get(get(arows, 0.0), "bad_n", "0"))
+  // Ожидают исхода: заданные в окне, ещё не разрешённые; ближайшие по resolve_by
+  let prows = query("SELECT COUNT(*) AS n, date(MIN(resolve_by), 'unixepoch') AS near_d FROM kk_questions WHERE asked_at > datetime('now', '-1 day') AND status IN ('open', 'answered')", [])
+  let p = to_float(json_get(get(prows, 0.0), "n", "0"))
+  let near_d = trim(to_string(json_get(get(prows, 0.0), "near_d", "")))
+  let mut near_s = ""
+  if p > 0.0 and near_d != "" then { let near_s = " (ближайшие — " + near_d + ")" }
   let resolved = query("SELECT COUNT(*) AS n FROM kk_outcomes WHERE resolved_at > datetime('now', '-1 day') AND outcome != 'disputed'", [])
   let m = to_float(json_get(get(resolved, 0.0), "n", "0"))
   let disputed = query("SELECT COUNT(*) AS n FROM kk_outcomes WHERE resolved_at > datetime('now', '-1 day') AND outcome = 'disputed'", [])
@@ -596,7 +732,9 @@ pattern KKLine24hCore() -> String {
     let e = json_get(get(fin_rows, 0.0), "e", "")
     if to_string(e) != "" then { let fin_s = to_string(KKRound2(to_float(to_string(e)))) }
   }
-  return "Кавальня: вчера " + to_string(n) + " вопросов, разрешено " + to_string(m) + ", спорных " + to_string(k) + "; Brier ОСП " + osp_s + " / ошибка финансов " + fin_s + "%"
+  let mut line = "Кавальня (24ч): задано " + to_string(n) + " — " + br + "; ответов с валидной карточкой " + to_string(x) + ", провал формы " + to_string(y) + "; ожидают исхода " + to_string(p) + near_s + "; разрешено " + to_string(m) + ", спорных " + to_string(k) + "; Brier ОСП " + osp_s + " / ошибка финансов " + fin_s + "%"
+  if shortfalls != "" then { let line = line + "\n" + shortfalls }
+  return line
 }
 
 // ── SVG-инфографика (наряд E): палитра Monolith F (dept/visual.mlog 437-444)
@@ -719,6 +857,8 @@ pattern KKSelectValid(raw: String, t1: Float, t7: Float, t30: Float) -> String {
   let mut c1 = 0.0
   let mut c7 = 0.0
   let mut c30 = 0.0
+  // #684 A.2: отклонения валидатора — плоский список меток без запятых
+  let mut rej = ""
   each q in list {
     let kind = trim(to_string(json_get(q, "kind", "")))
     let text = trim(to_string(json_get(q, "text", "")))
@@ -728,7 +868,8 @@ pattern KKSelectValid(raw: String, t1: Float, t7: Float, t30: Float) -> String {
     if to_string(rule_obj) != "()" and text != "" then {
       let rule_json = json_encode(rule_obj)
       let future = time() + horizon * 86400.0
-      if KKQuestionValid(kind, rule_json, url, horizon, future) == "OK" then {
+      let verdict = KKQuestionValid(kind, rule_json, url, horizon, future)
+      if verdict == "OK" then {
         if KKDedupOk(KKNormalize(text)) == "ok" then {
           let mut take = "no"
           if horizon <= 1.5 and c1 < t1 then {
@@ -746,12 +887,50 @@ pattern KKSelectValid(raw: String, t1: Float, t7: Float, t30: Float) -> String {
           if take == "yes" then {
             let item = json_encode({text: text, kind: kind, horizon_days: horizon, rule: rule_json, source_url: url})
             if picked == "" then { let picked = item } else { let picked = picked + "," + item }
+          } else {
+            // валиден, но бакет плана заполнен — вне плана дня
+            let rej = KKRejPush(rej, "вне плана")
           }
+        } else {
+          let rej = KKRejPush(rej, "дубль")
         }
+      } else {
+        let rej = KKRejPush(rej, KKRejectLabel(verdict))
       }
+    } else {
+      // объект без rule или без text — отклонён как вопрос без правила
+      let rej = KKRejPush(rej, "нет правила")
     }
   }
   let missing = (t1 + t7 + t30) - (c1 + c7 + c30)
+  // #684 A.2: итог по отделу — audit_log (kk_validate) и накопители дня для
+  // строки сводки (kk_rej_flat — причины валидатора, kk_ai_fail — сбои ИИ).
+  // Отдел приходит маркером kv из KKGenPromptBuild: слот kk-ask живёт в
+  // app.mlog, наряд #684 его не трогает.
+  let a_dept = kv_get("kk_ask_dept")
+  if a_dept == "" then { let a_dept = "kavalnya" }
+  let mut ai_s = "нет"
+  if length(list) == 0.0 then {
+    let ai_s = "да (ответ ИИ не разобран)"
+    let ai_key = "kk_ai_fail:" + a_dept + ":" + KKDayUtc()
+    let ai_prev = kv_get(ai_key)
+    let mut ai_n = 0.0
+    if ai_prev != "" then { let ai_n = to_float(ai_prev) }
+    let _ = kv_set(ai_key, to_string(ai_n + 1.0))
+  }
+  let flat_key = "kk_rej_flat:" + a_dept + ":" + KKDayUtc()
+  let flat_prev = kv_get(flat_key)
+  let mut flat = flat_prev
+  if flat == "" then { let flat = rej } else {
+    if rej != "" then { let flat = flat + "," + rej }
+  }
+  let _ = kv_set(flat_key, flat)
+  let mut total_rej = 0.0
+  if flat != "" then { let total_rej = to_float(length(split(flat, ","))) }
+  let reasons_s = KKReasonsFrom(flat)
+  let mut tail_s = "отклонено " + to_string(total_rej)
+  if reasons_s != "" then { let tail_s = tail_s + ": " + reasons_s }
+  let _ = AuditLog("kk_validate", a_dept, "план " + to_string(t1 + t7 + t30) + ", принято " + to_string(c1 + c7 + c30) + ", " + tail_s + "; ошибка ИИ: " + ai_s)
   return json_encode({picked: "[" + picked + "]", missing: missing})
 }
 
@@ -759,6 +938,10 @@ pattern KKSelectValid(raw: String, t1: Float, t7: Float, t30: Float) -> String {
 // машиночитаемый вывод; правило исхода — JSON с desc и опциональным
 // структурным путём (path/op/target) для программного разрешения (D.2).
 pattern KKGenPromptBuild(dept: String, news_block: String, t1: Float, t7: Float, t30: Float) -> String {
+  // #684 A.2: маркер отдела для итога KKSelectValid (kk_validate в audit_log
+  // и накопители kk_rej_flat/kk_ai_fail) — слот kk-ask живёт в app.mlog,
+  // наряд #684 его не трогает; маркер ставится перед каждым вызовом генерации
+  let _ = kv_set("kk_ask_dept", dept)
   let mut horizons = "два вопроса с горизонтом 1 день (исход наступит завтра), один вопрос с горизонтом 7 дней"
   if t30 > 0.0 then { let horizons = horizons + ", один вопрос с горизонтом 30 дней" }
   let domain = KKDomainQuery(dept)
@@ -778,6 +961,18 @@ pattern KKTestCleanup() -> String {
   let _ = db_execute_with_grant(g5, "DELETE FROM training_sessions WHERE dept_name = 'n671dept'", [])
   let g = grant_issue("db:delete:kk_questions", 3600.0, "n", 500)
   let _ = db_execute_with_grant(g, "DELETE FROM kk_questions WHERE norm LIKE 'n671%'", [])
+  // #684: строки фикстур наряда #684 (n684%) — таблицы те же
+  let g9 = grant_issue("db:delete:kk_outcomes", 3600.0, "n", 500)
+  let _ = db_execute_with_grant(g9, "DELETE FROM kk_outcomes WHERE question_id IN (SELECT id FROM kk_questions WHERE norm LIKE 'n684%')", [])
+  let g10 = grant_issue("db:delete:kk_answers", 3600.0, "n", 500)
+  let _ = db_execute_with_grant(g10, "DELETE FROM kk_answers WHERE question_id IN (SELECT id FROM kk_questions WHERE norm LIKE 'n684%')", [])
+  let g11 = grant_issue("db:delete:kk_questions", 3600.0, "n", 500)
+  let _ = db_execute_with_grant(g11, "DELETE FROM kk_questions WHERE norm LIKE 'n684%'", [])
+  // накопители дня #684 — сброс (день-scoped kv)
+  let _ = kv_set("kk_rej_flat:n671dept:" + KKDayUtc(), "")
+  let _ = kv_set("kk_ai_fail:n671dept:" + KKDayUtc(), "")
+  let _ = kv_set("kk_rej_flat:lz:" + KKDayUtc(), "")
+  let _ = kv_set("kk_rej_flat:osp:" + KKDayUtc(), "")
   return "ok"
 }
 
@@ -887,9 +1082,99 @@ test "n671: строка сводки — числа и формат по нар
   let _ = db_execute("UPDATE kk_questions SET status = 'resolved' WHERE id = ?1", [to_string(qid)])
   let _ = db_execute("INSERT INTO kk_outcomes (question_id, outcome, evidence_url, evidence_quote, resolved_by) VALUES (?1, 'yes', 'https://example.org/src', 'n671 цитата', 'program')", [to_string(qid)])
   let line = KKLine24h()
-  assert_contains(line, "Кавальня: вчера 1 вопросов")
+  assert_contains(line, "Кавальня (24ч): задано 1 — ОСП 1, финансы 0, юристы 0, ЛЗ 0")
   assert_contains(line, "разрешено 1")
   assert_contains(line, "Brier ОСП 0.13")
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'off')", [])
+}
+
+test "n684: строка сводки — формат 24ч, разбивка, ожидают исхода, недобор с причиной" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'on')", [])
+  // сценарий 07.11: ОСП 3, финансы 3, юристы 3, ЛЗ 0 — задано 9 из плана 12
+  let q1 = KKInsertQuestion("osp", "n684line вопрос ОСП один", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q2 = KKInsertQuestion("osp", "n684line вопрос ОСП два", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q3 = KKInsertQuestion("osp", "n684line вопрос ОСП три", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q4 = KKInsertQuestion("finance", "n684line вопрос фин один", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q5 = KKInsertQuestion("finance", "n684line вопрос фин два", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q6 = KKInsertQuestion("finance", "n684line вопрос фин три", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q7 = KKInsertQuestion("legal", "n684line вопрос юр один", "date", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q8 = KKInsertQuestion("legal", "n684line вопрос юр два", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q9 = KKInsertQuestion("legal", "n684line вопрос юр три", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  // ответы: 8 валидных карточек, 1 провал формы
+  let _ = KKAnswerRecord(q1, "osp", 0.5, "{}", "{}", "")
+  let _ = KKAnswerRecord(q2, "osp", 0.5, "{}", "{}", "")
+  let _ = KKAnswerRecord(q3, "osp", 100.0, "{}", "{}", "")
+  let _ = KKAnswerRecord(q4, "finance", 42.0, "{}", "{}", "")
+  let _ = KKAnswerRecord(q5, "finance", 17.0, "{}", "{}", "")
+  let _ = KKAnswerRecord(q6, "finance", 0.7, "{}", "{}", "")
+  let _ = KKAnswerRecord(q7, "legal", 3.0, "{}", "{}", "")
+  let _ = KKAnswerRecord(q8, "legal", 0.9, "{}", "{}", "")
+  let _ = KKAnswerRecord(q9, "legal", 0.0, "{}", "{}", "провал формы — нет claim")
+  // причина недобора ЛЗ: валидатор отклонил 3 раза — нет source_url
+  let _ = kv_set("kk_rej_flat:lz:" + KKDayUtc(), "нет source_url,нет source_url,нет source_url")
+  let line = KKLine24h()
+  assert_contains(line, "Кавальня (24ч): задано 9 — ОСП 3, финансы 3, юристы 3, ЛЗ 0")
+  assert_contains(line, "ответов с валидной карточкой 8, провал формы 1")
+  assert_contains(line, "ожидают исхода 9 (ближайшие — ")
+  assert_contains(line, "разрешено 0, спорных 0")
+  // недобор с причиной из записи слота (наряд #684 A.2.3); мутация «убрать
+  // причину пропуска» красит этот тест
+  assert_contains(line, "ЛЗ 0 из 3 — валидатор отклонил 3 раза: нет source_url (3)")
+  // окно честное: слово «вчера» в строке не появляется
+  assert_eq(KKCountIn(line, "вчера"), 0.0)
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'off')", [])
+}
+
+test "n684: KKSelectValid — итог по отделу в audit_log и накопителе" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = kv_set("kk_ask_dept", "n671dept")
+  // план 3 — на завтра 2, на неделю 1: 1 валидный, 3 отклонения — нет source_url,
+  // дубль, нет правила (объект без rule)
+  let _ = KKInsertQuestion("n671dept", "n684sel существующий вопрос для дедупа", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let raw = "[{\"text\":\"n684sel валидный вопрос про курс\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/b\"},{\"text\":\"n684sel без источника\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"\"},{\"text\":\"n684sel существующий вопрос для дедупа\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/a\"},{\"text\":\"n684sel без правила\",\"kind\":\"binary\",\"horizon_days\":1,\"source_url\":\"https://example.org/c\"}]"
+  let sel = KKSelectValid(raw, 2.0, 1.0, 0.0)
+  assert_contains(sel, "\"missing\":2")
+  let flat = kv_get("kk_rej_flat:n671dept:" + KKDayUtc())
+  assert_eq(KKCountIn(flat, "нет source_url"), 1.0)
+  assert_eq(KKCountIn(flat, "дубль"), 1.0)
+  assert_eq(KKCountIn(flat, "нет правила"), 1.0)
+  let arows = query("SELECT details FROM audit_log WHERE action = 'kk_validate' AND dept = 'n671dept' ORDER BY id DESC LIMIT 1", [])
+  let details = to_string(json_get(get(arows, 0.0), "details", ""))
+  assert_contains(details, "план 3")
+  assert_contains(details, "принято 1")
+  assert_contains(details, "отклонено 3")
+  assert_contains(details, "нет source_url (1)")
+  assert_contains(details, "дубль (1)")
+  assert_contains(details, "нет правила (1)")
+  assert_contains(details, "ошибка ИИ: нет")
+  // сбой ИИ: нечитаемый ответ — kk_ai_fail растёт, в audit честное «да»
+  let sel2 = KKSelectValid("совсем не JSON", 2.0, 1.0, 0.0)
+  let ai_n = kv_get("kk_ai_fail:n671dept:" + KKDayUtc())
+  assert_eq(to_float(ai_n), 1.0)
+  let arows2 = query("SELECT details FROM audit_log WHERE action = 'kk_validate' AND dept = 'n671dept' ORDER BY id DESC LIMIT 1", [])
+  assert_contains(to_string(json_get(get(arows2, 0.0), "details", "")), "ошибка ИИ: да")
+  let _ = KKTestCleanup()
+}
+
+test "n684: KKResolveSlot — итог разрешено, спорных, отложено в audit_log" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'on')", [])
+  // нет вопросов к разрешению — нули без сети
+  let rep = KKResolveSlot()
+  assert_contains(rep, "разрешено=0")
+  assert_contains(rep, "спорных=0")
+  assert_contains(rep, "отложено=0")
+  let arows = query("SELECT details FROM audit_log WHERE action = 'kk_resolve' ORDER BY id DESC LIMIT 1", [])
+  let details = to_string(json_get(get(arows, 0.0), "details", ""))
+  assert_contains(details, "разрешено=0")
+  assert_contains(details, "спорных=0")
+  assert_contains(details, "отложено=0")
   let _ = KKTestCleanup()
   let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'off')", [])
 }
