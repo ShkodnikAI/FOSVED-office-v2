@@ -121,11 +121,16 @@ def test_footer_reflects_factpack():
 
 
 def test_gates_untouched():
-    # 12 гейтов ОСП и финальный safety не трогаются ни #423, ни #474
-    gates = _pattern_body(OSP_MLOG, "OSPCheckQualityGates")
+    # #627 (§7.3): g1–g12 OSPCheckQualityGates удалены — поиск подстрок в прозе,
+    # два гейта всегда true, результат только в журнал. Замена — живые проверки:
+    # карточный контур (OSPCardGates/OSPEnsembleApply/OSPMethodsGate), сценарный
+    # гейт #469, финальный safety. Гвард: старого гейта нет, замена на месте.
     safety = _pattern_body(OSP_MLOG, "OSPFinalSafetyCheck")
-    assert "g1_" in gates and "g12_noUncalib" in gates, "12 гейтов должны остаться в исходном объёме"
     assert 'return "PASS"' in safety
+    assert "pattern OSPCheckQualityGates" not in OSP_MLOG, "g1–g12 удалены нарядом #627 (§7.3)"
+    assert "pattern OSPCardGates" in OSP_MLOG, "карточные гейты W1 на месте"
+    assert "pattern OSPMethodsGate" in OSP_MLOG, "структурные проверки методик #627 на месте"
+    assert "pattern OSPScenarioGateCheck" in OSP_MLOG, "сценарный гейт #469 на месте"
 
 
 def test_transport_is_shared_tavily_search():
