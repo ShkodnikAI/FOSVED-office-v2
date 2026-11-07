@@ -92,7 +92,10 @@ def test_serve_starts_and_health_answers(tmp_path):
         p = subprocess.Popen([str(MLOG), "serve", str(aug)], cwd=ROOT, env=env, stdout=fh, stderr=subprocess.STDOUT)
     try:
         ok = False
-        for _ in range(60):
+        # #627: dept/osp.mlog вырос (~1000 строк W4) — компиляция VM на медленных
+        # hosted-раннерах стала граничной к 60 окнам (CI 9d08ed6: prod_boot упал
+        # по таймингу, локально и на PR зелёный). 60→120 окон — запас ×2.
+        for _ in range(120):
             if p.poll() is not None:
                 break
             try:
