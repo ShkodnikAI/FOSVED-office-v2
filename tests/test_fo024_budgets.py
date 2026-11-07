@@ -132,7 +132,7 @@ def test_call_llm_hard_slices_heavy_model(monkeypatch):
 
     captured = {}
 
-    def fake_single(provider, model, messages, dept="yana", max_tokens=4096, is_internal=False):
+    def fake_single(provider, model, messages, dept="yana", max_tokens=4096, is_internal=False, **kw):  # #602: kwarg route
         captured["model"] = model
         return {"reply": "ok", "provider": provider, "model": model,
                 "tokens_in": 1, "tokens_out": 1}

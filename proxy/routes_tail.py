@@ -2788,6 +2788,8 @@ def expert_chart():
 CALL_PYTHON_ALLOWED = {
     # LLM-as-a-Verifier
     "llm_verifier": {"select", "score", "verify", "rank"},
+    # #602: учёт по ключам — ночная лента в сводку 07:15 (shadow, метаданные)
+    "usage_by_key": {"night_block"},
     # FO-035 A.2: secrets_store (SEC-5 минимальный) — AES-256-GCM, FORGE_MASTER_KEY
     "forge_secrets": {"set", "get"},
     # FORGE #221: детерминированные источники ЛЗ (arXiv/HN/GitHub) в общем пути /lz
