@@ -214,14 +214,14 @@ def _compaction_summarize(summary_prompt):
     """Дешёвая модель для summarize-компакции (race-пул: groq → cerebras).
     Передаётся в compact_context как summarize_fn (разрыв цикла импортов)."""
     try:
-        res = _call_single_provider("groq", "openai/gpt-oss-20b", summary_prompt,
+        res = _call_single_provider("groq", "openai/gpt-oss-20b", summary_prompt, route="compaction",
                                     dept="system", max_tokens=1024, is_internal=True)
         if res and res.get("reply"):
             return res
     except Exception as e:
         log.warning(f"compaction: groq summarize failed: {e}")
     try:
-        return _call_single_provider("cerebras", "gpt-oss-120b", summary_prompt,
+        return _call_single_provider("cerebras", "gpt-oss-120b", summary_prompt, route="compaction",
                                      dept="system", max_tokens=1024, is_internal=True)
     except Exception as e:
         log.warning(f"compaction: cerebras summarize failed: {e}")
@@ -237,17 +237,37 @@ def _compress_messages(messages, dept='yana'):
     return msgs, max(stats["tokens_before"] - stats["tokens_after"], 0)
 
 
-def _call_single_provider(provider_name, model, messages, dept='yana', max_tokens=4096, is_internal=False):
+def _call_single_provider(provider_name, model, messages, dept='yana', max_tokens=4096, is_internal=False, route=''):
     """Call a single provider+model. Returns result dict or None.
-    This is the low-level primitive used by both combo chains and direct calls."""
+    This is the low-level primitive used by both combo chains and direct calls.
+
+    #602 (shadow): каждая точка выхода пишет строку учётной ленты по ключам
+    (proxy/usage_by_key.record_call) — метаданные вызова, ключ ТОЛЬКО маской;
+    ошибки учёта глотаются самим учётом и поведение вызова не меняют."""
     prov = PROVIDERS.get(provider_name)
     if not prov:
+        # #602 shadow: отказ тоже в ленте (негативный контроль А)
+        try:
+            from proxy.usage_by_key import record_call
+            record_call(provider_name, "(unknown)", "(no provider)", dept, route, False, "no_provider", 0)
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"[usage_by_key] early record failed: {e}")
         return None
     api_key = get_secret(prov["env_key"])
     if not api_key:
+        try:
+            from proxy.usage_by_key import record_call
+            record_call(provider_name, prov["env_key"], "(no key)", dept, route, False, "no_key", 0)
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"[usage_by_key] early record failed: {e}")
         return None
     if not _breaker.can_call(provider_name):
         log.debug(f"CircuitBreaker: skipping {provider_name} (open)")
+        try:
+            from proxy.usage_by_key import record_call
+            record_call(provider_name, prov["env_key"], mask_key(api_key), dept, route, False, "breaker_open", 0)
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"[usage_by_key] early record failed: {e}")
         return None
 
     _trace_start = time.monotonic()
@@ -337,6 +357,7 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
                 "failure_bucket": "truncated",
                 "is_internal": is_internal,
             })
+            _trace_bucket = "truncated"
             return None
 
         # FO-022: пустой ответ = отказ (bucket empty), а не успех —
@@ -448,6 +469,18 @@ def _call_single_provider(provider_name, model, messages, dept='yana', max_token
             "is_internal": is_internal,
         })
         return None
+    finally:
+        # #602 shadow (негативный контроль А): каждый выход из вызова — строка
+        # учётной ленты; невалидный ключ (upstream 401/403 → bucket "forbidden")
+        # попадает как отказ, не проходит мимо. Секрет — только маской
+        # (негативный контроль Б); ошибки учёта глотаются самим учётом.
+        try:
+            from proxy.usage_by_key import record_call, mask_key
+            record_call(provider_name, prov["env_key"], mask_key(api_key), dept, route,
+                        _trace_ok, (_trace_bucket if not _trace_ok else None),
+                        (time.monotonic() - _trace_start) * 1000)
+        except Exception as _uk_err:  # noqa: BLE001 — shadow: не роняем вызов
+            log.debug(f"[usage_by_key] shadow record failed: {_uk_err}")
 
 # ──────────────────────────── CONFIG LOADING ────────────────────────────
 _cfg_cache = {"priority_provider": "zai", "priority_model": None, "overrides": {}}
@@ -620,7 +653,7 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
         for _m in _override_models:
             _eprov, _mmodel = _split_explicit_model(_m)
             _prov = _eprov or _provider_for_model(_mmodel)
-            _res = _call_single_provider(_prov, _mmodel, messages, dept=dept)
+            _res = _call_single_provider(_prov, _mmodel, messages, dept=dept, route="override")
             if _res and _res.get("reply"):
                 if compression_saved > 0:
                     _res["compression_saved"] = compression_saved
@@ -661,7 +694,7 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
         # №586 A.2: явная форма «провайдер:модель» уходит провайдеру БЕЗ префикса.
         _eprov, _mmodel = _split_explicit_model(model_override)
         provider = _eprov or _provider_for_model(_mmodel)
-        result = _call_single_provider(provider, _mmodel, messages, dept=dept)
+        result = _call_single_provider(provider, _mmodel, messages, dept=dept, route="direct")
         if result and result.get("reply"):
             if compression_saved > 0:
                 result["compression_saved"] = compression_saved
@@ -699,7 +732,7 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
     if len(race_entries) >= 2:
         def _race_call(entry):
             prov_name, model, max_tok = entry
-            return _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok)
+            return _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok, route="race")
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 futures = {pool.submit(_race_call, e): e for e in race_entries}
@@ -734,7 +767,7 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
             cap = PROVIDER_MAX_TOKENS.get(prov_name)
             if cap:
                 max_tok = min(max_tok, cap)
-            result = _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok)
+            result = _call_single_provider(prov_name, model, messages, dept=dept, max_tokens=max_tok, route="combo:" + combo_pre)
             if result and result.get("reply"):
                 if compression_saved > 0:
                     result["compression_saved"] = compression_saved
@@ -768,7 +801,7 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
         elif prov_name == "cerebras" and not use_model.startswith("gpt-oss"):
             use_model = "gpt-oss-120b"
         fb_max = PROVIDER_MAX_TOKENS.get(prov_name, 4096)
-        result = _call_single_provider(prov_name, use_model, messages, dept=dept, max_tokens=fb_max)
+        result = _call_single_provider(prov_name, use_model, messages, dept=dept, max_tokens=fb_max, route="fallback")
         if result and result.get("reply"):
             if compression_saved > 0:
                 result["compression_saved"] = compression_saved
