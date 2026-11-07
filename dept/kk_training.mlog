@@ -681,26 +681,14 @@ pattern KKLine24h() -> String {
   return to_string(r)
 }
 
-pattern KKLine24hCore() -> String {
+// ── Единый подсчёт 24ч (наряд #684 A.4.2, аудитор 07.11) ──────────────────
+// ВСЁ счётие за сутки живёт здесь: и строка брифа (KKLine24hCore), и карточки
+// /kk (KKStatsSvg/KKDeptSvg) читают одни и те же числа. Вторая реализация
+// подсчёта запрещена аудитором. Формат строки брифа не меняется.
+pattern KKStats24h() -> String {
   let _ = KKEnsureSchema()
   let asked = query("SELECT COUNT(*) AS n FROM kk_questions WHERE asked_at > datetime('now', '-1 day')", [])
   let n = to_float(json_get(get(asked, 0.0), "n", "0"))
-  if n == 0.0 then { return "" }
-  // #684 A.2: разбивка по отделам волны (все четыре, включая нули) и
-  // недоборы плана с причинами (KKShortfallReason: валидатор → сбой ИИ → слот)
-  let mut br = ""
-  let mut shortfalls = ""
-  let plan = KKPlanForToday()
-  each d in KKWaveDepts() {
-    let dept = to_string(d)
-    let dq = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = ?1 AND asked_at > datetime('now', '-1 day')", [dept])
-    let dn = to_float(json_get(get(dq, 0.0), "n", "0"))
-    if br == "" then { let br = KKDeptName(dept) + " " + to_string(dn) } else { let br = br + ", " + KKDeptName(dept) + " " + to_string(dn) }
-    if dn < plan then {
-      let line = KKDeptName(dept) + " " + to_string(dn) + " из " + to_string(plan) + " — " + KKShortfallReason(dept)
-      if shortfalls == "" then { let shortfalls = line } else { let shortfalls = shortfalls + "\n" + line }
-    }
-  }
   // Ответы отделов за окно: валидная карточка (note пустой) / провал формы
   let arows = query("SELECT COALESCE(SUM(CASE WHEN trim(note) = '' THEN 1 ELSE 0 END), 0) AS ok_n, COALESCE(SUM(CASE WHEN trim(note) != '' THEN 1 ELSE 0 END), 0) AS bad_n FROM kk_answers WHERE created_at > datetime('now', '-1 day')", [])
   let x = to_float(json_get(get(arows, 0.0), "ok_n", "0"))
@@ -709,8 +697,6 @@ pattern KKLine24hCore() -> String {
   let prows = query("SELECT COUNT(*) AS n, date(MIN(resolve_by), 'unixepoch') AS near_d FROM kk_questions WHERE asked_at > datetime('now', '-1 day') AND status IN ('open', 'answered')", [])
   let p = to_float(json_get(get(prows, 0.0), "n", "0"))
   let near_d = trim(to_string(json_get(get(prows, 0.0), "near_d", "")))
-  let mut near_s = ""
-  if p > 0.0 and near_d != "" then { let near_s = " (ближайшие — " + near_d + ")" }
   let resolved = query("SELECT COUNT(*) AS n FROM kk_outcomes WHERE resolved_at > datetime('now', '-1 day') AND outcome != 'disputed'", [])
   let m = to_float(json_get(get(resolved, 0.0), "n", "0"))
   let disputed = query("SELECT COUNT(*) AS n FROM kk_outcomes WHERE resolved_at > datetime('now', '-1 day') AND outcome = 'disputed'", [])
@@ -732,7 +718,100 @@ pattern KKLine24hCore() -> String {
     let e = json_get(get(fin_rows, 0.0), "e", "")
     if to_string(e) != "" then { let fin_s = to_string(KKRound2(to_float(to_string(e)))) }
   }
+  // Разбивка по отделам волны (все четыре, включая нули) и недоборы плана
+  // с причинами (KKShortfallReason: валидатор → сбой ИИ → слот) — те же,
+  // что в строке брифа.
+  let plan = KKPlanForToday()
+  let mut parts = ""
+  let mut shortfalls = ""
+  each d in KKWaveDepts() {
+    let dept = to_string(d)
+    let dq = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = ?1 AND asked_at > datetime('now', '-1 day')", [dept])
+    let dn = to_float(json_get(get(dq, 0.0), "n", "0"))
+    let da = query("SELECT COALESCE(SUM(CASE WHEN trim(a.note) = '' THEN 1 ELSE 0 END), 0) AS ok_n, COALESCE(SUM(CASE WHEN trim(a.note) != '' THEN 1 ELSE 0 END), 0) AS bad_n FROM kk_answers a JOIN kk_questions q ON a.question_id = q.id WHERE q.dept = ?1 AND a.created_at > datetime('now', '-1 day')", [dept])
+    let dok = to_float(json_get(get(da, 0.0), "ok_n", "0"))
+    let dbad = to_float(json_get(get(da, 0.0), "bad_n", "0"))
+    let dp = query("SELECT COUNT(*) AS n, date(MIN(resolve_by), 'unixepoch') AS near_d FROM kk_questions WHERE dept = ?1 AND asked_at > datetime('now', '-1 day') AND status IN ('open', 'answered')", [dept])
+    let dnp = to_float(json_get(get(dp, 0.0), "n", "0"))
+    let dnear = trim(to_string(json_get(get(dp, 0.0), "near_d", "")))
+    let dr = query("SELECT COALESCE(SUM(CASE WHEN o.outcome != 'disputed' THEN 1 ELSE 0 END), 0) AS rm, COALESCE(SUM(CASE WHEN o.outcome = 'disputed' THEN 1 ELSE 0 END), 0) AS rk FROM kk_outcomes o JOIN kk_questions q ON o.question_id = q.id WHERE q.dept = ?1 AND o.resolved_at > datetime('now', '-1 day')", [dept])
+    let drm = to_float(json_get(get(dr, 0.0), "rm", "0"))
+    let drk = to_float(json_get(get(dr, 0.0), "rk", "0"))
+    let mut dshort = ""
+    if dn < plan then {
+      let dshort = KKDeptName(dept) + " " + to_string(dn) + " из " + to_string(plan) + " — " + KKShortfallReason(dept)
+      if shortfalls == "" then { let shortfalls = dshort } else { let shortfalls = shortfalls + "\n" + dshort }
+    }
+    let seg = ",\"" + dept + "_asked\":" + to_string(dn) + ",\"" + dept + "_ok\":" + to_string(dok) + ",\"" + dept + "_bad\":" + to_string(dbad) + ",\"" + dept + "_pending\":" + to_string(dnp) + ",\"" + dept + "_near\":" + json_encode(dnear) + ",\"" + dept + "_resolved\":" + to_string(drm) + ",\"" + dept + "_disputed\":" + to_string(drk) + ",\"" + dept + "_short\":" + json_encode(dshort)
+    let parts = parts + seg
+  }
+  return "{\"asked\":" + to_string(n) + ",\"ok\":" + to_string(x) + ",\"bad\":" + to_string(y) + ",\"pending\":" + to_string(p) + ",\"near\":" + json_encode(near_d) + ",\"resolved\":" + to_string(m) + ",\"disputed\":" + to_string(k) + ",\"osp_brier\":" + json_encode(osp_s) + ",\"fin_err\":" + json_encode(fin_s) + parts + ",\"shortfalls\":" + json_encode(shortfalls) + "}"
+}
+
+// Сырой JSON KKStats24h для карточек; "" — сбор не удался.
+pattern KKStatsRaw() -> String {
+  let raw = TryVal(try KKStats24h())
+  if to_string(raw) == "()" then { return "" }
+  return to_string(raw)
+}
+
+// Чтение числа/строки из сырого JSON KKStats24h (карточки).
+pattern KKStatVal(raw: String, key: String, def: String) -> String {
+  let s = TryVal(try parse_json(raw))
+  if to_string(s) == "()" then { return def }
+  return to_string(json_get(s, key, def))
+}
+
+// Разбивка 24ч отдела — формулировки сегментов строки брифа; числа из
+// KKStats24h (подсчёт один). Две строки через "\n": карточка отдела печатает
+// их отдельно, общая карточка склеивает.
+pattern KKDeptLine24h(raw: String, dept: String) -> String {
+  if trim(raw) == "" then { return "" }
+  let dn = to_float(KKStatVal(raw, dept + "_asked", "0"))
+  let dok = to_float(KKStatVal(raw, dept + "_ok", "0"))
+  let dbad = to_float(KKStatVal(raw, dept + "_bad", "0"))
+  let dnp = to_float(KKStatVal(raw, dept + "_pending", "0"))
+  let dnear = trim(KKStatVal(raw, dept + "_near", ""))
+  let drm = to_float(KKStatVal(raw, dept + "_resolved", "0"))
+  let drk = to_float(KKStatVal(raw, dept + "_disputed", "0"))
+  let mut near_s = ""
+  if dnp > 0.0 and dnear != "" then { let near_s = " (ближайшие — " + dnear + ")" }
+  return "задано " + to_string(dn) + ", ответов с валидной карточкой " + to_string(dok) + ", провал формы " + to_string(dbad) + "\nожидают исхода " + to_string(dnp) + near_s + ", разрешено " + to_string(drm) + ", спорных " + to_string(drk)
+}
+
+// Ближайший исход отдела по всем открытым вопросам (A.4.3: «первые исходы»).
+pattern KKFirstResolveDate(dept: String) -> String {
+  let rows = TryVal(try query("SELECT date(MIN(resolve_by), 'unixepoch') AS d FROM kk_questions WHERE dept = ?1 AND status IN ('open', 'answered')", [dept]))
+  if to_string(rows) == "()" then { return "" }
+  if length(rows) == 0.0 then { return "" }
+  return trim(to_string(json_get(get(rows, 0.0), "d", "")))
+}
+
+pattern KKLine24hCore() -> String {
+  let raw = KKStatsRaw()
+  if trim(raw) == "" then { return "" }
+  let n = to_float(KKStatVal(raw, "asked", "0"))
+  if n == 0.0 then { return "" }
+  // #684 A.2: разбивка по отделам волны (все четыре, включая нули) и
+  // недоборы плана с причинами (KKShortfallReason: валидатор → сбой ИИ → слот)
+  let mut br = ""
+  each d in KKWaveDepts() {
+    let dept = to_string(d)
+    let dn = to_float(KKStatVal(raw, dept + "_asked", "0"))
+    if br == "" then { let br = KKDeptName(dept) + " " + to_string(dn) } else { let br = br + ", " + KKDeptName(dept) + " " + to_string(dn) }
+  }
+  let x = to_float(KKStatVal(raw, "ok", "0"))
+  let y = to_float(KKStatVal(raw, "bad", "0"))
+  let p = to_float(KKStatVal(raw, "pending", "0"))
+  let near_d = trim(KKStatVal(raw, "near", ""))
+  let mut near_s = ""
+  if p > 0.0 and near_d != "" then { let near_s = " (ближайшие — " + near_d + ")" }
+  let m = to_float(KKStatVal(raw, "resolved", "0"))
+  let k = to_float(KKStatVal(raw, "disputed", "0"))
+  let osp_s = KKStatVal(raw, "osp_brier", "—")
+  let fin_s = KKStatVal(raw, "fin_err", "—")
   let mut line = "Кавальня (24ч): задано " + to_string(n) + " — " + br + "; ответов с валидной карточкой " + to_string(x) + ", провал формы " + to_string(y) + "; ожидают исхода " + to_string(p) + near_s + "; разрешено " + to_string(m) + ", спорных " + to_string(k) + "; Brier ОСП " + osp_s + " / ошибка финансов " + fin_s + "%"
+  let shortfalls = KKStatVal(raw, "shortfalls", "")
   if shortfalls != "" then { let line = line + "\n" + shortfalls }
   return line
 }
@@ -753,22 +832,31 @@ pattern KKSvgHead(h: Float, title: String, sub: String) -> String {
 
 pattern KKSvgRow(y: Float, dept: String, w1: Float, w2: Float, w3: Float, w4: Float, resolved: Float, share: Float) -> String {
   // Ряд из 4 столбцов: балл за недели 4/3/2/1 (окна 28-21, 21-14, 14-7, 7-0).
+  // A.4.1 (аудитор 07.11): неделя без данных — служебная заглушка -1 НЕ
+  // рисуется как балл: полоски нет, подпись «нет данных» серым; числа —
+  // только для недель с разрешёнными вопросами (в окне есть строки полигона).
   let mut out = "<text x=\"48\" y=\"" + to_string(y + 8.0) + "\" font-family=\"DejaVu Sans\" font-size=\"20\" font-weight=\"bold\" fill=\"#EEF0F2\">" + KKXmlEsc(dept) + "</text>"
   let mut i = 0.0
   each w in [w1, w2, w3, w4] {
     let x = 200.0 + i * 70.0
-    let mut hh = 0.0
-    if to_float(w) > 0.0 then { let hh = to_float(w) * 64.0 }
-    if hh < 2.0 then { let hh = 2.0 }
-    let out = out + "<rect x=\"" + to_string(x) + "\" y=\"" + to_string(y + 40.0 - hh) + "\" width=\"48\" height=\"" + to_string(hh) + "\" fill=\"#FFA733\"/>" + "<text x=\"" + to_string(x + 24.0) + "\" y=\"" + to_string(y + 52.0) + "\" font-family=\"DejaVu Sans\" font-size=\"11\" fill=\"#9AA0A8\" text-anchor=\"middle\">" + to_string(KKRound2(to_float(w))) + "</text>"
+    if to_float(w) < 0.0 then {
+      let out = out + "<text x=\"" + to_string(x + 24.0) + "\" y=\"" + to_string(y + 26.0) + "\" font-family=\"DejaVu Sans\" font-size=\"11\" fill=\"#9AA0A8\" text-anchor=\"middle\">нет данных</text>"
+    } else {
+      let mut hh = 0.0
+      if to_float(w) > 0.0 then { let hh = to_float(w) * 64.0 }
+      if hh < 2.0 then { let hh = 2.0 }
+      let out = out + "<rect x=\"" + to_string(x) + "\" y=\"" + to_string(y + 40.0 - hh) + "\" width=\"48\" height=\"" + to_string(hh) + "\" fill=\"#FFA733\"/>" + "<text x=\"" + to_string(x + 24.0) + "\" y=\"" + to_string(y + 52.0) + "\" font-family=\"DejaVu Sans\" font-size=\"11\" fill=\"#9AA0A8\" text-anchor=\"middle\">" + to_string(KKRound2(to_float(w))) + "</text>"
+    }
     let i = i + 1.0
   }
-  let out = out + "<text x=\"500\" y=\"" + to_string(y + 8.0) + "\" font-family=\"DejaVu Sans\" font-size=\"14\" fill=\"#FFCF7A\">разрешено " + to_string(resolved) + "</text>" + "<text x=\"500\" y=\"" + to_string(y + 30.0) + "\" font-family=\"DejaVu Sans\" font-size=\"14\" fill=\"#9AA0A8\">спорных " + to_string(share) + "%</text>" + "<line x1=\"48\" y1=\"" + to_string(y + 68.0) + "\" x2=\"752\" y2=\"" + to_string(y + 68.0) + "\" stroke=\"#3A3F46\" stroke-width=\"1\"/>"
+  let out = out + "<text x=\"500\" y=\"" + to_string(y + 8.0) + "\" font-family=\"DejaVu Sans\" font-size=\"14\" fill=\"#FFCF7A\">разрешено " + to_string(resolved) + "</text>" + "<text x=\"500\" y=\"" + to_string(y + 30.0) + "\" font-family=\"DejaVu Sans\" font-size=\"14\" fill=\"#9AA0A8\">спорных " + to_string(share) + "% (4 нед)</text>" + "<line x1=\"48\" y1=\"" + to_string(y + 68.0) + "\" x2=\"752\" y2=\"" + to_string(y + 68.0) + "\" stroke=\"#3A3F46\" stroke-width=\"1\"/>"
   return out
 }
 
-// Общая карточка /kk: по каждому отделу волны — ряд 4 недель + счётчики.
+// Общая карточка /kk: по каждому отделу волны — ряд 4 недель + счётчики
+// + разбивка 24ч из ТОЙ ЖЕ функции, что строка брифа (A.4.2, аудитор 07.11).
 pattern KKStatsSvg() -> String {
+  let raw = KKStatsRaw()
   let mut body = ""
   let mut y = 120.0
   each d in KKWaveDepts() {
@@ -780,35 +868,83 @@ pattern KKStatsSvg() -> String {
     let w3 = KKWeekAvg(dept, 14.0, 7.0)
     let w4 = KKWeekAvg(dept, 7.0, 0.0)
     let body = body + KKSvgRow(y, dept, w1, w2, w3, w4, to_float(json_get(st, "resolved", "0")), to_float(json_get(st, "share", "0")))
-    let y = y + 92.0
+    // 24ч отдела — те же числа, что в строке брифа (подсчёт один, KKStats24h)
+    let l24 = replace(KKDeptLine24h(raw, dept), "\n", ", ")
+    if trim(l24) != "" then {
+      let body = body + "<text x=\"48\" y=\"" + to_string(y + 84.0) + "\" font-family=\"DejaVu Sans\" font-size=\"11\" fill=\"#9AA0A8\">24ч: " + KKXmlEsc(l24) + "</text>"
+    } else {
+      let body = body + "<text x=\"48\" y=\"" + to_string(y + 84.0) + "\" font-family=\"DejaVu Sans\" font-size=\"11\" fill=\"#9AA0A8\">24ч: нет данных за сутки</text>"
+    }
+    let dshort = KKStatVal(raw, dept + "_short", "")
+    if trim(dshort) != "" then {
+      let body = body + "<text x=\"48\" y=\"" + to_string(y + 102.0) + "\" font-family=\"DejaVu Sans\" font-size=\"11\" fill=\"#FFA733\">" + KKXmlEsc(dshort) + "</text>"
+    }
+    let y = y + 128.0
   }
+  // Подвал — строка брифа дословно (многострочно: строки недоборов)
   let line = TryVal(try KKLine24hCore())
+  let mut foot = "Кавальня: нет данных за сутки"
+  if to_string(line) != "()" and trim(to_string(line)) != "" then { let foot = to_string(line) }
+  let flines = split(foot, "\n")
   let mut footer = ""
-  if to_string(line) != "()" and to_string(line) != "" then { let footer = KKXmlEsc(to_string(line)) } else { let footer = "Кавальня: нет данных за сутки" }
-  return KKSvgHead(560.0, "КАВАЛЬНЯ", "тренировочный контур") + body + "<text x=\"48\" y=\"" + to_string(y + 16.0) + "\" font-family=\"DejaVu Sans\" font-size=\"14\" fill=\"#9AA0A8\">" + footer + "</text>" + "<line x1=\"48\" y1=\"500\" x2=\"752\" y2=\"500\" stroke=\"#FFAA50\" stroke-opacity=\"0.22\" stroke-width=\"1\"/>" + "<text x=\"48\" y=\"530\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">FOSVED · Кавальня · столбцы — средний балл по неделям (1 = максимум)</text></svg>"
+  let mut fy = y + 8.0
+  each ln in flines {
+    let footer = footer + "<text x=\"48\" y=\"" + to_string(fy) + "\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">" + KKXmlEsc(to_string(ln)) + "</text>"
+    let fy = fy + 20.0
+  }
+  let h = fy + 40.0
+  return KKSvgHead(h, "КАВАЛЬНЯ", "тренировочный контур") + body + footer + "<line x1=\"48\" y1=\"" + to_string(fy + 4.0) + "\" x2=\"752\" y2=\"" + to_string(fy + 4.0) + "\" stroke=\"#FFAA50\" stroke-opacity=\"0.22\" stroke-width=\"1\"/>" + "<text x=\"48\" y=\"" + to_string(fy + 28.0) + "\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">FOSVED · Кавальня · столбцы — средний балл по неделям (1 = максимум); 24ч — те же числа, что в строке сводки</text></svg>"
 }
 
-// Карточка отдела /kk <dept>: ряд недель + 3 худших провала.
+// Карточка отдела /kk <dept>: блок 24ч (та же функция, что строка брифа),
+// ряд недель, худшие провалы; «провалов нет» — только при разрешённых (A.4.3).
 pattern KKDeptSvg(dept: String) -> String {
+  let raw = KKStatsRaw()
   let mut st = TryVal(try parse_json(KKDeptStats(dept)))
   if to_string(st) == "()" then { let st = parse_json("{\"resolved\": 0, \"disputed\": 0, \"share\": 0}") }
+  let resolved28 = to_float(json_get(st, "resolved", "0"))
   let w1 = KKWeekAvg(dept, 28.0, 21.0)
   let w2 = KKWeekAvg(dept, 21.0, 14.0)
   let w3 = KKWeekAvg(dept, 14.0, 7.0)
   let w4 = KKWeekAvg(dept, 7.0, 0.0)
-  let row = KKSvgRow(120.0, dept, w1, w2, w3, w4, to_float(json_get(st, "resolved", "0")), to_float(json_get(st, "share", "0")))
-  let worst = KKWorstFails(dept)
-  let mut fails = "<text x=\"48\" y=\"230\" font-family=\"DejaVu Sans\" font-size=\"16\" fill=\"#E0B56A\">ХУДШИЕ ПРОВАЛЫ</text>"
-  if trim(worst) == "" then {
-    let fails = fails + "<text x=\"48\" y=\"260\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">провалов нет</text>"
+  // A.4.2: шапка блока отдела — разбивка 24ч из KKStats24h (подсчёт один)
+  let mut block24 = "<text x=\"48\" y=\"104\" font-family=\"DejaVu Sans\" font-size=\"14\" font-weight=\"bold\" fill=\"#E0B56A\">ЗА 24 ЧАСА</text>"
+  let parts24 = split(KKDeptLine24h(raw, dept), "\n")
+  if to_string(KKDeptLine24h(raw, dept)) == "" then {
+    let block24 = block24 + "<text x=\"48\" y=\"130\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">нет данных за сутки</text>"
   } else {
-    let mut fy = 262.0
-    each ln in split(worst, "\n") {
-      let fails = fails + "<text x=\"48\" y=\"" + to_string(fy) + "\" font-family=\"DejaVu Sans\" font-size=\"12\" fill=\"#EEF0F2\">" + KKXmlEsc(substring(to_string(ln), 0.0, 110.0)) + "</text>"
-      let fy = fy + 24.0
+    let mut by = 130.0
+    each ln in parts24 {
+      let block24 = block24 + "<text x=\"48\" y=\"" + to_string(by) + "\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#EEF0F2\">" + KKXmlEsc(to_string(ln)) + "</text>"
+      let by = by + 22.0
+    }
+    let dshort = KKStatVal(raw, dept + "_short", "")
+    if trim(dshort) != "" then {
+      let block24 = block24 + "<text x=\"48\" y=\"" + to_string(by + 4.0) + "\" font-family=\"DejaVu Sans\" font-size=\"12\" fill=\"#FFA733\">" + KKXmlEsc(dshort) + "</text>"
     }
   }
-  return KKSvgHead(400.0, "КАВАЛЬНЯ", "отдел " + dept) + row + fails + "<line x1=\"48\" y1=\"360\" x2=\"752\" y2=\"360\" stroke=\"#FFAA50\" stroke-opacity=\"0.22\" stroke-width=\"1\"/>" + "<text x=\"48\" y=\"384\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">FOSVED · Кавальня · балл: binary — 1−Brier, number — 1−отн.ошибка, date — 1−дни/30</text></svg>"
+  let row = KKSvgRow(226.0, dept, w1, w2, w3, w4, resolved28, to_float(json_get(st, "share", "0")))
+  let worst = KKWorstFails(dept)
+  let mut fails = "<text x=\"48\" y=\"322\" font-family=\"DejaVu Sans\" font-size=\"16\" fill=\"#E0B56A\">ХУДШИЕ ПРОВАЛЫ</text>"
+  if resolved28 < 1.0 then {
+    // A.4.3: разрешённых нет — пустота не выглядит успехом («провалов нет»
+    // пишется только при разрешённых ≥1 и отсутствии провалов)
+    let first_d = KKFirstResolveDate(dept)
+    let mut msg = "разрешённых вопросов ещё нет"
+    if first_d != "" then { let msg = msg + " — первые исходы " + first_d }
+    let fails = fails + "<text x=\"48\" y=\"352\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">" + KKXmlEsc(msg) + "</text>"
+  } else {
+    if trim(worst) == "" then {
+      let fails = fails + "<text x=\"48\" y=\"352\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">провалов нет</text>"
+    } else {
+      let mut fy = 354.0
+      each ln in split(worst, "\n") {
+        let fails = fails + "<text x=\"48\" y=\"" + to_string(fy) + "\" font-family=\"DejaVu Sans\" font-size=\"12\" fill=\"#EEF0F2\">" + KKXmlEsc(substring(to_string(ln), 0.0, 110.0)) + "</text>"
+        let fy = fy + 24.0
+      }
+    }
+  }
+  return KKSvgHead(470.0, "КАВАЛЬНЯ", "отдел " + dept) + block24 + row + fails + "<line x1=\"48\" y1=\"430\" x2=\"752\" y2=\"430\" stroke=\"#FFAA50\" stroke-opacity=\"0.22\" stroke-width=\"1\"/>" + "<text x=\"48\" y=\"454\" font-family=\"DejaVu Sans\" font-size=\"13\" fill=\"#9AA0A8\">FOSVED · Кавальня · балл: binary — 1−Brier, number — 1−отн.ошибка, date — 1−дни/30</text></svg>"
 }
 
 // ── Генерация вопросов (наряд B): слот kk-ask ─────────────────────────────
@@ -1196,4 +1332,101 @@ test "n671: срез кодовых блоков и ISO-дата" {
 test "n671: XmlEsc — атрибуты SVG безопасны" {
   assert_contains(KKXmlEsc("a<b & c\"d"), "&amp;")
   assert_contains(KKXmlEsc("a<b & c\"d"), "&lt;")
+}
+
+test "n684 A.4.1: заглушка -1 не рисуется баллом — «нет данных», числа только при разрешённых" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'on')", [])
+  // пустая база: все недели без данных — ни одного «>-1<», честные подписи
+  let svg = KKStatsSvg()
+  assert_eq(KKCountIn(svg, ">-1<"), 0.0)
+  assert_contains(svg, "нет данных")
+  let dsvg = KKDeptSvg("n671dept")
+  assert_eq(KKCountIn(dsvg, ">-1<"), 0.0)
+  assert_contains(dsvg, "нет данных")
+  // неделя с разрешённым вопросом: число и полоска есть, остальные недели — «нет данных»
+  let qid = KKInsertQuestion("n671dept", "n684svg вопрос с баллом", "binary", 1.0, time() + 3600.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let _ = KKAnswerRecord(qid, "n671dept", 0.7, "{}", "{}", "")
+  let _ = db_execute("UPDATE kk_questions SET status = 'resolved' WHERE id = ?1", [to_string(qid)])
+  let _ = db_execute("INSERT INTO kk_outcomes (question_id, outcome, evidence_url, evidence_quote, resolved_by) VALUES (?1, 'yes', 'https://example.org/src', 'n684 цитата', 'program')", [to_string(qid)])
+  let sid = KKSessionFor("n671dept")
+  let _ = KKRunPolygonTask(to_int(sid), "kk:n671dept:" + to_string(to_int(qid)) + " вопрос", "правило", "yes", 0.51)
+  let svg2 = KKDeptSvg("n671dept")
+  assert_contains(svg2, ">0.51<")
+  assert_eq(KKCountIn(svg2, ">-1<"), 0.0)
+  assert_eq(KKCountIn(svg2, "нет данных"), 3.0)
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'off')", [])
+}
+
+test "n684 A.4.2: карточка — та же разбивка 24ч, что строка брифа (подсчёт один)" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'on')", [])
+  // сценарий 07.11: ОСП 3, финансы 3, юристы 3, ЛЗ 0 — задано 9 из плана 12
+  let q1 = KKInsertQuestion("osp", "n684card вопрос ОСП один", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q2 = KKInsertQuestion("osp", "n684card вопрос ОСП два", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q3 = KKInsertQuestion("osp", "n684card вопрос ОСП три", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q4 = KKInsertQuestion("finance", "n684card вопрос фин один", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q5 = KKInsertQuestion("finance", "n684card вопрос фин два", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q6 = KKInsertQuestion("finance", "n684card вопрос фин три", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q7 = KKInsertQuestion("legal", "n684card вопрос юр один", "date", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q8 = KKInsertQuestion("legal", "n684card вопрос юр два", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let q9 = KKInsertQuestion("legal", "n684card вопрос юр три", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let _ = KKAnswerRecord(q1, "osp", 0.5, "{}", "{}", "")
+  let _ = KKAnswerRecord(q2, "osp", 0.5, "{}", "{}", "")
+  let _ = KKAnswerRecord(q3, "osp", 100.0, "{}", "{}", "")
+  let _ = KKAnswerRecord(q4, "finance", 42.0, "{}", "{}", "")
+  let _ = KKAnswerRecord(q5, "finance", 17.0, "{}", "{}", "")
+  let _ = KKAnswerRecord(q6, "finance", 0.7, "{}", "{}", "")
+  let _ = KKAnswerRecord(q7, "legal", 3.0, "{}", "{}", "")
+  let _ = KKAnswerRecord(q8, "legal", 0.9, "{}", "{}", "")
+  let _ = KKAnswerRecord(q9, "legal", 0.0, "{}", "{}", "провал формы — нет claim")
+  // причина недобора ЛЗ — из записи слота kk_ask (тест аудитора: «пропуск — лимит Tavily»)
+  let _ = AuditLog("kk_ask", "kavalnya", "osp: план 3, задано 3; finance: план 3, задано 3; legal: план 3, задано 3; lz: пропуск — лимит Tavily")
+  let line = KKLine24h()
+  assert_contains(line, "Кавальня (24ч): задано 9 — ОСП 3, финансы 3, юристы 3, ЛЗ 0")
+  assert_contains(line, "ЛЗ 0 из 3 — пропуск — лимит Tavily")
+  // карточка отдела: та же разбивка и та же причина (числа из KKStats24h)
+  let dsvg = KKDeptSvg("lz")
+  assert_contains(dsvg, "ЗА 24 ЧАСА")
+  assert_contains(dsvg, "задано 0")
+  assert_contains(dsvg, "ответов с валидной карточкой 0")
+  assert_contains(dsvg, "провал формы 0")
+  assert_contains(dsvg, "ожидают исхода 0")
+  assert_contains(dsvg, "разрешено 0")
+  assert_contains(dsvg, "спорных 0")
+  assert_contains(dsvg, "ЛЗ 0 из 3 — пропуск — лимит Tavily")
+  // общая карточка: строка 24ч отдела + подвал — строка брифа дословно
+  let ssvg = KKStatsSvg()
+  assert_contains(ssvg, "24ч: задано 3, ответов с валидной карточкой 3")
+  assert_contains(ssvg, "24ч: задано 0")
+  assert_contains(ssvg, "пропуск — лимит Tavily")
+  assert_contains(ssvg, "Кавальня (24ч): задано 9 — ОСП 3, финансы 3, юристы 3, ЛЗ 0")
+  assert_contains(ssvg, "ожидают исхода 3 (ближайшие — ")
+  let g = grant_issue("db:delete:audit_log", 3600.0, "n", 500)
+  let _ = db_execute_with_grant(g, "DELETE FROM audit_log WHERE action = 'kk_ask' AND details LIKE '%лимит Tavily%'", [])
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'off')", [])
+}
+
+test "n684 A.4.3: «провалов нет» — только при разрешённых; пустота — «ещё нет — первые исходы»" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  // разрешённых нет: открытый вопрос без исхода — пустота не выглядит успехом
+  let qid = KKInsertQuestion("lz", "n684a43 вопрос ЛЗ открытый", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let dsvg = KKDeptSvg("lz")
+  assert_contains(dsvg, "разрешённых вопросов ещё нет")
+  assert_contains(dsvg, "первые исходы 2")
+  assert_eq(KKCountIn(dsvg, "провалов нет"), 0.0)
+  // разрешённый вопрос без строк полигона: «провалов нет» — честно
+  let qid2 = KKInsertQuestion("lz", "n684a43 вопрос ЛЗ решённый", "binary", 1.0, time() + 3600.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let _ = KKAnswerRecord(qid2, "lz", 0.8, "{}", "{}", "")
+  let _ = db_execute("UPDATE kk_questions SET status = 'resolved' WHERE id = ?1", [to_string(qid2)])
+  let _ = db_execute("INSERT INTO kk_outcomes (question_id, outcome, evidence_url, evidence_quote, resolved_by) VALUES (?1, 'yes', 'https://example.org/src', 'n684 цитата', 'program')", [to_string(qid2)])
+  let dsvg2 = KKDeptSvg("lz")
+  assert_contains(dsvg2, "провалов нет")
+  assert_eq(KKCountIn(dsvg2, "разрешённых вопросов ещё нет"), 0.0)
+  let _ = KKTestCleanup()
 }
