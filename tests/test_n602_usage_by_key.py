@@ -167,7 +167,10 @@ def test_call_python_whitelist_and_mlog_hook():
     tail_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "proxy", "routes_tail.py"), encoding="utf-8").read()
     assert '"usage_by_key": {"night_block"}' in tail_src
     app_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.mlog"), encoding="utf-8").read()
-    assert 'OutboxPut("usage-by-key", call_python("usage_by_key", "night_block", "[]"))' in app_src
+    # #687 A.5: в ленту уходит NightUsageKeyLine — из конверта call-python
+    # извлекается поле result (сырой конверт в ленту больше не попадает)
+    assert 'OutboxPut("usage-by-key", NightUsageKeyLine())' in app_src
+    assert 'json_get(usage_json, "result"' in app_src
 
 
 def test_route_tags_in_call_chain():
