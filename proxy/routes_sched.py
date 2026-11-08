@@ -343,6 +343,148 @@ def build_attention_section(items: list) -> str:
     return "\n".join(lines)
 
 
+def forge_attention_block():
+    """FO-038 C.3: гейты и замечания FORGE — единый сборщик сигнала.
+
+    Используется брифом (#684) и ответом Админа (#688) — вторая реализация
+    запросов запрещена принципом одного подсчёта.
+    Возвращает (текст, число висящих гейтов).
+    """
+    try:
+        fg_rows = _query(
+            "SELECT id, kind, question FROM forge_gates "
+            "WHERE decision IS NULL OR decision = '' ORDER BY id LIMIT 5", fetch=True)
+        fr_rows = _query(
+            "SELECT COUNT(*) as c FROM forge_remarks WHERE status = 'open'", fetch=True)
+        fa_count = len(fg_rows) if fg_rows else 0
+        open_remarks = fr_rows[0]["c"] if fr_rows else 0
+        if fg_rows or open_remarks:
+            lines = [f"  - Гейт #{r['id']} [{r['kind']}]: {r['question'][:100]}" for r in fg_rows]
+            if open_remarks:
+                lines.append(f"  - Открытых замечаний: {open_remarks}")
+            return "\n".join(lines), fa_count
+    except Exception as e:
+        log.warning(f"[forge attention] query failed: {e}")
+    return "", 0
+
+
+def errors_digest_block():
+    """FO-007: повторяющиеся ошибки департаментов за сутки — единый сборщик."""
+    try:
+        err_rows = _query(
+            "SELECT dept, kind, COUNT(*) as c FROM error_log "
+            "WHERE ts > datetime('now', '-1 day') AND kind != 'external' "
+            "GROUP BY dept, kind HAVING c >= 3 ORDER BY c DESC LIMIT 5", fetch=True)
+        ext_rows = _query(
+            "SELECT COUNT(*) as c FROM error_log "
+            "WHERE ts > datetime('now', '-1 day') AND kind = 'external'", fetch=True)
+        if err_rows:
+            digest = "\n".join(
+                [f"  - {r['dept']}/{r['kind']}: {r['c']} раз(а) за сутки" for r in err_rows])
+            if ext_rows and ext_rows[0]["c"]:
+                digest += f"\n  - внешние сбои (api/сеть): {ext_rows[0]['c']} раз(а) за сутки"
+            return digest
+    except Exception as e:
+        log.warning(f"[errors digest] query failed: {e}")
+    return ""
+
+
+def stored_forge_backup():
+    """Итог последнего прогона резерва FORGE — из system_settings (пишет бриф).
+
+    Ответ Админа (07:25) НЕ перезапускает бэкап — читает сохранённый итог
+    (07:20), сигнал тот же, что в брифе. Возвращает (ok, line).
+    """
+    try:
+        rows = _query("SELECT value FROM system_settings WHERE key = 'forge_backup_summary'", fetch=True)
+        if rows:
+            data = json.loads(rows[0]["value"] or "{}")
+            return bool(data.get("ok")), (data.get("line") or "").strip()
+    except Exception as e:
+        log.warning(f"[forge backup] summary read failed (non-fatal): {e}")
+    return False, ""
+
+
+def forge_backup_stale_flag():
+    """«Старше суток» по ts сохранённого итога резерва (тот же источник)."""
+    try:
+        rows = _query("SELECT value FROM system_settings WHERE key = 'forge_backup_summary'", fetch=True)
+        if rows:
+            ts = (json.loads(rows[0]["value"]) or {}).get("ts", "")
+            if ts:
+                age = (datetime.utcnow() - datetime.fromisoformat(ts).replace(tzinfo=None)).total_seconds() / 3600.0
+                return age > 24.0
+    except Exception:
+        pass
+    return False
+
+
+def build_priorities_section(attention_items: list) -> str:
+    """#688 A.2: «📌 Приоритеты на сегодня» — дословно из списка внимания.
+
+    До 3 пунктов в порядке списка; модель приоритеты не пишет.
+    Пустой список — «📌 Приоритетов по сбоям нет».
+    """
+    items = [str(it).strip() for it in (attention_items or [])[:3] if str(it).strip()]
+    if not items:
+        return "📌 Приоритетов по сбоям нет"
+    return "📌 Приоритеты на сегодня:\n" + "\n".join("- " + it for it in items)
+
+
+# #688 A.1: строки-поручения («Яне: до 12:00 …», «ОСП и финансам: …»,
+# «Ответственному за резерв: …», «до 2026-11-09», «сегодня выполнить»)
+_ADMIN_DIRECTIVE_PATTERNS = (
+    re.compile(r"до \d{1,2}[:.]\d{2}"),
+    re.compile(r"до \d{4}-\d{2}-\d{2}"),
+    re.compile(r"(?i)\bсегодня\s+(?:нужно\s+)?(?:выполнить|сделать|подготовить|закрыть|прислать|проверить|свести|провести)"),
+    re.compile(r"(?i)(?:выполнить|сделать|подготовить|закрыть|прислать|провести)[^.]{0,40}\bсегодня\b"),
+    re.compile(r"(?i)^\s*[^:\n]{0,40}\b(яне|админу|ответственному|финансам|юристам|осп|osp|лз|lz|qa|dev|визуалу|кавальне|маркетингу|инженеру|дизайнеру|эксперту)\b[^:\n]{0,40}:"),
+    re.compile(r"(?i)^\s*жду\b|^\s*нужно от\b|^\s*прошу\b[^.]{0,60}\b(до|к)\s+\d"),
+)
+
+_ADMIN_RESERVE_HOLE = re.compile(r"(?i)(дыр|критичн|провал)[^.]{0,60}резерв|резерв[^.]{0,60}(дыр|критичн)")
+
+
+def filter_admin_directives(text: str, reserve_nothing: bool = False):
+    """#688 A.1/A.3: ответ Админа без поручений и без выдуманных проблем.
+
+    Вырезаются: блок «🔧 Указания отделам» (до следующего маркера секции),
+    строки с адресатом-исполнителем и/или сроком, строки-«проблемы» про
+    резерв, когда в сигналах честное «нечего резервировать» (A.3: замечания —
+    только по данным). Возвращает (текст, список вырезанных строк); срабатыв
+    ания пишет в audit_log вызывающий.
+    """
+    if not text:
+        return text, []
+    removed, kept = [], []
+    in_block = False
+    for ln in text.split("\n"):
+        low = ln.strip().lower()
+        if "указания отделам" in low:
+            in_block = True
+            removed.append(ln.strip()[:200] or "(заголовок блока указаний)")
+            continue
+        if in_block:
+            if ln.strip().startswith(("🔍", "📌", "💬")):
+                in_block = False
+            else:
+                if ln.strip():
+                    removed.append(ln.strip()[:200])
+                continue
+        if reserve_nothing and _ADMIN_RESERVE_HOLE.search(ln):
+            removed.append(ln.strip()[:200])
+            continue
+        # маркеры секций — структура ответа, не поручение (🔍 «Из находок ЛЗ: …»
+        # адресатом не является)
+        if any(p.search(ln) for p in _ADMIN_DIRECTIVE_PATTERNS) and not ln.strip().startswith(("📌", "💬", "🔍", "🌙", "⚡")):
+            removed.append(ln.strip()[:200])
+            continue
+        kept.append(ln)
+    if not removed:
+        return text, []
+    return "\n".join(kept), removed
+
+
 def kk_brief_line(d: dict) -> str:
     """#671 KK-1: строка тренировочного контура Кавальни из payload брифа.
 
@@ -457,15 +599,8 @@ def scheduler_morning_brief():
         forge_backup_line = f"бэкап FORGE: сбой контура ({str(e)[:120]})"
     # #684 A.1: «старше суток» — store_backup_summary пишет ts при каждом
     # запуске; старый ts в system_settings = свежий итог не записан
-    try:
-        _srows = _query("SELECT value FROM system_settings WHERE key = 'forge_backup_summary'", fetch=True)
-        if _srows:
-            _ts = (json.loads(_srows[0]["value"]) or {}).get("ts", "")
-            if _ts:
-                _age_h = (datetime.utcnow() - datetime.fromisoformat(_ts).replace(tzinfo=None)).total_seconds() / 3600.0
-                forge_backup_stale = _age_h > 24.0
-    except Exception:
-        forge_backup_stale = False
+    # (#688: единый хелпер forge_backup_stale_flag — тот же, что у Админа)
+    forge_backup_stale = forge_backup_stale_flag()
 
     # FO-043 (наряд #150): недельный срез доли first-try — только по понедельникам
     forge_edit_line = ""
@@ -584,41 +719,12 @@ def scheduler_morning_brief():
         except Exception as e:
             log.warning(f"[morning_brief] forge proposed query failed: {e}")
         # FO-038 C.3: FORGE-гейты и замечания — «требует внимания» ежедневно
-        forge_attention = ""
-        fa_count = 0
-        try:
-            fg_rows = _query(
-                "SELECT id, kind, question FROM forge_gates "
-                "WHERE decision IS NULL OR decision = '' ORDER BY id LIMIT 5", fetch=True)
-            fr_rows = _query(
-                "SELECT COUNT(*) as c FROM forge_remarks WHERE status = 'open'", fetch=True)
-            fa_count = len(fg_rows) if fg_rows else 0
-            open_remarks = fr_rows[0]["c"] if fr_rows else 0
-            if fg_rows or open_remarks:
-                lines = [f"  - Гейт #{r['id']} [{r['kind']}]: {r['question'][:100]}" for r in fg_rows]
-                if open_remarks:
-                    lines.append(f"  - Открытых замечаний: {open_remarks}")
-                forge_attention = "\n".join(lines)
-        except Exception as e:
-            log.warning(f"[morning_brief] forge attention query failed: {e}")
+        # (#688: сборщик единый с ответом Админа — forge_attention_block)
+        forge_attention, fa_count = forge_attention_block()
 
         # FO-007: повторяющиеся ошибки департаментов за сутки — в дайджест
-        errors_digest = ""
-        try:
-            err_rows = _query(
-                "SELECT dept, kind, COUNT(*) as c FROM error_log "
-                "WHERE ts > datetime('now', '-1 day') AND kind != 'external' "
-                "GROUP BY dept, kind HAVING c >= 3 ORDER BY c DESC LIMIT 5", fetch=True)
-            ext_rows = _query(
-                "SELECT COUNT(*) as c FROM error_log "
-                "WHERE ts > datetime('now', '-1 day') AND kind = 'external'", fetch=True)
-            if err_rows:
-                errors_digest = "\n".join(
-                    [f"  - {r['dept']}/{r['kind']}: {r['c']} раз(а) за сутки" for r in err_rows])
-                if ext_rows and ext_rows[0]["c"]:
-                    errors_digest += f"\n  - внешние сбои (api/сеть): {ext_rows[0]['c']} раз(а) за сутки"
-        except Exception as e:
-            log.warning(f"[morning_brief] error digest query failed: {e}")
+        # (#688: сборщик единый с ответом Админа — errors_digest_block)
+        errors_digest = errors_digest_block()
 
         # ── 2.5 #684 A.1: алерты раздела внимания — программой, до модели ──
         # Источники — те же сигналы, что уходят в промпт ниже; список условий —
@@ -836,8 +942,48 @@ def scheduler_admin_morning_reply():
         night_ctx = night_line
 
         # ── 5. Build admin prompt ──
+        # #688 A.1/A.2/A.3: ответ — замечания по фактам, не директива. Приоритеты
+        # собирает программа из списка внимания (build_priorities_section),
+        # «Указания отделам» удалены (механизма исполнения нет — прод 08.11:
+        # поручения при «0 проектов»); бриф Яны и ночная строка не меняются
+        # (границы нарядов #684/#687).
+        # #688 A.3: в промпт — те же сигналы, что у раздела внимания брифа.
+        fb_ok_sig, fb_line_sig = stored_forge_backup()
+        keys_line_sig = ""
+        try:
+            from proxy.key_health import build_morning_line
+            keys_line_sig = build_morning_line()
+        except Exception as e:
+            log.warning(f"[admin reply] keys line failed (non-fatal): {e}")
+        dfl_sig = dept_fail_line_24h()
+        kk_line_sig = ""
+        _kk_m = re.search(r"^Кавальня \(24ч\):[^\n]*", yana_brief, re.M) or re.search(r"^Кавальня: [^\n]*", yana_brief, re.M)
+        if _kk_m:
+            kk_line_sig = _kk_m.group(0).strip()
+        signals_block = (
+            "=== СИГНАЛЫ ДАННЫХ (тот же источник, что у раздела внимания брифа) ===\n"
+            + "Резерв FORGE: " + (fb_line_sig if fb_line_sig else "нет данных") + "\n"
+            + "Ключи: " + (keys_line_sig if keys_line_sig else "нет данных") + "\n"
+            + (dfl_sig if dfl_sig else "Отказы отделов за сутки: нет данных") + "\n"
+            + (kk_line_sig if kk_line_sig else "Кавальня: нет данных")
+        )
+        # #688 A.2: тот же список внимания, что у брифа (#684/#687) —
+        # те же условия collect_attention_items, сигналы Админа из хранимых источников
+        fa_sig, _fa_count = forge_attention_block()
+        ed_sig = errors_digest_block()
+        attention_items = collect_attention_items(
+            forge_backup_ok=fb_ok_sig,
+            forge_backup_line=fb_line_sig,
+            forge_backup_stale=forge_backup_stale_flag(),
+            keys_line=keys_line_sig,
+            dept_fail_line=dfl_sig,
+            kk_line=kk_line_sig,
+            forge_attention=fa_sig,
+            errors_digest=ed_sig,
+            night_line=night_line,
+        )
         messages = [
-            {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и должен дать свой ответ. Твой ответ — это директива на день. Упомяни находки Лаборатории Знаний, если они релевантны. Форматирование: *жирный* для приоритетов и ключевых слов, __подчёркнуто__ для указаний, эмодзи только как маркеры секций. НЕ используй кавычки."},
+            {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и даёшь замечания к нему по фактам из данных ниже. Не отдавай поручений отделам и людям, не ставь сроков. Упомяни находки Лаборатории Знаний, если они релевантны. Форматирование: *жирный* для ключевых слов, эмодзи только как маркеры секций. НЕ используй кавычки."},
             {"role": "user", "content": f"""Яна прислала утренний отчёт:
 
 {yana_brief}
@@ -846,28 +992,37 @@ def scheduler_admin_morning_reply():
 {f"=== СТАТУС ===\n{issues_context}" if issues_context else ""}
 {f"=== НОЧНАЯ ПРОВЕРКА (уже в сообщении первым разделом, не дублируй) ===\n{night_ctx}" if night_ctx else ""}
 
+{signals_block}
+
 Твоя задача: напиши краткий ответ на отчёт Яны на русском. Структура:
-1. 📌 Приоритеты на сегодня — 2-3 главных задачи
-2. 💬 Замечания по отчёту Яны (если есть)
-3. 🔧 Указания отделам
-4. 🔍 Что из находок ЛЗ стоит изучить и применить
+1. 💬 Замечания по отчёту Яны (если есть) — только по фактам из данных выше; не называй проблемой то, чего нет в сигналах (пример: резерв при 0 проектов — не проблема)
+2. 🔍 Что из находок ЛЗ стоит изучить и применить
+
+ПРИОРИТЕТЫ и УКАЗАНИЯ ОТДЕЛАМ модель НЕ пишет: приоритеты ставит программа из списка сбоев, поручений в офисе нет.
 
 ФОРМАТИРОВАНИЕ (Telegram MarkdownV2):
 ▸ Заголовки: *Жирный текст*
-▸ Приоритеты и указания: __подчёркнуто__
 ▸ Статусы: ✅ ⚠️ ❌
 ▸ НЕ используй кавычки — они озвучиваются TTS
-▸ Эмодзи только как маркеры секций (📌💬🔧🔍), не в середине предложений
+▸ Эмодзи только как маркеры секций (💬🔍), не в середине предложений
 
-Будь кратким, по-деловому. 5-8 предложений."""},
+Будь кратким, по-деловому. 3-6 предложений."""},
         ]
 
         result = call_llm("admin", messages)
-        reply = result["reply"]
+        # #688 A.1/A.3: фильтр поручений и выдуманных проблем; срабатывания —
+        # громко, в audit_log
+        reply, removed = filter_admin_directives(result["reply"], reserve_nothing=("нечего резервировать" in fb_line_sig))
+        if removed:
+            _log_audit("admin_reply_directive_filter", {"removed": removed[:6], "total": len(removed)})
 
-        # #485 A.4: раздел «Ночная проверка» — детерминированно ПЕРЕД комментарием
+        # #688 A.2: приоритеты — дословно из списка внимания, программой
+        priorities_section = build_priorities_section(attention_items)
+
+        # #485 A.4 / #688 A.2: сборка детерминированная: ночь → приоритеты → ответ модели
         # (дата/цифры не искажаются пересказом LLM — принцип FO-042/FO-043)
-        final_reply = (night_line + "\n\n" + reply) if night_line else reply
+        parts = [x for x in (night_line, priorities_section, reply) if x]
+        final_reply = "\n\n".join(parts)
 
         msg_id = _tg_send_formatted(owner_id, final_reply, dept="admin")
         # №587 A.2: ряд оценки к ответу Админа
