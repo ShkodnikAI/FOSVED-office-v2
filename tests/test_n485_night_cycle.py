@@ -105,7 +105,11 @@ def test_morning_report_reads_night():
     assert "Ночная проверка" in nl_seg, "нет раздела «Ночная проверка»"
     assert "> 26.0" in nl_seg, "порог 26 ч для «не выполнялась с <дата>» потерян"
     assert "night_report_line()" in seg, "ответ Админа не читает строку из night_report_line"
-    assert 'night_line + "\\n\\n" + reply' in seg, "раздел не предшествует комментарию (детерминированный prepend)"
+    # #688 A.2: сборка детерминированная — ночь → приоритеты (из списка
+    # внимания) → ответ модели; ночная строка по-прежнему первая
+    assert 'parts = [x for x in (night_line, priorities_section, reply) if x]' in seg, \
+        "детерминированная сборка ночь→приоритеты→ответ потеряна"
+    assert "build_priorities_section(attention_items)" in seg, "приоритеты должен строить build_priorities_section"
 
 
 def test_night_tick_registry_run_once():
