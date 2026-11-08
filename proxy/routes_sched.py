@@ -258,26 +258,46 @@ def filter_model_conclusions(text: str, has_attention: bool):
     return "\n".join(kept), removed
 
 
+def _age_from_night_line(night_line: str) -> str:
+    """#687 A.6.1: фактический возраст из строки ночной проверки.
+
+    Формат строки: «… UTC (<возраст>) ⚠️»; возраст — format_age_hours.
+    Разобрать не удалось — честная метка порога.
+    """
+    m = re.search(r"UTC \(([^)]+)\)", night_line or "")
+    return m.group(1).strip() if m else ">26 ч"
+
+
 def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
                             forge_backup_stale: bool, keys_line: str,
                             dept_fail_line: str, kk_line: str,
-                            forge_attention: str, errors_digest: str) -> list:
+                            forge_attention: str, errors_digest: str,
+                            night_line: str = "") -> list:
     """#684 A.1: алерты раздела «Что требует внимания» — программой.
 
     Источники — те же сигналы, что и ниже в отчёте (модель их видит, но
-    раздел внимания собирается кодом). Полный список условий (наряд #684):
+    раздел внимания собирается кодом). Полный список условий (наряд #684,
+    п. 8 — #687 A.6):
       1. резерв FORGE не выполнен (сбой контура или нет строки итога);
       2. последний итог резерва старше суток (свежий прогон не записан);
       3. проверка ключей не выполнялась (>26 ч) или есть проблемные ключи;
       4. отказы отделов за сутки > 0;
       5. Кавальня «не работала» (выключена) или «сбор строки упал»;
       6. висящие гейты/замечания FORGE (forge_attention непуст);
-      7. повторяющиеся ошибки офиса за сутки (errors_digest непуст).
+      7. повторяющиеся ошибки офиса за сутки (errors_digest непуст);
+      8. ночная проверка не выполнялась >26 ч — с фактическим возрастом.
+    Резерв при нуле проектов — не алерт (#687 A.6.2: резервировать нечего).
     Пустой список — валидный результат («Внимания не требуется»).
     """
     items = []
+    # #687 A.6.1: просроченная ночная проверка видна разделу внимания
+    nl = (night_line or "").strip()
+    if "НЕ выполнялась" in nl:
+        items.append("Ночная проверка не выполнялась (" + _age_from_night_line(nl) + ")")
     fbl = (forge_backup_line or "").strip()
-    if (not forge_backup_ok) or not fbl:
+    if "нечего резервировать" in fbl:
+        pass  # #687 A.6.2: проектов 0 — резервировать нечего, это не сбой
+    elif (not forge_backup_ok) or not fbl:
         items.append("Резерв FORGE не выполнен" + (f" ({fbl[:160]})" if fbl else " (нет строки итога)"))
     elif forge_backup_stale:
         items.append("Последний итог резерва FORGE старше суток")
@@ -335,6 +355,59 @@ def kk_brief_line(d: dict) -> str:
         return (d.get("kk_line_24h") or "").strip()
     except Exception:  # noqa: BLE001 — payload не словарь, строка не роняет бриф
         return ""
+
+
+def night_report_line():
+    """#687 A.4/A.6: строка ночной проверки — единый источник.
+
+    Читает последний итог NightSlot (admin_night_reports, scan_data='night-slot' —
+    тот же источник, что был в scheduler_admin_morning_reply). Возраст
+    просрочки — фактический (format_age_hours), не константа «>26 ч»
+    (прод 08.11: «НЕ выполнялась с 2026-11-04 (>26 ч)» при просрочке 3 суток).
+    Возвращает (night_line, age_h или None).
+    """
+    from proxy.key_health import format_age_hours
+    try:
+        night_rows = _query(
+            "SELECT created_at, review_data, health_score, findings_count FROM admin_night_reports "
+            "WHERE scan_data = 'night-slot' ORDER BY id DESC LIMIT 1",
+            fetch=True,
+        )
+    except Exception as e:  # noqa: BLE001 — таблица может не существовать
+        _log_error(f"night report read failed: {e}", source="admin_brief", dept="admin", kind="db_read")
+        return "", None
+    if not night_rows:
+        return "🌙 Ночная проверка: ещё не выполнялась (первый ночной цикл после деплоя)", None
+    nr = night_rows[0]
+    created_at = str(nr["created_at"] or "")[:16]
+    try:
+        info = json.loads(nr["review_data"] or "{}")
+        if not isinstance(info, dict):
+            info = {}
+    except (ValueError, TypeError):
+        info = {}
+    age_h = None
+    try:
+        dt = datetime.strptime(str(nr["created_at"]), "%Y-%m-%d %H:%M:%S")
+        age_h = (datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)).total_seconds() / 3600.0
+    except (ValueError, TypeError):
+        age_h = None
+    if age_h is None:
+        return "🌙 Ночная проверка: итог без даты (" + created_at + ")", None
+    if age_h > 26.0:
+        return ("🌙 Ночная проверка: НЕ выполнялась с " + created_at + " UTC ("
+                + format_age_hours(age_h) + ") ⚠️"), age_h
+    status = str(info.get("status") or "?")
+    health = str(info.get("health") or "?")
+    findings = nr["findings_count"] if nr["findings_count"] is not None else "?"
+    summary = str(info.get("summary") or "").strip()
+    night_line = (
+        f"🌙 Ночная проверка ({created_at} UTC): {status}; "
+        f"здоровье: {health}/10; открытых находок: {findings}"
+    )
+    if summary:
+        night_line += "\n" + summary[:400]
+    return night_line, age_h
 
 
 @app.post("/scheduler/morning-brief")
@@ -413,6 +486,10 @@ def scheduler_morning_brief():
     except Exception as e:
         log.warning(f"[morning_brief] keys line failed (non-fatal): {e}")
         keys_line = ""
+
+    # #687 A.6.1: состояние ночной проверки — тот же источник, что у строки
+    # ответа Админа (night_report_line); алерт просрочки — в collect_attention_items.
+    night_line, _night_age = night_report_line()
 
     # FO-049 (диспатч #161): недельная метрика нарядной дисциплины — по понедельникам
     narad_stats_line = ""
@@ -555,6 +632,7 @@ def scheduler_morning_brief():
             kk_line=kk_line,
             forge_attention=forge_attention,
             errors_digest=errors_digest,
+            night_line=night_line,
         )
 
         # ── 3. LZ daily findings (from memory) ──
@@ -751,53 +829,11 @@ def scheduler_admin_morning_reply():
         except Exception as e:
             _log_error(f"narads count query failed: {e}", source="admin_brief", dept="admin", kind="db_read")
 
-        # ── 4.5 #485 A.4: итог последнего ночного цикла ──
-        # Ночная проверка пишется NightSlot'ом в admin_night_reports с маркером
-        # scan_data='night-slot'. Порог 26 ч: слот 05:00 МСК + запас на сбой/пробуждение.
-        night_line = ""
-        night_ctx = ""
-        try:
-            night_rows = _query(
-                "SELECT created_at, review_data, health_score, findings_count FROM admin_night_reports "
-                "WHERE scan_data = 'night-slot' ORDER BY id DESC LIMIT 1",
-                fetch=True,
-            )
-            if night_rows:
-                nr = night_rows[0]
-                created_at = str(nr["created_at"] or "")[:16]
-                try:
-                    info = json.loads(nr["review_data"] or "{}")
-                    if not isinstance(info, dict):
-                        info = {}
-                except (ValueError, TypeError):
-                    info = {}
-                age_h = None
-                try:
-                    dt = datetime.strptime(str(nr["created_at"]), "%Y-%m-%d %H:%M:%S")
-                    age_h = (datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)).total_seconds() / 3600.0
-                except (ValueError, TypeError):
-                    age_h = None
-                if age_h is None:
-                    night_line = "🌙 Ночная проверка: итог без даты (" + created_at + ")"
-                elif age_h > 26.0:
-                    night_line = "🌙 Ночная проверка: НЕ выполнялась с " + created_at + " UTC (>26 ч) ⚠️"
-                else:
-                    status = str(info.get("status") or "?")
-                    health = str(info.get("health") or "?")
-                    findings = nr["findings_count"] if nr["findings_count"] is not None else "?"
-                    summary = str(info.get("summary") or "").strip()
-                    night_line = (
-                        f"🌙 Ночная проверка ({created_at} UTC): {status}; "
-                        f"здоровье: {health}/10; открытых находок: {findings}"
-                    )
-                    if summary:
-                        night_line += "\n" + summary[:400]
-                night_ctx = night_line
-            else:
-                night_line = "🌙 Ночная проверка: ещё не выполнялась (первый ночной цикл после деплоя)"
-                night_ctx = night_line
-        except Exception as e:
-            _log_error(f"night report read failed: {e}", source="admin_brief", dept="admin", kind="db_read")
+        # ── 4.5 #485 A.4 / #687 A.4: итог последнего ночного цикла ──
+        # Строка и возраст — из night_report_line (#687: единый источник с
+        # брифом; возраст фактический, не константа «>26 ч»).
+        night_line, _night_age = night_report_line()
+        night_ctx = night_line
 
         # ── 5. Build admin prompt ──
         messages = [

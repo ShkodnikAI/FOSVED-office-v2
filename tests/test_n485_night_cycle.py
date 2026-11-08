@@ -84,15 +84,27 @@ def test_night_slot_persists_and_reports():
     assert "CREATE TABLE IF NOT EXISTS admin_night_reports" in APP, "нет DDL в InitDB"
 
 
+def _py_segment(src: str, decl: str) -> str:
+    """Тело одной python-функции: от 'def NAME' до следующего '\\ndef '."""
+    start = src.index(decl)
+    rest = src[start + len(decl):]
+    nxt = rest.find("\ndef ")
+    return rest[:nxt] if nxt != -1 else rest
+
+
 def test_morning_report_reads_night():
     """A.4: утренний ответ Админа открывается разделом «Ночная проверка»."""
     start = ROUTES_SCHED.index("def scheduler_admin_morning_reply")
     seg = ROUTES_SCHED[start:]
     nxt = seg.find("\n@app.")
     seg = seg[:nxt] if nxt != -1 else seg
-    assert "admin_night_reports" in seg and "night-slot" in seg, "итог ночной проверки не читается"
-    assert "Ночная проверка" in seg, "нет раздела «Ночная проверка»"
-    assert "> 26.0" in seg, "порог 26 ч для «не выполнялась с <дата>» потерян"
+    # #687 A.4: строка и источник переехали в night_report_line — единый
+    # источник для ответа Админа и раздела внимания брифа; возраст фактический.
+    nl_seg = _py_segment(ROUTES_SCHED, "def night_report_line")
+    assert "admin_night_reports" in nl_seg and "night-slot" in nl_seg, "итог ночной проверки не читается"
+    assert "Ночная проверка" in nl_seg, "нет раздела «Ночная проверка»"
+    assert "> 26.0" in nl_seg, "порог 26 ч для «не выполнялась с <дата>» потерян"
+    assert "night_report_line()" in seg, "ответ Админа не читает строку из night_report_line"
     assert 'night_line + "\\n\\n" + reply' in seg, "раздел не предшествует комментарию (детерминированный prepend)"
 
 

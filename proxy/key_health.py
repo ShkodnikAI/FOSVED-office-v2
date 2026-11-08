@@ -397,6 +397,25 @@ def night_summary(summary):
             "checked_at": summary["checked_at"]}
 
 
+def format_age_hours(age_h: float) -> str:
+    """#687 A.4: фактический возраст просрочки вместо константы «(>26 ч)».
+
+    До двух суток — часы («31 ч»); дальше — «17 сут 5 ч»
+    (без часов — «17 сут»). Формат строки наряда #687 A.4.
+    """
+    age_h = max(0.0, float(age_h))
+    if age_h < 48.0:
+        return f"{int(age_h + 0.5)} ч"
+    days = int(age_h // 24)
+    hours = int(round(age_h - days * 24))
+    if hours >= 24:
+        days += 1
+        hours = 0
+    if hours:
+        return f"{days} сут {hours} ч"
+    return f"{days} сут"
+
+
 def build_morning_line(max_age_hours=26.0):
     """Детерминированная строка «Ключи» для утреннего отчёта (A.4).
 
@@ -428,7 +447,9 @@ def build_morning_line(max_age_hours=26.0):
         # сама строка даты остаётся в отчёте (проверяемая честность)
         age_stale = False
     if age_stale:
-        return f"🔑 Ключи: проверка НЕ выполнялась с {checked_at[:16]} UTC (>26 ч) ⚠️"
+        # #687 A.4: фактический возраст вместо «(>26 ч)» — прод 08.11 показывал
+        # «>26 ч» при просрочке 17 суток.
+        return f"🔑 Ключи: проверка НЕ выполнялась с {checked_at[:16]} UTC ({format_age_hours(age_h)}) ⚠️"
     labels = {e["env_key"]: e["label"] for e in KEY_MANIFEST}
     problems = [r for r in rows if r["status"] in ("invalid", "missing", "quota", "unreachable")]
     total = len(rows)

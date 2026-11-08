@@ -1759,10 +1759,35 @@ pattern NightLzPhase() -> String {
   if lz_val == "{}" then {
     return json_encode({line: "ЛЗ: скан недоступен — полный отчёт в 09:10", failed: 1.0})
   }
-  let lz_scan = parse_json(to_string(json_get(parse_json(lz_val), "scan", "{}")))
+  // #687 A.1: источник не-JSON у фазы — to_string вложенного dict бинаря даёт
+  // репрезентацию вида Json-метка, а не JSON-текст; json_encode сериализует
+  // значение честно. Разбор под TryVal: нечитаемый ответ — FAIL с причиной,
+  // не падение слота (A.2).
+  let lz_root = TryVal(try parse_json(lz_val))
+  if to_string(lz_root) == "()" then {
+    return json_encode({line: "ЛЗ: ответ не JSON: " + redact(substring(lz_val, 0.0, 120.0), "all") + " — полный отчёт в 09:10", failed: 1.0})
+  }
+  let lz_scan = TryVal(try parse_json(json_encode(json_get(lz_root, "scan", "{}"))))
+  if to_string(lz_scan) == "()" then {
+    return json_encode({line: "ЛЗ: блок скана не разобран — полный отчёт в 09:10", failed: 1.0})
+  }
   let lz_n = to_string(json_get(lz_scan, "repos_found", "?"))
   let lz_m = to_string(json_get(lz_scan, "releases_found", "?"))
   return json_encode({line: "ЛЗ: " + lz_n + " репозиториев, " + lz_m + " релизов — полный отчёт в 09:10", failed: 0.0})
+}
+
+// ── #687 A.5: блок учёта по ключам для ночной ленты ────────────────────────────
+// call_python возвращает конверт call-python целиком; в ленту уходит только
+// поле result (текст отчёта). Пустой/нечитаемый ответ — честная строка
+// недоступности, лента не теряется и не содержит обёртки.
+pattern NightUsageKeyLine() -> String {
+  let usage_env = TryVal(try call_python("usage_by_key", "night_block", "[]"))
+  if to_string(usage_env) == "()" then { return "🔑 Учёт по ключам: недоступна (call-python не ответил)" }
+  let usage_json = TryVal(try parse_json(to_string(usage_env)))
+  if to_string(usage_json) == "()" then { return "🔑 Учёт по ключам: недоступна (ответ call-python не разобран)" }
+  let usage_res = trim(to_string(json_get(usage_json, "result", "")))
+  if usage_res == "" then { return "🔑 Учёт по ключам: недоступна (пустой ответ night_block)" }
+  return usage_res
 }
 
 pattern NightSlot() -> String {
@@ -1785,7 +1810,9 @@ pattern NightSlot() -> String {
   // Shadow-контур: call_python → usage_by_key.night_block() — только метаданные
   // вызовов, ключ исключительно маской, содержимое не логируется. Ошибка
   // отчёта ночную сводку не ломает (TryVal).
-  let _ = TryVal(try OutboxPut("usage-by-key", call_python("usage_by_key", "night_block", "[]")))
+  // #687 A.5: из конверта call-python извлекается поле result — в ленту уходит
+  // текст отчёта, а не сырой конверт (прод 08.11: блок пришёл с обёрткой result/type).
+  let _ = TryVal(try OutboxPut("usage-by-key", NightUsageKeyLine()))
 
   // Phase 0: UA Night Cycle (Scanner → Analyzer → Grapher → Reviewer → Documenter)
   // #485 A.3: счётчик недоступных фаз — основа честного статуса в итоге
@@ -1804,20 +1831,56 @@ pattern NightSlot() -> String {
   let _ = AuditLog("night_ua_cycle", "admin", "triggering UA night cycle")
   let ua_body = "{}"
   let mut ua_result = "{}"
+  let mut ua_note = ""
   let ua_start = TryVal(try http_post("http://127.0.0.1:4000/admin-ua/night-cycle?itok=" + AdminUaToken() + "&async=1", ua_body, "application/json", 300.0))
-  let ua_job = to_string(json_get(TryVal(try parse_json(to_string(ua_start))), "job_id", ""))
-  // решения на недоверенных данных — через redact-fingerprint (№327-класс,
-  // идиома dept/utils.mlog:343-352; унифицировано с PollJobStatus)
-  if redact(ua_job, "hash_only") != redact("", "hash_only") and redact(ua_job, "hash_only") != redact("null", "hash_only") then {
-    let ua_poll = PollJobStatus("http://127.0.0.1:4000/admin-ua/night-cycle/status", "job=" + ua_job + "&itok=" + AdminUaToken())
-    let ua_state = to_string(json_get(TryVal(try parse_json(ua_poll)), "state", ""))
-    if redact(ua_state, "hash_only") == redact("done", "hash_only") then {
-      ua_result = to_string(json_get(TryVal(try parse_json(ua_poll)), "result", "{}"))
-      if redact(ua_result, "hash_only") == redact("()", "hash_only") or redact(ua_result, "hash_only") == redact("null", "hash_only") then { ua_result = "{}" }
+  // #687 A.2: каждый разбор ответа фазы — под TryVal; нечитаемый ответ —
+  // фаза FAIL с причиной «ответ не JSON: <первые 120 символов>», phase_fail + 1,
+  // остальные фазы выполняются. Причина — redact (ответы недоверенные).
+  let ua_start_json = TryVal(try parse_json(to_string(ua_start)))
+  if to_string(ua_start_json) == "()" then {
+    phase_fail = phase_fail + 1.0
+    ua_note = "ответ не JSON: " + redact(substring(to_string(ua_start), 0.0, 120.0), "all")
+  } else {
+    let ua_job = to_string(json_get(ua_start_json, "job_id", ""))
+    // решения на недоверенных данных — через redact-fingerprint (№327-класс,
+    // идиома dept/utils.mlog:343-352; унифицировано с PollJobStatus)
+    if redact(ua_job, "hash_only") != redact("", "hash_only") and redact(ua_job, "hash_only") != redact("null", "hash_only") then {
+      let ua_poll = PollJobStatus("http://127.0.0.1:4000/admin-ua/night-cycle/status", "job=" + ua_job + "&itok=" + AdminUaToken())
+      let ua_poll_json = TryVal(try parse_json(to_string(ua_poll)))
+      if to_string(ua_poll_json) == "()" then {
+        phase_fail = phase_fail + 1.0
+        ua_note = "ответ не JSON: " + redact(substring(to_string(ua_poll), 0.0, 120.0), "all")
+      } else {
+        let ua_state = to_string(json_get(ua_poll_json, "state", ""))
+        if redact(ua_state, "hash_only") == redact("done", "hash_only") then {
+          // #687 A.1: результат задания сериализован json_encode (PollJobStatus
+          // 0.38-серия: to_string вложенного значения давал не-JSON репрезентацию
+          // — с 05.11 ронял весь слот на разборе ниже). Двойной гард остаётся.
+          ua_result = to_string(json_get(ua_poll_json, "result", "{}"))
+          if redact(ua_result, "hash_only") == redact("()", "hash_only") or redact(ua_result, "hash_only") == redact("null", "hash_only") then { ua_result = "{}" }
+        } else {
+          phase_fail = phase_fail + 1.0
+          ua_note = "задание UA не завершилось: state=" + redact(ua_state, "all")
+        }
+      }
+    } else {
+      phase_fail = phase_fail + 1.0
+      ua_note = "старт UA вернул ответ без job_id"
     }
   }
-  if to_string(ua_result) == "{}" then { phase_fail = phase_fail + 1.0 }
-  let ua_summary = redact(to_string(json_get(parse_json(ua_result), "summary", "UA cycle failed")), "all")
+  let mut ua_summary = "UA cycle failed"
+  if ua_note != "" then {
+    ua_summary = ua_note
+  } else {
+    let ua_parsed = TryVal(try parse_json(ua_result))
+    if to_string(ua_parsed) == "()" then {
+      phase_fail = phase_fail + 1.0
+      ua_summary = "ответ не JSON: " + redact(substring(ua_result, 0.0, 120.0), "all")
+    } else {
+      let ua_s = redact(to_string(json_get(ua_parsed, "summary", "")), "all")
+      if ua_s != "" then { ua_summary = ua_s }
+    }
+  }
 
   // Phase 1: LZ Daily Report (GitHub scan → Admin)
   // №588 A.3: ЛЗ в ночи — НЕ БОЛЬШЕ ОДНОГО РАЗА за дату (NightPhaseBegin,
@@ -1829,16 +1892,35 @@ pattern NightSlot() -> String {
   // Фаза вынесена в паттерн NightLzPhase с ранними return: присваивание в
   // no-else if на уровне паттерна НЕ пробрасывает связку (семантика бинаря
   // 0.33.2, проба n588) — json-результат паттерна пробрасывается надёжно.
-  let lz_phase = parse_json(NightLzPhase())
-  let lz_line = to_string(json_get(lz_phase, "line", "ЛЗ: скан недоступен — полный отчёт в 09:10"))
-  let phase_fail = phase_fail + to_float(json_get(lz_phase, "failed", "0"))
+  // #687 A.2: и сам вызов, и разбор — под TryVal; сбой фазы — FAIL со
+  // счётчиком, не падение слота.
+  let lz_raw = TryVal(try NightLzPhase())
+  let lz_phase = TryVal(try parse_json(to_string(lz_raw)))
+  let mut lz_line = "ЛЗ: фаза не выполнилась — полный отчёт в 09:10"
+  let mut lz_failed = 1.0
+  if to_string(lz_phase) != "()" then {
+    lz_line = to_string(json_get(lz_phase, "line", "ЛЗ: скан недоступен — полный отчёт в 09:10"))
+    lz_failed = to_float(json_get(lz_phase, "failed", "1.0"))
+  }
+  let phase_fail = phase_fail + lz_failed
 
   // Phase 2: Memory Maintenance
+  // #687 A.2: разбор ответа под TryVal — не-JSON не роняет слот.
   let mem_body = "{}"
   let mut mem_result = TryVal(try http_post("http://127.0.0.1:4000/memory/maintenance", mem_body, "application/json"))
   if to_string(mem_result) == "()" then { mem_result = "{}" }
-  if to_string(mem_result) == "{}" then { phase_fail = phase_fail + 1.0 }
-  let mem_summary = redact(to_string(json_get(parse_json(mem_result), "result", "Memory maintenance failed")), "all")
+  let mut mem_summary = "Memory maintenance failed"
+  let mem_json = TryVal(try parse_json(to_string(mem_result)))
+  if to_string(mem_json) == "()" then {
+    phase_fail = phase_fail + 1.0
+    mem_summary = "ответ не JSON: " + redact(substring(to_string(mem_result), 0.0, 120.0), "all")
+  } else {
+    if to_string(mem_json) == "{}" then {
+      phase_fail = phase_fail + 1.0
+    } else {
+      mem_summary = redact(to_string(json_get(mem_json, "result", "Memory maintenance failed")), "all")
+    }
+  }
 
   // Phase 3: Original AdminNightCycle
   // #485 A.2: фаза под try — сбой AdminNightCycle (call_llm-фазы 3-5 внутри него
@@ -1854,20 +1936,31 @@ pattern NightSlot() -> String {
   if to_string(stale_result) == "()" then { let stale_result = "проверка не выполнена" }
   // Phase 5: Ключи и провайдеры (#486 A.3): валидность всех ключей манифеста
   // (proxy/key_health.py, дешёвые вызовы без расхода токенов); итог — в ночной отчёт
+  // Phase 5: Ключи и провайдеры (#486 A.3): валидность всех ключей манифеста
+  // (proxy/key_health.py, дешёвые вызовы без расхода токенов); итог — в ночной отчёт
+  // #687 A.2/A.3: один разбор ответа под TryVal (четыре голых parse_json до
+  // #687 роняли слот целиком — фаза ключей с 23.10 не выполнялась никогда);
+  // не-JSON — фаза FAIL с причиной, запись итога не теряется.
   let keys_body = "{}"
   let mut keys_result = TryVal(try http_post("http://127.0.0.1:4000/admin/keys/night-check", keys_body, "application/json", 120.0))
   let mut keys_summary = "недоступна (нет ответа от admin/keys/night-check)"
   if to_string(keys_result) == "()" then {
     phase_fail = phase_fail + 1.0
   } else {
-    let keys_status = redact(to_string(json_get(parse_json(keys_result), "status", "?")), "all")
-    let keys_line = redact(to_string(json_get(parse_json(keys_result), "problems_line", "")), "all")
-    let keys_ok = to_string(json_get(parse_json(keys_result), "ok_count", "0"))
-    let keys_total = to_string(json_get(parse_json(keys_result), "total", "0"))
-    if keys_status == "ok" then {
-      keys_summary = "ok (" + keys_ok + "/" + keys_total + ")"
+    let keys_json = TryVal(try parse_json(to_string(keys_result)))
+    if to_string(keys_json) == "()" then {
+      phase_fail = phase_fail + 1.0
+      keys_summary = "ответ не JSON: " + redact(substring(to_string(keys_result), 0.0, 120.0), "all")
     } else {
-      keys_summary = keys_line + " — ok " + keys_ok + "/" + keys_total
+      let keys_status = redact(to_string(json_get(keys_json, "status", "?")), "all")
+      let keys_line = redact(to_string(json_get(keys_json, "problems_line", "")), "all")
+      let keys_ok = to_string(json_get(keys_json, "ok_count", "0"))
+      let keys_total = to_string(json_get(keys_json, "total", "0"))
+      if keys_status == "ok" then {
+        keys_summary = "ok (" + keys_ok + "/" + keys_total + ")"
+      } else {
+        keys_summary = keys_line + " — ok " + keys_ok + "/" + keys_total
+      }
     }
   }
   let result = "Phase 0: UA Analysis\n" + ua_summary + "\n\n" + result + "\n\nPhase 1-2: LZ + Memory\n" + lz_line + "\n\n" + substring(mem_summary, 0, 400) + "\n\nPhase 4: Устаревшие отделы\n" + stale_result + "\n\nPhase 5: Ключи и провайдеры\n" + keys_summary

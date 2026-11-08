@@ -285,12 +285,15 @@ class TestKkLineMlog:
         assert 'kv_set("kk_ask_dept", dept)' in KK
 
     def test_app_mlog_untouched(self):
-        # наряд #684 app.mlog не трогает — гвардия на всякий случай
+        # наряд #684 app.mlog не трогает. #687 (NIGHT-1) правит NightSlot
+        # легитимно — гвардия отслеживает, что в app.mlog нет правок
+        # Кавальни (запрет наряда #684 остаётся в силе).
         import subprocess
         out = subprocess.run(
             ["git", "diff", "origin/main", "--", "app.mlog"],
             cwd=str(REPO_ROOT), capture_output=True, text=True)
-        assert out.stdout.strip() == "", "app.mlog изменён — запрещено нарядом #684"
+        for banned in ("KKAskForDept", "KKResolveSlot", "KKLine24h", "kk_ask", "kk_resolve"):
+            assert banned not in out.stdout, f"app.mlog: правка Кавальни ({banned}) запрещена наряду #684"
 
     def test_scheduler_payload_keeps_kk_field(self):
         # mlog-сторона по-прежнему кладёт строку в payload брифа

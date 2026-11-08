@@ -138,6 +138,19 @@ def do_backup(force_smoke: bool = False) -> dict:
     date_stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     bares = sorted(glob.glob(os.path.join(REPOS_DIR, "*.git")))
 
+    # #687 A.6.2: проектов нет — резервировать нечего; это не сбой, а честное
+    # состояние. Раньше строка «создано 0 … (репозиториев 0)» читалась брифом
+    # и Админом как критическая дыра в контуре.
+    if not bares:
+        summary = {
+            "ok": True, "repos": 0, "created": 0, "failed": 0,
+            "total_size_mb": 0.0, "smoke": "пропущен",
+            "smoke_msg": "нечего резервировать (проектов 0)",
+            "failures": [],
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        return {"summary": summary, "line": "Резерв FORGE: нечего резервировать (проектов 0)"}
+
     created, failed, total_size = 0, 0, 0
     all_bundles = []
     failures = []
