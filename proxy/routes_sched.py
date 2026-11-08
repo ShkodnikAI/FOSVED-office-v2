@@ -414,8 +414,8 @@ def forge_backup_stale_flag():
             if ts:
                 age = (datetime.utcnow() - datetime.fromisoformat(ts).replace(tzinfo=None)).total_seconds() / 3600.0
                 return age > 24.0
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 — сигнал деградирует к False, не роняет ответ
+        log.warning(f"[forge backup] stale flag read failed (non-fatal): {e}")
     return False
 
 
