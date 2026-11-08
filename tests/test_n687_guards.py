@@ -93,6 +93,9 @@ def test_a4_night_line_actual_age():
     assert "НЕ выполнялась" in line and "3 сут" in line, line
     assert ">26 ч" not in line, line
     assert age_h is not None and age_h > 70.0
+    # порядок-независимость: тесты ниже (n688 и др.) считают сигналы —
+    # ночная строка не должна оставаться просроченной после теста
+    _query("DELETE FROM admin_night_reports WHERE scan_data='night-slot'", ())
 
 
 # ──────────────────────────── A.6: раздел внимания ────────────────────────────

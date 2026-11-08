@@ -53,6 +53,11 @@ def green_signals():
     _query("DELETE FROM audit_log WHERE action IN ('scheduler_admin_morning_reply', 'admin_reply_directive_filter')")
     _query("DELETE FROM key_health_status", ())
     _query("DELETE FROM system_settings WHERE key='forge_backup_summary'", ())
+    # порядок-независимость: сигналы чужих тестов (ночная строка, ошибки
+    # офиса, отказы отделов) — не сигналы здесь
+    _query("DELETE FROM admin_night_reports WHERE scan_data='night-slot'", ())
+    _query("DELETE FROM error_log", ())
+    _query("DELETE FROM trace_log WHERE action='dept_fail'", ())
     _query("INSERT INTO system_settings (key, value) VALUES ('forge_backup_summary', ?)", (
         '{"ok": true, "line": "Резерв FORGE: нечего резервировать (проектов 0)", '
         '"ts": "2026-11-08T04:20:00+00:00"}',))
