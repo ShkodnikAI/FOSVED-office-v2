@@ -258,6 +258,54 @@ def filter_model_conclusions(text: str, has_attention: bool):
     return "\n".join(kept), removed
 
 
+# #689 B.1: маркеры раздела мировых событий в ответе модели — сам раздел
+# пишет программа из сборщика (get_night_news_items), пересказ модели
+# (включая выдуманные детали — инцидент брифа 08.11) вырезается
+_WORLD_EVENTS_MARKERS = ("мировые события", "🌍")
+_SECTION_START_RE = re.compile(r"^\s*(?:\d+\s*[.)]|[📅🌤🏢🔍⚡💾🛠🔑📈📊🧭])")
+
+
+def strip_model_world_events(text: str) -> str:
+    """#689 B.1: раздел мировых событий из ответа модели вырезается.
+
+    Блок от строки-заголовка (маркер «мировые события»/«🌍») до начала
+    следующей секции (нумерованный пункт или эмодзи-маркер в начале строки)
+    удаляется целиком. Остальные секции не трогаются.
+    """
+    if not text:
+        return text
+    out, skipping = [], False
+    for ln in text.split("\n"):
+        if any(m in ln.lower() for m in _WORLD_EVENTS_MARKERS):
+            skipping = True
+            continue
+        if skipping and _SECTION_START_RE.match(ln):
+            skipping = False
+        if not skipping:
+            out.append(ln)
+    return "\n".join(out).rstrip("\n")
+
+
+def build_world_events_section(items: list) -> str:
+    """#689 B.1: раздел «🌍 Важные мировые события» — дословно из сборщика.
+
+    До 5 пунктов «📌 <title> (<source>)» в порядке сборщика — заголовки
+    не искажаются пересказом модели (инцидент брифа 08.11: «партия
+    налоговой реформы» была дописана моделью от себя). Пусто — честная
+    строка «За ночь значимых событий не зафиксировано».
+    """
+    lines = []
+    for it in items[:5]:
+        title = str(it.get("title") or "").strip()
+        if not title:
+            continue
+        src = str(it.get("source") or "").strip()
+        lines.append(f"📌 {title}" + (f" ({src})" if src else ""))
+    if not lines:
+        return "🌍 Важные мировые события: За ночь значимых событий не зафиксировано"
+    return "🌍 Важные мировые события:\n" + "\n".join(lines)
+
+
 def _age_from_night_line(night_line: str) -> str:
     """#687 A.6.1: фактический возраст из строки ночной проверки.
 
@@ -752,10 +800,13 @@ def scheduler_morning_brief():
 
         # ── 4. Night news (with explicit empty marker) ──
         # №597 A.2: в бриф — только НЕ сообщённые события; keys — для пометки
-        # в реестре после успешной отправки
-        night_news, night_news_keys = get_night_news_items()
-        if not night_news:
-            night_news = "\n📰 Топ события за ночь: НЕТ ДАННЫХ (сборщик новостей не вернул результатов)\n"
+        # в реестре после успешной отправки.
+        # #689 B.1: данные событий из промпта УБРАНЫ (текст дайджеста больше
+        # не запрашивается) — раздел «🌍 Важные мировые события» собирает
+        # программа из этих же items ПОСЛЕ ответа модели (дословные
+        # заголовки сборщика с источником); модель пересказывать и
+        # дополнять события больше не может
+        night_news_keys = get_night_news_items()[1]
 
         # ── 5. Build prompt ──
         dept_prompt = get_dept_prompt("yana")
@@ -797,17 +848,16 @@ def scheduler_morning_brief():
 === НАХОДКИ ЛАБОРАТОРИИ ЗНАНИЙ ===
 {lz_findings if lz_findings else 'За последние сутки нет новых находок'}
 
-{night_news}
-
 === ТВОЯ ЗАДАЧА ===
 Напиши утренний отчёт на русском. Структура:
 1. 📅 Дата, время, день недели
 2. 🌤 Прогноз погоды в Минске
 3. 🏢 Статус офиса — кратко, что происходит
-4. 🌍 Важные мировые события — ТОЛЬКО из раздела «Топ события за ночь» ниже, если он есть. Если раздела нет или он пуст — напиши буквально «За ночь значимых событий не зафиксировано» и не добавляй ничего от себя. ЗАПРЕЩЕНО придумывать события, даже правдоподобные.
-5. 🔍 Ключевые находки ЛЗ (если есть)
+4. 🔍 Ключевые находки ЛЗ (если есть)
 
 #684: РАЗДЕЛ «ЧТО ТРЕБУЕТ ВНИМАНИЯ» ТЫ НЕ ПИШЕШЬ — он добавляется программой после твоего текста. ЗАПРЕЩЕНО писать выводы о необходимости вмешательства хозяина и фразы вида «всё в порядке», «не требует внимания», «проблем нет».
+
+#689: РАЗДЕЛ «🌍 ВАЖНЫЕ МИРОВЫЕ СОБЫТИЯ» ТЫ НЕ ПИШЕШЬ — он добавляется программой из сборщика новостей дословно. ЗАПРЕЩЕНО писать о мировых событиях и новостях — они печатаются машиной без пересказа.
 
 ФОРМАТИРОВАНИЕ (Telegram MarkdownV2):
 ▸ Заголовки секций: *Жирный текст*
@@ -815,7 +865,7 @@ def scheduler_morning_brief():
 ▸ Подчёркивания важных пунктов: __подчёркнуто__
 ▸ Статусы: ✅ зелёный, ⚠️ жёлтый, ❌ красный
 ▸ НЕ используй кавычки " " или « » — они озвучиваются TTS
-▸ Эмодзи только как маркеры секций (📅🌤🏢🌍🔍), не ставь эмодзи в середине предложений
+▸ Эмодзи только как маркеры секций (📅🌤🏢🔍), не ставь эмодзи в середине предложений
 ▸ НЕ ставь # заголовки — Telegram их не рендерит
 
 Будь лаконичной но информативной. 7-12 предложений максимум."""
@@ -834,6 +884,12 @@ def scheduler_morning_brief():
         brief, _filtered_phrases = filter_model_conclusions(brief, bool(attention_items))
         if _filtered_phrases:
             _log_audit("brief_attention_filter", {"removed": _filtered_phrases, "attention_items": len(attention_items)})
+
+        # #689 B.1: раздел мировых событий из ответа модели вырезается
+        # (пересказ мог добавлять детали от себя — инцидент 08.11)…
+        brief = strip_model_world_events(brief)
+        # …и добавляется программой — дословно из сборщика, с источником
+        brief = brief + "\n\n" + build_world_events_section(night_news_keys)
 
         # #684 A.1: раздел внимания — дословно после ответа модели (собирает
         # программа из тех же сигналов, что ниже в отчёте)
@@ -862,8 +918,13 @@ def scheduler_morning_brief():
         if msg_id and night_news_keys:
             try:
                 from proxy import reported as rpt
-                rpt.mark_many("brief_events", [it["key"] for it in night_news_keys],
-                              {it["key"]: {"title": it["title"]} for it in night_news_keys if it.get("title")})
+                # #689 B.1: items могут нести key=None (сбой реестра) —
+                # помечаются только реальные ключи, показ новости не теряется
+                _we_keys = [it["key"] for it in night_news_keys if it.get("key")]
+                if _we_keys:
+                    rpt.mark_many("brief_events", _we_keys,
+                                  {it["key"]: {"title": it["title"]}
+                                   for it in night_news_keys if it.get("key") and it.get("title")})
             except Exception as e:
                 _log_error(f"brief: reported_items mark failed: {e}",
                            source="scheduler_morning_brief", dept="yana", kind="registry")

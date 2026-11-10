@@ -436,8 +436,10 @@ def get_night_news_items():
     items = []
     for r, key in fresh[:5]:
         digest += f"  {emoji.get(r[2], '📄')} [{r[0]}] {r[1][:80]}\n"
-        if key:
-            items.append({"key": key, "title": r[1]})
+        # #689 B.1: source — для раздела мировых событий брифа (программа
+        # печатает «📌 <title> (<source>)»); key может быть None при сбое
+        # реестра — пометка в брифе фильтрует, показ новости не теряется
+        items.append({"key": key, "title": r[1], "source": r[0]})
     return digest, items
 
 
