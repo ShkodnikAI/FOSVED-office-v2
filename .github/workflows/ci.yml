@@ -605,3 +605,42 @@ jobs:
             --data-urlencode "chat_id=${OWNER_TELEGRAM_ID}" \
             --data-urlencode "text=${MSG}" > /dev/null
           echo "OK: уведомление отправлено"
+
+  # ── #695 REA-2 A.2: паспорт релиза — non-blocking lane ──────────────
+  # Измерительный lane: факты hardening/ELF-notes вендоренных бинарей
+  # (bin/*) статическим разбором rea-agents (пин 6.8.0, без исполнения).
+  # Падение lane НЕ красит CI (continue-on-error) и не будит notify-red
+  # (job conclusion при continue-on-error — success с аннотацией):
+  # сначала накопление фактов, решение о блокировке — отдельное
+  # (граница наряда #695 «Что НЕ делаем»).
+  release-passport:
+    name: Release passport (REA, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: venv для hardening-фактов (pwntools-адаптер REA)
+        run: |
+          python3 -m venv /tmp/rea_venv
+          /tmp/rea_venv/bin/pip install -q pwntools==4.15.0 pyelftools==0.33 unicorn==2.1.2
+      - name: Паспорт на артефакты bin/* (маска путей)
+        env:
+          REA_PWNTOOLS_PYTHON: /tmp/rea_venv/bin/python3
+        run: |
+          mapfile -t BINS < <(git ls-files 'bin/*' | grep -v '\.md$' || true)
+          if [ "${#BINS[@]}" -eq 0 ]; then
+            echo "Артефактов по маске bin/* нет — lane скипнут (#695: запуск только при наличии артефактов)"
+            exit 0
+          fi
+          bash scripts/release_passport.sh "${BINS[@]}"
+      - name: Паспорт — артефакт джобы
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-passport
+          path: /tmp/release_passport_*.md
+          if-no-files-found: ignore
