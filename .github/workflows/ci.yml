@@ -250,6 +250,27 @@ jobs:
             grep "❌" /tmp/mlogtest/out.txt | head -5
             exit 1
           fi
+          # ── #698 CI-2: гвард полноты — «зелёное неполное» запрещено ──
+          # Прецедент PR #693: дефолтный бюджет EXEC тихо усекал прогон —
+          # «82/82 passed» при rc=0 (усечены ОБА числа: существующие гварды
+          # rc≠0 и «❌» этот класс пропускали). Независимая правда — машинный
+          # подсчёт test-блоков: grep '^test ' по app.mlog + dept/*.mlog
+          # (app.mlog с #644 тестов не содержит; doc-тесты идут только с
+          # --docs — здесь их нет). Статический подсчёт — нижняя граница
+          # динамического (тесты внутри паттернов инлайнятся кратно),
+          # поэтому красит только passed < counted.
+          COUNTED=$(grep -h -c '^test ' app.mlog dept/*.mlog | awk '{s+=$1} END {print s+0}' || true)
+          PASSED=$(grep -oE '[0-9]+/[0-9]+ tests passed' /tmp/mlogtest/out.txt | head -1 | cut -d/ -f1 || true)
+          echo "Гвард полноты: test-блоков (grep) $COUNTED, passed (раннер) ${PASSED:-<нет строки>}"
+          if [ -z "$PASSED" ]; then
+            echo "FAIL: строка «N/M tests passed» не найдена в выводе mlog test"
+            exit 1
+          fi
+          if [ "$PASSED" -lt "$COUNTED" ]; then
+            echo "FAIL: зелёное неполное — passed ($PASSED) < подсчитанных test-блоков ($COUNTED)"
+            echo "Прецедент PR #693: усечение прогона не красит rc — проверь бюджет METALOGOS_EXEC_TIMEOUT_SECS"
+            exit 1
+          fi
           grep -E "tests passed" /tmp/mlogtest/out.txt
 
       # ── №312: Category-A аудит dept-файлов — гвард «долг не растёт» ──
