@@ -212,8 +212,10 @@ class TestBriefStructure:
         assert "kk_brief_line(d)" in ROUTES
 
     def test_emoji_markers_without_attention_bolt(self):
-        # ⚡ больше не маркер секций модели — раздел пишет программа
-        assert "(📅🌤🏢🌍🔍)" in ROUTES
+        # ⚡ больше не маркер секций модели — раздел пишет программа;
+        # #689 B.1: 🌍 убран из маркеров модели — раздел мировых событий
+        # тоже собирает программа (дословно из сборщика)
+        assert "(📅🌤🏢🔍)" in ROUTES
         assert "📅🌤🏢🌍🔍⚡" not in ROUTES
 
     def test_attention_collected_before_model_call(self):

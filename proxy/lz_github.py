@@ -362,8 +362,11 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                              "title": f"{r.get('repo', '')} {r.get('tag', '')}",
                              "url": r.get("url", ""), "item": r})
         for nr in news_rows:
+            # #689 A.1: source/summary тянутся в элементы из news_cache —
+            # строка новости модели строится с заголовком и источником
             lz_items.append({"key": rpt.norm_news_key(nr[6], nr[3]), "kind": "news",
-                             "title": nr[1], "url": nr[3] or ""})
+                             "title": nr[1], "url": nr[3] or "",
+                             "source": nr[0] or "", "summary": nr[2] or ""})
         try:
             new_items, update_items = rpt.filter_lz_items("lz_daily", lz_items)
         except Exception as e:
@@ -381,6 +384,7 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
         result = {"provider": "-", "tokens_in": 0, "tokens_out": 0}
         analysis = ""
         hidden_repeats = 0
+        inc_news = []  # #689 A.2: доступно и когда модель не вызывалась
         if included_items:
             inc_repos = [it for it in included_items if it["kind"] == "repo"]
             inc_releases = [it for it in included_items if it["kind"] == "release"]
@@ -396,12 +400,23 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                 r = it["item"]
                 lbl = f" {it['update_label']}" if it.get("update_label") else ""
                 releases_text += f"- {r['repo']} {r['tag']}: {r['name']} ({r['date']}){lbl}\n  {r['body']}\n  {r['url']}\n"
+            # #689 A.1: каждой новостью — строка «[<источник>] <заголовок> —
+            # <URL>» (+ summary до 300 символов, если непустой). До наряда
+            # модель получала только URL — кириллические и числовые адреса
+            # не читались, новости молча выпадали из отчёта. Заголовки и
+            # summary — недоверенные данные: только данные, без инструкций.
             news_section = ""
             if inc_news:
                 news_section = f"=== МИРОВЫЕ НОВОСТИ И СОБЫТИЯ (новое, {len(inc_news)}) ===\n\n"
                 for it in inc_news:
                     u = it.get("url", "")
-                    news_section += f"{u}\n" if u else "(без ссылки)\n"
+                    src = (it.get("source") or "").strip()
+                    title = (it.get("title") or "").strip()
+                    line = f"[{src}] {title} — {u}\n" if u else f"[{src}] {title} — (без ссылки)\n"
+                    summary = (it.get("summary") or "").strip()
+                    if summary and summary != title:
+                        line += f"  {summary[:300]}\n"
+                    news_section += line
             monitors_text = ""
             if monitor_topics:
                 monitors_text = "Custom monitors: " + ", ".join(monitor_topics)
@@ -495,6 +510,15 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
             report += analysis
             report += f"\n\n{'─' * 40}\n"
             report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {news_count} новостей, {len(monitor_topics)} monitors\n"
+            # #689 A.2: учёт пропущенного — программой. URL входных новостей
+            # сверяется с текстом отчёта (после фильтра повторов — счёт честен
+            # к итоговому тексту); подвал показывает расхождение, модель
+            # больше не может сказать «помечены», если пометок нет.
+            if inc_news:
+                n_in = len(inc_news)
+                n_hit = sum(1 for it in inc_news if it.get("url") and it["url"] in analysis)
+                report += (f"Новостей на входе {n_in}, в отчёт вошло {n_hit}, "
+                           f"не вошло {n_in - n_hit}\n")
             if hidden_repeats:
                 # №597 A.3: страховка после модели — сколько абзацев скрыто
                 report += f"скрыто повторов: {hidden_repeats}\n"
