@@ -60,6 +60,11 @@
 
 Добавлено: `skills/`, `artifacts/`, `*.tar.gz`, `*.sql.gz`, `dumps/`, `*.dump`.
 
+### 5. Сторонние артефакты
+
+Новые npm/Electron/нативные артефакты принимаются только после статического
+разбора rea-agents — рецепт: [`docs/dependency-acceptance-rea.md`](dependency-acceptance-rea.md) (#694).
+
 ## Итог
 
 | Метрика | До | После |
