@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 
 from proxy.core import log, _query, _log_audit, _log_error, DB_PATH
 from proxy.telegram import _tg_send_document
+# #712 MEM-1 (P0) A.1: RSS до/после бэкапа (учёт памяти, proxy/mem_sampler.py)
+from proxy.mem_sampler import run_tracked
 
 # Скрипт-бэкап живёт в scripts/ рядом с корнем репо
 _SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "backup_forge_repos.py")
@@ -49,8 +51,8 @@ def run_forge_backup(force_smoke: bool = False) -> dict:
     if force_smoke:
         cmd.append("--smoke")
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=420,
-                           env={**os.environ})
+        r = run_tracked(cmd, capture_output=True, text=True, timeout=420,
+                        env={**os.environ})
         out = (r.stdout or "") + (r.stderr or "")
         m = re.search(r"^SUMMARY_JSON: (.*)$", out, re.M)
         summary = {}
