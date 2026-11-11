@@ -259,21 +259,36 @@ pattern ImpactAnalysis(file_path: String) -> String {
 // Admin Metrics Analysis (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminMetricsAnalysis() -> String {
-  // Data for last 24 hours
-  let tasks = query("SELECT dept, COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours') AND role = 'user' GROUP BY dept ORDER BY cnt DESC", [])
-  let errors = query("SELECT dept, error_type, COUNT(*) as cnt FROM error_patterns WHERE created_at > datetime('now', '-24 hours') GROUP BY dept, error_type ORDER BY cnt DESC LIMIT 10", [])
-  let cost = query("SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE created_at > datetime('now', '-24 hours')", [])
+  // #705 A.4: источники данных — под TryVal; сбой источника (прод-класс
+  // «database is locked») — честная подстановка в промпт, не падение фазы
+  // и не падение всего AdminNightCycle (прод 11.11).
+  let tr_tasks = try query("SELECT dept, COUNT(*) as cnt FROM dialog_history WHERE created_at > datetime('now', '-24 hours') AND role = 'user' GROUP BY dept ORDER BY cnt DESC", [])
+  // №327-класс: решения на данных из БД — через redact (гвард аудита №312)
+  let tasks_ok = redact(to_string(TryVal(tr_tasks)), "all")
+  let mut tasks_s = "недоступны (БД)"
+  if tasks_ok != "()" then { tasks_s = tasks_ok }
+  let tr_errors = try query("SELECT dept, error_type, COUNT(*) as cnt FROM error_patterns WHERE created_at > datetime('now', '-24 hours') GROUP BY dept, error_type ORDER BY cnt DESC LIMIT 10", [])
+  let errors_ok = redact(to_string(TryVal(tr_errors)), "all")
+  let mut errors_s = "недоступны (БД)"
+  if errors_ok != "()" then { errors_s = errors_ok }
+  let tr_cost = try query("SELECT COALESCE(SUM(cost_usd), 0) as total FROM token_usage WHERE created_at > datetime('now', '-24 hours')", [])
+  let cost_ok = redact(to_string(TryVal(tr_cost)), "all")
+  let mut cost_s = "недоступна (БД)"
+  if cost_ok != "()" then { cost_s = cost_ok }
 
-  let admin_profile = redact(read_file("library/admin.md"), "all")
+  let prof_ok = redact(to_string(TryVal(try read_file("library/admin.md"))), "all")
+  let mut admin_profile = "(профиль недоступен)"
+  if prof_ok != "()" then { admin_profile = prof_ok }
   let disclaimer = AdminDisclaimer()
-  let metrics_prompt = "Analyze office metrics for the last 24 hours:\n\nTasks by dept: " + to_string(tasks) + "\n\nErrors: " + to_string(errors) + "\n\nLLM cost: $" + to_string(cost) + "\n\nAnswer:\n1. Which departments are overloaded/idle?\n2. Which errors repeat?\n3. Is spending optimal?\n4. Any departments needing attention?"
+  let metrics_prompt = "Analyze office metrics for the last 24 hours:\n\nTasks by dept: " + tasks_s + "\n\nErrors: " + errors_s + "\n\nLLM cost: $" + cost_s + "\n\nAnswer:\n1. Which departments are overloaded/idle?\n2. Which errors repeat?\n3. Is spending optimal?\n4. Any departments needing attention?"
 
   let llm_result = redact(to_string(TryVal(try call_llm(disclaimer + "\n\n" + admin_profile, metrics_prompt))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
+  // #705 A.4: мёртвый let-фолбэк (внутренний let затенял связку, строка
+  // не срабатывала никогда) убран — честный выход один: провайдеры не ответили.
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
-  let _ = AuditLog("metrics_analysis", "admin", "analysis complete")
+  let _ = TryVal(try AuditLog("metrics_analysis", "admin", "analysis complete"))
 
   return reply
 }
@@ -282,27 +297,50 @@ pattern AdminMetricsAnalysis() -> String {
 // Admin AutoFix — low risk only, with HARD GATES (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminAutoFix(issues: String) -> String {
-  let admin_profile = redact(read_file("library/admin.md"), "all")
+  // #705 A.4: read_file — под TryVal (сбой чтения профиля не роняет фазу);
+  // решение — через redact (№327-класс, гвард аудита №312).
+  let prof_ok = redact(to_string(TryVal(try read_file("library/admin.md"))), "all")
+  let mut admin_profile = "(профиль недоступен)"
+  if prof_ok != "()" then { admin_profile = prof_ok }
   let disclaimer = AdminDisclaimer()
 
   let fix_prompt = disclaimer + "\n\nFrom these issues select ONLY those that:\n- severity = low\n- Do NOT touch app.mlog\n- Do NOT touch webhook logic\n- Do NOT touch audit_log, lockdown, bin/mlog\n- Change < 10 lines\n- Type: dead code, typo, unused import\n\nFor each: FILE:path\nACTION:planned\nEND_FIX\n\nIf nothing fits, answer NONE."
 
   let llm_result = redact(to_string(TryVal(try call_llm(admin_profile + "\n\n" + fix_prompt, issues))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
+  // #705 A.4: мёртвый let-фолбэк убран (см. AdminMetricsAnalysis); разбор
+  // плана — в отдельном паттерне AdminParseAutofixPlan (чистая строковая
+  // логика, тестируется прямо в mlog test).
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let plan = to_string(llm_result)
 
-  let mut fixes_applied = ""
+  let fixes_applied = AdminParseAutofixPlan(plan)
 
-  if contains(plan, "NONE") then {
-    let fixes_applied = "No autofixes needed"
-  } else {
-    // Parse autofix plan and apply only low-risk fixes in dept/ files
-    let _file = "FILE:"
-    let parts = split(plan, _file)
-    each part in parts {
-      if length(part) > 5.0 then {
-        let file_path = trim(substring(to_string(part), 0.0, index_of(to_string(part), "\n")))
+  let _ = TryVal(try AuditLog("autofix_done", "admin", fixes_applied))
+
+  return fixes_applied
+}
+
+// #705 A.4: разбор плана автофиксов — вынесен из AdminAutoFix: чистая
+// строковая логика без LLM/БД, вызывается после успешного call_llm.
+// Гейты сохранены дословно (AdminGateImmutable/AdminGateAutoFix); изменение
+// против прежнего инлайна: сегмент без «\n» — честный SKIP (index_of = -1,
+// живая проба bin/mlog test), прежде он молча давал пустой путь и исчезал
+// из итога; ветка NONE — присваивание, не let (let внутри if затенял
+// связку — «No autofixes needed» не срабатывал никогда).
+pattern AdminParseAutofixPlan(plan: String) -> String {
+  if contains(plan, "NONE") then { return "No autofixes needed" }
+
+  let mut fixes_applied = ""
+  // Plan the fix (log but don't auto-apply to be safe)
+  let _file = "FILE:"
+  let parts = split(plan, _file)
+  each part in parts {
+    if length(part) > 5.0 then {
+      let nl = index_of(to_string(part), "\n")
+      if nl < 1.0 then {
+        let fixes_applied = fixes_applied + "SKIP (нет перевода строки): " + substring(to_string(part), 0.0, 40.0) + "\n"
+      } else {
+        let file_path = trim(substring(to_string(part), 0.0, nl))
 
         // HARD GATE: check both immutable and autofix gates
         let gate = AdminGateAutoFix(file_path, "low")
@@ -310,17 +348,13 @@ pattern AdminAutoFix(issues: String) -> String {
           let fixes_applied = fixes_applied + "BLOCKED (" + gate + "): " + file_path + "\n"
         } else {
           if contains(file_path, "dept/") then {
-            // Plan the fix (log but don't auto-apply to be safe)
             let fixes_applied = fixes_applied + "PLANNED: " + file_path + "\n"
-            let _ = AuditLog("autofix_planned", "admin", "file=" + file_path + " gate=ALLOW")
+            let _ = TryVal(try AuditLog("autofix_planned", "admin", "file=" + file_path + " gate=ALLOW"))
           }
         }
       }
     }
   }
-
-  let _ = AuditLog("autofix_done", "admin", fixes_applied)
-
   return fixes_applied
 }
 
@@ -328,20 +362,30 @@ pattern AdminAutoFix(issues: String) -> String {
 // Admin Proposals (NATIVE call_llm)
 // ═══════════════════════════════════════════════════════════════════════
 pattern AdminProposals() -> String {
-  let admin_profile = redact(read_file("library/admin.md"), "all")
+  // #705 A.4: read_file — под TryVal (как в AdminMetricsAnalysis); решение
+  // — через redact (№327-класс, гвард аудита №312).
+  let prof_ok = redact(to_string(TryVal(try read_file("library/admin.md"))), "all")
+  let mut admin_profile = "(профиль недоступен)"
+  if prof_ok != "()" then { admin_profile = prof_ok }
   let disclaimer = AdminDisclaimer()
 
   let proposal_prompt = disclaimer + "\n\nGenerate improvement proposals for the office based on recent activity.\nTypes:\n- NEW_CMD: new command needed (if request pattern repeats)\n- PROMPT_FIX: department prompt needs improvement\n- OPTIMIZE: duplication or inefficiency found\n- DEPRECATE: unused function can be removed\n- NATIVE_MIGRATE: CallLLMProxy references need migration to native call_llm\n\nFormat: TYPE:type\nTITLE:short title\nDESCRIPTION:details\nRISK:low/medium/high\nEND_PROPOSAL\n\nGenerate 2-3 actionable proposals."
 
   let llm_result = redact(to_string(TryVal(try call_llm(admin_profile + "\n\n" + proposal_prompt, "Based on recent office activity, suggest improvements."))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
+  // #705 A.4: мёртвый let-фолбэк убран (см. AdminMetricsAnalysis).
   if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
   let reply = to_string(llm_result)
 
   // Save to admin_proposals table
-  db_execute("INSERT INTO admin_proposals (content, status, created_at) VALUES (?1, 'pending', datetime('now'))", [reply])
+  // #705 A.4: INSERT — под TryVal: лок БД не роняет фазу после ответа модели;
+  // сбой записи — честная пометка в аудит, ответ возвращается.
+  let ins = TryVal(try db_execute("INSERT INTO admin_proposals (content, status, created_at) VALUES (?1, 'pending', datetime('now'))", [reply]))
+  let ins_ok = redact(to_string(ins), "all")
+  if ins_ok == "()" then {
+    let _ = TryVal(try AuditLog("proposals_save_failed", "admin", "admin_proposals INSERT failed"))
+  }
 
-  let _ = AuditLog("proposals_generated", "admin", "proposals saved")
+  let _ = TryVal(try AuditLog("proposals_generated", "admin", "proposals saved"))
 
   return reply
 }
@@ -405,7 +449,9 @@ pattern AdminUaToken() -> String {
 
 pattern AdminNightCycle() -> String {
   let start_time = now()
-  let _ = AuditLog("night_cycle_start", "admin", "night cycle started")
+  // #705 A.4: аудит — под TryVal (прецедент #569 A.4: AuditLog сам падал на
+  // database is locked и ронял слот) — сбой записи аудита не роняет цикл.
+  let _ = TryVal(try AuditLog("night_cycle_start", "admin", "night cycle started"))
 
   let report = "NIGHT CYCLE REPORT\n\n"
 
@@ -449,17 +495,53 @@ pattern AdminNightCycle() -> String {
     health = redact(to_string(json_get(parse_json(review_ok), "health_score", "?")), "all")
   }
   let report = report + "Phase 2/7: Reviewer\n" + review_summary + "\n\n"
+  // #705 A.3: здоровье — в KV сразу после вычисления (фаза 2), не в конце
+  // цикла: прод 11.11 — падение фазы 3+ оставляло шапку ночи без здоровья.
+  // Дубль в Phase 7 безвреден (то же значение).
+  let _ = TryVal(try kv_set("admin_last_health", health))
 
   // Phase 3: Metrics Analysis (native call_llm)
-  let metrics_result = AdminMetricsAnalysis()
+  // #705 A.1: вызов фазы — под try (идиома #485 A.2 для http-фаз): падение
+  // AdminMetricsAnalysis больше не роняет цикл — честная строка с причиной,
+  // остальные фазы выполняются; статус — крошкой в audit_log (A.2).
+  let tr_metrics = try AdminMetricsAnalysis()
+  let mut metrics_result = ""
+  let mut p3_status = "failed"
+  if to_string(TryVal(tr_metrics)) != "()" then {
+    metrics_result = redact(to_string(TryVal(tr_metrics)), "all")
+    p3_status = "ok"
+  } else {
+    metrics_result = "недоступна (" + redact(substring(TryVal(try to_string(tr_metrics.error.message)), 0.0, 120.0), "all") + ")"
+  }
+  let _ = TryVal(try AuditLog("night_cycle_phase", "admin", "phase=3 metrics " + p3_status))
   let report = report + "Phase 3/7: Metrics Analysis\n" + substring(metrics_result, 0, 500) + "\n\n"
 
   // Phase 4: Autofix (native call_llm, from review findings, with hard gates)
-  let autofixes = AdminAutoFix(review_summary)
+  // #705 A.1: под try — см. Phase 3.
+  let tr_autofix = try AdminAutoFix(review_summary)
+  let mut autofixes = ""
+  let mut p4_status = "failed"
+  if to_string(TryVal(tr_autofix)) != "()" then {
+    autofixes = to_string(TryVal(tr_autofix))
+    p4_status = "ok"
+  } else {
+    autofixes = "недоступна (" + redact(substring(TryVal(try to_string(tr_autofix.error.message)), 0.0, 120.0), "all") + ")"
+  }
+  let _ = TryVal(try AuditLog("night_cycle_phase", "admin", "phase=4 autofix " + p4_status))
   let report = report + "Phase 4/7: Autofix\n" + autofixes + "\n\n"
 
   // Phase 5: Proposals (native call_llm)
-  let proposals = AdminProposals()
+  // #705 A.1: под try — см. Phase 3.
+  let tr_proposals = try AdminProposals()
+  let mut proposals = ""
+  let mut p5_status = "failed"
+  if to_string(TryVal(tr_proposals)) != "()" then {
+    proposals = redact(to_string(TryVal(tr_proposals)), "all")
+    p5_status = "ok"
+  } else {
+    proposals = "недоступна (" + redact(substring(TryVal(try to_string(tr_proposals.error.message)), 0.0, 120.0), "all") + ")"
+  }
+  let _ = TryVal(try AuditLog("night_cycle_phase", "admin", "phase=5 proposals " + p5_status))
   let report = report + "Phase 5/7: Proposals\n" + substring(proposals, 0, 500) + "\n\n"
 
   // Phase 6: Documenter (Python UA) — #485 A.2
@@ -475,21 +557,30 @@ pattern AdminNightCycle() -> String {
   let disclaimer = AdminDisclaimer()
   let report = report + "Phase 7/7: Health\nCode health: " + to_string(health) + "/10\n\n" + disclaimer
   // #485 A.3: последнее известное здоровье кода — в KV для итога NightSlot
-  // (если Reviewer был недоступен, здесь честный "?")
-  kv_set("admin_last_health", health)
+  // (если Reviewer был недоступен, здесь честный "?"); #705 A.3/A.4 —
+  // рабочая запись уже сделана после фазы 2, здесь безвредный дубль под
+  // TryVal (сбой KV в конце не роняет цикл после выполненных фаз).
+  let _ = TryVal(try kv_set("admin_last_health", health))
 
   // Save report
   let duration = to_string(to_int(now() - start_time))
-  db_execute("INSERT INTO admin_reports (type, content, duration_sec, created_at) VALUES ('night_cycle', ?1, ?2, datetime('now'))", [report, duration])
+  // #705 A.2/A.4: сохранение — под TryVal: лок БД в конце цикла (прод-класс
+  // «database is locked») не роняет цикл; сбой — крошкой в аудит, отчёт
+  // всё равно возвращается в NightSlot и пишется им в admin_night_summary.
+  let save_res = TryVal(try db_execute("INSERT INTO admin_reports (type, content, duration_sec, created_at) VALUES ('night_cycle', ?1, ?2, datetime('now'))", [report, duration]))
+  if redact(to_string(save_res), "all") == "()" then {
+    let _ = TryVal(try AuditLog("night_cycle_save_failed", "admin", "admin_reports INSERT failed"))
+  }
 
   // Save for morning brief
-  kv_set("admin_night_summary", report)
+  // #705 A.4: kv_set — под TryVal (NightSlot пишет свою свёртку независимо).
+  let _ = TryVal(try kv_set("admin_night_summary", report))
 
   // Наряд #381: кросс-департаментная маршрутизация — KV admin_night_summary и есть
   // живой путь (AdminReport читает; HTTP-мост :10000/dept/scheduler удалён —
   // reverse_proxy не форвардит /dept/*, action "append_brief" не существовал)
 
-  let _ = AuditLog("night_cycle_done", "admin", "completed in " + duration + "s, health=" + to_string(health))
+  let _ = TryVal(try AuditLog("night_cycle_done", "admin", "completed in " + duration + "s, health=" + to_string(health)))
 
   return report
 }
@@ -998,3 +1089,28 @@ pattern AdminSystemStatus(question: String) -> String {
   return "Статус системы для коллеги: версия mlog " + version + "; таблиц в БД: " + table_count + "; вопрос коллеги: " + question + ". Детальный статус — /admin status у владельца."
 }
 
+
+// ════════════════════════════════════════════════════════════════════════
+// ТЕСТЫ (#705 A.4: разбор плана автофиксов — чистая логика, прямо здесь)
+// ════════════════════════════════════════════════════════════════════════
+
+test "n705 A.4: план NONE — честный выход, не пустая строка" {
+  assert_contains(AdminParseAutofixPlan("NONE"), "No autofixes needed")
+}
+
+test "n705 A.4: сегмент с переводом строки — PLANNED для dept/" {
+  assert_contains(AdminParseAutofixPlan("FILE:dept/utils.mlog\nACTION:planned\nEND_FIX"), "PLANNED: dept/utils.mlog")
+}
+
+test "n705 A.4: DENY-гейты сохранены (immutable/high_risk_core)" {
+  assert_contains(AdminParseAutofixPlan("FILE:audit_log.csv\nfix"), "BLOCKED (DENY:immutable)")
+  assert_contains(AdminParseAutofixPlan("FILE:app.mlog\nfix"), "BLOCKED (DENY:high_risk_core)")
+}
+
+test "n705 A.4: сегмент без перевода строки — честный SKIP (index_of = -1)" {
+  assert_contains(AdminParseAutofixPlan("FILE:dept/utils.mlog-without-newline"), "SKIP (нет перевода строки)")
+}
+
+test "n705 A.4: allow-гейт вне dept/ не даёт PLANNED" {
+  assert_eq(contains(AdminParseAutofixPlan("FILE:library/admin.md\nfix"), "PLANNED"), false)
+}
