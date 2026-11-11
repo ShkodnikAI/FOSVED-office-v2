@@ -2409,11 +2409,32 @@ def _golden_evals_impl(dept_list):
     alerts = []
     results = []
     for dept in dept_list:
-        tasks = _golden_load(dept)
+        # #706 A.3: сбой одного департамента (битый golden-JSON, исключение в
+        # прогоне) не роняет весь фоновый job — прод-класс: state=failed →
+        # ночь видела только «evals=FAIL» без причины. Упавший департамент —
+        # в results с "error" и в алерт отдельной строкой «Прогон упал»;
+        # остальные департаменты выполняются.
+        try:
+            tasks = _golden_load(dept)
+        except Exception as e:
+            _log_error(f"golden: load failed {dept}: {e}",
+                       source="golden_evals", dept=dept, kind="golden_load_failed")
+            crashed = {"dept": dept, "error": f"golden load failed: {e}"}
+            results.append(crashed)
+            alerts.append(crashed)
+            continue
         if not tasks:
             results.append({"dept": dept, "skipped": "no_golden_set"})
             continue
-        summary = _golden_run_dept(dept, tasks)
+        try:
+            summary = _golden_run_dept(dept, tasks)
+        except Exception as e:
+            _log_error(f"golden: run failed {dept}: {e}",
+                       source="golden_evals", dept=dept, kind="golden_run_failed")
+            crashed = {"dept": dept, "error": f"run failed: {e}"}
+            results.append(crashed)
+            alerts.append(crashed)
+            continue
         prev = _golden_previous_avg(dept)
         summary["previous_avg"] = prev
         # №588 B.3: причины раздельно — «ниже порога 0.6» НЕ «регрессия»
@@ -2441,6 +2462,11 @@ def _golden_evals_impl(dept_list):
     if alerts and owner_id:
         lines = []
         for s in alerts:
+            # #706 A.3: упавший департамент — отдельная строка «Прогон упал»,
+            # не «качество ниже порога» (упавшее не имеет avg_score)
+            if "error" in s:
+                lines.append(f"Прогон упал: {s['dept']} — {s['error']}")
+                continue
             prev_txt = f" (было {s['previous_avg']:.2f})" if s.get("previous_avg") is not None else ""
             if s.get("regression"):
                 lines.append(f"❌ Регрессия: {s['dept']} {s['avg_score']:.2f}{prev_txt}, проваленных задач: {s['failed']}")
