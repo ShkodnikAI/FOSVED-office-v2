@@ -503,6 +503,21 @@ def init_db():
         CREATE TABLE IF NOT EXISTS news_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL, title TEXT NOT NULL, summary TEXT, url TEXT, category TEXT DEFAULT 'general', language TEXT DEFAULT 'ru', published TIMESTAMP, collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, relevance_score REAL DEFAULT 0, hash TEXT UNIQUE);
         CREATE TABLE IF NOT EXISTS continuous_learning (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT NOT NULL, query TEXT, approach TEXT, score REAL DEFAULT 0.5, created_at TEXT DEFAULT (datetime('now')));
         CREATE INDEX IF NOT EXISTS idx_cl_dept ON continuous_learning(dept);
+        -- #712 MEM-1 (P0) A.1: учёт RSS по процессам контейнера (сборщик
+        -- proxy/mem_sampler.py: поток в llm_proxy, срез раз в 60 с, слоты,
+        -- call_python, subprocess — до/после; retention 7 суток)
+        CREATE TABLE IF NOT EXISTS mem_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now')),
+            name TEXT NOT NULL,
+            pid INTEGER,
+            rss_mb REAL NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'tick',
+            ref TEXT DEFAULT '',
+            phase TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_mem_samples_ts ON mem_samples(ts);
+        CREATE INDEX IF NOT EXISTS idx_mem_samples_kind_ref ON mem_samples(kind, ref);
         CREATE INDEX IF NOT EXISTS idx_news_category ON news_cache (category, collected DESC);
         CREATE INDEX IF NOT EXISTS idx_news_hash ON news_cache (hash);
         """)

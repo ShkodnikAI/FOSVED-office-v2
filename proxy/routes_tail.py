@@ -19,6 +19,10 @@ import requests as http_requests
 
 from flask import request, jsonify, Response, send_file
 
+# #712 MEM-1 (P0) A.1: RSS-метки слотов / call_python / subprocess —
+# учёт памяти контейнера (сборщик proxy/mem_sampler.py, OOM прода 512 МБ)
+from proxy.mem_sampler import slot_mem_guard, call_python_mem_guard, run_tracked
+
 from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting, _db, db_lock,
@@ -232,6 +236,7 @@ def yana_auto_memorize():
 # ══════════════════════════════════════════════════════════════════════
 
 @app.post("/scheduler/reminder-check")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_reminder_check():
     """Check yana_events for due reminders and send them to owner."""
     owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
@@ -1326,6 +1331,7 @@ def metrics_activity():
 
 # ── Cron endpoint ──
 @app.route("/cron/collect-news", methods=["GET"])
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_collect_news():
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
@@ -1339,6 +1345,7 @@ def cron_collect_news():
 
 # ── FO-001: Nightly DB backup ──
 @app.route("/cron/backup", methods=["GET"])
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_backup():
     """Nightly backup cron: VACUUM INTO + integrity check + retention."""
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
@@ -1350,8 +1357,8 @@ def cron_backup():
     if upload:
         cmd.append("--upload")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
-                                env={**os.environ, "DATABASE_PATH": os.environ.get("DATABASE_PATH", "./data")})
+        result = run_tracked(cmd, capture_output=True, text=True, timeout=120,
+                             env={**os.environ, "DATABASE_PATH": os.environ.get("DATABASE_PATH", "./data")})
         ok = result.returncode == 0
         _log_audit("db_backup", {"ok": ok, "output": result.stdout[-500:] if result.stdout else ""}, "system")
         return jsonify({"ok": ok, "output": result.stdout[-500:] if result.stdout else result.stderr[-500:]})
@@ -1365,6 +1372,7 @@ def cron_backup():
 # для ручного прогона и внешнего крона; штатный ежедневный запуск — из
 # /scheduler/morning-brief (надёжный триггер BRIEF-1).
 @app.route("/cron/backup-forge", methods=["GET"])
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_backup_forge():
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
@@ -1381,6 +1389,7 @@ def cron_backup_forge():
 # keep-alive крон каждые 14 мин (render.yaml); approve в miniapp дёргает
 # такт в фоне (narad_queue.trigger_async).
 @app.route("/cron/narad-tick", methods=["GET"])
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_narad_tick():
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
@@ -1398,6 +1407,7 @@ def cron_narad_tick():
 # оценка целей (цена/настоящая скидка/наличие) → алерты владельцу.
 # Kill-switch SHOP_ENABLED=0 выключает такт полностью.
 @app.route("/cron/shop-tick", methods=["GET"])
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_shop_tick():
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
@@ -1411,6 +1421,7 @@ def cron_shop_tick():
 
 # ── #429 A.3: прогрев каталога схем Onliner ──────────────────────────────
 @app.route("/cron/onliner-warm", methods=["GET", "POST"])
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_onliner_warm():
     """Фоновая догрузка словаря /schemas до complete (наряд #429 A.3).
 
@@ -1841,6 +1852,7 @@ def forge_export_state():
 # ── FO-016: чистка offload-хранилища tool-выводов (issue #82) ────────────
 # data/tool_output/ с ретеншном 7 дней (env FOSVED_TOOL_OUTPUT_RETENTION_DAYS).
 @app.route("/cron/cleanup-tool-output", methods=["GET"])
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_cleanup_tool_output():
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
@@ -2171,6 +2183,7 @@ def _consolidate_memory(days=1, dept_filter=None, backfill=False):
     return results
 
 @app.post("/cron/consolidate-memory")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_consolidate_memory():
     """FO-006: ночная консолидация dialog_history → facts.
 
@@ -2191,10 +2204,9 @@ def cron_consolidate_memory():
     backup_status = None
     if do_backup:
         try:
-            import subprocess
-            result = subprocess.run([sys.executable, "scripts/backup_db.py", "backup"],
-                                    capture_output=True, text=True, timeout=120,
-                                    env={**os.environ, "DATABASE_PATH": os.environ.get("DATABASE_PATH", "./data")})
+            result = run_tracked([sys.executable, "scripts/backup_db.py", "backup"],
+                                 capture_output=True, text=True, timeout=120,
+                                 env={**os.environ, "DATABASE_PATH": os.environ.get("DATABASE_PATH", "./data")})
             backup_status = {"ok": result.returncode == 0,
                              "output": (result.stdout or result.stderr)[-300:]}
         except Exception as e:
@@ -2367,6 +2379,7 @@ def _golden_previous_avg(dept):
     return None
 
 @app.post("/scheduler/golden-evals")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_golden_evals():
     """FO-005: ночной прогон golden-наборов + детекция регрессий.
 
@@ -2622,6 +2635,7 @@ from proxy.news import (
 # ══════════════════════════════════════════════════════════════════════
 
 @app.post("/scheduler/watch-sweep")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_watch_sweep():
     """Sweep all active WatchlistItems, check for deltas, update timestamps.
     For each item:
@@ -2713,6 +2727,7 @@ def scheduler_watch_sweep():
 # ══════════════════════════════════════════════════════════════════════
 
 @app.post("/scheduler/indicator-pre-reminders")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_indicator_pre_reminders():
     """Find indicators with verifyDate within `days_ahead` days.
     Send a consolidated pre-reminder to owner with:
@@ -2838,6 +2853,7 @@ CALL_PYTHON_ALLOWED = {
 }
 
 @app.post("/call-python")
+@call_python_mem_guard  # #712 MEM-1 A.1: RSS llm_proxy до/после каждого вызова
 def call_python_endpoint():
     """Universal Python bridge for mlog. Executes module.function(args) with strict whitelist.
     Body: {"module": "statistics", "function": "mean", "args": [[1,2,3,4,5]], "kwargs": {}, "dept": "dev"}
