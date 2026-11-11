@@ -16,9 +16,6 @@ import requests as http_requests
 
 from flask import request, jsonify, Response
 
-# #712 MEM-1 (P0) A.1: RSS-метки слотов — учёт памяти контейнера (proxy/mem_sampler.py)
-from proxy.mem_sampler import slot_mem_guard
-
 from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting,
@@ -604,7 +601,6 @@ def night_report_line():
 
 
 @app.post("/scheduler/morning-brief")
-@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_morning_brief():
     """
     Generate and send a morning brief to the owner.
@@ -951,7 +947,6 @@ def scheduler_morning_brief():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.post("/scheduler/admin-morning-reply")
-@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_admin_morning_reply():
     """
     Админ делает свой ответ на утренний отчёт Яны (7:25).
@@ -1103,7 +1098,6 @@ def scheduler_admin_morning_reply():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.post("/scheduler/evening-summary")
-@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_evening_summary():
     """Generate and send an evening summary, plus publish daily digest to archive."""
     d = request.get_json(force=True)
@@ -1178,7 +1172,6 @@ def _ratings_counts_line(days=7):
 
 
 @app.post("/scheduler/weekly-digest")
-@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_weekly_digest():
     """Generate a weekly digest per department and send via Telegram."""
     d = request.get_json(force=True)
@@ -1226,7 +1219,6 @@ def scheduler_weekly_digest():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.post("/scheduler/monthly-review")
-@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_monthly_review():
     """Generate a monthly review per department."""
     d = request.get_json(force=True)
@@ -1263,7 +1255,6 @@ def scheduler_monthly_review():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.post("/scheduler/control-check")
-@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_control_check():
     """Check control predictions against current reality."""
     d = request.get_json(force=True)
@@ -1328,7 +1319,6 @@ def scheduler_control_check():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.post("/scheduler/self-learn")
-@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_self_learn():
     """Self-learning: call LLM to identify improvement areas and memorize findings."""
     try:

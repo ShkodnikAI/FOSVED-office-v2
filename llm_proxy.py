@@ -268,11 +268,6 @@ from proxy.routes_tail import (
 
 if __name__ == "__main__":
     log.info(f"Starting LLM Proxy on port {PORT}, DB={DB_FILE}")
-    # #712 MEM-1 (P0) A.1: поток учётника памяти — срез /proc раз в 60 с,
-    # топ-3 при > 400 МБ, retention 7 суток. Поток, а не отдельный процесс:
-    # лишний python-процесс стоил бы ~30 МБ RSS при лимите контейнера 512 МБ.
-    from proxy.mem_sampler import start_sampler_thread
-    start_sampler_thread()
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
              f"expert/chart, tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*, "

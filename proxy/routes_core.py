@@ -17,9 +17,6 @@ import doc_extract
 
 from flask import request, jsonify, Response
 
-# #712 MEM-1 (P0) A.1: RSS до/после git-subprocess (учёт памяти, proxy/mem_sampler.py)
-from proxy.mem_sampler import run_tracked
-
 from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting,
@@ -109,7 +106,7 @@ def preview_file():
     if not os.path.isdir(bare):
         return jsonify({"error": "repo not found"}), 404
     try:
-        res = run_tracked(
+        res = subprocess.run(
             ["git", "-C", bare, "show", f"{ref}:{path}"],
             capture_output=True, timeout=10,
         )

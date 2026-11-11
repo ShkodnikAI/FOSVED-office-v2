@@ -21,8 +21,6 @@ from flask import request, jsonify, Response, send_file
 
 from proxy.kg import kg_scan_rebuild, kg_active
 from proxy import jobs as n596_jobs  # №596 A.2: фоновые задания ночных фаз
-# #712 MEM-1 (P0) A.1: RSS-метки ночного UA-цикла и subprocess (proxy/mem_sampler.py)
-from proxy.mem_sampler import slot_mem_guard, run_tracked, mark as _mem_mark
 from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting, _db, db_lock,
@@ -882,7 +880,7 @@ def _forge_bridge_run(slug: str, name: str, goal: str, customer: str, ptype: str
     env.update({"FNP_SLUG": slug, "FNP_NAME": name, "FNP_GOAL": goal,
                 "FNP_CUSTOMER": customer, "FNP_TYPE": ptype})
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proc = run_tracked(
+    proc = subprocess.run(
         ["./bin/mlog", "run", "dept/forge_create_bridge.mlog"],
         capture_output=True, text=True, timeout=90, env=env, cwd=repo_root)
     out = (proc.stdout or "") + "\n" + (proc.stderr or "")
@@ -1960,16 +1958,6 @@ def admin_ua_docs():
 
 
 def _ua_night_cycle_impl():
-    """#712 MEM-1 A.1: обёртка — RSS всех процессов до/после тяжёлой фазы
-    ночи (и синхронный, и async-путь через реестр заданий идут сюда)."""
-    _mem_mark("slot", "admin-ua/night-cycle:impl", "before", full=True)
-    try:
-        return _ua_night_cycle_impl_inner()
-    finally:
-        _mem_mark("slot", "admin-ua/night-cycle:impl", "after", full=True)
-
-
-def _ua_night_cycle_impl_inner():
     """
     Full UA night cycle: Scanner → Analyzer → Grapher → Reviewer → Differ → Documenter.
     Saves results to admin_night_reports, updates knowledge graph.
@@ -2120,7 +2108,6 @@ def _ua_night_cycle_impl_inner():
 
 
 @app.post("/admin-ua/night-cycle")
-@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def admin_ua_night_cycle():
     """№596 A.2: async=1 — фоном (реестр proxy/jobs), сразу {"job_id"};
     статус — GET /admin-ua/night-cycle/status?job=<id>. Без async=1 —
