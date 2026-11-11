@@ -243,12 +243,18 @@ def _precreate_flask_tables(db_path: Path) -> None:
         con.close()
 
 
-def _run_night_scenario(tmp_path, upstream, ua_start_override=None):
-    """Бут VM + ожидание ночного прогона. Возвращает (db_path, proc)."""
+def _run_night_scenario(tmp_path, upstream, ua_start_override=None, extra_config=None):
+    """Бут VM + ожидание ночного прогона. Возвращает (db_path, proc).
+
+    #706 A.4: extra_config — точечные моки фаз поверх DEFAULT_UPSTREAM
+    (например, упавший статус golden-задания), не ломает сценарии #687.
+    """
     upstream["hits"] = {}
     upstream["config"] = {}
     if ua_start_override is not None:
         upstream["config"]["POST /admin-ua/night-cycle"] = ua_start_override
+    if extra_config:
+        upstream["config"].update(extra_config)
     db_path = tmp_path / "office.db"
     _precreate_flask_tables(db_path)
     env = _serve_env(tmp_path)

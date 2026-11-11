@@ -807,22 +807,48 @@ pattern NightTickSlot() -> String {
     // обрывал ожидание по таймауту (прод 22.10: evals=FAIL при живом прогоне,
     // алерт пришёл отдельно). Фоном: async=1 → job_id → поллинг статуса
     // (PollJobStatus, до 25 мин); итог фазы — по статусу задания.
+    // #706 A.1: исходы evals различимы — старт / задание failed / таймаут
+    // поллинга / done (прод 11.11: «evals=FAIL» без причины; прод 22.10 —
+    // «evals=FAIL при живом прогоне» того же класса). Строка отчёта:
+    // «evals=FAIL(<причина>)» либо «evals=ok»; причина — из статуса задания.
     let mut evals_state = "FAIL"
+    let mut evals_reason = "старт не удался (нет job_id)"
+    let mut evals_job = ""
     let ge_start = TryVal(try http_post("http://127.0.0.1:4000/scheduler/golden-evals?secret=" + redact(env("CRON_SECRET"), "hash_only") + "&async=1", "{}", "application/json", 300.0))
     let ge_job = to_string(json_get(TryVal(try parse_json(to_string(ge_start))), "job_id", ""))
     // решения на недоверенных данных — через redact-fingerprint (№327-класс,
     // идиома dept/utils.mlog:343-352; audit 0271: 0 errors)
     if redact(ge_job, "hash_only") != redact("", "hash_only") and redact(ge_job, "hash_only") != redact("null", "hash_only") then {
+      // #706 A.2: job_id — в телеметрию аудита (связь исхода с записью
+      // реестра proxy/jobs); текст недоверенный → redact (№327-класс).
+      evals_job = redact(ge_job, "all")
       let ge_poll = TryVal(try parse_json(PollJobStatus("http://127.0.0.1:4000/scheduler/golden-evals/status", "job=" + ge_job + "&secret=" + redact(env("CRON_SECRET"), "hash_only"))))
-      if redact(to_string(json_get(ge_poll, "state", "")), "hash_only") == redact("done", "hash_only") then {
+      let ge_state = to_string(json_get(ge_poll, "state", ""))
+      if redact(ge_state, "hash_only") == redact("done", "hash_only") then {
         evals_state = "ok"
+        evals_reason = "done"
+      } else {
+        if redact(ge_state, "hash_only") == redact("failed", "hash_only") then {
+          // причина — из статуса задания (наш реестр; текст недоверенный →
+          // redact, усечён до 120 симв.)
+          evals_reason = "задание failed: " + redact(substring(to_string(json_get(ge_poll, "error", "нет описания")), 0.0, 120.0), "all")
+        } else {
+          if redact(ge_state, "hash_only") == redact("timeout", "hash_only") then {
+            evals_reason = "таймаут поллинга (25 мин)"
+          } else {
+            evals_reason = "статус не распознан: " + redact(ge_state, "all")
+          }
+        }
       }
     }
     if evals_state == "FAIL" then {
-      report = report + " evals=FAIL"
+      // #706 A.2: телеметрия — в аудит в ОБЕИХ ветках (job_id, state,
+      // причина), под TryVal (#569 A.4 — сбой записи аудита не роняет слот)
+      let _ = TryVal(try AuditLog("cron_golden_evals", "qa", "job=" + evals_job + " state=FAIL reason=" + evals_reason))
+      report = report + " evals=FAIL(" + evals_reason + ")"
     } else {
       // #569 A.4: см. комментарий выше — аудит не роняет слот.
-      let _ = TryVal(try AuditLog("cron_golden_evals", "qa", "golden evals triggered by night tick"))
+      let _ = TryVal(try AuditLog("cron_golden_evals", "qa", "job=" + evals_job + " state=ok"))
       report = report + " evals=ok"
       let _ = NightPhaseMark("evals")
     }
