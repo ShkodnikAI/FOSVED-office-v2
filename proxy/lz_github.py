@@ -14,6 +14,9 @@ import requests as http_requests
 
 from flask import request, jsonify
 
+# #712 MEM-1 (P0) A.1: RSS-метки слотов и subprocess (proxy/mem_sampler.py)
+from proxy.mem_sampler import slot_mem_guard, run_tracked
+
 from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _get_setting, get_secret,
@@ -91,7 +94,7 @@ def scan_osint(username, level='basic', timeout=120, tor=False, sites=None):
     cmd.extend(['--no-nsfw'])
 
     try:
-        result = subprocess.run(
+        result = run_tracked(
             cmd, capture_output=True, text=True, timeout=timeout,
             env={**os.environ, 'NO_COLOR': '1'}
         )
@@ -237,6 +240,7 @@ def _github_releases(repo_full_name):
 
 
 @app.get("/scheduler/lz-daily-test")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_lz_daily_test():
     """Безопасная проверка через обычную ссылку в браузере — GET, по умолчанию
     dry_run=True принудительно, никаких побочных эффектов. Добавь
@@ -249,6 +253,7 @@ def scheduler_lz_daily_test():
 
 
 @app.post("/scheduler/lz-daily")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_lz_daily():
     """
     LZ Daily Report: scan GitHub → LLM analysis → save to memory → return report.
@@ -589,6 +594,7 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
 
 
 @app.post("/scheduler/admin-daily")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def scheduler_admin_daily():
     """
     Admin Daily Report: comprehensive report combining:

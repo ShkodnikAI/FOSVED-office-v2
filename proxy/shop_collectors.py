@@ -96,6 +96,8 @@ import urllib.parse
 from pathlib import Path
 
 from proxy.shop_engine import to_byn
+# #712 MEM-1 (P0) A.1: RSS до/после web-MCP дочки (учёт памяти, proxy/mem_sampler.py)
+from proxy.mem_sampler import run_tracked
 
 log = logging.getLogger("shop_collectors")
 
@@ -271,7 +273,7 @@ def _mcp_web_call(tool, args):
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": tool, "arguments": args},
     }) + "\n"
-    proc = subprocess.run(
+    proc = run_tracked(
         [str(_WEB_SERVER)], input=payload, capture_output=True,
         text=True, timeout=60, cwd=str(_REPO_ROOT))
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
