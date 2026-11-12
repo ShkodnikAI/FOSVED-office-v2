@@ -89,9 +89,15 @@ pattern KKAbs(x: Float) -> Float {
   return x
 }
 
-// UTC-день для суточных счётчиков бюджета (идиома utils.mlog:168).
+// UTC-день для суточных счётчиков (бюджет Кавальни, kk_rej_flat/kk_ai_fail).
+// №711 A.3: раньше substring(to_string(now())) давал ПРЕФИКС ЭПОХИ — ключ
+// менялся каждую секунду (159 мусорных ключей в kv; регенерация не видела
+// накопителей прошлого вызова — реальный механизм «юристы 5 при плане 3»).
+// Теперь — настоящая UTC-дата тем же способом, что и окна KKStats24h
+// (datetime('now') в SQL).
 pattern KKDayUtc() -> String {
-  return substring(to_string(now()), 0.0, 10.0)
+  let rows = query("SELECT date('now') AS d", [])
+  return to_string(json_get(get(rows, 0.0), "d", ""))
 }
 
 // ── Бюджет Кавальни (наряд: генерация и разрешение — daily_budget_kavalnya).
@@ -206,6 +212,9 @@ pattern KKAppendReason(acc: String, joined: String, label: String) -> String {
 // фиксированный (от полей вопроса к плану)
 pattern KKReasonsFrom(flat: String) -> String {
   let mut acc = ""
+  // №711 A.1: метки кривых полей модели — до прочих полевых причин
+  let acc = KKAppendReason(acc, flat, "поле не читается")
+  let acc = KKAppendReason(acc, flat, "horizon_days не число")
   let acc = KKAppendReason(acc, flat, "нет source_url")
   let acc = KKAppendReason(acc, flat, "нет правила")
   let acc = KKAppendReason(acc, flat, "плохой тип")
@@ -254,6 +263,54 @@ pattern KKInsertQuestion(dept: String, text: String, kind: String, horizon: Floa
   let ids = query("SELECT id FROM kk_questions WHERE norm = ?1 ORDER BY id DESC LIMIT 1", [norm])
   if length(ids) > 0.0 then { return to_float(json_get(get(ids, 0.0), "id", "0")) }
   return 0.0
+}
+
+// ── №711 A.3: план дня по БД, а не по kv-накопителям ──────────────────────
+
+// Сколько вопросов отделу уже задано сегодня (kk_questions, asked_at за
+// текущие сутки UTC). Единственный источник истины плана дня — БД;
+// повторный прогон слота только добирает до плана.
+pattern KKAskedToday(dept: String) -> Float {
+  let _ = KKEnsureSchema()
+  let rows = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = ?1 AND date(asked_at) = date('now')", [dept])
+  return to_float(json_get(get(rows, 0.0), "n", "0"))
+}
+
+// №711 A.2/A.3: вставка одобренных отбором вопросов (стадия слота — ДО
+// регенерации, чтобы БД-счётчик плана видел их). Возвращает JSON:
+// items — массив вставленных [{qid, text, kind}] (qid > 0), dups — снято
+// дедупом. Ответы отделов — не здесь (наряд C живёт в KKAskForDept).
+pattern KKInsertPicked(dept: String, picked_s: String) -> String {
+  let picked = TryVal(try parse_json(picked_s))
+  if to_string(picked) == "()" then { return json_encode({items: "[]", dups: 0.0}) }
+  let mut items = ""
+  let mut dups = 0.0
+  each p in picked {
+    let hz_v = TryVal(try to_float(to_string(json_get(p, "horizon_days", "0"))))
+    if to_string(hz_v) == "()" then {
+      let dups = dups + 1.0
+    } else {
+      let hz = to_float(to_string(hz_v))
+      let text = to_string(json_get(p, "text", ""))
+      let kind = to_string(json_get(p, "kind", ""))
+      let qid = KKInsertQuestion(dept, text, kind, hz, time() + hz * 86400.0, to_string(json_get(p, "rule", "")), to_string(json_get(p, "source_url", "")))
+      if qid > 0.0 then {
+        let item = json_encode({qid: qid, text: text, kind: kind})
+        if items == "" then { let items = item } else { let items = items + "," + item }
+      } else {
+        let dups = dups + 1.0
+      }
+    }
+  }
+  return json_encode({items: "[" + items + "]", dups: dups})
+}
+
+// Слияние двух items-массивов KKInsertPicked (та же идиома, что picked_s
+// в KKAskForDept): "[" + a + "," + b + "]" без пустых.
+pattern KKCollectedMerge(a: String, b: String) -> String {
+  if a == "[]" or a == "" then { return b }
+  if b == "[]" or b == "" then { return a }
+  return substring(a, 0.0, length(a) - 1.0) + "," + substring(b, 1.0, length(b))
 }
 
 // ── Инструкция значения хвоста (наряд C: value — вероятность/число/дата) ───
@@ -618,6 +675,72 @@ pattern KKWorstFails(dept: String) -> String {
     let i = i + 1.0
   }
   return out
+}
+
+// ── №711 A.4: /kk <dept> подробно — текстовые причины (не карточка) ────────
+// За 24 часа: каждый провал формы (вопрос + note), каждый спорный исход
+// (вопрос, правило, evidence_url, причина), недобор к плану с причиной.
+// За 4 недели: доля спорных и 3 последних спорных с причинами. Числа
+// сводки — из KKStats24h (подсчёт один, запрет второй реализации).
+pattern KKDeptDetails(dept: String) -> String {
+  let _ = KKEnsureSchema()
+  let name = KKDeptName(dept)
+  let raw = KKStatsRaw()
+  let plan = KKPlanForToday()
+  let asked_s = KKStatVal(raw, dept + "_asked", "0")
+  let bad_s = KKStatVal(raw, dept + "_bad", "0")
+  let disp_s = KKStatVal(raw, dept + "_disputed", "0")
+  let mut out = "Кавальня — " + name + " (подробно, окно 24 ч)\n"
+  // провалы формы: вопрос (до 80) + note
+  let frows = query("SELECT q.text AS qt, a.note AS note FROM kk_answers a JOIN kk_questions q ON a.question_id = q.id WHERE q.dept = ?1 AND a.created_at > datetime('now', '-1 day') AND trim(a.note) != '' ORDER BY a.id DESC", [dept])
+  let mut fsec = "Провалы формы (" + bad_s + "):"
+  if length(frows) == 0.0 then {
+    let fsec = fsec + "\n  нет"
+  } else {
+    each fr in frows {
+      let fsec = fsec + "\n  — " + substring(to_string(json_get(fr, "qt", "")), 0.0, 80.0) + " — " + substring(to_string(json_get(fr, "note", "")), 0.0, 80.0)
+    }
+  }
+  let out = out + fsec + "\n"
+  // спорные исходы: вопрос, правило (desc), evidence_url, причина
+  let drows = query("SELECT q.text AS qt, q.rule AS rule, o.evidence_url AS url, o.evidence_quote AS why FROM kk_outcomes o JOIN kk_questions q ON o.question_id = q.id WHERE q.dept = ?1 AND o.resolved_at > datetime('now', '-1 day') AND o.outcome = 'disputed' ORDER BY o.resolved_at DESC", [dept])
+  let mut dsec = "Спорные исходы (" + disp_s + "):"
+  if length(drows) == 0.0 then {
+    let dsec = dsec + "\n  нет"
+  } else {
+    each dr in drows {
+      let rj = TryVal(try parse_json(to_string(json_get(dr, "rule", "{}"))))
+      let mut rule_desc = ""
+      if to_string(rj) != "()" then { let rule_desc = substring(trim(to_string(json_get(rj, "desc", ""))), 0.0, 60.0) }
+      let dsec = dsec + "\n  — " + substring(to_string(json_get(dr, "qt", "")), 0.0, 80.0) + " — правило: " + rule_desc + "; источник: " + substring(to_string(json_get(dr, "url", "")), 0.0, 100.0) + "; причина: " + substring(to_string(json_get(dr, "why", "")), 0.0, 100.0)
+    }
+  }
+  let out = out + dsec + "\n"
+  // недобор к плану с причиной из итога слота
+  let mut ssec = "План дня: задано " + asked_s + " из " + to_string(to_int(plan))
+  if to_float(asked_s) < plan then {
+    let ssec = ssec + " — недобор: " + KKShortfallReason(dept)
+  } else {
+    let ssec = ssec + " — план выполнен"
+  }
+  let out = out + ssec + "\n"
+  // 4 недели: доля спорных + 3 последних спорных с причинами
+  let stats = TryVal(try parse_json(KKDeptStats(dept)))
+  let mut wsec = "За 4 недели: "
+  if to_string(stats) == "()" then {
+    let wsec = wsec + "статистика недоступна"
+  } else {
+    let wsec = wsec + "спорных " + to_string(json_get(stats, "share", "0")) + "% (разрешено " + to_string(json_get(stats, "resolved", "0")) + ", спорных " + to_string(json_get(stats, "disputed", "0")) + ")"
+  }
+  let lrows = query("SELECT q.text AS qt, o.evidence_quote AS why FROM kk_questions q LEFT JOIN kk_outcomes o ON o.question_id = q.id WHERE q.dept = ?1 AND q.status = 'disputed' ORDER BY q.id DESC LIMIT 3", [dept])
+  if length(lrows) > 0.0 then {
+    let wsec = wsec + "; последние спорные:"
+    each lr in lrows {
+      let wsec = wsec + "\n  — " + substring(to_string(json_get(lr, "qt", "")), 0.0, 80.0) + " — " + substring(to_string(json_get(lr, "why", "не указана")), 0.0, 100.0)
+    }
+  }
+  let out = out + wsec
+  return substring(out, 0.0, 3500.0)
 }
 
 // Отдел волны — человекочитаемое имя (наряд #684: разбивка в строке сводки)
@@ -1001,19 +1124,20 @@ pattern KKSelectValid(raw: String, t1: Float, t7: Float, t30: Float) -> String {
   // Накопители принятых за день по бакетам (kk_acc_t1/t7/t30:<dept>:<день>):
   // цели ЭТОГО отбора — остаток плана, поэтому регенерация (второй вызов
   // слота с теми же t1/t7/t30) добирает недостающее, а не полный план заново.
+  // №711 A.3: план дня — по БД (kk_questions.asked_at за текущие сутки UTC,
+  // по горизонту); kv-накопители kk_acc_* не источник истины (прецедент
+  // 11.11: «юристы 5 при плане 3» — двойной прогон слота). Регенерация и
+  // повторный прогон добирают только остаток плана.
   let a_dept0 = kv_get("kk_ask_dept")
   let mut a_dept = "kavalnya"
   if a_dept0 != "" then { a_dept = a_dept0 }
-  let acc_day = KKDayUtc()
-  let acc1_raw = kv_get("kk_acc_t1:" + a_dept + ":" + acc_day)
-  let mut acc1 = 0.0
-  if acc1_raw != "" then { acc1 = to_float(acc1_raw) }
-  let acc7_raw = kv_get("kk_acc_t7:" + a_dept + ":" + acc_day)
-  let mut acc7 = 0.0
-  if acc7_raw != "" then { acc7 = to_float(acc7_raw) }
-  let acc30_raw = kv_get("kk_acc_t30:" + a_dept + ":" + acc_day)
-  let mut acc30 = 0.0
-  if acc30_raw != "" then { acc30 = to_float(acc30_raw) }
+  let _ = KKEnsureSchema()
+  let q1r = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = ?1 AND date(asked_at) = date('now') AND horizon_days <= 1.5", [a_dept])
+  let acc1 = to_float(json_get(get(q1r, 0.0), "n", "0"))
+  let q7r = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = ?1 AND date(asked_at) = date('now') AND horizon_days > 1.5 AND horizon_days <= 7.5", [a_dept])
+  let acc7 = to_float(json_get(get(q7r, 0.0), "n", "0"))
+  let q30r = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = ?1 AND date(asked_at) = date('now') AND horizon_days > 7.5", [a_dept])
+  let acc30 = to_float(json_get(get(q30r, 0.0), "n", "0"))
   let mut e1 = t1 - acc1
   if e1 < 0.0 then { e1 = 0.0 }
   let mut e7 = t7 - acc7
@@ -1021,60 +1145,70 @@ pattern KKSelectValid(raw: String, t1: Float, t7: Float, t30: Float) -> String {
   let mut e30 = t30 - acc30
   if e30 < 0.0 then { e30 = 0.0 }
   each q in list {
-    let kind = trim(to_string(json_get(q, "kind", "")))
-    let text = trim(to_string(json_get(q, "text", "")))
-    let url = trim(to_string(json_get(q, "source_url", "")))
-    let horizon = to_float(to_string(json_get(q, "horizon_days", "0")))
+    // №711 A.1: нечисловое поле модели роняло ВЕСЬ отбор (бросок to_float
+    // до накопителей — прод 11.11 «ОСП 0 из 3 — сбой разбора генерации»).
+    // Все преобразования полей вопроса — под TryVal; кривой вопрос
+    // отбрасывается с причиной в kk_rej_flat, остальные проходят.
+    let kind_v = TryVal(try to_string(json_get(q, "kind", "")))
+    let text_v = TryVal(try to_string(json_get(q, "text", "")))
+    let url_v = TryVal(try to_string(json_get(q, "source_url", "")))
+    let horizon_v = TryVal(try to_float(to_string(json_get(q, "horizon_days", "0"))))
     let rule_obj = TryVal(try json_get(q, "rule"))
-    if to_string(rule_obj) != "()" and text != "" then {
-      let rule_json = json_encode(rule_obj)
-      let future = time() + horizon * 86400.0
-      let verdict = KKQuestionValid(kind, rule_json, url, horizon, future)
-      if verdict == "OK" then {
-        if KKDedupOk(KKNormalize(text)) == "ok" then {
-          let mut take = "no"
-          if horizon <= 1.5 and c1 < e1 then {
-            let take = "yes"
-            let c1 = c1 + 1.0
-          }
-          if horizon > 1.5 and horizon <= 7.5 and c7 < e7 then {
-            let take = "yes"
-            let c7 = c7 + 1.0
-          }
-          if horizon > 7.5 and c30 < e30 then {
-            let take = "yes"
-            let c30 = c30 + 1.0
-          }
-          if take == "yes" then {
-            let item = json_encode({text: text, kind: kind, horizon_days: horizon, rule: rule_json, source_url: url})
-            if picked == "" then { let picked = item } else { let picked = picked + "," + item }
+    if to_string(kind_v) == "()" or to_string(text_v) == "()" or to_string(url_v) == "()" then {
+      let rej = KKRejPush(rej, "поле не читается")
+    } else {
+      if to_string(horizon_v) == "()" then {
+        // даты (future/resolve_by) производны от horizon — гвард horizon
+        // закрывает и их: до арифметики дат нечисло не доходит
+        let rej = KKRejPush(rej, "horizon_days не число")
+      } else {
+        let kind = trim(to_string(kind_v))
+        let text = trim(to_string(text_v))
+        let url = trim(to_string(url_v))
+        let horizon = to_float(to_string(horizon_v))
+        if to_string(rule_obj) != "()" and text != "" then {
+          let rule_json = json_encode(rule_obj)
+          let future = time() + horizon * 86400.0
+          let verdict = KKQuestionValid(kind, rule_json, url, horizon, future)
+          if verdict == "OK" then {
+            if KKDedupOk(KKNormalize(text)) == "ok" then {
+              let mut take = "no"
+              if horizon <= 1.5 and c1 < e1 then {
+                let take = "yes"
+                let c1 = c1 + 1.0
+              }
+              if horizon > 1.5 and horizon <= 7.5 and c7 < e7 then {
+                let take = "yes"
+                let c7 = c7 + 1.0
+              }
+              if horizon > 7.5 and c30 < e30 then {
+                let take = "yes"
+                let c30 = c30 + 1.0
+              }
+              if take == "yes" then {
+                let item = json_encode({text: text, kind: kind, horizon_days: horizon, rule: rule_json, source_url: url})
+                if picked == "" then { let picked = item } else { let picked = picked + "," + item }
+              } else {
+                // валиден, но бакет плана заполнен — вне плана дня
+                let rej = KKRejPush(rej, "вне плана")
+              }
+            } else {
+              let rej = KKRejPush(rej, "дубль")
+            }
           } else {
-            // валиден, но бакет плана заполнен — вне плана дня
-            let rej = KKRejPush(rej, "вне плана")
+            let rej = KKRejPush(rej, KKRejectLabel(verdict))
           }
         } else {
-          let rej = KKRejPush(rej, "дубль")
+          // объект без rule или без text — отклонён как вопрос без правила
+          let rej = KKRejPush(rej, "нет правила")
         }
-      } else {
-        let rej = KKRejPush(rej, KKRejectLabel(verdict))
       }
-    } else {
-      // объект без rule или без text — отклонён как вопрос без правила
-      let rej = KKRejPush(rej, "нет правила")
     }
   }
   let missing = (e1 + e7 + e30) - (c1 + c7 + c30)
-  // накопители дня: принятые ЭТИМ отбором учитываются следующим (регенерация
-  // слота добирает остаток плана — суммарно за день не больше плана)
-  let _ = kv_set("kk_acc_t1:" + a_dept + ":" + acc_day, to_string(acc1 + c1))
-  let _ = kv_set("kk_acc_t7:" + a_dept + ":" + acc_day, to_string(acc7 + c7))
-  let _ = kv_set("kk_acc_t30:" + a_dept + ":" + acc_day, to_string(acc30 + c30))
-  // #684 A.2: итог по отделу — audit_log (kk_validate) и накопители дня для
-  // строки сводки (kk_rej_flat — причины валидатора, kk_ai_fail — сбои ИИ).
-  // Отдел приходит маркером kv из KKGenPromptBuild: слот kk-ask живёт в
-  // app.mlog, наряд #684 его не трогает.
-  let a_dept = kv_get("kk_ask_dept")
-  if a_dept == "" then { let a_dept = "kavalnya" }
+  // №711 A.3: kv-накопители kk_acc_* больше не пишутся — вставка вопросов
+  // в kk_questions (KKInsertPicked в app.mlog) и есть учёт плана;
+  // источник истины — БД
   let mut ai_s = "нет"
   if length(list) == 0.0 then {
     let ai_s = "да (ответ ИИ не разобран)"
@@ -1139,6 +1273,15 @@ pattern KKTestCleanup() -> String {
   let _ = kv_set("kk_ai_fail:n671dept:" + KKDayUtc(), "")
   let _ = kv_set("kk_rej_flat:lz:" + KKDayUtc(), "")
   let _ = kv_set("kk_rej_flat:osp:" + KKDayUtc(), "")
+  // №711: строки фикстур наряда (n711%) — таблицы те же
+  let g12 = grant_issue("db:delete:kk_outcomes", 3600.0, "n", 500)
+  let _ = db_execute_with_grant(g12, "DELETE FROM kk_outcomes WHERE question_id IN (SELECT id FROM kk_questions WHERE norm LIKE 'n711%')", [])
+  let g13 = grant_issue("db:delete:kk_answers", 3600.0, "n", 500)
+  let _ = db_execute_with_grant(g13, "DELETE FROM kk_answers WHERE question_id IN (SELECT id FROM kk_questions WHERE norm LIKE 'n711%')", [])
+  let g14 = grant_issue("db:delete:kk_questions", 3600.0, "n", 500)
+  let _ = db_execute_with_grant(g14, "DELETE FROM kk_questions WHERE norm LIKE 'n711%'", [])
+  let _ = kv_set("kk_rej_flat:finance:" + KKDayUtc(), "")
+  let _ = kv_set("kk_ai_fail:finance:" + KKDayUtc(), "")
   // #684 A.5.1: накопители плана дня — сброс
   let _ = kv_set("kk_acc_t1:n671dept:" + KKDayUtc(), "")
   let _ = kv_set("kk_acc_t7:n671dept:" + KKDayUtc(), "")
@@ -1308,7 +1451,9 @@ test "n684: KKSelectValid — итог по отделу в audit_log и нак�
   let _ = kv_set("kk_ask_dept", "n671dept")
   // план 3 — на завтра 2, на неделю 1: 1 валидный, 3 отклонения — нет source_url,
   // дубль, нет правила (объект без rule)
-  let _ = KKInsertQuestion("n671dept", "n684sel существующий вопрос для дедупа", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  // №711 A.3: фикстура дедупа — asked_at вчера: дедуп (30 дней) работает,
+  // но суточный план (kk_questions за сегодня) она не расходует
+  let _ = db_execute("INSERT INTO kk_questions (dept, text, norm, kind, horizon_days, asked_at, resolve_by, rule, source_url, source_kind, status) VALUES ('n671dept', 'n684sel существующий вопрос для дедупа', 'n684sel существующий вопрос для дедупа', 'binary', 1.0, datetime('now', '-1 day'), ?1, '{\"desc\":\"правило\"}', 'https://example.org/a', 'news', 'open')", [to_string(time() + 86400.0)])
   let raw = "[{\"text\":\"n684sel валидный вопрос про курс\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/b\"},{\"text\":\"n684sel без источника\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"\"},{\"text\":\"n684sel существующий вопрос для дедупа\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/a\"},{\"text\":\"n684sel без правила\",\"kind\":\"binary\",\"horizon_days\":1,\"source_url\":\"https://example.org/c\"}]"
   let sel = KKSelectValid(raw, 2.0, 1.0, 0.0)
   assert_contains(sel, "\"missing\":2")
@@ -1334,35 +1479,44 @@ test "n684: KKSelectValid — итог по отделу в audit_log и нак�
   let _ = KKTestCleanup()
 }
 
-test "n684 A.5.1: план дня не превышается — регенерация добирает остаток" {
-  // Аудитор 08.11: «юристы 4 при плане 3». Причина — регенерация слота
-  // запрашивала полный план заново и дописывала к уже принятым. Гвардия:
-  // два отбора подряд (как слот) дают суммарно не больше плана.
+test "n684 A.5.1 + n711 A.3: план дня не превышается — регенерация добирает остаток (по БД)" {
+  // Аудитор 08.11: «юристы 4 при плане 3». №711 A.3: источник истины плана —
+  // kk_questions (вставка одобренных МЕЖДУ стадиями селекции), kv-накопители
+  // kk_acc_* не читаются и не пишутся. Гвардия: две стадии отбора с вставкой
+  // дают суммарно не больше плана; третья — ничего.
   let _ = KKEnsureSchema()
   let _ = KKTestCleanup()
   let _ = kv_set("kk_ask_dept", "legal")
-  // раунд 1: из 3 предложенных валиден 1 (на завтра) — принято 1, missing 2
+  // раунд 1: из 3 предложенных валиден 1 (на завтра) — отобран и вставлен 1
   let raw1 = "[{\"text\":\"n684plan юр раунд1 один\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/p1\"},{\"text\":\"n684plan юр раунд1 два\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"\"},{\"text\":\"n684plan юр раунд1 три\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"\"}]"
   let sel1 = KKSelectValid(raw1, 2.0, 1.0, 0.0)
   assert_contains(sel1, "\"missing\":2")
-  assert_eq(to_float(json_get(parse_json(sel1), "missing", "0")), 2.0)
-  // накопитель дня: принято 1 на завтра
-  assert_eq(to_float(kv_get("kk_acc_t1:legal:" + KKDayUtc())), 1.0)
-  // раунд 2 (регенерация с тем же планом): 3 валидных на завтра — добрать можно
-  // только 1 (остаток плана t1=2 минус принято 1), ещё 2 — «вне плана»
+  let ins1 = KKInsertPicked("legal", to_string(json_get(parse_json(sel1), "picked", "[]")))
+  let items1 = parse_json(to_string(json_get(parse_json(ins1), "items", "[]")))
+  assert_eq(length(items1), 1.0)
+  // БД сегодня (бакет t1): вставлен ровно 1 — kv-накопителей больше нет
+  let q1 = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = 'legal' AND horizon_days <= 1.5 AND asked_at >= ?1", [KKDayUtc()])
+  assert_eq(to_float(json_get(get(q1, 0.0), "n", "0")), 1.0)
+  // раунд 2 (регенерация с тем же планом): 3 валидных на завтра — добрать
+  // можно только 1 (остаток плана t1=2 минус вставлено 1), ещё 2 — «вне плана»
   let raw2 = "[{\"text\":\"n684plan юр раунд2 один\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/p2\"},{\"text\":\"n684plan юр раунд2 два\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/p3\"},{\"text\":\"n684plan юр раунд2 три\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/p4\"}]"
   let sel2 = KKSelectValid(raw2, 2.0, 1.0, 0.0)
   let picked2 = parse_json(to_string(json_get(parse_json(sel2), "picked", "[]")))
   assert_eq(length(picked2), 1.0)
+  let ins2 = KKInsertPicked("legal", to_string(json_get(parse_json(sel2), "picked", "[]")))
+  let items2 = parse_json(to_string(json_get(parse_json(ins2), "items", "[]")))
+  assert_eq(length(items2), 1.0)
   // суммарно за день по бакету t1 — ровно план 2, не 4
-  assert_eq(to_float(kv_get("kk_acc_t1:legal:" + KKDayUtc())), 2.0)
+  let q2 = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = 'legal' AND horizon_days <= 1.5 AND asked_at >= ?1", [KKDayUtc()])
+  assert_eq(to_float(json_get(get(q2, 0.0), "n", "0")), 2.0)
   let flat = kv_get("kk_rej_flat:legal:" + KKDayUtc())
   assert_eq(KKCountIn(flat, "вне плана"), 2.0)
-  // третья генерация (гипотетический повтор) — добрать нечего
+  // третья генерация (гипотетический повтор слота) — добрать нечего
   let sel3 = KKSelectValid(raw2, 2.0, 1.0, 0.0)
   let picked3 = parse_json(to_string(json_get(parse_json(sel3), "picked", "[]")))
   assert_eq(length(picked3), 0.0)
-  assert_eq(to_float(kv_get("kk_acc_t1:legal:" + KKDayUtc())), 2.0)
+  let q3 = query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = 'legal' AND horizon_days <= 1.5 AND asked_at >= ?1", [KKDayUtc()])
+  assert_eq(to_float(json_get(get(q3, 0.0), "n", "0")), 2.0)
   let _ = KKTestCleanup()
   let _ = kv_set("kk_ask_dept", "")
 }
@@ -1517,4 +1671,102 @@ test "n684 A.4.3: «провалов нет» — только при разре
   assert_contains(dsvg2, "провалов нет")
   assert_eq(KKCountIn(dsvg2, "разрешённых вопросов ещё нет"), 0.0)
   let _ = KKTestCleanup()
+}
+
+test "n711 A.1: кривое horizon_days отбрасывает один вопрос, а не отдел" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = kv_set("kk_ask_dept", "n671dept")
+  // 3 вопроса, у второго horizon_days не число: раньше to_float ронял ВЕСЬ
+  // отбор (прод 11.11 «ОСП 0 из 3 — сбой разбора генерации»), теперь —
+  // отбрасывается один вопрос с причиной, 2 отобраны (мутация «убрать
+  // try у horizon_days» красит этот тест)
+  let raw = "[{\"text\":\"n711sel валидный вопрос один\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/a\"},{\"text\":\"n711sel кривой горизонт\",\"kind\":\"binary\",\"horizon_days\":\"завтра\",\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/b\"},{\"text\":\"n711sel валидный вопрос два\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/c\"}]"
+  let sel = KKSelectValid(raw, 2.0, 1.0, 0.0)
+  let picked = parse_json(to_string(json_get(parse_json(sel), "picked", "[]")))
+  assert_eq(length(picked), 2.0)
+  // причина отказа записана в накопитель дня и в audit_log
+  let flat = kv_get("kk_rej_flat:n671dept:" + KKDayUtc())
+  assert_eq(KKCountIn(flat, "horizon_days не число"), 1.0)
+  let arows = query("SELECT details FROM audit_log WHERE action = 'kk_validate' AND dept = 'n671dept' ORDER BY id DESC LIMIT 1", [])
+  let details = to_string(json_get(get(arows, 0.0), "details", ""))
+  assert_contains(details, "принято 2")
+  assert_contains(details, "отклонено 1")
+  assert_contains(details, "horizon_days не число (1)")
+  let _ = KKTestCleanup()
+  let _ = kv_set("kk_ask_dept", "")
+}
+
+test "n711 A.3: план по БД — kv-рассинхрон не даёт превысить план" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = kv_set("kk_ask_dept", "n671dept")
+  // симуляция прецедента 11.11: kv-накопители пусты (как после потери
+  // флэша/рестарта), но в БД сегодня уже 2 вопроса на завтра — план t1
+  // исчерпан, отбирать нельзя. Мутация «считать по kv» — тест красный.
+  let _ = KKInsertQuestion("n671dept", "n711kv вопрос один сегодня", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/a")
+  let _ = KKInsertQuestion("n671dept", "n711kv вопрос два сегодня", "binary", 1.0, time() + 86400.0, "{\"desc\":\"правило\"}", "https://example.org/b")
+  let raw = "[{\"text\":\"n711kv кандидат один\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/c\"},{\"text\":\"n711kv кандидат два\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/d\"},{\"text\":\"n711kv кандидат три\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/e\"}]"
+  let sel = KKSelectValid(raw, 2.0, 1.0, 0.0)
+  let picked = parse_json(to_string(json_get(parse_json(sel), "picked", "[]")))
+  assert_eq(length(picked), 0.0)
+  let flat = kv_get("kk_rej_flat:n671dept:" + KKDayUtc())
+  assert_eq(KKCountIn(flat, "вне плана"), 3.0)
+  let _ = KKTestCleanup()
+  let _ = kv_set("kk_ask_dept", "")
+}
+
+test "n711 A.3: два прогона слота подряд — по отделу ровно план" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = kv_set("kk_ask_dept", "n671dept")
+  // прогон 1: 3 валидных, план 2+1 — вставлено 2 (t1) и 1 (t7)
+  let rawA = "[{\"text\":\"n711run вопрос завтра один\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/a\"},{\"text\":\"n711run вопрос завтра два\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/b\"},{\"text\":\"n711run вопрос неделя\",\"kind\":\"binary\",\"horizon_days\":7,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/c\"}]"
+  let selA = KKSelectValid(rawA, 2.0, 1.0, 0.0)
+  let insA = KKInsertPicked("n671dept", to_string(json_get(parse_json(selA), "picked", "[]")))
+  let itemsA = parse_json(to_string(json_get(parse_json(insA), "items", "[]")))
+  assert_eq(length(itemsA), 3.0)
+  assert_eq(KKAskedToday("n671dept"), 3.0)
+  // прогон 2 (повторный слот в тот же день): добрать нечего — 0 новых
+  let rawB = "[{\"text\":\"n711run повтор вопрос завтра\",\"kind\":\"binary\",\"horizon_days\":1,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/d\"},{\"text\":\"n711run повтор вопрос неделя\",\"kind\":\"binary\",\"horizon_days\":7,\"rule\":{\"desc\":\"правило\"},\"source_url\":\"https://example.org/e\"}]"
+  let selB = KKSelectValid(rawB, 2.0, 1.0, 0.0)
+  let insB = KKInsertPicked("n671dept", to_string(json_get(parse_json(selB), "picked", "[]")))
+  let itemsB = parse_json(to_string(json_get(parse_json(insB), "items", "[]")))
+  assert_eq(length(itemsB), 0.0)
+  // суммарно за день — ровно план, не больше
+  assert_eq(KKAskedToday("n671dept"), 3.0)
+  let _ = KKTestCleanup()
+  let _ = kv_set("kk_ask_dept", "")
+}
+
+test "n711 A.4: /kk подробно — провалы формы с note и спорные видны" {
+  let _ = KKEnsureSchema()
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'on')", [])
+  // финансы: 3 вопроса, каждый с провалом формы «бюджет отдела исчерпан»
+  let q1 = KKInsertQuestion("finance", "n711fin вопрос финансов один", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило фин одно\"}", "https://example.org/a")
+  let q2 = KKInsertQuestion("finance", "n711fin вопрос финансов два", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило фин два\"}", "https://example.org/b")
+  let q3 = KKInsertQuestion("finance", "n711fin вопрос финансов три", "number", 1.0, time() + 86400.0, "{\"desc\":\"правило фин три\"}", "https://example.org/c")
+  let _ = KKAnswerRecord(q1, "finance", 0.0, "{}", "{}", "бюджет отдела исчерпан")
+  let _ = KKAnswerRecord(q2, "finance", 0.0, "{}", "{}", "бюджет отдела исчерпан")
+  let _ = KKAnswerRecord(q3, "finance", 0.0, "{}", "{}", "бюджет отдела исчерпан")
+  // один спорный исход с причиной и источником
+  let _ = db_execute("UPDATE kk_questions SET status = 'disputed' WHERE id = ?1", [to_string(q1)])
+  let _ = db_execute("INSERT INTO kk_outcomes (question_id, outcome, evidence_url, evidence_quote, resolved_by) VALUES (?1, 'disputed', 'https://example.org/src', 'исход неоднозначен по ответу разрешения', 'kavalnya')", [to_string(q1)])
+  let txt = KKDeptDetails("finance")
+  // все три провала формы видны с note (проверка наряда)
+  assert_eq(KKCountIn(txt, "бюджет отдела исчерпан"), 3.0)
+  assert_contains(txt, "Провалы формы (3)")
+  // спорный виден: вопрос, правило, источник, причина
+  assert_contains(txt, "n711fin вопрос финансов один")
+  assert_contains(txt, "правило: правило фин одно")
+  assert_contains(txt, "https://example.org/src")
+  assert_contains(txt, "исход неоднозначен по ответу разрешения")
+  // план дня: задано 3 (число плана — по дню недели, не хардкодом)
+  assert_contains(txt, "План дня: задано 3 из " + to_string(to_int(KKPlanForToday())))
+  // 4 недели: доля спорных и последние спорные с причинами
+  assert_contains(txt, "За 4 недели")
+  assert_contains(txt, "последние спорные")
+  let _ = KKTestCleanup()
+  let _ = db_execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('kk_enabled', 'off')", [])
 }
