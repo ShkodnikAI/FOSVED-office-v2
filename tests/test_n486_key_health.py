@@ -149,10 +149,27 @@ def test_missing_key_and_unverified(monkeypatch):
     r = key_health.check_entry(key_health.KEY_MANIFEST[0])
     assert r["status"] == "missing"
     # провайдер без дешёвой проверки -> unverified, не ok
-    ym = next(e for e in key_health.KEY_MANIFEST if e["env_key"] == "YANDEX_MARKET_API_KEY")
+    # (№715: Яндекс.Маркет удалён из манифеста — Synthetic-запись
+    # вместо него, путь check=None остаётся покрыт)
+    synthetic = {"env_key": "SYNTHETIC_NO_CHECK_KEY", "label": "Синтетика",
+                 "kind": "service", "required": False, "sanctions_ok": True,
+                 "check": None}
     monkeypatch.setattr(key_health, "_key_value", lambda env_key: "value")
-    r2 = key_health.check_entry(ym)
+    r2 = key_health.check_entry(synthetic)
     assert r2["status"] == "unverified"
+
+
+def test_n715_manifest_14_keys_no_removed():
+    """№715 KEYS-2 (решение владельца 12.11 по #708): в манифесте 14 ключей,
+    GROK/NVIDIA/Яндекс.Маркет удалены; оставшиеся (Qwen, FRED, Alpha
+    Vantage и 11 рабочих) на месте."""
+    env_keys = [e["env_key"] for e in key_health.KEY_MANIFEST]
+    assert len(env_keys) == 14, f"ожидалось 14 ключей, стало {len(env_keys)}"
+    for gone in ("GROK_API_KEY", "NVIDIA_API_KEY", "YANDEX_MARKET_API_KEY"):
+        assert gone not in env_keys, gone
+    for keep in ("QWEN_API_KEY", "FRED_API_KEY", "ALPHAVANTAGE_API_KEY",
+                 "TAVILY_API_KEY", "TELEGRAM_BOT_TOKEN", "ZAI_API_KEY"):
+        assert keep in env_keys, keep
 
 
 def test_night_phase_and_admin_command_guards():

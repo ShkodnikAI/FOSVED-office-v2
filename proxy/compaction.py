@@ -46,8 +46,8 @@ from proxy.core import log, _query, _write_llm_trace
 # Консервативные окна контекста по провайдерам (токены). Значение — не
 # рекламный максимум, а минимальное окно среди моделей провайдера, реально
 # используемых в COMBO_CHAINS (kimi-k3, deepseek-chat, glm-4.6/glm-4-plus,
-# gpt-oss-20b/120b, claude-sonnet-4, nemotron). Провайдер вне таблицы
-# считается окном _UNKNOWN_PROVIDER_LIMIT (безопасно мало).
+# gpt-oss-20b/120b, claude-sonnet-4). №715 KEYS-2: nemotron (nvidia) удалён.
+# Провайдер вне таблицы считается окном _UNKNOWN_PROVIDER_LIMIT (безопасно мало).
 PROVIDER_CONTEXT_LIMITS = {
     "anthropic": 200000,   # claude-sonnet-4 — 200k
     "kimi": 262144,        # kimi-k3 — 256k
@@ -55,8 +55,6 @@ PROVIDER_CONTEXT_LIMITS = {
     "zai": 131072,         # glm-4-plus 128k (glm-4.6 шире — берём минимум)
     "groq": 131072,        # gpt-oss-20b — 131k
     "cerebras": 131072,    # gpt-oss-120b — 131k
-    "nvidia": 131072,      # nemotron-super-49b — 128k+
-    "grok": 131072,
     "deepseek": 65536,     # deepseek-chat — консервативно 64k
     "qwen": 128000,        # №586 A.1: qwen-plus/max (DashScope) — 128k
 }
