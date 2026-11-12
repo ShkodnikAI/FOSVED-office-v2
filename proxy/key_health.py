@@ -13,6 +13,10 @@ METALOGOS_ENV_ALLOWLIST_CENSUS (entrypoint.sh). Метаданные (назна
 OpenAI/Anthropic — False; открытые/нейтральные — True) и отмечены в отчёте
 наряда как допущение.
 
+12.11 (#715 KEYS-2, решение владельца по #708): из манифеста удалены
+GROK_API_KEY, NVIDIA_API_KEY и YANDEX_MARKET_API_KEY — 14 ключей.
+История проверок в key_health_status не чистится.
+
 Правила наряда:
 - дешёвый вызов с авторизацией на каждый ключ, таймаут <= 10 c, без расхода
   платных токенов;
@@ -70,11 +74,6 @@ KEY_MANIFEST = [
      "how_link": "https://console.groq.com/keys",
      "why": "Быстрый бесплатный LLM-провайдер.",
      "check": {"type": "openai_models", "url": "https://api.groq.com/openai/v1/models"}},
-    {"env_key": "GROK_API_KEY", "label": "Grok (xAI)", "kind": "model",
-     "required": False, "sanctions_ok": False,
-     "how_link": "https://console.x.ai",
-     "why": "LLM-провайдер (класс OpenAI/Anthropic по санкционной карте fdf7ae1).",
-     "check": {"type": "openai_models", "url": "https://api.x.ai/v1/models"}},
     {"env_key": "ANTHROPIC_API_KEY", "label": "Anthropic (Claude)", "kind": "model",
      "required": False, "sanctions_ok": False,
      "how_link": "https://console.anthropic.com",
@@ -85,11 +84,6 @@ KEY_MANIFEST = [
      "how_link": "https://platform.openai.com/api-keys",
      "why": "LLM-провайдер; санкционное ограничение (fdf7ae1).",
      "check": {"type": "openai_models", "url": "https://api.openai.com/v1/models"}},
-    {"env_key": "NVIDIA_API_KEY", "label": "NVIDIA", "kind": "model",
-     "required": False, "sanctions_ok": True,
-     "how_link": "https://build.nvidia.com",
-     "why": "Бесплатный LLM-провайдер (инференс NIM).",
-     "check": {"type": "openai_models", "url": "https://integrate.api.nvidia.com/v1/models"}},
     {"env_key": "CEREBRAS_API_KEY", "label": "Cerebras", "kind": "model",
      "required": False, "sanctions_ok": True,
      "how_link": "https://cloud.cerebras.ai",
@@ -115,11 +109,6 @@ KEY_MANIFEST = [
      "how_link": "https://app.tavily.com",
      "why": "Живой поиск ОСП/ЛЗ по умолчанию (#474); free-квота ~1000/мес.",
      "check": {"type": "tavily_usage", "url": "https://api.tavily.com/usage"}},
-    {"env_key": "YANDEX_MARKET_API_KEY", "label": "Яндекс.Маркет (контентный API)", "kind": "service",
-     "required": False, "sanctions_ok": True,
-     "how_link": "https://yandex.ru/dev/market",
-     "why": "Контентный API магазина; дешёвого валидирующего вызова нет — только наличие.",
-     "check": None},
     {"env_key": "GITHUB_TOKEN_METALOGOS", "label": "GitHub (трекинг репозиториев)", "kind": "service",
      "required": False, "sanctions_ok": True,
      "how_link": "https://github.com/settings/tokens",
