@@ -286,16 +286,20 @@ class TestKkLineMlog:
     def test_dept_marker_set_in_prompt_builder(self):
         assert 'kv_set("kk_ask_dept", dept)' in KK
 
-    def test_app_mlog_untouched(self):
-        # наряд #684 app.mlog не трогает. #687 (NIGHT-1) правит NightSlot
-        # легитимно — гвардия отслеживает, что в app.mlog нет правок
-        # Кавальни (запрет наряда #684 остаётся в силе).
+    def test_app_mlog_kk_card_lines_untouched(self):
+        # №687 (NIGHT-1) и №711 (KK-1.1) правят app.mlog легитимно —
+        # ККAskForDept/KKAskSlot по мандату #711. Гвард сужен до того,
+        # что правки не задевают строки брифа/карточек #684: KKLine24h
+        # и её вызовы не менялись.
         import subprocess
         out = subprocess.run(
             ["git", "diff", "origin/main", "--", "app.mlog"],
             cwd=str(REPO_ROOT), capture_output=True, text=True)
-        for banned in ("KKAskForDept", "KKResolveSlot", "KKLine24h", "kk_ask", "kk_resolve"):
-            assert banned not in out.stdout, f"app.mlog: правка Кавальни ({banned}) запрещена наряду #684"
+        for banned in ("KKLine24h", "KKStats24h", "KKShortfallReason"):
+            for line in out.stdout.splitlines():
+                if line.startswith("+") and banned in line:
+                    raise AssertionError(
+                        f"app.mlog: строка брифа/счёта #684 изменена ({banned}): {line[:80]}")
 
     def test_scheduler_payload_keeps_kk_field(self):
         # mlog-сторона по-прежнему кладёт строку в payload брифа
