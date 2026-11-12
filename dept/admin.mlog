@@ -458,9 +458,14 @@ pattern AdminNightCycle() -> String {
   // Phase 1a: Scanner (Python UA — file inventory)
   // #485 A.2: каждый http_get фазы — под try; сбой фазы даёт честную строку
   // «Phase N: недоступна (причина)» и НЕ роняет весь ночной цикл.
+  // №707 A.2 (сопровождение, осознанное отступление — см. отчёт): дефолт-
+  // строки фаз вычисляются ВСЕГДА, а substring(TryVal(...)) на УСПЕШНОМ
+  // ответе получал Unit и бросал TYPE_MISMATCH — цикл умирал на первом же
+  // успехе фазы (харнесс #687, сценарий A). to_string ДО substring —
+  // идиома файла: to_string(Unit)="()", успеха фаза больше не боится.
   // #550 A.2: доступ — только с внутренним hash-токеном (itok).
   let tr_scan = try http_get("http://127.0.0.1:4000/admin-ua/scan?itok=" + AdminUaToken())
-  let mut scan_summary = "Phase 1a: недоступна (" + redact(substring(TryVal(try to_string(tr_scan.error.message)), 0.0, 120.0), "all") + ")"
+  let mut scan_summary = "Phase 1a: недоступна (" + redact(substring(to_string(TryVal(try to_string(tr_scan.error.message))), 0.0, 120.0), "all") + ")"
   let scan_ok = redact(to_string(TryVal(tr_scan)), "all")
   if scan_ok != "()" then {
     scan_summary = redact(to_string(json_get(parse_json(scan_ok), "summary", "Scanner failed")), "all")
@@ -469,7 +474,7 @@ pattern AdminNightCycle() -> String {
 
   // Phase 1b: Analyzer (Python UA — patterns, routes, imports) — #485 A.2
   let tr_analyze = try http_get("http://127.0.0.1:4000/admin-ua/analyze?itok=" + AdminUaToken())
-  let mut analyze_summary = "Phase 1b: недоступна (" + redact(substring(TryVal(try to_string(tr_analyze.error.message)), 0.0, 120.0), "all") + ")"
+  let mut analyze_summary = "Phase 1b: недоступна (" + redact(substring(to_string(TryVal(try to_string(tr_analyze.error.message))), 0.0, 120.0), "all") + ")"
   let analyze_ok = redact(to_string(TryVal(tr_analyze)), "all")
   if analyze_ok != "()" then {
     analyze_summary = redact(to_string(json_get(parse_json(analyze_ok), "summary", "Analyzer failed")), "all")
@@ -478,7 +483,7 @@ pattern AdminNightCycle() -> String {
 
   // Phase 1c: Grapher (Python UA — knowledge graph → SQLite) — #485 A.2
   let tr_graph = try http_get("http://127.0.0.1:4000/admin-ua/graph?itok=" + AdminUaToken())
-  let mut graph_summary = "Phase 1c: недоступна (" + redact(substring(TryVal(try to_string(tr_graph.error.message)), 0.0, 120.0), "all") + ")"
+  let mut graph_summary = "Phase 1c: недоступна (" + redact(substring(to_string(TryVal(try to_string(tr_graph.error.message))), 0.0, 120.0), "all") + ")"
   let graph_ok = redact(to_string(TryVal(tr_graph)), "all")
   if graph_ok != "()" then {
     graph_summary = redact(to_string(json_get(parse_json(graph_ok), "summary", "Grapher failed")), "all")
@@ -487,7 +492,7 @@ pattern AdminNightCycle() -> String {
 
   // Phase 2: Reviewer (Python UA — orphans, security, bugs, architecture) — #485 A.2
   let tr_review = try http_get("http://127.0.0.1:4000/admin-ua/review?itok=" + AdminUaToken())
-  let mut review_summary = "Phase 2: недоступна (" + redact(substring(TryVal(try to_string(tr_review.error.message)), 0.0, 120.0), "all") + ")"
+  let mut review_summary = "Phase 2: недоступна (" + redact(substring(to_string(TryVal(try to_string(tr_review.error.message))), 0.0, 120.0), "all") + ")"
   let mut health = "?"
   let review_ok = redact(to_string(TryVal(tr_review)), "all")
   if review_ok != "()" then {
@@ -498,7 +503,11 @@ pattern AdminNightCycle() -> String {
   // #705 A.3: здоровье — в KV сразу после вычисления (фаза 2), не в конце
   // цикла: прод 11.11 — падение фазы 3+ оставляло шапку ночи без здоровья.
   // Дубль в Phase 7 безвреден (то же значение).
+  // №707 A.2: рядом — метка времени записи (свежость для шапки NightSlot:
+  // запись этой же ночи = ts >= старта слота; вчерашнее значение без
+  // пометки не показывается).
   let _ = TryVal(try kv_set("admin_last_health", health))
+  let _ = TryVal(try kv_set("admin_last_health_ts", to_string(now())))
 
   // Phase 3: Metrics Analysis (native call_llm)
   // #705 A.1: вызов фазы — под try (идиома #485 A.2 для http-фаз): падение
@@ -546,7 +555,7 @@ pattern AdminNightCycle() -> String {
 
   // Phase 6: Documenter (Python UA) — #485 A.2
   let tr_docs = try http_get("http://127.0.0.1:4000/admin-ua/docs?itok=" + AdminUaToken())
-  let mut docs_count = "Phase 6: недоступна (" + redact(substring(TryVal(try to_string(tr_docs.error.message)), 0.0, 120.0), "all") + ")"
+  let mut docs_count = "Phase 6: недоступна (" + redact(substring(to_string(TryVal(try to_string(tr_docs.error.message))), 0.0, 120.0), "all") + ")"
   let docs_ok = redact(to_string(TryVal(tr_docs)), "all")
   if docs_ok != "()" then {
     docs_count = redact(to_string(json_get(parse_json(docs_ok), "structure", "")), "all")
@@ -560,7 +569,9 @@ pattern AdminNightCycle() -> String {
   // (если Reviewer был недоступен, здесь честный "?"); #705 A.3/A.4 —
   // рабочая запись уже сделана после фазы 2, здесь безвредный дубль под
   // TryVal (сбой KV в конце не роняет цикл после выполненных фаз).
+  // №707 A.2: ts — той же записью (дубль фазы 2 обновляет и метку).
   let _ = TryVal(try kv_set("admin_last_health", health))
+  let _ = TryVal(try kv_set("admin_last_health_ts", to_string(now())))
 
   // Save report
   let duration = to_string(to_int(now() - start_time))
