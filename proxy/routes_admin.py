@@ -1034,8 +1034,8 @@ _SHOP_SOURCES_DDL = ("CREATE TABLE IF NOT EXISTS shop_sources (source_id TEXT PR
 # Батч-2 (наряды #335/#337/#338/#339/#340, живая разведка 2026-09-24):
 # 7745/shopby — GeoIP-блок 403 датацентровых IP (у 7745 robots/sitemap 200,
 # но динамика закрыта); tomas/unishop — robots запрещает поисковую поверхность
-# (у unishop дополнительно капча reagate); ym — официальная реализация готова,
-# ждёт API-ключ владельца (шаг A.1 наряда #340).
+# (у unishop дополнительно капча reagate). №715 KEYS-2: Яндекс.Маркет (ym)
+# удалён решением владельца 12.11 (#708) — сборщика и статуса больше нет.
 _SHOP_SOURCE_STATUS = {
     "wb": ("работает", "ok"),
     "ozon": ("заблокирован антиботом", "warn"),
@@ -1046,15 +1046,16 @@ _SHOP_SOURCE_STATUS = {
     "shopby": ("нет доступа из датацентра — нужна живая проба", "warn"),
     "tomas": ("robots запрещает сбор", "warn"),
     "unishop": ("robots запрещает сбор", "warn"),
-    "ym": ("готов — ждёт API-ключ владельца", "warn"),
 }
 
 
 @app.get("/api/shop/sources")
 def api_shop_sources():
     """FORGE-UI-9 (#202): источники Закупок — известные (wb/ozon/onliner/21vek/tmby
-    + батч-2 #335/#337/#338/#339/#340: 7745/shopby/tomas/unishop/ym — переключатели
+    + батч-2 #335/#337/#338/#339: 7745/shopby/tomas/unishop — переключатели
     тем же паттерном, список серверный) + свои магазины (custom) из shop_sources.
+    №715 KEYS-2: ym (Яндекс.Маркет) удалён решением владельца 12.11;
+    существующие строки shop_sources в БД не трогаются.
     enabled — реальный флаг опроса."""
     try:
         _query(_SHOP_SOURCES_DDL)
@@ -1065,7 +1066,7 @@ def api_shop_sources():
                            ("onliner", "Onliner"), ("21vek", "21vek"),
                            ("tmby", "TM.by"), ("7745", "7745.by"),
                            ("shopby", "Shop.by"), ("tomas", "Tomas.by"),
-                           ("unishop", "UniShop.by"), ("ym", "Яндекс.Маркет")]:
+                           ("unishop", "UniShop.by")]:
             r = rows.pop(sid, None)
             # статус — из серверной карты (один источник правды; ранее фронт
             # ссылался на несуществующую JS-константу SHOP_SOURCE_STATUS —
