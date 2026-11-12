@@ -176,8 +176,12 @@ def test_mutation_crumbs_removed():
 
 
 def test_mutation_health_kv_back_to_phase7():
-    """Возврат kv_set в конец (после Phase 3) — гвард ранней записи краснеет."""
-    seg_old = '  let _ = TryVal(try kv_set("admin_last_health", health))\n\n  // Phase 3: Metrics Analysis'
+    """Возврат kv_set в конец (после Phase 3) — гвард ранней записи краснеет.
+    №707 A.2: рядом с записью здоровья теперь и admin_last_health_ts —
+    мутация убирает ОБЕ строки ранней записи (после фазы 2)."""
+    seg_old = ('  let _ = TryVal(try kv_set("admin_last_health", health))\n'
+               '  let _ = TryVal(try kv_set("admin_last_health_ts", to_string(now())))\n'
+               '\n  // Phase 3: Metrics Analysis')
     seg_new = '\n  // Phase 3: Metrics Analysis'
     m = ADMIN.replace(seg_old, seg_new, 1)
     assert m != ADMIN, "мутация не применилась"

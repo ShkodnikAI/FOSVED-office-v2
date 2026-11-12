@@ -1792,6 +1792,9 @@ pattern NightUsageKeyLine() -> String {
 
 pattern NightSlot() -> String {
   let _ = InitDB()
+  // №707 A.2: старт слота — точка свежести для kv admin_last_health
+  // (запись этой же ночи = ts >= slot_started; разбор — to_float_or, №514)
+  let slot_started = now()
 
   // Phase: FO-027 TTL chain_steps — очистка старше 14 дней; pending/failed
   // без прогресса >24 ч → expired + Telegram-алерт владельцу
@@ -1869,6 +1872,9 @@ pattern NightSlot() -> String {
     }
   }
   let mut ua_summary = "UA cycle failed"
+  // №707 A.1: health_score из результата UA-фазы — в переменную слота
+  // (раньше парсился только summary, хотя Python его отдаёт)
+  let mut ua_health = "?"
   if ua_note != "" then {
     ua_summary = ua_note
   } else {
@@ -1879,6 +1885,8 @@ pattern NightSlot() -> String {
     } else {
       let ua_s = redact(to_string(json_get(ua_parsed, "summary", "")), "all")
       if ua_s != "" then { ua_summary = ua_s }
+      let ua_h = redact(to_string(json_get(ua_parsed, "health_score", "?")), "all")
+      if ua_h != "" then { let ua_health = ua_h }
     }
   }
 
@@ -1978,9 +1986,21 @@ pattern NightSlot() -> String {
   if to_string(frows) != "()" and length(frows) > 0.0 then {
     findings_open = to_float(TryVal(try json_get(get(frows, 0.0), "cnt", "0")))
   }
-  let mut health_last = redact(kv_get("admin_last_health"), "all")
-  if health_last == "" then {
-    health_last = "?"
+  // №707 A.2: разрешение здоровья — приоритет источников, не усреднение:
+  // свежий (записан этой ночью, ts >= старта слота) mlog-Reviewer health
+  // ≠ «?» → UA health_score → честный «?»; UA-источник помечается « (UA)».
+  // То же разрешённое значение — в review_json и INSERT (консистентность).
+  let mut health_last = "?"
+  let mut health_src = ""
+  let kv_health = redact(kv_get("admin_last_health"), "all")
+  let kv_ts = to_float_or(kv_get("admin_last_health_ts"), 0.0)
+  if kv_health != "" and kv_health != "?" and kv_ts >= slot_started then {
+    health_last = kv_health
+  } else {
+    if ua_health != "?" and ua_health != "" then {
+      health_last = ua_health
+      health_src = " (UA)"
+    }
   }
   let mut health_num = 0.0
   let htry = TryVal(try to_int(health_last))
@@ -1990,7 +2010,7 @@ pattern NightSlot() -> String {
   let review_json = json_encode({status: night_status, summary: substring(result, 0, 400), health: health_last, findings_open: findings_open})
   let save_res = TryVal(try db_execute("INSERT INTO admin_night_reports (scan_data, review_data, health_score, findings_count) VALUES (?1, ?2, ?3, ?4)", ["night-slot", review_json, health_num, findings_open]))
   let _ = AuditLog("night_slot_done", "admin", "status=" + night_status + " health=" + health_last + " findings=" + to_string(to_int(findings_open)) + " saved=" + to_string(save_res))
-  let _ = TryVal(try OutboxPut("night", "Ночная проверка: " + night_status + ", здоровье " + health_last + "/10, открытых находок: " + to_string(to_int(findings_open)) + "\n\n" + substring(result, 0, 2800)))
+  let _ = TryVal(try OutboxPut("night", "Ночная проверка: " + night_status + ", здоровье " + health_last + "/10" + health_src + ", открытых находок: " + to_string(to_int(findings_open)) + "\n\n" + substring(result, 0, 2800)))
   return result
 }
 

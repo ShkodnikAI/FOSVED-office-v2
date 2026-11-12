@@ -322,3 +322,48 @@ def test_night_slot_survives_non_json_phase(tmp_path, upstream):
         assert "Phase 5: Ключи и провайдеры" in night and "ok (17/17)" in night, night[-2500:]
         assert upstream["hits"].get("POST /admin/keys/night-check", 0) >= 1, "фаза ключей не выполнилась после сбоя UA"
         assert "partial" in night, "честный статус partial потерян:\n" + night[-800:]
+
+
+# ──────────────────── №707 NIGHT-3: здоровье в шапке ночи ────────────────────
+
+def test_n707_a_reviewer_health_in_header(tmp_path, upstream):
+    """№707 A.3, сценарий A: мок /admin-ua/review отдаёт health_score 7
+    (mlog-Reviewer жив) → шапка «здоровье 7/10» БЕЗ пометки (UA);
+    разрешённое значение — в review_json и INSERT (консистентность)."""
+    # Все UA-фазы живы (прочие — заглушки-успехи): до №707 дефолт-строка
+    # фазы бросала substring(Unit) на успешном ответе и роняла весь цикл —
+    # сценарий одновременно регрессия этого фикса.
+    for db_path, _proc in _run_night_scenario(tmp_path, upstream, extra_config={
+        "GET /admin-ua/review": (200, {"status": "ok", "summary": "Reviewer OK n707",
+                                        "health_score": 7}),
+    }):
+        night = "\n".join(_outbox_texts(db_path, "night"))
+        assert "Ночная проверка: ok, здоровье 7/10," in night, night[-2500:]
+        assert "здоровье 7/10 (UA)" not in night, "источник — mlog-Reviewer, пометка не нужна"
+        rows = _db_rows(db_path, "SELECT review_data, health_score FROM admin_night_reports "
+                                 "WHERE scan_data='night-slot' ORDER BY id DESC LIMIT 1")
+        rj = json.loads(rows[0][0])
+        assert rj["health"] == "7", rj
+        assert rows[0][1] == 7.0, rows[0]
+
+
+def test_n707_b_ua_fallback_marked(tmp_path, upstream):
+    """№707 A.3, сценарий B: review 500 (mlog-Reviewer упал), UA отдаёт
+    health_score 1 → шапка «здоровье 1/10 (UA)», night=ok; разрешённое
+    значение — в review_json и INSERT."""
+    for db_path, _proc in _run_night_scenario(tmp_path, upstream, extra_config={
+        "GET /admin-ua/review": (500, "Reviewer down n707"),
+        "GET /admin-ua/night-cycle/status": (200, {"status": "done", "error": None,
+                                                   "result": {"status": "ok",
+                                                              "summary": "UA fallback n707",
+                                                              "health_score": 1}}),
+    }):
+        tick = "\n".join(_outbox_texts(db_path, "night-tick"))
+        night = "\n".join(_outbox_texts(db_path, "night"))
+        assert "night=FAIL" not in tick, tick[-1500:]
+        assert "Ночная проверка: ok, здоровье 1/10 (UA)," in night, night[-2500:]
+        rows = _db_rows(db_path, "SELECT review_data, health_score FROM admin_night_reports "
+                                 "WHERE scan_data='night-slot' ORDER BY id DESC LIMIT 1")
+        rj = json.loads(rows[0][0])
+        assert rj["health"] == "1", rj
+        assert rows[0][1] == 1.0, rows[0]
