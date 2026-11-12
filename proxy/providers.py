@@ -60,21 +60,27 @@ PROVIDERS = {
     "zai": {"url": "https://api.z.ai/api/paas/v4/chat/completions", "env_key": "ZAI_API_KEY", "format": "openai", "timeout": 120},
     "deepseek": {"url": "https://api.deepseek.com/v1/chat/completions", "env_key": "DEEPSEEK_API_KEY", "format": "openai", "timeout": 120},
     "groq": {"url": "https://api.groq.com/openai/v1/chat/completions", "env_key": "GROQ_API_KEY", "format": "openai", "timeout": 120},
-    "grok": {"url": "https://api.x.ai/v1/chat/completions", "env_key": "GROK_API_KEY", "format": "openai", "timeout": 120},
     "anthropic": {"url": "https://api.anthropic.com/v1/messages", "env_key": "ANTHROPIC_API_KEY", "format": "anthropic", "timeout": 120},
     "openai": {"url": "https://api.openai.com/v1/chat/completions", "env_key": "OPENAI_API_KEY", "format": "openai", "timeout": 120},
-    "nvidia": {"url": "https://integrate.api.nvidia.com/v1/chat/completions", "env_key": "NVIDIA_API_KEY", "format": "openai", "timeout": 120},
     "cerebras": {"url": "https://api.cerebras.ai/v1/chat/completions", "env_key": "CEREBRAS_API_KEY", "format": "openai", "timeout": 120},
     "kimi": {"url": "https://api.moonshot.ai/v1/chat/completions", "env_key": "KIMI_API_KEY", "format": "openai", "timeout": 120},
     # №586 A.1: Qwen (Alibaba DashScope, OpenAI-совместимый режим); регион — QWEN_BASE_URL
     "qwen": {"url": _qwen_base_url() + "/chat/completions", "env_key": "QWEN_API_KEY", "format": "openai", "timeout": 120},
 }
 
+# №715 KEYS-2 (решение владельца 12.11 по #708): Grok и NVIDIA удалены из
+# цепочки провайдеров. Префиксы моделей остаются в детекции (_provider_for_model),
+# чтобы запрос к удалённому провайдеру получал ГРОМКИЙ отказ, а не тихий
+# переход на другого провайдера цепочки.
+REMOVED_PROVIDERS = {
+    "grok": "провайдер удалён решением владельца 12.11 (#708/#715)",
+    "nvidia": "провайдер удалён решением владельца 12.11 (#708/#715)",
+}
+
 TOKEN_COSTS = {
     "zai": {"input": 0.5, "output": 1.5}, "deepseek": {"input": 0.14, "output": 0.28},
-    "groq": {"input": 0.0, "output": 0.0}, "grok": {"input": 3.0, "output": 15.0},
+    "groq": {"input": 0.0, "output": 0.0},
     "anthropic": {"input": 3.0, "output": 15.0}, "openai": {"input": 2.5, "output": 10.0},
-    "nvidia": {"input": 0.0, "output": 0.0},
     "cerebras": {"input": 0.0, "output": 0.0},
     "kimi": {"input": 0.6, "output": 2.5},
     # №586 A.1: оценка по публичному прайсу DashScope intl (qwen-plus class) — уточнить по тарифу
@@ -586,12 +592,16 @@ def _provider_for_model(model):
     elif model.startswith("deepseek"):
         provider = "deepseek"
     elif model.startswith("grok"):
+        # №715 KEYS-2: провайдер удалён — ветка оставлена СОЗНАТЕЛЬНО,
+        # чтобы детекция возвращала «grok» и вызывающая сторона могла
+        # дать громкий отказ (REMOVED_PROVIDERS), а не тихий фолбэк.
         provider = "grok"
     elif model.startswith("glm"):
         provider = "zai"
     elif model.startswith("llama") or model.startswith("mixtral") or model.startswith("gemma"):
         provider = "groq"
     elif model.startswith("nvidia/"):
+        # №715 KEYS-2: см. ветку grok выше — детекция без тихого фолбэка
         provider = "nvidia"
     elif model.startswith("zai-glm"):
         provider = "cerebras"
@@ -653,6 +663,14 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
         for _m in _override_models:
             _eprov, _mmodel = _split_explicit_model(_m)
             _prov = _eprov or _provider_for_model(_mmodel)
+            # №715 KEYS-2: назначение отдела на удалённый провайдер — громкая
+            # запись и пропуск этой модели (не тихий обход другим провайдером).
+            if _prov in REMOVED_PROVIDERS:
+                _log_error(f"override на удалённый провайдер: dept={dept} model={_m} ({_prov})",
+                           dept=dept, kind="provider_removed")
+                log.warning(f"[override] dept={dept}: модель {_m} на удалённом провайдере {_prov} — пропуск (№715)")
+                _ov_fails.append(f"{_m} ({REMOVED_PROVIDERS[_prov]})")
+                continue
             _res = _call_single_provider(_prov, _mmodel, messages, dept=dept, route="override")
             if _res and _res.get("reply"):
                 if compression_saved > 0:
@@ -694,6 +712,16 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
         # №586 A.2: явная форма «провайдер:модель» уходит провайдеру БЕЗ префикса.
         _eprov, _mmodel = _split_explicit_model(model_override)
         provider = _eprov or _provider_for_model(_mmodel)
+        # №715 KEYS-2: запрос к удалённому провайдеру — ГРОМКИЙ отказ,
+        # не тихий переход на другого провайдера цепочки.
+        if provider in REMOVED_PROVIDERS:
+            _log_error(f"запрос к удалённому провайдеру: dept={dept} model={model_override} ({provider})",
+                       dept=dept, kind="provider_removed")
+            log.warning(f"[provider-removed] dept={dept}: {model_override} — {REMOVED_PROVIDERS[provider]}")
+            return {"reply": f"[Oshibka] Модель {model_override} недоступна: "
+                            f"{REMOVED_PROVIDERS[provider]}. Укажите модель живого провайдера.",
+                    "provider": None, "model": None, "tokens_in": 0, "tokens_out": 0,
+                    "removed_provider": provider}
         result = _call_single_provider(provider, _mmodel, messages, dept=dept, route="direct")
         if result and result.get("reply"):
             if compression_saved > 0:
@@ -796,8 +824,6 @@ def _call_llm_impl(dept, messages, model_override=None, combo=None, command='', 
             use_model = "deepseek-chat"
         elif prov_name == "groq" and not any(m in use_model for m in ("openai/gpt-oss", "llama", "mixtral", "gemma")):
             use_model = "openai/gpt-oss-20b"
-        elif prov_name == "nvidia" and not use_model.startswith("nvidia/"):
-            use_model = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
         elif prov_name == "cerebras" and not use_model.startswith("gpt-oss"):
             use_model = "gpt-oss-120b"
         fb_max = PROVIDER_MAX_TOKENS.get(prov_name, 4096)

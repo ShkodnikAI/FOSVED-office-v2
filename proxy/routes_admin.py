@@ -211,7 +211,6 @@ def api_models():
             "zai": {"name": "GLM 4.6", "provider": "zai", "label": "Z.ai", "tier": "priority"},
             "deepseek": {"name": "DeepSeek Chat", "provider": "deepseek", "label": "DeepSeek", "tier": "cheap"},
             "groq": {"name": "Llama 3.3 70B", "provider": "groq", "label": "Groq", "tier": "free"},
-            "grok": {"name": "Grok 3", "provider": "grok", "label": "xAI", "tier": "free_limit"},
             "anthropic": {"name": "Claude Sonnet 4", "provider": "anthropic", "label": "Anthropic", "tier": "paid"},
             "openai": {"name": "GPT-4o", "provider": "openai", "label": "OpenAI", "tier": "paid"},
         }
@@ -231,9 +230,6 @@ def api_models():
             is_priority = prov_key == _cfg_cache["priority_provider"]
 
             status = "active" if api_key else "no_key"
-            if prov_key == "grok":
-                # Check if rate limited (mock: if calls > 500)
-                status = "limited" if calls > 500 else status
 
             models.append({
                 "key": prov_key, "name": info["name"], "label": info["label"],
@@ -270,10 +266,11 @@ def api_models():
 # одна на строку (порядок = цепь fallback); TG /model <dept> приведён к тому же
 # формату (был "provider model" — такой литерал ни один потребитель не читает).
 
-_MODEL_LABELS = {"zai": "Z.ai", "deepseek": "DeepSeek", "groq": "Groq", "grok": "xAI",
+# №715 KEYS-2: grok (xAI) и nvidia удалены из подписей каталога — решение владельца 12.11.
+_MODEL_LABELS = {"zai": "Z.ai", "deepseek": "DeepSeek", "groq": "Groq",
                  "anthropic": "Anthropic", "openai": "OpenAI", "cerebras": "Cerebras",
-                 "kimi": "Kimi", "nvidia": "NVIDIA"}
-_MODEL_CATALOG_EXTRA = {"openai": ["gpt-4o"], "grok": ["grok-3"]}
+                 "kimi": "Kimi", "qwen": "Qwen"}
+_MODEL_CATALOG_EXTRA = {"openai": ["gpt-4o"]}
 _RE_MODEL_NAME = re.compile(r"^[A-Za-z0-9/._:+-]{1,120}$")
 
 
