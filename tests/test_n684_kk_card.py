@@ -12,7 +12,9 @@
   содержат собственных COUNT-запросов, читают KKStats24h/KKDeptLine24h;
 - A.4.3: «провалов нет» — только при разрешённых ≥1; при нуле —
   «разрешённых вопросов ещё нет — первые исходы <дата>»;
-- app.mlog не тронут (запрет наряда #684), подписи вызова карточек на месте.
+- №711 KK-1.1 правит app.mlog (KKAskForDept/маршрут /kk — мандат #711);
+  подписи вызова карточек #684 не менялись (узкий гвард вместо старого
+  «app.mlog не тронут»).
 """
 import os
 import sys
@@ -121,13 +123,20 @@ class TestA43FailsOnlyWhenResolved:
 
 
 class TestGuards:
-    def test_app_mlog_untouched(self):
-        # наряд #684 app.mlog не трогает — гвардия по рабочему дереву
+    def test_app_mlog_kk_call_sites(self):
+        # №711 KK-1.1 правит app.mlog (KKAskForDept/KKAskSlot — мандат наряда),
+        # поэтому старый гвард «app.mlog не тронут» заменён узким: подписи
+        # карточек #684 не менялись — app.mlog зовёт как раньше
         import subprocess
         out = subprocess.run(
             ["git", "diff", "origin/main", "--", "app.mlog"],
             cwd=str(REPO_ROOT), capture_output=True, text=True)
-        assert out.stdout.strip() == "", "app.mlog изменён — запрещено нарядом #684"
+        diff = out.stdout
+        # изменения допустимы только в блоке KK-вопросов/маршруте /kk
+        for changed_marker in ("KKStatsSvg", "KKDeptSvg", "KKSendCard",
+                               "KKLine24h", "KKDispute"):
+            assert f"+      let svg = TryVal(try {changed_marker}" not in diff, \
+                f"подпись вызова {changed_marker} изменена"
 
     def test_call_sites_in_app_mlog_unchanged(self):
         # подписи карточек не менялись — app.mlog зовёт как раньше
