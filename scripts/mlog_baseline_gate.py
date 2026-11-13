@@ -107,8 +107,15 @@ def parse_baseline(path):
 
 
 def run_check(mlog_file, root_file):
-    env = dict(os.environ)
-    env["DATABASE_URL"] = "sqlite::memory:"
+    # #717 SEC-1 п.2: окружение — только через общий санитайзер (deny-by-default,
+    # DATABASE_URL=sqlite::memory:, боевые переменные не наследуются даже с
+    # машины разработчика). MLOG_BIN (#655, кандидат стенда) пробрасывается.
+    import sys as _sys
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in _sys.path:
+        _sys.path.insert(0, _here)
+    from mlog_check_root_env import sanitize_env
+    env = sanitize_env()
     proc = subprocess.run(
         [MLOG, "check", mlog_file, "--root", root_file],
         cwd=REPO, env=env, capture_output=True, text=True, timeout=600,
