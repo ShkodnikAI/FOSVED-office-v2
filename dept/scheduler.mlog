@@ -528,8 +528,32 @@ pattern DbBackupSlot() -> String {
 // одним сообщением (OutboxFlush). Ночью — тишина (цель наряда #550).
 // Таблица — общая с Python (proxy/core.py init_db): ночной LZ DAILY пишется
 // из proxy/lz_github.py (deliver="outbox"), выгружается той же меткой.
+// ── #720 A.1: блоки-сводки ночи — одна запись на ночь (MSK-дату) ─────────
+// Факт 12.11: «usage-by-key» пришёл в отчёт дважды (131 и 133) — NightSlot
+// отработал два раза (нативный слот night-tick + внешний триггер /cron/night*),
+// у OutboxPut не было дедупликации. Источники-сводки (фикс-список ниже) при
+// повторе ЗАМЕНЯЮТ запись этой ночи — последняя выигрывает, блок в отчёте
+// один. Источники-ленты (fo027 — по цепочке, osp-watch — по находке) пишутся
+// как раньше: каждый вызов — своя запись. UPDATE, а не DELETE: голый DELETE —
+// irreversible-sink (мост №391), аудит не должен краснеть на каждом ночном
+// прогоне. sent_at IS NULL: выгруженное (07:15 MSK) не трогаем — блок,
+// пришедший ПОСЛЕ выгрузки, честно уходит в следующий отчёт.
+// Дата — MSK (created_at в UTC): ночь 02:00–05:00 UTC = один MSK-день.
 pattern OutboxPut(source: String, text: String) -> String {
   let _ = InitDB()
+  // #720 A.1: mlog-тесты и чистый mlog run не поднимают Python-слой,
+  // где создаётся owner_outbox (proxy/core.py init_db) — паттерн
+  // обеспечивает свою зависимость сам (идиома TavilySearch/tavily_usage
+  // №474); на проде таблица уже есть — IF NOT EXISTS это no-op.
+  let _ = TryVal(try db_execute("CREATE TABLE IF NOT EXISTS owner_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), source TEXT NOT NULL, text TEXT NOT NULL, sent_at TEXT)", []))
+  if contains(",night-tick,usage-by-key,night,", "," + source + ",") then {
+    let rows = TryVal(try query("SELECT id FROM owner_outbox WHERE source = ?1 AND sent_at IS NULL AND date(created_at, '+3 hours') = date('now', '+3 hours') ORDER BY id DESC LIMIT 1", [source]))
+    if to_string(rows) != "()" and length(rows) > 0.0 then {
+      let oid = to_string(json_get(rows[0], "id", ""))
+      let _ = TryVal(try db_execute("UPDATE owner_outbox SET text = ?2, created_at = datetime('now') WHERE id = ?1", [oid, text]))
+      return "replaced"
+    }
+  }
   let _ = db_execute("INSERT INTO owner_outbox (source, text) VALUES (?1, ?2)", [source, text])
   return "queued"
 }
@@ -1021,4 +1045,32 @@ test "n637 A2d: маршрутизация /visual-image и /visual — оба �
   assert_eq(img, "visual-image")
   let plain = DetectDepartment("/visual обзор макетов")
   assert_eq(plain, "visual")
+}
+
+// ── #720 A.1: дедуп блоков-сводок ночи (факт 12.11: usage-by-key дважды) ──
+// Инвариант к накоплению (идиома n636): до теста в текущем MSK-дне может
+// лежать 0 или 1 незакрытая запись usage-by-key (последняя, если ночь или
+// прошлый прогон уже писали); два OutboxPut подряд обязаны оставить РОВНО
+// одну (вторая — «replaced», заменяет текст), в тексте — последний блок.
+// Чистки DELETE нет (irreversible-sink, мост №391 — прецедент n636 D.1).
+test "n720 A.1: usage-by-key — одна запись на ночь, повтор заменяет" {
+  let _ = InitDB()
+  let r1 = OutboxPut("usage-by-key", "🔑 Учёт по ключам (n720-первая): Неделя: вызовов 131")
+  let r2 = OutboxPut("usage-by-key", "🔑 Учёт по ключам (n720-вторая): Неделя: вызовов 133")
+  assert_eq(r2, "replaced")
+  let rows = query("SELECT COUNT(*) AS c FROM owner_outbox WHERE source = 'usage-by-key' AND sent_at IS NULL AND date(created_at, '+3 hours') = date('now', '+3 hours')", [])
+  assert_eq(to_float(json_get(rows[0], "c", "0")), 1.0)
+  let last = query("SELECT text FROM owner_outbox WHERE source = 'usage-by-key' AND sent_at IS NULL AND date(created_at, '+3 hours') = date('now', '+3 hours') ORDER BY id DESC LIMIT 1", [])
+  assert_eq(contains(to_string(json_get(last[0], "text", "")), "n720-вторая"), true)
+}
+
+// Источники-ленты дедупом не накрыты: fo027 — по цепочке, каждая запись своя
+// (возвращаемое значение «queued» в обоих вызовах; счёт не проверяем —
+// накопление между прогонами легально, как у n636 dept_fail).
+test "n720 A.1: fo027 — не сводка, без дедупа (обе записи свои)" {
+  let _ = InitDB()
+  let r1 = OutboxPut("fo027", "FO-027: тест n720 цепочка A")
+  let r2 = OutboxPut("fo027", "FO-027: тест n720 цепочка B")
+  assert_eq(r1, "queued")
+  assert_eq(r2, "queued")
 }
