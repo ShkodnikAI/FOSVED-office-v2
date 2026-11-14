@@ -54,6 +54,12 @@ from proxy.news import get_night_news_digest, get_night_news_items, get_fresh_ne
 # №596 A.3: scheduler_lz_daily_core из брифа удалён (обход «BRIEF-1 доп.»),
 # импорт больше не нужен — полный отчёт ЛЗ только в LzDailySlot 09:10.
 
+# ── #720 REPORT-1: пороги раздела внимания (перечень — в отчёте наряда) ──
+NIGHT_HEALTH_ALERT_MAX = 3     # A.2-3: здоровье ночного цикла ≤ 3/10 — алерт
+KK_FORM_FAIL_ALERT_PCT = 30.0  # A.2-4: провал формы ≥ 30% ответов за 24 ч — алерт
+# A.3: статусные значки брифа — только программой; модель их не ставит
+STATUS_ICONS = ("✅", "⚠️", "⚠", "❌")
+
 # ══════════════════════════════════════════════════════════════════════
 #  MEGA-3: ARCHIVE ENDPOINTS
 # ══════════════════════════════════════════════════════════════════════
@@ -319,16 +325,38 @@ def _age_from_night_line(night_line: str) -> str:
     return m.group(1).strip() if m else ">26 ч"
 
 
+def night_tick_report_line():
+    """#720 A.2: последний блок night-tick этой ночи (MSK-дата) — источник раздела внимания.
+
+    Формат блока (dept/scheduler.mlog NightTickSlot): «night-tick: backup=ok
+    indicators=ok shop=ok evals=FAIL(старт не удался (нет job_id)) night=ok».
+    Бриф в 07:20 MSK читает уже выгруженную (07:15) запись — строки остаются
+    в owner_outbox после отправки. Аналогичный дедуп-фильтр дат — MSK (+3 ч).
+    """
+    try:
+        rows = _query(
+            "SELECT text FROM owner_outbox WHERE source = 'night-tick' "
+            "AND date(created_at, '+3 hours') = date('now', '+3 hours') "
+            "ORDER BY id DESC LIMIT 1",
+            fetch=True,
+        )
+        return str(rows[0]["text"]) if rows else ""
+    except Exception as e:  # noqa: BLE001 — таблица может не существовать
+        _log_error(f"night-tick line read failed: {e}", source="admin_brief", dept="admin", kind="db_read")
+        return ""
+
+
 def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
                             forge_backup_stale: bool, keys_line: str,
                             dept_fail_line: str, kk_line: str,
                             forge_attention: str, errors_digest: str,
-                            night_line: str = "") -> list:
+                            night_line: str = "",
+                            night_tick_line: str = "") -> list:
     """#684 A.1: алерты раздела «Что требует внимания» — программой.
 
     Источники — те же сигналы, что и ниже в отчёте (модель их видит, но
     раздел внимания собирается кодом). Полный список условий (наряд #684,
-    п. 8 — #687 A.6):
+    п. 8 — #687 A.6; #720 A.2 — пункты 9–12):
       1. резерв FORGE не выполнен (сбой контура или нет строки итога);
       2. последний итог резерва старше суток (свежий прогон не записан);
       3. проверка ключей не выполнялась (>26 ч) или есть проблемные ключи;
@@ -336,7 +364,12 @@ def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
       5. Кавальня «не работала» (выключена) или «сбор строки упал»;
       6. висящие гейты/замечания FORGE (forge_attention непуст);
       7. повторяющиеся ошибки офиса за сутки (errors_digest непуст);
-      8. ночная проверка не выполнялась >26 ч — с фактическим возрастом.
+      8. ночная проверка не выполнялась >26 ч — с фактическим возрастом;
+      9. (#720) ночная проверка partial/fail — с первой недоступной фазой;
+     10. (#720) night-tick: любой компонент =FAIL(…) — с причиной;
+     11. (#720) здоровье ночного цикла ≤ NIGHT_HEALTH_ALERT_MAX (3/10);
+     12. (#720) Кавальня: провал формы ≥ KK_FORM_FAIL_ALERT_PCT (30%)
+         ответов за 24 ч.
     Резерв при нуле проектов — не алерт (#687 A.6.2: резервировать нечего).
     Пустой список — валидный результат («Внимания не требуется»).
     """
@@ -345,6 +378,34 @@ def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
     nl = (night_line or "").strip()
     if "НЕ выполнялась" in nl:
         items.append("Ночная проверка не выполнялась (" + _age_from_night_line(nl) + ")")
+    # ── #720 A.2-1: ночная проверка partial/fail (строка — тот же источник,
+    # что в брифе: статус между «):» и «;», фазы — «Phase N: недоступна …»)
+    if nl and "НЕ выполнялась" not in nl and "ещё не выполнялась" not in nl:
+        _m_status = re.search(r"\)\s*:\s*([A-Za-zА-Яа-яёЁ\-]+)\s*;", nl)
+        _status = (_m_status.group(1).lower() if _m_status else "")
+        if _status and _status not in ("ok", "ок"):
+            _phases = re.findall(r"Phase \d+:[^,\n]*?недоступна[^,\n]*", nl)
+            _phase_note = (" — " + _phases[0].strip()) if _phases else ""
+            items.append("Ночная проверка: " + _status + _phase_note)
+        # ── #720 A.2-3: здоровье ночного цикла ≤ 3/10 (порог — константа
+        # модуля NIGHT_HEALTH_ALERT_MAX, №707: значение — Reviewer→UA→«?»)
+        _m_h = re.search(r"здоровье[:\s]*(\d+)\s*/\s*10", nl)
+        if _m_h and int(_m_h.group(1)) <= NIGHT_HEALTH_ALERT_MAX:
+            items.append("Здоровье ночного цикла: " + _m_h.group(1) + "/10"
+                         + " (порог ≤ " + str(NIGHT_HEALTH_ALERT_MAX) + ")")
+    # ── #720 A.2-2: night-tick — любой компонент FAIL(…) с причиной
+    # (формат: «name=значение» через пробел; значение может содержать
+    # пробелы и вложенные скобки — «старт не удался (нет job_id)»)
+    ntl = (night_tick_line or "").strip()
+    if ntl:
+        for _token in re.split(r"\s+(?=\w+=)", ntl):
+            _m_fail = re.match(r"^(\w+)=FAIL(.*)$", _token)
+            if _m_fail:
+                _reason = _m_fail.group(2).strip()
+                if _reason.startswith("(") and _reason.endswith(")"):
+                    _reason = _reason[1:-1]
+                items.append("night-tick: " + _m_fail.group(1) + "=FAIL"
+                             + ((" — " + _reason) if _reason else ""))
     fbl = (forge_backup_line or "").strip()
     if "нечего резервировать" in fbl:
         pass  # #687 A.6.2: проектов 0 — резервировать нечего, это не сбой
@@ -366,6 +427,18 @@ def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
     kkl = (kk_line or "").strip()
     if ("не работала" in kkl) or ("сбор строки упал" in kkl):
         items.append("Кавальня: " + kkl.replace("Кавальня: ", ""))
+    # ── #720 A.2-4: провал формы ≥ 30% ответов за 24 ч (порог — константа
+    # модуля KK_FORM_FAIL_ALERT_PCT; строка — KKLine24h, тот же SSOT,
+    # что в брифе: «…валидной карточкой X, провал формы Y; …»)
+    if kkl:
+        _m_ok = re.search(r"валидной карточкой (\d+)", kkl)
+        _m_bad = re.search(r"провал формы (\d+)", kkl)
+        if _m_ok and _m_bad:
+            _ok_n, _bad_n = int(_m_ok.group(1)), int(_m_bad.group(1))
+            _total = _ok_n + _bad_n
+            if _total > 0 and _bad_n * 100.0 / _total >= KK_FORM_FAIL_ALERT_PCT:
+                items.append("Кавальня: провал формы " + str(_bad_n) + " из " + str(_total)
+                             + " ответов за 24 ч (≥ " + str(int(KK_FORM_FAIL_ALERT_PCT)) + "%)")
     fa = (forge_attention or "").strip()
     if fa:
         items.append("FORGE требует внимания:\n" + fa)
@@ -392,6 +465,43 @@ def build_attention_section(items: list) -> str:
         for cont in sub[1:]:
             lines.append("  " + cont)
     return "\n".join(lines)
+
+
+def enforce_status_icon(brief: str, attention_empty: bool) -> str:
+    """#720 A.3: статусные значки брифа — только программой.
+
+    Факт 12.11: «🏢 Статус офиса: … отказы 0. ✅» — галку поставила модель
+    при живых сбоях. Теперь: (1) все статусные значки (STATUS_ICONS) из
+    ответа модели вырезаются; (2) к строке «Статус офиса» программно
+    дописывается ровно один — ✅ при пустом списке внимания, ⚠️ при
+    непустом. Строки с таким заголовком нет — значок не изобретается
+    (модель нарушила структуру — поймает ревью брифа, не молчаливый
+    подлог статуса). Разделы, дописанные программой ПОЗЖЕ вызова
+    (внимание/события/резерв), значками не владеют и не затрагиваются.
+    """
+    cleaned = brief
+    for icon in STATUS_ICONS:
+        cleaned = cleaned.replace(icon, "")
+    icon = "✅" if attention_empty else "⚠️"
+    lines = cleaned.split("\n")
+    for i, ln in enumerate(lines):
+        if "Статус офиса" in ln:
+            lines[i] = ln.rstrip() + " " + icon
+            break
+    return "\n".join(lines)
+
+
+def forge_backup_block(line: str) -> str:
+    """#720 A.4: строка резерва FORGE с префиксом — ровно один раз.
+
+    Факт 12.11: «💾 Резерв FORGE: Резерв FORGE: нечего резервировать» —
+    итог контура (backup_forge_repos.py) уже содержит префикс в ветке
+    «нечего резервировать», а сборка брифа добавляла его второй раз.
+    """
+    l = (line or "").strip()
+    if l.startswith("Резерв FORGE:"):
+        return "💾 " + l
+    return "💾 Резерв FORGE: " + l
 
 
 def forge_attention_block():
@@ -791,6 +901,8 @@ def scheduler_morning_brief():
             forge_attention=forge_attention,
             errors_digest=errors_digest,
             night_line=night_line,
+            # #720 A.2: night-tick этой ночи — FAIL-компоненты в раздел внимания
+            night_tick_line=night_tick_report_line(),
         )
 
         # ── 3. LZ daily findings (from memory) ──
@@ -861,13 +973,14 @@ def scheduler_morning_brief():
 
 #684: РАЗДЕЛ «ЧТО ТРЕБУЕТ ВНИМАНИЯ» ТЫ НЕ ПИШЕШЬ — он добавляется программой после твоего текста. ЗАПРЕЩЕНО писать выводы о необходимости вмешательства хозяина и фразы вида «всё в порядке», «не требует внимания», «проблем нет».
 
+#720: СТАТУСНЫЕ ЗНАЧКИ (✅ ⚠️ ❌) НЕ СТАВЬ НИГДЕ — значок статуса офиса дописывает программа по списку внимания после твоего текста.
 #689: РАЗДЕЛ «🌍 ВАЖНЫЕ МИРОВЫЕ СОБЫТИЯ» ТЫ НЕ ПИШЕШЬ — он добавляется программой из сборщика новостей дословно. ЗАПРЕЩЕНО писать о мировых событиях и новостях — они печатаются машиной без пересказа.
 
 ФОРМАТИРОВАНИЕ (Telegram MarkdownV2):
 ▸ Заголовки секций: *Жирный текст*
 ▸ Ключевые цифры и термины: *выделить жирным*
 ▸ Подчёркивания важных пунктов: __подчёркнуто__
-▸ Статусы: ✅ зелёный, ⚠️ жёлтый, ❌ красный
+▸ Статусные значки (✅ ⚠️ ❌) НЕ ставь — статус офиса дописывает программа (#720)
 ▸ НЕ используй кавычки " " или « » — они озвучиваются TTS
 ▸ Эмодзи только как маркеры секций (📅🌤🏢🔍), не ставь эмодзи в середине предложений
 ▸ НЕ ставь # заголовки — Telegram их не рендерит
@@ -892,7 +1005,15 @@ def scheduler_morning_brief():
         # #689 B.1: раздел мировых событий из ответа модели вырезается
         # (пересказ мог добавлять детали от себя — инцидент 08.11)…
         brief = strip_model_world_events(brief)
-        # …и добавляется программой — дословно из сборщика, с источником
+
+        # #720 A.3: статусные значки — только программой. Значки модели
+        # вырезаются (факт 12.11: ✅ при живых сбоях), к строке «Статус
+        # офиса» дописывается ровно один: ✅ — внимание пусто, ⚠️ — непусто.
+        # Выполняется ДО дописывания машинных разделов — их содержимое
+        # («дословно из сборщика») значками модели не владеет и не режется.
+        brief = enforce_status_icon(brief, attention_empty=not attention_items)
+
+        # …мировые события добавляются программой — дословно из сборщика
         brief = brief + "\n\n" + build_world_events_section(night_news_keys)
 
         # #684 A.1: раздел внимания — дословно после ответа модели (собирает
@@ -900,9 +1021,10 @@ def scheduler_morning_brief():
         brief = brief + "\n\n" + build_attention_section(attention_items)
 
         # FO-042: строка резерва FORGE — точно в бриф (не через LLM, чтобы
-        # цифры не искажались пересказом)
+        # цифры не искажались пересказом); #720 A.4: префикс — ровно один
+        # (итог контура в ветке «нечего резервировать» уже с префиксом)
         if forge_backup_line:
-            brief = brief + "\n\n💾 Резерв FORGE: " + forge_backup_line
+            brief = brief + "\n\n" + forge_backup_block(forge_backup_line)
         # FO-043: недельный срез first-try — тоже дословно (по понедельникам)
         if forge_edit_line:
             brief = brief + "\n🛠 Правки FORGE: " + forge_edit_line
@@ -1047,6 +1169,8 @@ def scheduler_admin_morning_reply():
             forge_attention=fa_sig,
             errors_digest=ed_sig,
             night_line=night_line,
+            # #720 A.2: тот же night-tick, что у брифа — единый источник
+            night_tick_line=night_tick_report_line(),
         )
         messages = [
             {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и даёшь замечания к нему по фактам из данных ниже. Не отдавай поручений отделам и людям, не ставь сроков. Упомяни находки Лаборатории Знаний, если они релевантны. Форматирование: *жирный* для ключевых слов, эмодзи только как маркеры секций. НЕ используй кавычки."},

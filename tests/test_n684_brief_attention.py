@@ -195,10 +195,12 @@ class TestBriefStructure:
 
     def test_section_appended_by_program_after_model(self):
         # порядок: ответ модели → фильтр → раздел внимания → дословные строки
+        # #720 A.4: строка резерва собирается forge_backup_block (префикс один
+        # раз — факт 12.11 «Резерв FORGE: Резерв FORGE:»), якорь обновлён
         i_call = ROUTES.index('result = call_llm("yana", messages)')
         i_filter = ROUTES.index("filter_model_conclusions(brief, bool(attention_items))")
         i_section = ROUTES.index('build_attention_section(attention_items)')
-        i_backup = ROUTES.index('brief = brief + "\\n\\n💾 Резерв FORGE: "')
+        i_backup = ROUTES.index('brief + "\\n\\n" + forge_backup_block(forge_backup_line)')
         assert i_call < i_filter < i_section < i_backup
 
     def test_filter_trigger_audited(self):
