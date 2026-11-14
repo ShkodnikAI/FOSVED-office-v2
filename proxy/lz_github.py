@@ -181,6 +181,105 @@ GITHUB_WATCH_RELEASES = [
 ]
 
 
+# ── #721 LZ-2: факты стека офиса — в промпт, не в память модели ───────────
+# Инцидент 12.11: ЛЗ приписала офису LangChain и Python 3.10 («операционный
+# приоритет №1 дня») — ни того, ни другого в офисе нет; промпт фактов стека
+# не содержал, модель достраивала сама.
+
+def _requirements_packages():
+    """#721 A.1/A.2: имена пакетов офиса из requirements.txt (без спеков версий)."""
+    try:
+        txt = (BASE_DIR / "requirements.txt").read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 — файла нет (стенд) — честный пустой список
+        return []
+    names = []
+    for ln in txt.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        name = re.split(r"[><=!~\[; ]", ln)[0].strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def office_stack_block():
+    """#721 A.1: блок «=== СТЕК ОФИСА (факт) ===» — программно, при каждой сборке промпта.
+
+    Версия Python — фактического рантайма (на проде — python3 из ubuntu:24.04);
+    версия Metalogos — из пина Dockerfile («Metalogos v0.39.0»); пакеты —
+    требования офиса. Модель получает факт, а не догадку.
+    """
+    import sys as _sys
+    lines = [f"Python рантайма: {_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}"
+             " (образ ubuntu:24.04)"]
+    try:
+        m = re.search(r"Metalogos v(\d+\.\d+\.\d+)",
+                      (BASE_DIR / "Dockerfile").read_text(encoding="utf-8"))
+        if m:
+            lines.append(f"Metalogos (язык сценариев офиса, bin/mlog): {m.group(1)}")
+    except Exception:  # noqa: BLE001 — Dockerfile недоступен — строка просто опускается
+        pass
+    pkgs = _requirements_packages()
+    if pkgs:
+        lines.append("Пакеты Python офиса (requirements.txt): " + ", ".join(pkgs))
+    return "=== СТЕК ОФИСА (факт, собран программой) ===\n" + "\n".join(lines)
+
+
+# #721 A.2: «наш/наших/офиса…» — маркеры утверждения о влиянии на офис
+_STACK_CLAIM_RE = re.compile(r"(?i)\b(?:наш\w*|офис\w*)\b")
+# «Пакет + версия» — кандидат на упоминание релиза пакета
+_PKG_VER_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_.\-]*)\s+\d+\.\d+(?:\.\d+)?\b")
+# Базовые имена, которые НЕ pip-пакеты, но стек офиса (A.1) описывают
+_STACK_KNOWN_BASE = ("python", "metalogos", "ubuntu")
+
+
+def annotate_foreign_stack_claims(text, known_packages=None):
+    """#721 A.2: программная проверка после модели.
+
+    Абзац, связывающий релиз пакета («Пакет 1.5.0») со словами «наш/офис»,
+    при отсутствии пакета в requirements.txt получает пометку в конец
+    абзаца. Возвращает (текст, число пометок) — счётчик уходит в подвал.
+    """
+    if known_packages is None:
+        known_packages = _requirements_packages()
+    known = {str(p).lower() for p in known_packages}
+    known |= set(_STACK_KNOWN_BASE)
+    known_norm = {p.replace("-", "").replace("_", "") for p in known}
+    blocks = str(text).split("\n\n")
+    marked = 0
+    for i, block in enumerate(blocks):
+        if not _STACK_CLAIM_RE.search(block):
+            continue
+        foreign = False
+        for m in _PKG_VER_RE.finditer(block):
+            cand = m.group(1).lower()
+            if cand in known or cand.replace("-", "").replace("_", "") in known_norm:
+                continue
+            foreign = True
+            break
+        if foreign:
+            blocks[i] = block.rstrip() + \
+                "\n⚠️ пакет в стеке офиса не используется (проверено по requirements.txt)"
+            marked += 1
+    return "\n\n".join(blocks), marked
+
+
+def strip_disrupting_scores(text):
+    """#721 A.3 (решение владельца 12.11): баллы «N/10» рядом с
+    disrupting potential вырезаются — число выглядит измерением, но им
+    не является. Возвращает (текст, число вырезанных баллов)."""
+    count = 0
+    lines = str(text).split("\n")
+    for i, ln in enumerate(lines):
+        if re.search(r"(?i)potential|потенциал", ln):
+            new_ln, n = re.subn(r"\b\d{1,2}\s*/\s*10\b", "", ln)
+            if n:
+                lines[i] = re.sub(r"\s{2,}", " ", new_ln).rstrip()
+                count += n
+    return "\n".join(lines), count
+
+
 def _github_search(query, sort="updated", per_page=5):
     """Search GitHub repos, return list of dicts. Works without token (public API)."""
     try:
@@ -389,6 +488,8 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
         result = {"provider": "-", "tokens_in": 0, "tokens_out": 0}
         analysis = ""
         hidden_repeats = 0
+        stack_marks = 0    # #721 A.2: пометки «пакет в стеке офиса не используется»
+        dp_removed = 0     # #721 A.3: вырезано баллов disrupting potential
         inc_news = []  # #689 A.2: доступно и когда модель не вызывалась
         if included_items:
             inc_repos = [it for it in included_items if it["kind"] == "repo"]
@@ -431,16 +532,19 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
                  "Ты — Лаборатория знаний Фосвед Офиса. Задача: проанализировать ежедневный скан мира.\n\n"
                  "ТВОЯ КЛЮЧЕВАЯ РОЛЬ: отобрать НОВИНКИ и СОБЫТИЯ, которые Админ должен знать.\n\n"
                  "Структура отчёта:\n"
-                 "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — с disrupting potential 1-10\n"
+                 "1. 🔥 Тренды и находки дня (технологии, наука, геополитика) — пункты по убыванию важности для офиса; у каждого пункта — одна строка «Почему важно для офиса:» с опорой на блок СТЕК ОФИСА или на отдел, которому событие полезно (ОСП, ЛЗ, финансы, юристы)\n"
                  "2. 📦 Новые релизы и обновления — что вышло\n"
                  "3. 🌍 Ключевые мировые события — экономика, политика, breakthrough\n"
                  "4. 💡 Рекомендации — что Админу стоит изучить и почему\n"
-                 "5. 📊 Статистика скана\n\n"
+                 "5. 📊 Статистика скана (топ-тему — строкой «Первая по важности: <тема>», без баллов)\n\n"
                  "ПРАВИЛО ССЫЛОК: для КАЖДОГО упомянутого проекта/события ОБЯЗАТЕЛЬНО включай прямую ссылку на источник в формате: https://...\n"
                  "Используй ТОЛЬКО ссылки из предоставленных данных. Не придумывай ссылки.\n\n"
+                 "ПРАВИЛО СТЕКА (#721): утверждения о влиянии на офис («наши пайплайны», «наш стек», «для офиса») — ТОЛЬКО о пакетах из блока СТЕК ОФИСА ниже. Пакета в этом блоке нет — пиши прямо: «в стеке офиса не используется». Не приписывай офису стек, которого у него нет (инцидент 12.11: LangChain/Python 3.10).\n"
+                 "Баллы важности (N/10) НЕ ставь — важность передают порядок пунктов и строка «Почему важно для офиса:».\n\n"
                  "Фильтруй: релевантное для AI-офиса, технологий, мировых событий.\n"
                  "Язык: русский."},
-                {"role": "user", "content": f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
+                {"role": "user", "content": f"{office_stack_block()}\n\n"
+                 f"Данные скана за {datetime.utcnow().isoformat()[:10]}:\n\n"
                  f"=== НОВЫЕ РЕПОЗИТОРИИ ({len(inc_repos)} найдено) ===\n"
                  f"{repos_text}\n\n"
                  f"=== НОВЫЕ РЕЛИЗЫ ({len(inc_releases)}) ===\n"
@@ -459,6 +563,21 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
             except Exception as e:
                 log.warning(f"LZ Daily: stale-block filter failed (non-fatal): {e}")
                 hidden_repeats = 0
+            # ── #721 A.3: баллы «N/10» рядом с disrupting potential —
+            # страховка после модели (решение владельца 12.11: число выглядит
+            # измерением, но им не является)
+            try:
+                analysis, dp_removed = strip_disrupting_scores(analysis)
+            except Exception as e:  # noqa: BLE001 — не роняет отчёт
+                log.warning(f"LZ Daily: disrupting-score strip failed (non-fatal): {e}")
+                dp_removed = 0
+            # ── #721 A.2: абзац про «наш стек» без пакета в requirements —
+            # программная пометка (факт 12.11: LangChain/Python 3.10)
+            try:
+                analysis, stack_marks = annotate_foreign_stack_claims(analysis)
+            except Exception as e:  # noqa: BLE001 — не роняет отчёт
+                log.warning(f"LZ Daily: stack-claim annotate failed (non-fatal): {e}")
+                stack_marks = 0
 
         # ── Phase 3: Save to DB + Memory (with cross-run dedup) ───────────
         if not dry_run:
@@ -527,6 +646,12 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
             if hidden_repeats:
                 # №597 A.3: страховка после модели — сколько абзацев скрыто
                 report += f"скрыто повторов: {hidden_repeats}\n"
+            if stack_marks:
+                # #721 A.2: пометок «пакет в стеке офиса не используется»
+                report += f"пометок стека: {stack_marks}\n"
+            if dp_removed:
+                # #721 A.3: вырезано баллов disrupting potential
+                report += f"вырезано баллов disrupting potential: {dp_removed}\n"
             report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
 
         # ── Phase 5: Send to Owner (Admin) ────────────────────
