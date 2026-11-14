@@ -399,19 +399,42 @@ pattern AdminProposals() -> String {
 // обращались» — dept_activity, обновляется в RecordUserMessage).
 // Порог намеренно короче их 14/30 дней — у нас 14 отделов, не сотни
 // скиллов, реже используемый должен быть виден раньше.
+// #720 A.4: жив ли отдел по СВОИМ слотам за 7 дней — dept_activity ведёт
+// только диалоги, а Кавальня работает каждый день (kk-ask/kk-resolve),
+// в счётчик не попадая (факт 12.11: «никогда: … kavalnya»). Источники —
+// записи слотов: kk_questions (заданные вопросы отдела) и audit_log
+// (действия kk_* отдела за 7 дней). Живой по слотам отдел не попадает ни
+// в «никогда», ни в «устарели» — он работает, просто не через диалоги.
+pattern AdminDeptSlotActive7d(dept_name: String) -> Float {
+  let kk_rows = TryVal(try query("SELECT COUNT(*) AS n FROM kk_questions WHERE dept = ?1 AND asked_at > datetime('now', '-7 days')", [dept_name]))
+  if to_string(kk_rows) != "()" and length(kk_rows) > 0.0 then {
+    if to_float(json_get(kk_rows[0], "n", "0")) > 0.0 then { return 1.0 }
+  }
+  let al_rows = TryVal(try query("SELECT COUNT(*) AS n FROM audit_log WHERE dept = ?1 AND timestamp > datetime('now', '-7 days') AND action LIKE 'kk_%'", [dept_name]))
+  if to_string(al_rows) != "()" and length(al_rows) > 0.0 then {
+    if to_float(json_get(al_rows[0], "n", "0")) > 0.0 then { return 1.0 }
+  }
+  return 0.0
+}
+
 pattern AdminCheckStaleDepts() -> String {
   let all_depts = ["yana", "osp", "lz", "expert", "marketing", "finance", "legal", "dev", "design", "qa", "visual", "engineering", "kavalnya", "admin"]
   let stale_days = 60.0
+  // #720 A.4: сборка без висячей запятой (факт 12.11: «…kavalnya, ]»)
   let mut never_used = ""
   let mut stale_used = ""
   each dept_name in all_depts {
-    let rows = TryVal(try query("SELECT last_used_at, use_count, julianday('now') - julianday(last_used_at) as days_ago FROM dept_activity WHERE dept = ?1", [dept_name]))
-    if to_string(rows) == "()" or to_string(rows) == "[]" then {
-      let never_used = never_used + dept_name + ", "
-    } else {
-      let days_ago = to_float(TryVal(try json_get(get(rows, 0.0), "days_ago", "0")))
-      if days_ago > stale_days then {
-        let stale_used = stale_used + dept_name + " (" + to_string(to_int(days_ago)) + " дн.), "
+    // #720 A.4: отдел с записями своих слотов за 7 дней жив — не «никогда» и не «устарел»
+    if AdminDeptSlotActive7d(dept_name) != 1.0 then {
+      let rows = TryVal(try query("SELECT last_used_at, use_count, julianday('now') - julianday(last_used_at) as days_ago FROM dept_activity WHERE dept = ?1", [dept_name]))
+      if to_string(rows) == "()" or to_string(rows) == "[]" then {
+        if never_used == "" then { let never_used = dept_name } else { let never_used = never_used + ", " + dept_name }
+      } else {
+        let days_ago = to_float(TryVal(try json_get(get(rows, 0.0), "days_ago", "0")))
+        if days_ago > stale_days then {
+          let entry = dept_name + " (" + to_string(to_int(days_ago)) + " дн.)"
+          if stale_used == "" then { let stale_used = entry } else { let stale_used = stale_used + ", " + entry }
+        }
       }
     }
   }
@@ -1124,4 +1147,39 @@ test "n705 A.4: сегмент без перевода строки — чест
 
 test "n705 A.4: allow-гейт вне dept/ не даёт PLANNED" {
   assert_eq(contains(AdminParseAutofixPlan("FILE:library/admin.md\nfix"), "PLANNED"), false)
+}
+
+// ── #720 A.4: отдел с записями своих слотов — не «никогда» ────────────────
+// Фикстура — в паттерне (литералы db_execute в test-блоках не проходят мост
+// №391, прецедент n636). Чистки DELETE нет (irreversible-sink): фикстурная
+// kk-запись kavalnya копится между прогонами — для AdminDeptSlotActive7d
+// это тот же ответ (1.0), тест инвариантен накоплению.
+pattern N720KkFixture() -> String {
+  let _ = KKEnsureSchema()
+  // asked_at = −2 дня: ВНУТРИ 7-дневного окна AdminDeptSlotActive7d и
+  // ВНЕ 24-часового окна KKStats24h — счётчики чужих тестов (n671/n684:
+  // «задано N» по окну суток) не задеваются. Идиома #711: фикстура дедупа
+  // 1305 — вчерашней датой; чистки DELETE нет (irreversible-sink), копить
+  // безопасно — свежая строка каждый прогон, окно 7 дней видит её же.
+  let _ = db_execute("INSERT INTO kk_questions (dept, text, norm, kind, asked_at) VALUES ('kavalnya', 'тест n720: живой слот', 'n720-slot-active', 'binary', datetime('now', '-2 days'))", [])
+  return "ok"
+}
+
+test "n720 A.4: Кавальня с kk-вопросами за 7 дней — жива, не «никогда»" {
+  let _ = InitDB()
+  let _ = N720KkFixture()
+  assert_eq(AdminDeptSlotActive7d("kavalnya"), 1.0)
+}
+
+test "n720 A.4: отдел без слотов и диалогов — не активен" {
+  let _ = InitDB()
+  // design: kk-вопросов нет никогда, audit_log kk_% для design не пишет никто
+  assert_eq(AdminDeptSlotActive7d("design"), 0.0)
+}
+
+test "n720 A.4: списки «никогда/устарели» — без висячей запятой" {
+  let _ = InitDB()
+  let r = AdminCheckStaleDepts()
+  assert_eq(contains(r, ", ]"), false)
+  assert_eq(contains(r, ",]"), false)
 }
