@@ -2059,7 +2059,20 @@ mlogserver {
   }
 
   route "/health" method=GET {
-    let _ = InitDB()
+    // #728 B.1: InitDB() УБРАН из /health. До наряда каждая проверка
+    // здоровья (Render — раз в 5 с) исполняла весь InitDB (десятки
+    // CREATE TABLE IF NOT EXISTS + ALTER-миграции — записи в БД); при
+    // чужом долгом write-локе (прод 19.11: фаза Grapher ночи, 11 мин)
+    // db_execute внутри InitDB падал на «database is locked» → 500 →
+    // Render: «HTTP health check failed» → перезапуск контейнера —
+    // спираль «тик → лок → 500 → рестарт → догон-тик» (аудитор 19.11).
+    // Health-check НЕ пишет в БД: ответ процесса + VERSION-файл
+    // (entrypoint пишет его до старта, №422). Схему гарантируют другие
+    // точки: срезы слотов зовут InitDB перед первой записью (пример:
+    // app.mlog:1028 ShowStats, 1794 NightSlot, 2062 → см. WebhookBody
+    // /schedules/create 2639), Python-сторона — init_db() на буте
+    // llm_proxy (proxy/core.py), Flask /health — read-only
+    // (proxy/routes_core.py:60, пишет только в память).
     return respond("200 ok " + trim(read_file("VERSION")))
   }
 
