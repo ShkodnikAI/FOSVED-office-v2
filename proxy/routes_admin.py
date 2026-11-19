@@ -1826,6 +1826,23 @@ def admin_ua_graph():
     return jsonify({'summary': summary, 'nodes': nodes_saved, 'edges': edges_saved, 'kg': kg_res})
 
 
+# #712 MEM-1 A.2: сводка по mem_samples — кто копит/кто исчез.
+# Гвард префикса /admin-ua/* (127.0.0.1 + X-Internal-Token/itok, #550 A.2)
+# применяется before_request'ом; read-only соединение — тяжёлым писателям
+# не мешает. Параметр hours (дефолт 24) — окно сводки (max 7 сут = retention).
+@app.get("/admin-ua/mem-report")
+def admin_ua_mem_report():
+    """A.2: таблица процессов (рост/пик), топ-слоты по RSS-ступеням,
+    исчезнувшие пиды (кандидат OOM-жертвы), сумма сейчас."""
+    try:
+        hours = int(request.args.get("hours", 24))
+    except ValueError:
+        hours = 24
+    hours = max(1, min(hours, 7 * 24))
+    from proxy.mem_sampler import mem_report
+    return jsonify(mem_report(hours=hours))
+
+
 @app.get("/admin-ua/review")
 def admin_ua_review():
     """Reviewer: orphans, bugs, security, architecture checks."""
