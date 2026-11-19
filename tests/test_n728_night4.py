@@ -513,3 +513,272 @@ def test_b3_mutation_single_transaction_is_red():
         assert "for i in range(0, len(edges_rows), EDGE_COMMIT_ROWS)" in mutated
 
 
+# ─────────────────── B.2: догон night-tick не зацикливается ───────────────────
+
+TOKEN_N728 = "tok-n728-mlog-12345678"
+
+
+def _b2_harness(port):
+    """Харнесс: НАСТОЯЩИЕ InitDB/OutboxPut/NightTickSlot + новые паттерны
+    попыток; фазы — стабы-«зависания» (имитация долгого Grapher'а, класс
+    прода 19.11: контейнер убивают СЕРЕДИНА тика). Собран по образцу
+    tests/test_night_lock.py (_extract по балансу скобок, №620: VM
+    компилирует файл целиком — включаем PollJobStatus)."""
+    app_src = APP_MLOG.read_text(encoding="utf-8")
+    sched_src = SCHED_MLOG.read_text(encoding="utf-8")
+    utils_src = (REPO / "dept" / "utils.mlog").read_text(encoding="utf-8")
+
+    init_db_text = _extract(app_src, "InitDB", "CREATE TABLE IF NOT EXISTS audit_log")
+    outbox_text = _extract(sched_src, "OutboxPut", "owner_outbox")
+    tick_text = _extract(sched_src, "NightTickSlot", 'OutboxPut("night-tick"')
+    guard_text = (
+        _extract(sched_src, "NightPhaseDone", 'return "new"')
+        + "\n\n" + _extract(sched_src, "NightPhaseMark", "UPDATE night_run_state")
+        + "\n\n" + _extract(sched_src, "NightPhaseBegin", 'return "acquired"')
+        + "\n\n" + _extract(sched_src, "NightTickAttemptGate", "finished_at IS NULL")
+        + "\n\n" + _extract(sched_src, "NightTickAttemptOpen", "INSERT INTO night_tick_attempts")
+        + "\n\n" + _extract(sched_src, "NightTickAttemptClose", "SET finished_at")
+        + "\n\n" + _extract(sched_src, "NightTickAttemptDay", "date('now', '+3 hours')")
+        + "\n\n" + _extract(sched_src, "NightTickAttemptMax", "return 2.0")
+    )
+    tryval_text = _extract(utils_src, "TryVal", "return")
+    colguard_text = (
+        _extract(utils_src, "ColumnExists", "pragma_table_info")
+        + "\n\n" + _extract(utils_src, "AlterColIfMissing", "ColumnExists")
+    )
+    poll_text = _extract(sched_src, "PollJobStatus", "http_get")
+
+    init_db_text = init_db_text.replace("let _ = LZDataMaintain()",
+                                        "let _ = LZDataMaintainStub()")
+    assert "LZDataMaintainStub()" in init_db_text
+    init_db_text = init_db_text.replace("let _ = LZWatchSeedCategory()",
+                                        "let _ = LZWatchSeedCategoryStub()")
+    assert "LZWatchSeedCategoryStub()" in init_db_text
+    # «перезапуск прода»: тик никогда не доходит до конца — фаза backup
+    # висит 300 с (sleep, как зависший Grapher), тест убивает serve раньше.
+    # Connection-refused не годится: http_get к мёртвому порту падает
+    # мгновенно, тик успевает закончиться и закрыть попытку.
+    tick_text = tick_text.replace(
+        'let r_backup = redact(to_string(TryVal(try http_get(base + "backup" + qs, 300.0))), "all")',
+        'let r_backup = "hang-n728"\n    sleep(300.0)')
+    assert "hang-n728" in tick_text, "подмена фазы backup не удалась"
+
+    return (
+        "// #728 B.2: харнесс — НАСТОЯЩИЕ NightTickSlot/InitDB/OutboxPut/"
+        "// попытки догона; фаза backup «висит» (имитация смерти контейнера\n"
+        "// среди тика, прод 19.11). Мост №391 как в entrypoint.\n"
+        + "profile legacy { egress: permissive_with_audit }\n\n"
+        + "db { url: env(\"DATABASE_URL\") }\n\n"
+        + tryval_text + "\n\n"
+        + colguard_text + "\n\n"
+        + init_db_text + "\n\n"
+        + outbox_text + "\n\n"
+        + guard_text + "\n\n"
+        + poll_text + "\n\n"
+        + tick_text + "\n\n"
+        + "pattern LZDataMaintainStub() -> String {\n  return \"ok\"\n}\n\n"
+        + "pattern LZWatchSeedCategoryStub() -> String {\n  return \"ok\"\n}\n\n"
+        # NightSlot (фаза night) — стаб: тик не должен до него доходить
+        # (фаза backup висит); определение нужно для VM-компиляции (№620).
+        + "pattern NightSlot() -> String {\n  return \"night-stub-ok\"\n}\n\n"
+        + "pattern AuditLog(action: String, dept: String, details: String) -> String {\n"
+        + "  let _ = db_execute(\"INSERT INTO audit_log (action, actor, dept, details) VALUES (?1, 'system', ?2, ?3)\", [action, dept, details])\n"
+        + "  return \"ok\"\n}\n\n"
+        + f"mlogserver {{\n  port: {port}\n  host: \"127.0.0.1\"\n\n"
+        + "  route \"/run-tick\" method=GET {\n    return NightTickSlot()\n  }\n"
+        + "}\n"
+    )
+
+
+class _ServeB2:
+    """bin/mlog serve с харнессом B.2; kill_immidiate() — «перезапуск прода»."""
+
+    def __init__(self):
+        self.dir = tempfile.mkdtemp(prefix="n728-b2-")
+        self.port = _free_port(17401)
+        self.db = os.path.join(self.dir, "fosved.db")
+        # прод-порядок: Flask поднимает owner_outbox раньше первого тика
+        # (как в проде — по образцу tests/test_night_lock.py)
+        con = sqlite3.connect(self.db)
+        con.execute("CREATE TABLE IF NOT EXISTS owner_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "created_at TEXT DEFAULT (datetime('now')), source TEXT NOT NULL, text TEXT NOT NULL, sent_at TEXT)")
+        con.commit()
+        con.close()
+        src = os.path.join(self.dir, "harness.mlog")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(_b2_harness(self.port))
+        env = dict(os.environ)
+        env.update({
+            "DATABASE_URL": f"sqlite:{self.db}",
+            "CRON_SECRET": TOKEN_N728,
+            "METALOGOS_ENV_ALLOWLIST": "CRON_SECRET,DATABASE_URL",
+            "METALOGOS_SERVE_BACKEND": "vm",
+            "METALOGOS_HTTP_ALLOW_PRIVATE": "1",
+            "METALOGOS_DATA_DIR": self.dir,
+        })
+        self.log = open(os.path.join(self.dir, "serve.log"), "w")
+        self.env = env
+        self.proc = subprocess.Popen(
+            [str(MLOG_BIN), "serve", src], cwd=self.dir, env=env,
+            stdout=self.log, stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid)
+        self.url = f"http://127.0.0.1:{self.port}"
+        self._wait_boot()
+
+    def restart(self):
+        """Рестарт serve на той же БД (как Render перезапускает контейнер:
+        диск с fosved.db переживает, env тот же)."""
+        self.proc = subprocess.Popen(
+            [str(MLOG_BIN), "serve", os.path.join(self.dir, "harness.mlog")],
+            cwd=self.dir, env=self.env,
+            stdout=self.log, stderr=subprocess.STDOUT, preexec_fn=os.setsid)
+        self._wait_boot()
+
+    def _wait_boot(self):
+        import requests as _rq
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                tail = open(self.log.name, errors="replace").read()[-800:]
+                raise RuntimeError(f"mlog serve умер при старте:\n{tail}")
+            try:
+                _rq.get(self.url + "/run-tick", timeout=1)
+                return
+            except Exception:
+                time.sleep(0.3)
+        raise RuntimeError("mlog serve не поднялся за 90 с")
+
+    def tick_bg(self):
+        """Запустить /run-tick в фоне треде (как catch-up на буте)."""
+        th = threading.Thread(target=self._tick_call, daemon=True)
+        th.start()
+        return th
+
+    def _tick_call(self):
+        try:
+            import requests as _rq
+            _rq.get(self.url + "/run-tick", timeout=400)
+        except Exception:
+            pass  # «контейнер убит» — соединение рвётся, это и есть сценарий
+
+    def kill_hard(self):
+        """SIGKILL группы процессов — «Render убил контейнер»."""
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+            self.proc.wait(timeout=10)
+        except Exception:
+            pass
+
+    def attempts(self):
+        con = sqlite3.connect(self.db, timeout=5)
+        try:
+            rows = con.execute(
+                "SELECT attempt, finished_at FROM night_tick_attempts "
+                "ORDER BY id").fetchall()
+            outbox = con.execute(
+                "SELECT text FROM owner_outbox WHERE source='night-tick' "
+                "ORDER BY id").fetchall()
+            audit = con.execute(
+                "SELECT details FROM audit_log WHERE action='cron_night_tick' "
+                "ORDER BY id").fetchall()
+        finally:
+            con.close()
+        return rows, [r[0] for r in outbox], [r[0] for r in audit]
+
+    def stop(self):
+        self.kill_hard()
+        self.log.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def test_b2_catchup_stops_after_two_unfinished_attempts():
+    """Критерий B.2: три «перезапуска» при незавершённом тике → запусков 2,
+    третий отказ с громкой записью (audit + owner_outbox).
+
+    Сценарий прода 19.11 (инстанс lhhd6): тик стартует → фаза висит →
+    контейнер убит health-check'ом → рестарт → catch-up снова тик → …
+    До B.2: бесконечный цикл (каждые ~15 минут). После: третья попытка
+    за дату получает отказ «догон остановлен», запись в outbox попадает
+    в ночную сводку 07:15 MSK — не тихий пропуск (граница наряда).
+    """
+    # «Перезапуск» = новый _ServeB2 на СВОЕЙ же БД не подходит (tmp-директория
+    # новая); вместо этого один serve, убиваемый насильно: попытки живут в
+    # его БД, а kill+подъём на той же БД и есть рестарт контейнера Render.
+    s = _ServeB2()
+    try:
+        # цикл рестартов: бут (тик №1) → kill среди тика → рестарт на той же
+        # БД → тик №2 → kill → рестарт → тик №3 (гейт обязан отказать).
+        for round_no in (1, 2, 3):
+            th = s.tick_bg()
+            if round_no < 3:
+                # ждём, пока попытка зафиксирована в БД (стартовая запись)
+                deadline = time.time() + 20
+                while time.time() < deadline:
+                    rows, _, _ = s.attempts()
+                    if rows and max(r[0] for r in rows) >= round_no:
+                        break
+                    time.sleep(0.3)
+                else:
+                    raise AssertionError(
+                        f"раунд {round_no}: попытка не зафиксирована за 20 с:\n"
+                        + open(s.log.name, errors="replace").read()[-600:])
+                # «контейнер убит среди тика» — попытка остаётся незакрытой
+                s.kill_hard()
+                s.restart()
+            else:
+                # раунд 3: гейт должен отказать ДО открытия попытки — ждём
+                # запись остановки в owner_outbox (доставка 07:15 MSK)
+                gate_line = None
+                deadline = time.time() + 30
+                while time.time() < deadline:
+                    _, outbox, _ = s.attempts()
+                    for t in outbox:
+                        if "догон остановлен" in t:
+                            gate_line = t
+                            break
+                    if gate_line:
+                        break
+                    time.sleep(0.5)
+                rows, outbox, audit = s.attempts()
+                assert gate_line is not None, (
+                    f"третий запуск не остановлен гейтом; attempts={rows}; "
+                    f"outbox={outbox[-2:]}; log tail:\n"
+                    + open(s.log.name, errors="replace").read()[-800:])
+                # запусков ровно 2 (третий не открыл попытку)
+                assert len(rows) == 2, (
+                    f"попыток открыто {len(rows)} (ожидалось 2): {rows}")
+                # громкость: и audit, и owner_outbox
+                assert any("догон остановлен" in a for a in audit), (
+                    f"нет записи в audit_log: {audit[-2:]}")
+                assert "незавершённых попыток" in gate_line and "#728" in gate_line
+                # обе попытки незавершённые (kill среди тика) — finished_at IS NULL
+                assert all(r[1] is None for r in rows), rows
+                th.join(timeout=35)
+                assert not th.is_alive(), "слот не завершился после отказа гейта"
+    finally:
+        s.stop()
+
+
+def test_b2_static_gate_in_slot_and_ddl():
+    """СТАТИКА B.2: гейт в начале NightTickSlot, закрытие в конце, DDL в InitDB."""
+    sched = SCHED_MLOG.read_text(encoding="utf-8")
+    tick = _pattern_segment(sched, "pattern NightTickSlot()")
+    code = "\n".join(_code_lines(tick))
+    gate_pos = code.index("NightTickAttemptGate()")
+    open_pos = code.index("NightTickAttemptOpen()")
+    close_pos = code.index("NightTickAttemptClose()")
+    # гейт ДО открытия попытки, закрытие — после OutboxPut (тик дошёл до конца)
+    assert gate_pos < open_pos, "гейт проверяется после открытия попытки"
+    outbox_pos = code.index('OutboxPut("night-tick"')
+    assert close_pos > outbox_pos, "попытка закрывается до OutboxPut — до конца тика"
+    # порог — 2 (мутация-детектор: вернуть 3.0 → тест красный)
+    assert "return 2.0" in _pattern_segment(sched, "pattern NightTickAttemptMax()")
+    # DDL в обеих точках входа
+    app_src = APP_MLOG.read_text(encoding="utf-8")
+    dog_src = (REPO / "dogfood_staging.mlog").read_text(encoding="utf-8")
+    for src, name in ((app_src, "app.mlog"), (dog_src, "dogfood_staging.mlog")):
+        assert "CREATE TABLE IF NOT EXISTS night_tick_attempts" in src, (
+            f"{name}: нет DDL night_tick_attempts")
+
+
+

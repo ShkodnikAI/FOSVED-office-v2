@@ -706,6 +706,65 @@ pattern NightPhaseBegin(name: String) -> String {
   return "acquired"
 }
 
+// ── #728 B.2: память о попытках night-tick — догон не зацикливается ────────
+// Прод-факт 19.11: контейнер убивался по health-check СЕРЕДИНА тика; тик за
+// дату не завершался → catch-up «run_once» после каждого рестарта запускал
+// NightTickSlot снова (инстанс lhhd6: 02:48 тик → 03:01 server_failed →
+// 03:03 тик снова) — спираль перезапусков каждые ~15 минут.
+// Механика: попытка фиксируется ДО фаз; незавершённая (finished_at IS NULL)
+// не позволяет бесконечно догонять: после N728_MAX_ATTEMPTS незавершённых
+// попыток за дату догон отказывает — громко (audit + owner_outbox), без
+// тихого пропуска. Датирование — MSK (оконное время слота 05:00 MSK),
+// формат как у night_run_state date('now','+3 hours') в №588: UTC-день
+// менялся в 03:00 MSK и резал окно ночи; здесь наоборот нужен ДЕНЬ ОКНА,
+// а не день календаря UTC.
+pattern NightTickAttemptDay() -> String {
+  let rows = query("SELECT date('now', '+3 hours') as d", [])
+  let mut d = ""
+  each r in rows { let d = to_string(json_get(r, "d", "")) }
+  return d
+}
+
+pattern NightTickAttemptMax() -> Float {
+  return 2.0
+}
+
+// "go" | "stop:<N>:<last_attempt_started>"
+pattern NightTickAttemptGate() -> String {
+  let day = NightTickAttemptDay()
+  let rows = query("SELECT COUNT(*) AS unfinished, MAX(attempt) AS last_no, MAX(started_at) AS last_started FROM night_tick_attempts WHERE day = ?1 AND finished_at IS NULL", [day])
+  let mut unfinished = 0.0
+  let mut last_no = ""
+  let mut last_started = ""
+  each r in rows {
+    let unfinished = to_float(json_get(r, "unfinished", 0))
+    let last_no = to_string(json_get(r, "last_no", ""))
+    let last_started = to_string(json_get(r, "last_started", ""))
+  }
+  if unfinished >= NightTickAttemptMax() then {
+    return "stop:" + to_string(to_int(unfinished)) + ":" + last_started
+  }
+  return "go"
+}
+
+// Открыть новую попытку (номер = последняя за дату + 1). Возврат: "N".
+pattern NightTickAttemptOpen() -> String {
+  let day = NightTickAttemptDay()
+  let rows = query("SELECT MAX(attempt) AS m FROM night_tick_attempts WHERE day = ?1", [day])
+  let mut m = 0.0
+  each r in rows { let m = to_float(json_get(r, "m", 0)) }
+  let n = to_int(m) + 1
+  let _ = db_execute("INSERT INTO night_tick_attempts (day, attempt, started_at) VALUES (?1, ?2, datetime('now'))", [day, to_string(n)])
+  return to_string(n)
+}
+
+// Закрыть попытку (finished_at) — тик дошёл до конца (OutboxPut выполнен).
+pattern NightTickAttemptClose() -> String {
+  let day = NightTickAttemptDay()
+  let _ = db_execute("UPDATE night_tick_attempts SET finished_at = datetime('now') WHERE day = ?1 AND finished_at IS NULL", [day])
+  return "ok"
+}
+
 // №596 A.2: поллинг фонового задания (proxy/jobs.py, реестр в процессе
 // Python-прокси). Пауза 25 с между опросами, до 60 опросов (25 мин) на фазу —
 // по тексту наряда. while в бинаре — bounded fixpoint ≤8 проходов (REFERENCE),
@@ -769,6 +828,25 @@ pattern NightReportSlot() -> String {
 // OutboxPut в owner_outbox, доставка слотом night-report в 07:15 MSK.
 pattern NightTickSlot() -> String {
   let _ = InitDB()
+  // #728 B.2: гейт догона. Плановый запуск (05:00 MSK) всегда проходит:
+  // таблица попыток пуста на начало даты. Спираль продавала ДО фикса:
+  // контейнер умирал среди тика → тик за дату не завершён → рестарт →
+  // catch-up снова запускал слот → снова смерть. Теперь: ≥2 незавершённых
+  // попыток за дату — отказ с громкой записью (audit + owner_outbox),
+  // плановый слот следующей ночи не задет (счётчик по дате окна).
+  let gate = NightTickAttemptGate()
+  if starts_with(gate, "stop:") then {
+    let parts = split(gate, ":")
+    let n_attempts = "0"
+    let last_started = ""
+    if length(parts) > 1.0 then { let n_attempts = to_string(get(parts, 1.0)) }
+    if length(parts) > 2.0 then { let last_started = to_string(get(parts, 2.0)) }
+    let msg = "ночной тик " + NightTickAttemptDay() + ": догон остановлен после " + n_attempts + " незавершённых попыток (последняя " + last_started + ") — спираль рестартов, см. #728"
+    let _ = TryVal(try AuditLog("cron_night_tick", "system", msg))
+    let _ = OutboxPut("night-tick", msg)
+    return msg
+  }
+  let attempt_no = NightTickAttemptOpen()
   let base = "http://127.0.0.1:4000/cron/"
   let qs = "?secret=" + env("CRON_SECRET")
 
@@ -906,6 +984,10 @@ pattern NightTickSlot() -> String {
   // #550 A.1: итог тика — в outbox (доставка слотом night-report в 07:15 MSK),
   // немедленной ночной отправки больше нет.
   let _ = OutboxPut("night-tick", report)
+  // #728 B.2: тик дошёл до конца — попытка закрыта; следующий catch-up
+  // (если контейнер умрёт ПОСЛЕ этого) увидит завершённую попытку и по
+  // resume-маркерам №588 честно пропустит выполненные фазы, не новую попытку.
+  let _ = NightTickAttemptClose()
   return report
 }
 
