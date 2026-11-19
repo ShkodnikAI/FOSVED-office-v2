@@ -2263,6 +2263,9 @@ mlogserver {
     // №442 A.2: гвард владельца — только владелец читает FORGE
     let auth = ReposAccessGuard()
     if auth != "ok" then { return respond("403 Forbidden") }
+    // #728 B.1: InitDB здесь (не в /health) — forge_projects создаётся
+    // InitDB; холодный старт новой БД больше не прогревается /health.
+    let _ = InitDB()
     let rows = query("SELECT slug, name, project_type, status, gate_policy, updated_at FROM forge_projects ORDER BY updated_at DESC LIMIT 50", [])
     let mut items = ""
     each r in rows {
@@ -2280,6 +2283,8 @@ mlogserver {
     // №442 A.2: гвард владельца — только владелец читает FORGE
     let auth = ReposAccessGuard()
     if auth != "ok" then { return respond("403 Forbidden") }
+    // #728 B.1: InitDB здесь (не в /health) — см. /repos
+    let _ = InitDB()
     let slug = redact(query_param("slug"), "all")
     let rows = query("SELECT slug, name, description, goal, project_type, gate_policy, model_combo, departments, status, updated_at FROM forge_projects WHERE slug = ? LIMIT 1", [slug])
     if length(rows) == 0.0 then { return respond("404 project not found") }
@@ -2311,6 +2316,8 @@ mlogserver {
     // №442 A.1: гвард владельца — первым делом, до любого эффекта
     let auth = ReposAccessGuard()
     if auth != "ok" then { return respond("403 Forbidden") }
+    // #728 B.1: InitDB здесь (не в /health) — см. /repos
+    let _ = InitDB()
     let task_id = redact(query_param("task_id"), "all")
     let rows = query("SELECT t.project_slug, p.project_type, (SELECT name FROM forge_repos WHERE project_slug = t.project_slug LIMIT 1) as repo_name, (SELECT COUNT(*) FROM forge_repos r WHERE r.project_slug = t.project_slug AND r.name LIKE '%package%') as has_pkg FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
     if length(rows) < 1.0 then { return respond("404 task not found") }
@@ -2377,6 +2384,11 @@ mlogserver {
   route "/webhook/telegram" method=POST {
     // №422: тело в WebhookBody() — причина та же, см. /repos/task;
     // respond()-ответы перехватываются ExprStmt-рукой route-исполнителя.
+    // #728 B.1: InitDB ЗДЕСЬ, а не в /health — вебхук низкочастотный
+    // (только сообщения Telegram), идиома всех /cron/*-роутов; до наряда
+    // таблицы вебхуку (webhook_dedup, №587/№588 и др.) гарантировал
+    // /health с InitDB — Render дёргал его каждые 5 с с самого бута.
+    let _ = InitDB()
     WebhookBody()
   }
 

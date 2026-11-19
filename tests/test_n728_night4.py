@@ -295,6 +295,25 @@ def test_b1_dogfood_health_same_fix():
     assert "InitDB" not in code, "dogfood /health всё ещё зовёт InitDB"
 
 
+def test_b1_every_db_route_has_initdb_or_delegate():
+    """ГВАРД КЛАССА (найден живым тестом n603 после B.1): любой route app.mlog
+    с прямым db-доступом (query/db_execute/kv_*) обязан поднимать схему сам
+    (InitDB в теле) — /health больше не прогревает БД каждые 5 с. Новый
+    db-роут без InitDB = 500 «no such table» на холодной БД — красный."""
+    src = APP_MLOG.read_text(encoding="utf-8")
+    routes = re.findall(r'route "([^"]+)" method=(\w+) \{(.*?)\n  \}', src, re.S)
+    assert routes, "парсер route-блоков сломан"
+    bad = []
+    for path, method, body in routes:
+        code = "\n".join(l for l in body.splitlines()
+                         if not l.strip().startswith("//"))
+        if re.search(r'\b(query|db_execute|kv_get|kv_set)\(', code) and "InitDB" not in code:
+            bad.append(f"{method} {path}")
+    assert bad == [], (
+        "db-роуты без InitDB (холодная БД = no such table, класс #728 B.1): "
+        + "; ".join(bad))
+
+
 # ─────────────────────── B.4: mem-sampler под локом ───────────────────────
 
 def test_b4_store_skips_fast_under_external_write_lock(tmp_path, monkeypatch, capsys):
