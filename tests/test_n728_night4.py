@@ -232,8 +232,9 @@ def test_b1_health_answers_under_external_write_lock():
     body = _health_body_from_app()
     assert "InitDB" not in "\n".join(
         _code_lines(body)), "в /health вернулся InitDB — см. B.1 наряда"
-    src = HARNESS_B1_HEAD.replace("PORT_N728", "17301") + body + HARNESS_B1_TAIL
-    s = _Serve(src, 17301, {"CRON_SECRET": "n728-b1"})
+    src = HARNESS_B1_HEAD.replace("PORT_N728", str(_free_port(17301))) + body + HARNESS_B1_TAIL
+    port = int(re.search(r"port: (\d+)", src).group(1))
+    s = _Serve(src, port, {"CRON_SECRET": "n728-b1"})
     try:
         # VERSION-файл пишет entrypoint; на харнессе его может не быть —
         # создаём, чтобы read_file не влиял на тайминг (№422: путь тот же).
@@ -292,3 +293,76 @@ def test_b1_dogfood_health_same_fix():
     seg = _route_segment(src, "/health")
     code = "\n".join(_code_lines(seg))
     assert "InitDB" not in code, "dogfood /health всё ещё зовёт InitDB"
+
+
+# ─────────────────────── B.4: mem-sampler под локом ───────────────────────
+
+def test_b4_store_skips_fast_under_external_write_lock(tmp_path, monkeypatch, capsys):
+    """При удержанном внешнем write-локе store_samples отказывается
+    за ≤ ~1 с (busy_timeout 500 мс), НЕ бросает, пишет одну строку
+    «skip … db locked» в stderr (граница наряда: без повторов, без очереди).
+
+    До B.4: sqlite3.connect(DB_FILE, timeout=10) — каждая метка слота
+    ждала до 10 с под локом Grapher (прод 19.11 03:00:26Z: store failed
+    … database is locked — после 10-с ожидания), тред слота залипал.
+    """
+    sys.path.insert(0, str(REPO))
+    from proxy import mem_sampler
+
+    db = tmp_path / "b4.db"
+    import proxy.core
+    monkeypatch.setattr(proxy.core, "DB_FILE", str(db))
+    monkeypatch.setattr(mem_sampler, "_SCHEMA_READY", False)
+
+    # Схема должна появиться ДО внешнего лока (иначе — отложенная, тоже ок,
+    # но тестируем именно store-путь).
+    mem_sampler._ensure_schema_once()
+    assert mem_sampler._SCHEMA_READY, "схема не поднялась на пустой БД"
+
+    ready, release = threading.Event(), threading.Event()
+    th = threading.Thread(target=_hold_write_lock,
+                          args=(str(db), ready, release), daemon=True)
+    th.start()
+    assert ready.wait(timeout=10)
+    try:
+        t0 = time.perf_counter()
+        mem_sampler.store_samples(
+            [{"pid": 1, "name": "llm_proxy.py", "rss_mb": 123.0}],
+            kind="tick", ref="container", phase="")
+        elapsed = time.perf_counter() - t0
+    finally:
+        release.set()
+        th.join(timeout=10)
+
+    assert elapsed < 1.5, (
+        f"store_samples под внешним локом выполнялся {elapsed:.2f} с — "
+        "дефолтные 10 с таймаута всё ещё в игре (B.4)")
+    err = capsys.readouterr().err
+    assert "db locked" in err, (
+        f"тихого пропуска среза нет (нужна строка 'skip … db locked'): {err!r}")
+    assert "Traceback" not in err, "store_samples бросил исключение наружу"
+    # Срез НЕ записан и НЕ поставлен в очередь (без повторов): в БД пусто.
+    con = sqlite3.connect(db)
+    try:
+        n = con.execute("SELECT COUNT(*) FROM mem_samples").fetchone()[0]
+    finally:
+        con.close()
+    assert n == 0, f"под локом записалось {n} строк — очередь/повтор появились"
+
+
+def test_b4_busy_timeout_static():
+    """СТАТИКА: _connect ставит busy_timeout 500 мс (не дефолт 10 с)."""
+    src = MEM_SAMPLER.read_text(encoding="utf-8")
+    assert "BUSY_TIMEOUT_MS = 500" in src, "константа busy_timeout исчезла"
+    m = re.search(r"def _connect\(\):.*?return conn", src, re.S)
+    assert m, "_connect не найден"
+    body = m.group(0)
+    assert "timeout=BUSY_TIMEOUT_MS / 1000.0" in body, (
+        "connect(timeout=…) не привязан к BUSY_TIMEOUT_MS")
+    assert "PRAGMA busy_timeout" in body, "PRAGMA busy_timeout не ставится"
+    # skip-ветка: OperationalError с locked/busy → одна строка skip, не стек
+    store = re.search(r"def store_samples\(.*?\n    except sqlite3\.OperationalError", src, re.S)
+    assert store, "у store_samples нет отдельной ветки OperationalError (locked)"
+    assert 'print(f"[mem-sampler] skip {kind}/{ref}: db locked' in src, (
+        "нет строки тихого пропуска «skip … db locked»")
+
