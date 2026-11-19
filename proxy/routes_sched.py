@@ -1836,17 +1836,12 @@ def scheduler_mem_recycle():
     import gc
     collected = gc.collect()
 
-    # сброс кэша конфигов провайдеров (известный держатель, providers.py:492:
-    # priority_provider/model/overrides — живёт вечно и перечитывается
-    # только при смене; чистка принудит перечитать при следующем вызове)
+    # Кэш провайдеров (_cfg_cache) НЕ трогаем: он live-критичный —
+    # _provider_for_model читает priority_provider на каждом вызове
+    # (KeyError пойман CI: tests/test_n715_keys_removal). Памяти в нём —
+    # копейки; A.3 этого прохода — только gc.collect(), причина роста —
+    # отдельным проходом по данным A.2 (/admin-ua/mem-report после суток).
     caches_cleared = []
-    try:
-        from proxy.providers import _cfg_cache
-        n = len(_cfg_cache.get("overrides") or {})
-        _cfg_cache.clear()
-        caches_cleared.append(f"providers._cfg_cache(overrides={n})")
-    except Exception as e:  # noqa: BLE001 — очистка не роняет слот
-        log.warning(f"[mem-recycle] providers cache clear failed: {e}")
 
     _log_audit("scheduler_mem_recycle",
                {"gc_collected": collected, "caches_cleared": caches_cleared},

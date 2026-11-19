@@ -161,10 +161,28 @@ class TestMemRecycle:
         assert r.status_code == 200, r.get_data(as_text=True)[:300]
         data = r.get_json()
         assert data["status"] == "ok" and "gc_collected" in data
-        assert any("providers._cfg_cache" in c for c in data["caches_cleared"]), data
         rows = _query("SELECT details FROM audit_log WHERE action='scheduler_mem_recycle' "
                       "ORDER BY id DESC LIMIT 1", fetch=True)
         assert rows, "слот не записал итог в audit_log"
+
+    def test_slot_does_not_touch_live_provider_cache(self, mem_db):
+        """CI-регрессия (PR #733, test_n715 KeyError): _cfg_cache —
+        live-критичный (priority_provider читается на каждом call_llm),
+        слот памяти НЕ имеет права его чистить. Гвард класса."""
+        os.environ["INTERNAL_API_TOKEN"] = "tok-n712p2-1234567890"
+        os.environ["API_SECRET"] = "test-secret-123"
+        os.environ["TELEGRAM_WEBHOOK_SECRET"] = "tg-wh"
+        os.environ["OWNER_TELEGRAM_ID"] = "1"
+        os.environ["DATABASE_PATH"] = "/tmp/fosved-n712p2"
+        import llm_proxy  # noqa: F401
+        from proxy import providers
+        before = dict(providers._cfg_cache)
+        client = llm_proxy.app.test_client()
+        r = client.post("/scheduler/mem-recycle", json={"owner_id": "1"})
+        assert r.status_code == 200
+        assert providers._cfg_cache == before, (
+            "слот mem-recycle изменил _cfg_cache — live-кэш провайдеров "
+            "трогать нельзя (KeyError в call_llm, CI PR #733)")
 
     def test_registry_entry_disabled_by_default(self):
         """№419: новая запись реестра — enabled: false (владелец включает)."""

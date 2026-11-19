@@ -153,6 +153,9 @@ INTERNAL_ONLY_PREFIXES = [
     "/scheduler/control-check",
     "/scheduler/self-learn",
     "/scheduler/reminder-check",
+    # #712 MEM-1 A.3: плановая очистка памяти — зовёт только mlog-слот
+    # MemRecycleSlot (dept/scheduler.mlog); снаружи не нужен (SEC-1 404).
+    "/scheduler/mem-recycle",
     "/learning/",
     "/memory/",
     "/lz/",
