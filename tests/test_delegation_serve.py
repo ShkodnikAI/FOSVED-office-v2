@@ -242,6 +242,19 @@ def office(stub):
         version.write_text("n603-serve-test\n", encoding="utf-8")  # /health читает VERSION (№254)
     serve = None
     try:
+        # #728 B.1: /health больше не поднимает схему (InitDB снят) — mlog-таблицы,
+        # которые харнесс читает до первого вебхука, прекомпретим сами (как
+        # Flask-сторона на проде создаёт свои до первого запроса).
+        con = sqlite3.connect(tmp / "office.db")
+        try:
+            con.execute("CREATE TABLE IF NOT EXISTS team_board (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "from_dept TEXT NOT NULL, kind TEXT NOT NULL, topic TEXT NOT NULL, "
+                        "tags TEXT DEFAULT '[]', payload TEXT DEFAULT '', sources TEXT DEFAULT '', "
+                        "severity TEXT DEFAULT '', delivered INTEGER DEFAULT 0, "
+                        "created_at TEXT DEFAULT (datetime('now')), expires_at TEXT)")
+            con.commit()
+        finally:
+            con.close()
         serve = _OfficeServe(_augmented(tmp), tmp)
         yield SimpleNamespace(stub=stub, serve=serve, db=tmp / "office.db", tmp=tmp)
     finally:

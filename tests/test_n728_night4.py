@@ -389,18 +389,26 @@ def test_b4_busy_timeout_static():
 # ───────────────────── B.3: Grapher не держит общую БД ─────────────────────
 
 def _b3_env(tmp_path, monkeypatch):
-    """Окружение Flask test_client на tmp-БД (как test_night_lock.py)."""
+    """Окружение Flask test_client на tmp-БД (как test_night_lock.py).
+
+    Герметичность к порядку прогонов: DB_FILE подменяется в САМОМ модуле
+    core и во всех импортёрах (routes_admin/kg импортируют имя из core;
+    после test_n712 в том же прогоне их ссылка уже материализована —
+    monkeypatchattr по одному core недостаточно).
+    """
     os.environ['API_SECRET'] = 'test-secret-123'
     os.environ['TELEGRAM_WEBHOOK_SECRET'] = 'tg-wh-secret'
     os.environ['OWNER_TELEGRAM_ID'] = '12345'
     os.environ['DATABASE_PATH'] = str(tmp_path)
     os.environ['ZAI_API_KEY'] = 'fake-key'
     os.environ['INTERNAL_API_TOKEN'] = 'tok-n728-test-12345678'
-    import importlib
-    import proxy.core as core
-    monkeypatch.setattr(core, "DB_FILE", str(tmp_path / "office.db"))
     import llm_proxy  # noqa: F401
+    import proxy.core as core
     import proxy.routes_admin as ra
+    db = str(tmp_path / "office.db")
+    monkeypatch.setattr(core, "DB_FILE", db)
+    monkeypatch.setattr(ra, "DB_FILE", db)
+    # kg не импортирует DB_FILE — пишет через _query/core, патч core хватает
     from proxy.core import init_db
     init_db()
     return ra

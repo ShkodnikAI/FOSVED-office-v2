@@ -14,6 +14,7 @@ module-scoped и держит порт боя, пока идут кейсы; м�
 import pathlib
 import re
 import shutil
+import sqlite3
 import tempfile
 
 import pytest
@@ -77,6 +78,18 @@ def test_mutation_revert_1149_is_killed_by_case1(stub):
     serve = None
     try:
         serve = _mutant_office(tmp, "revert_1149")
+        # #728 B.1: /health больше не поднимает схему — таблицу инъекции
+        # создаём сами (до первого вебхука), как Flask на проде.
+        con = sqlite3.connect(tmp / "office.db")
+        try:
+            con.execute("CREATE TABLE IF NOT EXISTS team_board (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "from_dept TEXT NOT NULL, kind TEXT NOT NULL, topic TEXT NOT NULL, "
+                        "tags TEXT DEFAULT '[]', payload TEXT DEFAULT '', sources TEXT DEFAULT '', "
+                        "severity TEXT DEFAULT '', delivered INTEGER DEFAULT 0, "
+                        "created_at TEXT DEFAULT (datetime('now')), expires_at TEXT)")
+            con.commit()
+        finally:
+            con.close()
         _seed_owner_injection(tmp / "office.db")  # НЕпустые rows — иначе парс не достигается
         stub.reset_calls()
         stub.detect = "yana"
