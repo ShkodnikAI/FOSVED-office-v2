@@ -438,6 +438,13 @@ jobs:
   docker-build:
     name: Docker build
     runs-on: ubuntu-latest
+    # #731 A.1 (CI-3): таймаут job. Факт 19.11: зависание docker build
+    # (run 44472439570, шаг шёл 06:28:47 → 07:49:07Z = 80 мин) держало
+    # Deploy gate (и P0-деплой прода) всё это время. Дефолт GitHub — 360 мин.
+    # N = 10: 3 × медиана job «Docker build» по последним 20 успешным runs
+    # main (замер в PR #732: медиана 164.5 с, max 272 с → 3× ≈ 8.2 мин),
+    # округлено вверх до 5 → 10.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -570,11 +577,17 @@ jobs:
   # ── #500 A.2: уведомление владельца о красном коммите в main ─────────
   # Джоба стартует, если ХОТЯ БЫ одна блокирующая джоба упала (needs + if:
   # failure()); секреты TELEGRAM_BOT_TOKEN / OWNER_TELEGRAM_ID — в Actions.
+  # #731 A.2 (CI-3): failure() НЕ покрывает timeout job — по таймауту
+  # GitHub ставит джобе conclusion=cancelled (failure() = только failure),
+  # а у needs-зависимых это даёт skipped — владелец не узнавал бы о
+  # зависании. Условие расширено: failure() || cancelled(). Внутри джобы
+  # шаг телеграм-сообщения перечисляет реальные результаты needs.* —
+  # «Docker build (cancelled)» попадёт в текст уведомления как есть.
   notify-red:
     name: Notify owner (red commit)
     runs-on: ubuntu-latest
     needs: [pytest, error-hygiene, mlog-check, version-check, docker-build, smoke, deploy]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && failure()
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (failure() || cancelled())
     steps:
       - name: Telegram message to owner
         env:
