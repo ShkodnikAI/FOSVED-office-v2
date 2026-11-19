@@ -366,3 +366,150 @@ def test_b4_busy_timeout_static():
     assert 'print(f"[mem-sampler] skip {kind}/{ref}: db locked' in src, (
         "нет строки тихого пропуска «skip … db locked»")
 
+
+# ───────────────────── B.3: Grapher не держит общую БД ─────────────────────
+
+def _b3_env(tmp_path, monkeypatch):
+    """Окружение Flask test_client на tmp-БД (как test_night_lock.py)."""
+    os.environ['API_SECRET'] = 'test-secret-123'
+    os.environ['TELEGRAM_WEBHOOK_SECRET'] = 'tg-wh-secret'
+    os.environ['OWNER_TELEGRAM_ID'] = '12345'
+    os.environ['DATABASE_PATH'] = str(tmp_path)
+    os.environ['ZAI_API_KEY'] = 'fake-key'
+    os.environ['INTERNAL_API_TOKEN'] = 'tok-n728-test-12345678'
+    import importlib
+    import proxy.core as core
+    monkeypatch.setattr(core, "DB_FILE", str(tmp_path / "office.db"))
+    import llm_proxy  # noqa: F401
+    import proxy.routes_admin as ra
+    from proxy.core import init_db
+    init_db()
+    return ra
+
+
+def test_b3_parallel_insert_passes_during_graph_write(tmp_path, monkeypatch):
+    """Критерий B.3 аудитора: во время записи графа параллельный INSERT
+    в fosved.db проходит за ≤ 3 с (write-лок удерживается ≤ 2 с на батч).
+
+    До B.3 красный двумя местами: (1) роут /admin-ua/graph и ночная фаза
+    держали транзакцию от DELETE до конца всех INSERT + 11-минутного
+    кросс-файлового скана; (2) kg_scan_rebuild открывал по соединению на
+    каждый апсерт (~8.5k за прогон) — суммарно минуты непрерывного лока.
+    Здесь замедляем kg-этап (имитация тяжёлого скана ~6k узлов) и меряем
+    внешний INSERT ПОКА запись идёт.
+    """
+    ra = _b3_env(tmp_path, monkeypatch)
+    import llm_proxy
+    from proxy.core import _query
+
+    # чистая поверхность
+    _query("DELETE FROM knowledge_graph", ())
+    _query("DELETE FROM knowledge_edges", ())
+
+    # «анализ»: 40 файлов × 30 паттернов = 1200 узлов — запись идёт секунды+
+    analysis = []
+    for i in range(40):
+        analysis.append({
+            'path': f'file{i}.mlog',
+            'patterns': [{'name': f'Pat{i}_{j}', 'args': '', 'returns': ''} for j in range(30)],
+            'routes': [{'path': f'/r{i}', 'method': 'GET'}],
+            'imports': [], 'tables': [], 'builtins_used': [],
+        })
+    monkeypatch.setattr(ra, '_ua_analyze_internal', lambda: analysis)
+
+    # Замедлитель кг-этапа: каждый узел +5 мс «скана» — суммарно ~6 с записи
+    orig_rebuild = ra.kg_scan_rebuild
+
+    def slow_rebuild(nodes, source="scan"):
+        time.sleep(0.5)  # фаза подготовки рёбер/узлов (вне транзакции)
+        return orig_rebuild(nodes, source=source)
+
+    monkeypatch.setattr(ra, 'kg_scan_rebuild', slow_rebuild)
+
+    result_box = {}
+
+    def _run():
+        client = llm_proxy.app.test_client()
+        # /admin-ua/* — 127.0.0.1 + X-Internal-Token (#550 A.2)
+        resp = client.get('/admin-ua/graph',
+                          environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                          headers={'X-Internal-Token': os.environ['INTERNAL_API_TOKEN']})
+        result_box['status'] = resp.status_code
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    # даём Grapher'у войти в запись (ждём первую партию рёбер)
+    time.sleep(2.0)
+
+    t0 = time.perf_counter()
+    last_err = None
+    while time.perf_counter() - t0 < 3.0:
+        try:
+            _query("INSERT INTO knowledge_graph (node_type, node_name, file_path) "
+                   "VALUES ('probe', 'probe-n728', 'probe.mlog')", ())
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            time.sleep(0.2)
+    elapsed = time.perf_counter() - t0
+    th.join(timeout=60)
+    assert not th.is_alive(), "Grapher не завершился за 60 с"
+    assert result_box.get('status') == 200, f"роут упал: {result_box}"
+    assert last_err is None, (
+        f"параллельный INSERT не прошёл за {elapsed:.1f} с ({last_err}) — "
+        "Grapher держит общую БД дольше критерия B.3 (≤ 2 с на батч)")
+    # рёбра реально записаны (не пустышка)
+    edges = _query("SELECT COUNT(*) AS c FROM knowledge_edges", (), fetch=True)
+    assert edges and edges[0]['c'] >= 1200, "рёбра не записаны"
+    _query("DELETE FROM knowledge_graph WHERE node_type='probe'", ())
+
+
+def test_b3_static_grapher_short_transactions():
+    """СТАТИКА B.3: батчная запись рёбер, busy_timeout, скан вне транзакции."""
+    src = ROUTES_ADMIN.read_text(encoding="utf-8")
+    # 1) константы на месте
+    assert "EDGE_COMMIT_ROWS = 200" in src, "лимит строк на транзакцию исчез"
+    assert "GRAPH_BUSY_TIMEOUT_MS" in src, "busy_timeout Grapher исчез"
+    # 2) оба вызывателя идут через общий write-фазу
+    assert src.count("_grapher_write_phase(") >= 3, (
+        "роут /admin-ua/graph и ночная фаза должны делить _grapher_write_phase "
+        "(вызов + 2 определения вызовов)")
+    # 3) мутация «одна транзакция на все рёбра»: в write-фазе executemany
+    #    обязан идти циклом по батчам с commit внутри
+    m = re.search(r"def _grapher_write_phase\(.*?\n@app\.", src, re.S)
+    assert m, "_grapher_write_phase не найден"
+    body = m.group(0)
+    assert "for i in range(0, len(edges_rows), EDGE_COMMIT_ROWS)" in body, (
+        "батч-цикл записи рёбер исчез — вернулась одна длинная транзакция")
+    # 4) анализ ДО открытия соединения в роуте graph (мутация-детектор:
+    #    DELETE/CREATE TABLE не встречается до вызова _ua_analyze_internal;
+    #    только некомментарные строки — в комментарии история фикса)
+    route = re.search(r'@app\.get\("/admin-ua/graph"\).*?(?=@app\.)', src, re.S)
+    assert route, "роут /admin-ua/graph не найден"
+    py_code = "\n".join(l for l in route.group(0).splitlines()
+                        if not l.strip().startswith("#"))
+    ai = py_code.index("_ua_analyze_internal")
+    for banned in ("DELETE FROM knowledge_edges", "sqlite3.connect"):
+        assert banned not in py_code[:ai], (
+            f"{banned} выполняется до анализа — транзакция снова висит на скане")
+    # 5) kg.py: чанковый ребилд
+    kg_src = (REPO / "proxy" / "kg.py").read_text(encoding="utf-8")
+    assert "KG_CHUNK = 500" in kg_src, "чанк ребилда исчез"
+    assert "parent_count_for" not in kg_src, (
+        "per-node parent_count запросы вернулись (должен быть один агрегат)")
+
+
+def test_b3_mutation_single_transaction_is_red():
+    """Мутационный самотест детектора: «executemany без батч-цикла» — красный."""
+    src = ROUTES_ADMIN.read_text(encoding="utf-8")
+    mutated = src.replace(
+        "for i in range(0, len(edges_rows), EDGE_COMMIT_ROWS):\n"
+        "            c.executemany(ins, edges_rows[i:i + EDGE_COMMIT_ROWS])\n"
+        "            conn.commit()",
+        "c.executemany(ins, edges_rows)\n        conn.commit()")
+    assert mutated != src, "мутация не применилась (патч-якорь устарел)"
+    with pytest.raises(AssertionError):
+        assert "for i in range(0, len(edges_rows), EDGE_COMMIT_ROWS)" in mutated
+
+
