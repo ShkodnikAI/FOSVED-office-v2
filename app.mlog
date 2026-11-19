@@ -121,6 +121,11 @@ pattern InitDB() -> String {
   db_execute("CREATE TABLE IF NOT EXISTS reply_ratings (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, kind TEXT DEFAULT 'reply', ref TEXT DEFAULT '', chat_id TEXT, message_id INTEGER, vote INTEGER, comment TEXT, prompt_message_id INTEGER, created_at TEXT DEFAULT (datetime('now')), voted_at TEXT)")
   // №588 A.3: resume-маркеры ночного цикла (NightPhaseDone/Mark/Begin, dept/scheduler.mlog)
   db_execute("CREATE TABLE IF NOT EXISTS night_run_state (day TEXT PRIMARY KEY, phases TEXT NOT NULL DEFAULT '', updated_at TEXT)")
+  // #728 B.2: память о попытках догона night-tick (NightTickAttempt*, dept/scheduler.mlog).
+  // catch-up после рестарта контейнера не должен зацикливаться: если за дату
+  // уже ≥2 незавершённых попыток — догон не запускается, громкая запись.
+  db_execute("CREATE TABLE IF NOT EXISTS night_tick_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL, attempt INTEGER NOT NULL, started_at TEXT DEFAULT (datetime('now')), finished_at TEXT)")
+  db_execute("CREATE INDEX IF NOT EXISTS idx_night_tick_attempts_day ON night_tick_attempts(day)")
   // №597 A.1: реестр сообщённого (proxy/reported.py; DDL зеркалится в Python
   // init_db — идемпотентно с обеих сторон; запись — только после успешной
   // отправки владельцу)
@@ -2059,7 +2064,20 @@ mlogserver {
   }
 
   route "/health" method=GET {
-    let _ = InitDB()
+    // #728 B.1: InitDB() УБРАН из /health. До наряда каждая проверка
+    // здоровья (Render — раз в 5 с) исполняла весь InitDB (десятки
+    // CREATE TABLE IF NOT EXISTS + ALTER-миграции — записи в БД); при
+    // чужом долгом write-локе (прод 19.11: фаза Grapher ночи, 11 мин)
+    // db_execute внутри InitDB падал на «database is locked» → 500 →
+    // Render: «HTTP health check failed» → перезапуск контейнера —
+    // спираль «тик → лок → 500 → рестарт → догон-тик» (аудитор 19.11).
+    // Health-check НЕ пишет в БД: ответ процесса + VERSION-файл
+    // (entrypoint пишет его до старта, №422). Схему гарантируют другие
+    // точки: срезы слотов зовут InitDB перед первой записью (пример:
+    // app.mlog:1028 ShowStats, 1794 NightSlot, 2062 → см. WebhookBody
+    // /schedules/create 2639), Python-сторона — init_db() на буте
+    // llm_proxy (proxy/core.py), Flask /health — read-only
+    // (proxy/routes_core.py:60, пишет только в память).
     return respond("200 ok " + trim(read_file("VERSION")))
   }
 
@@ -2245,6 +2263,9 @@ mlogserver {
     // №442 A.2: гвард владельца — только владелец читает FORGE
     let auth = ReposAccessGuard()
     if auth != "ok" then { return respond("403 Forbidden") }
+    // #728 B.1: InitDB здесь (не в /health) — forge_projects создаётся
+    // InitDB; холодный старт новой БД больше не прогревается /health.
+    let _ = InitDB()
     let rows = query("SELECT slug, name, project_type, status, gate_policy, updated_at FROM forge_projects ORDER BY updated_at DESC LIMIT 50", [])
     let mut items = ""
     each r in rows {
@@ -2262,6 +2283,8 @@ mlogserver {
     // №442 A.2: гвард владельца — только владелец читает FORGE
     let auth = ReposAccessGuard()
     if auth != "ok" then { return respond("403 Forbidden") }
+    // #728 B.1: InitDB здесь (не в /health) — см. /repos
+    let _ = InitDB()
     let slug = redact(query_param("slug"), "all")
     let rows = query("SELECT slug, name, description, goal, project_type, gate_policy, model_combo, departments, status, updated_at FROM forge_projects WHERE slug = ? LIMIT 1", [slug])
     if length(rows) == 0.0 then { return respond("404 project not found") }
@@ -2293,6 +2316,8 @@ mlogserver {
     // №442 A.1: гвард владельца — первым делом, до любого эффекта
     let auth = ReposAccessGuard()
     if auth != "ok" then { return respond("403 Forbidden") }
+    // #728 B.1: InitDB здесь (не в /health) — см. /repos
+    let _ = InitDB()
     let task_id = redact(query_param("task_id"), "all")
     let rows = query("SELECT t.project_slug, p.project_type, (SELECT name FROM forge_repos WHERE project_slug = t.project_slug LIMIT 1) as repo_name, (SELECT COUNT(*) FROM forge_repos r WHERE r.project_slug = t.project_slug AND r.name LIKE '%package%') as has_pkg FROM forge_tasks t JOIN forge_projects p ON p.slug = t.project_slug WHERE t.id = ? LIMIT 1", [task_id])
     if length(rows) < 1.0 then { return respond("404 task not found") }
@@ -2359,6 +2384,11 @@ mlogserver {
   route "/webhook/telegram" method=POST {
     // №422: тело в WebhookBody() — причина та же, см. /repos/task;
     // respond()-ответы перехватываются ExprStmt-рукой route-исполнителя.
+    // #728 B.1: InitDB ЗДЕСЬ, а не в /health — вебхук низкочастотный
+    // (только сообщения Telegram), идиома всех /cron/*-роутов; до наряда
+    // таблицы вебхуку (webhook_dedup, №587/№588 и др.) гарантировал
+    // /health с InitDB — Render дёргал его каждые 5 с с самого бута.
+    let _ = InitDB()
     WebhookBody()
   }
 

@@ -198,12 +198,25 @@ def _harness_mlog(port):
     tick_text = _extract("NightTickSlot", sched_src, 'OutboxPut("night-tick"', path="dept/scheduler.mlog")
     # №588 A.3: resume-гварды NightTickSlot зовут NightPhaseMark —
     # харнесс включает настоящие паттерны из dept/scheduler.mlog
+    # #728 B.2: NightTickSlot зовёт NightTickAttempt* (гейт догона) —
+    # включены настоящие определения (харнесс n569 их DDL уже получает:
+    # InitDB приложения теперь создаёт night_tick_attempts)
     guard_text = (
         _extract("NightPhaseDone", sched_src, 'return "new"', path="dept/scheduler.mlog")
         + "\n\n"
         + _extract("NightPhaseMark", sched_src, "UPDATE night_run_state", path="dept/scheduler.mlog")
         + "\n\n"
         + _extract("NightPhaseBegin", sched_src, 'return "acquired"', path="dept/scheduler.mlog")
+        + "\n\n"
+        + _extract("NightTickAttemptDay", sched_src, "date('now', '+3 hours')", path="dept/scheduler.mlog")
+        + "\n\n"
+        + _extract("NightTickAttemptMax", sched_src, "return 2.0", path="dept/scheduler.mlog")
+        + "\n\n"
+        + _extract("NightTickAttemptGate", sched_src, "finished_at IS NULL", path="dept/scheduler.mlog")
+        + "\n\n"
+        + _extract("NightTickAttemptOpen", sched_src, "INSERT INTO night_tick_attempts", path="dept/scheduler.mlog")
+        + "\n\n"
+        + _extract("NightTickAttemptClose", sched_src, "SET finished_at", path="dept/scheduler.mlog")
     )
     tryval_text = _extract("TryVal", utils_src, "return")  # офисный, не builtin
     # #612: InitDB зовёт ColumnExists/AlterColIfMissing (dept/utils.mlog,

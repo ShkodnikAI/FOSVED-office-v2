@@ -169,10 +169,22 @@ class TestOrderBoundaries:
         assert '"anthropics/anthropic-sdk-python",' in LZ_SRC
 
     def test_app_mlog_untouched(self):
+        # #728 (NIGHT-4) правит app.mlog легитимно по мандату наряда
+        # (B.1 /health, B.2 DDL night_tick_attempts, InitDB в db-роуты) —
+        # гвард #721 сужен до своего предмета: правки не задевают линии
+        # ЛЗ (office_stack_block и стековые правила наряда #721);
+        # сужение по прецеденту 5310b6b (n711 → гвард n684).
         import subprocess
         out = subprocess.run(["git", "diff", "origin/main", "--", "app.mlog"],
                              cwd=str(REPO_ROOT), capture_output=True, text=True)
-        assert out.stdout.strip() == "", "наряд #721 не правит app.mlog"
+        for banned in ("office_stack_block", "СТЕК ОФИСА", "annotate_foreign_stack"):
+            for line in out.stdout.splitlines():
+                if line.startswith("+") and banned in line:
+                    raise AssertionError(
+                        f"app.mlog: правка стека ЛЗ (#721) добавлена вне мандата: {line[:80]}")
+                if line.startswith("-") and banned in line:
+                    raise AssertionError(
+                        f"app.mlog: строка стека ЛЗ (#721) удалена: {line[:80]}")
 
     def test_search_queries_untouched(self):
         """Поисковые запросы (GITHUB_SEARCH_QUERIES) не менялись."""

@@ -48,6 +48,13 @@ SAMPLER_INTERVAL_SECS = 60        # п.1: раз в 60 с
 TOTAL_WARN_MB = 400.0             # п.2: порог топ-3 строки
 RETENTION_DAYS = 7                # хранение 7 суток
 PURGE_EVERY_SECS = 3600           # чистка раз в час
+# #728 B.4: при чужом write-локе (прод 19.11: фаза Grapher ночи, ~11 мин)
+# store_samples не ждёт дефолтные 10 с: короткий busy_timeout + тихий
+# пропуск среза. Учёт памяти — наблюдатель, не участник: 60-с тик следующей
+# минуты запишется, когда лок снимется; повторы/очередь запретлены нарядом
+# («без повторов в цикле»). Данные A.2 не теряются: держатель лока — свой
+# же ночной этап, а не внешний писатель.
+BUSY_TIMEOUT_MS = 500
 
 # Переопределяется в тестах (фикстура /proc, tmp_path).
 PROC_ROOT = "/proc"
@@ -152,10 +159,17 @@ def self_name():
 # ───────────────────────────── хранение ─────────────────────────────
 
 def _connect():
-    """Свое соединение на запись (WAL): короткая транзакция, не держим."""
+    """Свое соединение на запись (WAL): короткая транзакция, не держим.
+
+    #728 B.4: busy_timeout 500 мс — при чужом write-локе store_samples
+    отказывается быстро (тихий пропуск среза), не блокируя тред слота/
+    петлю на дефолтные 10 с.OperationalError("database is locked")
+    ловится вызывающим except'ом.
+    """
     from proxy.core import DB_FILE
-    conn = sqlite3.connect(DB_FILE, timeout=10)
+    conn = sqlite3.connect(DB_FILE, timeout=BUSY_TIMEOUT_MS / 1000.0)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     return conn
 
 
@@ -171,12 +185,17 @@ def _ensure_schema_once():
     with _schema_lock:
         if _SCHEMA_READY:
             return
-        conn = _connect()
         try:
-            ensure_schema(conn)
-            _SCHEMA_READY = True
-        finally:
-            conn.close()
+            conn = _connect()
+            try:
+                ensure_schema(conn)
+                _SCHEMA_READY = True
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            # #728 B.4: бут под чужим локом — схема отложена до первого
+            # успешного тика (тихий пропуск, не роняем петлю/процесс).
+            print(f"[mem-sampler] schema deferred: {e}", file=sys.stderr, flush=True)
 
 
 def _now_ts():
@@ -185,7 +204,13 @@ def _now_ts():
 
 def store_samples(rows, kind, ref, phase, proc_root=None):
     """INSERT среза rows в mem_samples. Ошибка БД — строка в stderr,
-    вызов НЕ роняется (учёт памяти не должен валить слот/контейнер)."""
+    вызов НЕ роняется (учёт памяти не должен валить слот/контейнер).
+
+    #728 B.4: при чужом write-локе (прод 19.11 03:00:26Z: «[mem-sampler]
+    store failed … database is locked») — быстрый отказ по busy_timeout
+    (500 мс) и тихий пропуск среза: НЕТ повторов в цикле и НЕТ очереди
+    (граница наряда). Следующий 60-с тик запишется после снятия лока.
+    """
     if not rows:
         return
     try:
@@ -202,6 +227,16 @@ def store_samples(rows, kind, ref, phase, proc_root=None):
                 conn.commit()
             finally:
                 conn.close()
+    except sqlite3.OperationalError as e:
+        # B.4: лок БД — ожидаемое состояние под нагрузкой (Grapher ночи);
+        # отдельная строка (не общий стек) — чтобы прод-лог отличал пропуск
+        # по локу от настоящей ошибки записи.
+        if "locked" in str(e) or "busy" in str(e):
+            print(f"[mem-sampler] skip {kind}/{ref}: db locked ({BUSY_TIMEOUT_MS}ms busy_timeout)",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"[mem-sampler] store failed kind={kind} ref={ref} phase={phase}: {e}",
+                  file=sys.stderr, flush=True)
     except Exception as e:  # noqa: BLE001 — учёт не роняет офис
         print(f"[mem-sampler] store failed kind={kind} ref={ref} phase={phase}: {e}",
               file=sys.stderr, flush=True)
