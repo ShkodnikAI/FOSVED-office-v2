@@ -343,6 +343,29 @@ def call_python_mem_guard(fn):
 
 # ───────────────────────────── subprocess ─────────────────────────────
 
+# #712 A.4: предел адресного пространства дочернего процесса. Лимит
+# контейнера 512 МБ; тяжёлая дочка (OCR/рендер карточки/backup), вышедшая
+# из-под контроля, обязана упасть САМА (MemoryError в ней), а не забрать
+# контейнер (oomKilled 11.11 04:38: убийца выбил процесс за секунды,
+# mlog serve выжил — по факту наряда умирал дочерний). Дефолт 256 МБ:
+# наблюдаемые пики дочек — десятки МБ (backup/git/mlog-мост/edge-tts),
+# 256 = запас ×2+ от самого тяжёлого; вызывающий может задать свой
+# mem_limit_mb= (тяжёлые — по фактам A.2 следующего прохода).
+SUBPROCESS_MEM_LIMIT_MB = 256
+
+
+def _make_preexec(mem_limit_mb):
+    """preexec_fn с RLIMIT_AS (наряд A.4). None → без предела (легаси-
+    вызов с уже существующим preexec_fn не перезаписываем)."""
+    import resource
+
+    def _apply():
+        if mem_limit_mb and mem_limit_mb > 0:
+            lim = int(mem_limit_mb) * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
+    return _apply
+
+
 def _cmd_ref(cmd):
     """Короткий ref из командной строки: backup_db.py / mlog:run / git:show."""
     tokens = [t for t in (cmd or []) if not str(t).startswith("-")]
@@ -358,19 +381,169 @@ def _cmd_ref(cmd):
     return ref[:60]
 
 
-def run_tracked(cmd, **kwargs):
-    """subprocess.run + RSS-метки полного среза до/после (kind='subprocess').
+# ─────────────── #712 A.2: отчёт по mem_samples (кто копит) ───────────────
 
-    Дочерний процесс после завершения мёртв — его собственный пик поймает
-    A.4 (RLIMIT) на следующем проходе; здесь фиксируется ступень памяти
-    контейнера, которую дал запуск дочки. Аргументы — как у subprocess.run.
+def mem_report(hours=24):
+    """Сводка A.2 по mem_samples за последние `hours` часов (таблица наряда:
+    процесс → рост/пик; топ-слоты по RSS-ступеням; исчезнувшие пиды).
+
+    Read-only: своё соединение (WAL), не мешает писателям. Возврат — dict
+    (роут /admin-ua/mem-report отдаёт его как JSON; краткая строка для
+    утреннего брифа — mem_report_line).
+    """
+    from proxy.core import DB_FILE
+    out = {"window_hours": hours, "processes": [], "top_slots": [],
+           "latest_total_mb": None, "samples": 0}
+    try:
+        conn = sqlite3.connect(f"file:{DB_FILE}?mode=ro", uri=True, timeout=5.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=3000")
+            n = conn.execute("SELECT COUNT(*) FROM mem_samples").fetchone()
+            out["samples"] = n[0] if n else 0
+            if not out["samples"]:
+                return out
+
+            # 1) процессы: первый/последний/макс RSS по (name) за окно
+            #    (pid меняется между рестартами — агрегируем по имени;
+            #     исчезнувший pid ловим отдельно, ниже)
+            procs = conn.execute(
+                "SELECT name, MIN(rss_mb) AS mb_min, MAX(rss_mb) AS mb_max, "
+                "AVG(rss_mb) AS mb_avg, COUNT(*) AS n "
+                "FROM mem_samples WHERE kind='tick' "
+                "AND ts >= datetime('now', ?) GROUP BY name ORDER BY mb_max DESC",
+                (f"-{int(hours)} hours",)).fetchall()
+            for r in procs:
+                name, mb_min, mb_max, mb_avg, n = r
+                # рост: последний тик минус первый тик ИМЕНИ за окно
+                # (id в сортировке — tie-break при равных секундах ts)
+                first = conn.execute(
+                    "SELECT rss_mb FROM mem_samples WHERE kind='tick' AND name=? "
+                    "AND ts >= datetime('now', ?) ORDER BY ts ASC, id ASC LIMIT 1",
+                    (name, f"-{int(hours)} hours")).fetchone()
+                last = conn.execute(
+                    "SELECT rss_mb FROM mem_samples WHERE kind='tick' AND name=? "
+                    "AND ts >= datetime('now', ?) ORDER BY ts DESC, id DESC LIMIT 1",
+                    (name, f"-{int(hours)} hours")).fetchone()
+                grow = round((last[0] - first[0]), 1) if first and last else None
+                out["processes"].append({
+                    "name": name, "rss_first_mb": round(first[0], 1) if first else None,
+                    "rss_last_mb": round(last[0], 1) if last else None,
+                    "rss_max_mb": round(mb_max, 1), "rss_avg_mb": round(mb_avg, 1),
+                    "growth_mb": grow, "ticks": n})
+
+            # 2) текущая сумма по последнему тику всех живых процессов
+            latest = conn.execute(
+                "SELECT SUM(rss_mb) FROM mem_samples WHERE kind='tick' "
+                "AND ts >= datetime('now', '-5 minutes')").fetchone()
+            out["latest_total_mb"] = round(latest[0], 1) if latest and latest[0] else None
+
+            # 3) топ-слоты по ступени RSS (after − before по llm_proxy,
+            #    главный кандидат-копитель по факту наряда)
+            slots = conn.execute(
+                "SELECT b.ref AS slot_ref, AVG(a.rss_mb - b.rss_mb) AS step, COUNT(*) AS n "
+                "FROM mem_samples b JOIN mem_samples a "
+                "ON a.kind=b.kind AND a.ref=b.ref AND a.phase='after' "
+                "AND b.phase='before' AND a.ts > b.ts "
+                "AND a.ts <= datetime(b.ts, '+30 minutes') "
+                "AND b.name = a.name "
+                "WHERE b.kind='slot' AND b.name='llm_proxy.py' "
+                "AND b.ts >= datetime('now', ?) "
+                "GROUP BY b.ref HAVING n >= 1 ORDER BY step DESC LIMIT 8",
+                (f"-{int(hours)} hours",)).fetchall()
+            out["top_slots"] = [{"ref": r[0], "avg_step_mb": round(r[1], 1),
+                                 "runs": r[2]} for r in slots]
+
+            # 4) исчезнувшие пиды (кандидаты на OOM-жертву 11.11 04:38):
+            #    имя писало тики, но не пишет последние 10 минут
+            gone = conn.execute(
+                "SELECT name, MAX(pid) AS pid, MAX(ts) AS last_ts, MAX(rss_mb) AS mb_max "
+                "FROM mem_samples WHERE kind='tick' "
+                "AND ts >= datetime('now', ?) AND name NOT IN ("
+                "  SELECT DISTINCT name FROM mem_samples WHERE kind='tick' "
+                "  AND ts >= datetime('now', '-10 minutes')) GROUP BY name",
+                (f"-{int(hours)} hours",)).fetchall()
+            out["disappeared"] = [{"name": r[0], "pid": r[1], "last_ts": r[2],
+                                   "rss_max_mb": round(r[3], 1)} for r in gone]
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        # read-only отчёт: недоступность БД — честная строка, не 500-трейс
+        out["error"] = str(e)[:200]
+    return out
+
+
+def mem_report_line(hours=24):
+    """Одна строка для утреннего брифа: сумма сейчас + топ-2 роста.
+
+    Формат (владелец читает в Telegram):
+    «💾 Память: 262 МБ (пик за сутки 411); растёт: llm_proxy +84, mlog +12»
+    """
+    rep = mem_report(hours=hours)
+    if rep.get("error"):
+        return f"💾 Память: сводка недоступна ({rep['error'][:60]})"
+    if not rep["samples"]:
+        return "💾 Память: mem_samples пуст (сборщик A.1 не писал)"
+    total = rep.get("latest_total_mb")
+    peak = max((p["rss_max_mb"] for p in rep["processes"]), default=None)
+    grows = sorted((p for p in rep["processes"]
+                    if p.get("growth_mb") and p["growth_mb"] > 5),
+                   key=lambda p: -p["growth_mb"])[:2]
+    parts = []
+    if total is not None:
+        parts.append(f"сейчас {total} МБ")
+    if peak:
+        parts.append(f"пик за окно {peak} МБ")
+    line = "💾 Память: " + ", ".join(parts)
+    if grows:
+        line += "; растёт: " + ", ".join(
+            f"{p['name']} +{p['growth_mb']}" for p in grows)
+    return line
+
+
+def run_tracked(cmd, mem_limit_mb=SUBPROCESS_MEM_LIMIT_MB, **kwargs):
+    """subprocess.run + RSS-метки полного среза до/после (kind='subprocess')
+    + предел памяти дочернему процессу (#712 A.4).
+
+    Дочерний процесс с RLIMIT_AS=mem_limit_mb: превышение → дочка падает
+    сама (MemoryError / exit non-zero), контейнер жив — «тяжёлая разовая
+    задача падает одна, а не роняет контейнер» (цель наряда). Дефолт —
+    SUBPROCESS_MEM_LIMIT_MB (256); вызывающий может передать свой предел
+    (тяжёлые задачи — по фактам A.2) или 0/None для снятия предела.
+
+    Понятная ошибка вызывающему: при падении по пределу в stderr пишется
+    строка «<ref>: не хватило памяти (предел N МБ)» (не глушим, наряд:
+    громкая запись); исключение subprocess пробрасывается как есть —
+    вызывающие слоты уже переводят его в честные строки отчётов.
+    Аргументы — как у subprocess.run (кроме preexec_fn: наш совместим по
+    смыслу — если вызывающий передал свой, предел НЕ применяется).
     """
     ref = _cmd_ref(cmd)
     mark("subprocess", ref, "before", full=True)
     try:
-        return subprocess.run(cmd, **kwargs)
+        if kwargs.get("preexec_fn") is None and mem_limit_mb:
+            kwargs["preexec_fn"] = _make_preexec(mem_limit_mb)
+        proc = subprocess.run(cmd, **kwargs)
+        # A.4: дочка умерла не-нулём при активном пределе — громкая строка
+        # (check=True у большинства вызовов нет: слоты сами разбирают код).
+        rc = getattr(proc, "returncode", None)
+        if rc is not None and rc != 0 and mem_limit_mb:
+            _report_rlimit_kill(ref, mem_limit_mb, rc)
+        return proc
+    except subprocess.CalledProcessError as e:
+        # check=True у вызывающего: то же сообщение, исключение пробрасываем
+        _report_rlimit_kill(ref, mem_limit_mb, getattr(e, "returncode", None))
+        raise
     finally:
         mark("subprocess", ref, "after", full=True)
+
+
+def _report_rlimit_kill(ref, mem_limit_mb, rc=None):
+    """A.4: громкая строка о падении дочки при активном пределе памяти.
+    rc ≠ 0 при RLIMIT_AS — как правило MemoryError (python) либо сигнал;
+    финальный разбор — по отчёту слота, здесь — сигнал владельцу в лог."""
+    print(f"[mem-sampler] subprocess {ref}: не хватило памяти? "
+          f"(предел {mem_limit_mb} МБ, rc={rc}) — проверь отчёт слота",
+          file=sys.stderr, flush=True)
 
 
 # ───────────────────────────── петля 60 с ─────────────────────────────

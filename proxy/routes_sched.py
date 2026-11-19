@@ -1035,6 +1035,16 @@ def scheduler_morning_brief():
         # из промпта строка убрана — наряд BRIEF-2)
         if kk_line:
             brief = brief + "\n\n" + kk_line
+        # #712 MEM-1 A.2: строка памяти — дословно из mem_samples (сборщик
+        # A.1; цифры не искажаются пересказом модели). Всегда: утро ≥ вечер
+        # +30 МБ — критерий A.3, владелец видит тренд каждый день.
+        try:
+            from proxy.mem_sampler import mem_report_line
+            mem_line = mem_report_line(hours=24)
+            if mem_line:
+                brief = brief + "\n\n" + mem_line
+        except Exception as e:  # noqa: BLE001 — строка памяти не роняет бриф
+            log.warning(f"[morning_brief] mem line failed: {e}")
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         # №587 A.2: ряд оценки к брифу Яны (kind=brief)
@@ -1792,3 +1802,56 @@ def search_endpoint():
         log.error(f"search error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+
+# ── #712 MEM-1 A.3: плановая очистка памяти Python-процесса (тихое окно) ──
+# Временная мера наряда: если рост в Python-процессе не удастся устранить
+# в источнике за этот проход — плановый перезапуск/очистка в тихое окно
+# (наряд предлагает 03:40 MSK, между kk-ask и ЛЗ). Здесь — мягкая очистка
+# БЕЗ рестарта процесса: gc.collect() + сброс известных кэшей провайдеров
+# (#712 A.2 прошлых проходов: главный кандидат роста — кэш конфигов LLM).
+# Слот в реестре dept/schedules.mlog — mem-recycle, по правилу №419
+# создаётся ВЫКЛЮЧЕННЫМ: владелец включает сознательно (правка → деплой)
+# после того, как A.2/брифы покажут, что утро стабильно выше вечера.
+@app.post("/scheduler/mem-recycle")
+@slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
+def scheduler_mem_recycle():
+    """A.3: gc.collect() + сброс кэшей провайдеров в тихое окно.
+
+    Отчёт — RSS llm_proxy до/после из mem_samples (метки @slot_mem_guard):
+    если слот реально освобождает память, разница видна в таблице A.2 и
+    строке утреннего брифа. Тихо: никакого Telegram-шума, итог — в
+    audit_log (разбор — по /admin-ua/mem-report).
+    """
+    from proxy.mem_sampler import mark
+    d = request.get_json(force=True, silent=True) or {}
+    owner_id = d.get("owner_id", "")
+    if not owner_id:
+        # слоты нативного стора зовут с owner_id; внешний ручной вызов —
+        # с секретом как /cron/* (№425)
+        from proxy.routes_tail import cron_secret_ok
+        if not cron_secret_ok():
+            return jsonify({"status": "error", "message": "owner_id is required"}), 400
+
+    import gc
+    collected = gc.collect()
+
+    # сброс кэша конфигов провайдеров (известный держатель, providers.py:492:
+    # priority_provider/model/overrides — живёт вечно и перечитывается
+    # только при смене; чистка принудит перечитать при следующем вызове)
+    caches_cleared = []
+    try:
+        from proxy.providers import _cfg_cache
+        n = len(_cfg_cache.get("overrides") or {})
+        _cfg_cache.clear()
+        caches_cleared.append(f"providers._cfg_cache(overrides={n})")
+    except Exception as e:  # noqa: BLE001 — очистка не роняет слот
+        log.warning(f"[mem-recycle] providers cache clear failed: {e}")
+
+    _log_audit("scheduler_mem_recycle",
+               {"gc_collected": collected, "caches_cleared": caches_cleared},
+               "system")
+    return jsonify({"status": "ok", "gc_collected": collected,
+                    "caches_cleared": caches_cleared,
+                    "note": "RSS до/после — по меткам slot в mem_samples "
+                            "(см. /admin-ua/mem-report, hours=1)"})
