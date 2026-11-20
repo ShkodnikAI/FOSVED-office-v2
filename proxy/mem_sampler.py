@@ -431,11 +431,32 @@ def mem_report(hours=24):
                     "rss_max_mb": round(mb_max, 1), "rss_avg_mb": round(mb_avg, 1),
                     "growth_mb": grow, "ticks": n})
 
-            # 2) текущая сумма по последнему тику всех живых процессов
+            # 2) текущая сумма по ПОСЛЕДНЕМУ тику каждого живого процесса.
+            #    #712 (аудит 20.11 05:12): прежде SUM по всем тикам за 5 мин
+            #    считал каждый процесс ~5 раз (бриф 20.11: «сейчас 1961 МБ»
+            #    при лимите контейнера 512). Правильно: один (самый свежий)
+            #    тик на процесс.
             latest = conn.execute(
-                "SELECT SUM(rss_mb) FROM mem_samples WHERE kind='tick' "
-                "AND ts >= datetime('now', '-5 minutes')").fetchone()
+                "SELECT SUM(rss_mb) FROM mem_samples m "
+                "WHERE m.kind='tick' AND m.id = ("
+                "  SELECT t2.id FROM mem_samples t2 WHERE t2.kind='tick' "
+                "  AND t2.name = m.name AND t2.ts >= datetime('now', '-10 minutes') "
+                "  ORDER BY t2.ts DESC, t2.id DESC LIMIT 1)").fetchone()
             out["latest_total_mb"] = round(latest[0], 1) if latest and latest[0] else None
+
+            # 2б) пик СУММЫ по минутному срезу (максимум по окну).
+            #     #712 (аудит 20.11 05:12): прежний «пик» был максимумом
+            #     ОДНОГО процесса (184 МБ рядом с «сейчас 1961») — метрики
+            #     разной природы стояли под общими словами. Теперь обе
+            #     метрики про сумму контейнера: сейчас — последний срез,
+            #     пик — максимум минутных срезов за окно.
+            per_minute = conn.execute(
+                "SELECT MAX(s) FROM ("
+                "  SELECT strftime('%Y-%m-%d %H:%M', ts) AS minute, SUM(rss_mb) AS s"
+                "  FROM mem_samples WHERE kind='tick' "
+                "  AND ts >= datetime('now', ?) GROUP BY minute)",
+                (f"-{int(hours)} hours",)).fetchone()
+            out["peak_total_mb"] = round(per_minute[0], 1) if per_minute and per_minute[0] else None
 
             # 3) топ-слоты по ступени RSS (after − before по llm_proxy,
             #    главный кандидат-копитель по факту наряда)
@@ -477,6 +498,11 @@ def mem_report_line(hours=24):
 
     Формат (владелец читает в Telegram):
     «💾 Память: 262 МБ (пик за сутки 411); растёт: llm_proxy +84, mlog +12»
+
+    #712 (аудит 20.11 05:12): «сейчас» — сумма RSS по процессам
+    ПОСЛЕДНЕГО тика (не всех тиков за 5 мин), «пик» — максимум СУММЫ по
+    минутному срезу за окно (не максимум одного процесса). Обе метрики —
+    про сумму контейнера; лимит Render 512 МБ теперь сравним напрямую.
     """
     rep = mem_report(hours=hours)
     if rep.get("error"):
@@ -484,14 +510,14 @@ def mem_report_line(hours=24):
     if not rep["samples"]:
         return "💾 Память: mem_samples пуст (сборщик A.1 не писал)"
     total = rep.get("latest_total_mb")
-    peak = max((p["rss_max_mb"] for p in rep["processes"]), default=None)
+    peak = rep.get("peak_total_mb")
     grows = sorted((p for p in rep["processes"]
                     if p.get("growth_mb") and p["growth_mb"] > 5),
                    key=lambda p: -p["growth_mb"])[:2]
     parts = []
     if total is not None:
         parts.append(f"сейчас {total} МБ")
-    if peak:
+    if peak is not None:
         parts.append(f"пик за окно {peak} МБ")
     line = "💾 Память: " + ", ".join(parts)
     if grows:
