@@ -26,6 +26,7 @@ from proxy.mem_sampler import slot_mem_guard, run_tracked, mark as _mem_mark
 from proxy.core import (
     app, log, http_requests,
     _query, _log_audit, _log_error, _write_llm_trace, _get_setting, _db, db_lock,
+    DB_TIMEOUT_SECS,
     get_secret, set_secret, delete_secret, _has_db_override, INTEGRATIONS_REGISTRY,
     PORT, DB_PATH, DB_FILE, BASE_DIR, LIB_DIR, CFG_DIR,
     TELEGRAM_BOT_TOKEN, TELEGRAM_ARCHIVE_CHANNEL_ID, API_SECRET, WEBHOOK_SECRET,
@@ -1685,6 +1686,53 @@ EDGE_COMMIT_ROWS = 200
 GRAPH_BUSY_TIMEOUT_MS = 5000
 
 
+def _ua_tx_log(phase, rows=0, held_ms=0, **extra):
+    """#728 B.3-бис: единая строка длительности фазы/транзакции UA-ночи.
+
+    Формат аудита: [ua-tx] phase=<имя> rows=<строк> held_ms=<мс> …
+    (held_ms — удержание write-лока транзакцией либо длительность фазы).
+    Аудит 20.11: в логе не было длительностей — держателя лока
+    02:00–02:16 установить по логу было нельзя. Пишем через log.info
+    (рендер-лог), НЕ в БД (сэмплер — наблюдатель, не участник).
+    """
+    tail = "".join(f" {k}={v}" for k, v in extra.items())
+    log.info(f"[ua-tx] phase={phase} rows={rows} held_ms={held_ms}{tail}")
+
+
+class _NightCycleGate:
+    """#728 B.6: запрет параллельного запуска тяжёлых писателей БД.
+
+    Прод 20.11 02:19–02:25: night-cycle (попытка 2, Grapher-чанки),
+    keys night-check и Documenter дрались за write-лок — «database is
+    locked», попытка 2 не завершена. Решение наряда: /admin-ua/graph и
+    /admin/keys/night-check во время night-cycle — 409 (не ждать: слот
+    сам повторит в следующую ночь; ручной graph-запрос повторит админ).
+    Реестр заданий №596 уже сериализует night-cycle сам с собой; гейт
+    закрывает остальные входы.
+    """
+    _lock = threading.Lock()
+    _owner = None  # имя держателя (для диагностики в 409)
+
+    @classmethod
+    def enter(cls, owner):
+        acquired = cls._lock.acquire(blocking=False)
+        if acquired:
+            cls._owner = owner
+        return acquired
+
+    @classmethod
+    def exit(cls):
+        cls._owner = None
+        try:
+            cls._lock.release()
+        except RuntimeError:  # уже снят — не падать
+            pass
+
+    @classmethod
+    def owner(cls):
+        return cls._owner
+
+
 def _grapher_edges_and_nodes(analysis):
     """Чистая функция Grapher: (nodes_list, edges_rows) из анализа.
 
@@ -1772,6 +1820,9 @@ def _grapher_write_phase(analysis, source):
     3. kg_scan_rebuild — после закрытия соединения (#569 A.2).
     Возврат: (summary_dict, nodes_saved, edges_saved).
     """
+    # #728 B.3-бис: длительности фаз записи графа — в лог (держатель лока
+    # по следующей ночи обязан быть виден из лога, не из догадок)
+    _t0 = time.monotonic()
     conn = sqlite3.connect(str(DB_FILE), timeout=GRAPH_BUSY_TIMEOUT_MS / 1000.0)
     try:
         c = conn.cursor()
@@ -1783,18 +1834,28 @@ def _grapher_write_phase(analysis, source):
             (id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT, target_name TEXT,
              edge_type TEXT, file_path TEXT, updated_at TEXT DEFAULT (datetime('now')))""")
         conn.commit()
+        _ua_tx_log("graph_schema", rows=0, held_ms=int((time.monotonic() - _t0) * 1000), source=source)
 
+        _t1 = time.monotonic()
         nodes_list, edges_rows, nodes_saved = _grapher_edges_and_nodes(analysis)
+        _ua_tx_log("graph_prepare", rows=len(nodes_list), held_ms=int((time.monotonic() - _t1) * 1000),
+                   edges=len(edges_rows), source=source)
 
         # Рёбра перестраиваются (FO-009: узлы — темпоральные, ниже); батчи
         # вместо одной транзакции: #728 B.3 — каждый commit снимает лок.
+        _t2 = time.monotonic()
         c.execute("DELETE FROM knowledge_edges")
         conn.commit()
+        _ua_tx_log("edges_delete", rows=len(edges_rows), held_ms=int((time.monotonic() - _t2) * 1000), source=source)
         ins = ("INSERT INTO knowledge_edges (source_name, target_name, edge_type, file_path, updated_at) "
                "VALUES (?,?,?,?,?)")
         for i in range(0, len(edges_rows), EDGE_COMMIT_ROWS):
+            _tb = time.monotonic()
             c.executemany(ins, edges_rows[i:i + EDGE_COMMIT_ROWS])
             conn.commit()
+            _ua_tx_log("edges_insert", rows=min(EDGE_COMMIT_ROWS, len(edges_rows) - i),
+                       held_ms=int((time.monotonic() - _tb) * 1000),
+                       batch=i // EDGE_COMMIT_ROWS, source=source)
     except Exception:
         conn.rollback()  # #569 A.2: транзакция завершена на любом пути
         raise
@@ -1804,13 +1865,25 @@ def _grapher_write_phase(analysis, source):
     # FO-009: темпоральная фиксация узлов (после commit+close — #569 A.2);
     # #728 B.3: батчинг по узлам — kg_scan_rebuild больше не открывает
     # транзакцию на каждый апсерт (прод: ~8.5k соединений = минуты лока).
+    _t3 = time.monotonic()
     kg_res = kg_scan_rebuild(nodes_list, source=source)
+    _ua_tx_log("kg_scan_rebuild",
+               rows=kg_res['inserted'] + kg_res['updated'],
+               held_ms=int((time.monotonic() - _t3) * 1000), source=source,
+               new=kg_res['inserted'], noop=kg_res['noop'], closed=kg_res['closed_missing'])
     return kg_res, nodes_saved, len(edges_rows)
 
 
 @app.get("/admin-ua/graph")
 def admin_ua_graph():
     """Grapher: build knowledge graph from analysis data, save to SQLite."""
+    # #728 B.6: во время night-cycle — 409 (не ждать): Grapher-роут и
+    # ночной цикл — два независимых входа в один тяжёлый писатель
+    # (прод 20.11 02:19–02:25 — драка за write-лок). Слот сам повторит
+    # в следующую ночь; ручной запрос повторит админ.
+    if _NightCycleGate.owner() is not None:
+        return jsonify({'error': 'night cycle in progress',
+                        'holder': _NightCycleGate.owner()}), 409
     # #728 B.3: анализ (медленный дисковый скан) — ДО открытия соединения;
     # запись — _grapher_write_phase (короткие транзакции, busy_timeout).
     # Прежний код открывал conn и делал DELETE FROM knowledge_edges ПЕРЕД
@@ -2025,71 +2098,121 @@ def _ua_night_cycle_impl_inner():
     и бросает исключения наружу — их ловит роут-обёртка/реестр заданий.
     """
     try:
-        log.info("UA Night Cycle: Phase 1/6 — Scanner")
-        inventory = _ua_scan_internal()
+        # #728 B.6: night-cycle — держатель гейта на всё тело (снимается
+        # в finally): /admin-ua/graph и /admin/keys/night-check в это окно
+        # отвечают 409, не дракой за write-лок (прод 20.11 02:19–02:25).
+        if not _NightCycleGate.enter("night-cycle"):
+            # Второй параллельный night-cycle: реестр №596 обычно не пускает,
+            # но синхронный + фоновый пути могли пересечься — честный 409
+            # наружу, не тихий пропуск.
+            raise RuntimeError("night cycle already running (holder: %s)" % _NightCycleGate.owner())
+        try:
+            _t0 = time.monotonic()
+            log.info("UA Night Cycle: Phase 1/6 — Scanner")
+            inventory = _ua_scan_internal()
+            _ua_tx_log("night_scanner", rows=inventory.get('total_files', 0),
+                       held_ms=int((time.monotonic() - _t0) * 1000))
 
-        log.info("UA Night Cycle: Phase 2/6 — Analyzer")
-        analysis = _ua_analyze_internal()
+            _t1 = time.monotonic()
+            log.info("UA Night Cycle: Phase 2/6 — Analyzer")
+            analysis = _ua_analyze_internal()
+            _ua_tx_log("night_analyzer", rows=len(analysis),
+                       held_ms=int((time.monotonic() - _t1) * 1000))
 
-        log.info("UA Night Cycle: Phase 3/6 — Grapher")
-        # Наряд #569 A.2 + #728 B.3: запись графа — _grapher_write_phase:
-        # подготовка (включая дисковый кросс-скан с кэшем файлов) ВНЕ
-        # транзакции, запись рёбер — короткими батчами (EDGE_COMMIT_ROWS)
-        # с commit на каждый, busy_timeout на соединении. Прежний код
-        # держал транзакцию от DELETE до конца всех INSERT'ов (прод 19.11:
-        # ~11 минут write-лока, соседние писатели — «database is locked»);
-        # kg_scan_rebuild — строго ПОСЛЕ закрытия conn (без само-блокировки).
-        kg_res, nodes_saved, edges_saved = _grapher_write_phase(
-            analysis, source='admin_ua_night_cycle')
-        log.info(f"UA Night Cycle: KG temporal +{kg_res['inserted']} new, ~{kg_res['updated']} updated, "
-                 f"={kg_res['noop']} unchanged, -{kg_res['closed_missing']} closed")
+            _t2 = time.monotonic()
+            log.info("UA Night Cycle: Phase 3/6 — Grapher")
+            # Наряд #569 A.2 + #728 B.3: запись графа — _grapher_write_phase:
+            # подготовка (включая дисковый кросс-скан с кэшем файлов) ВНЕ
+            # транзакции, запись рёбер — короткими батчами (EDGE_COMMIT_ROWS)
+            # с commit на каждый, busy_timeout на соединении. Прежний код
+            # держал транзакцию от DELETE до конца всех INSERT'ов (прод 19.11:
+            # ~11 минут write-лока, соседние писатели — «database is locked»);
+            # kg_scan_rebuild — строго ПОСЛЕ закрытия conn (без само-блокировки).
+            # #728 B.3-бис: длительности под-фаз — внутри _grapher_write_phase
+            # (graph_schema/graph_prepare/edges_delete/edges_insert/kg_scan_rebuild).
+            kg_res, nodes_saved, edges_saved = _grapher_write_phase(
+                analysis, source='admin_ua_night_cycle')
+            _ua_tx_log("night_grapher", rows=nodes_saved,
+                       held_ms=int((time.monotonic() - _t2) * 1000), edges=edges_saved)
+            log.info(f"UA Night Cycle: KG temporal +{kg_res['inserted']} new, ~{kg_res['updated']} updated, "
+                     f"={kg_res['noop']} unchanged, -{kg_res['closed_missing']} closed")
 
-        log.info("UA Night Cycle: Phase 4/6 — Reviewer")
-        review = _ua_review_internal()
-        findings = review['findings']
-        health = review['health_score']
+            _t3 = time.monotonic()
+            log.info("UA Night Cycle: Phase 4/6 — Reviewer")
+            review = _ua_review_internal()
+            findings = review['findings']
+            health = review['health_score']
+            _ua_tx_log("night_reviewer", rows=len(findings),
+                       held_ms=int((time.monotonic() - _t3) * 1000))
 
-        log.info("UA Night Cycle: Phase 5/6 — Differ (skip — needs file param)")
-        # Differ is on-demand via /admin impact <file>
+            log.info("UA Night Cycle: Phase 5/6 — Differ (skip — needs file param)")
+            # Differ is on-demand via /admin impact <file>
 
-        log.info("UA Night Cycle: Phase 6/6 — Documenter")
-        structure_lines = []
-        api_lines = []
-        for fa in sorted(analysis, key=lambda x: x['path']):
-            structure_lines.append(f"- `{fa['path']}` — {len(fa.get('patterns', []))} patterns")
-            for r in fa.get('routes', []):
-                api_lines.append(f"{r.get('method', '?')} {r['path']} ({fa['path']})")
+            _t4 = time.monotonic()
+            log.info("UA Night Cycle: Phase 6/6 — Documenter")
+            structure_lines = []
+            api_lines = []
+            for fa in sorted(analysis, key=lambda x: x['path']):
+                structure_lines.append(f"- `{fa['path']}` — {len(fa.get('patterns', []))} patterns")
+                for r in fa.get('routes', []):
+                    api_lines.append(f"{r.get('method', '?')} {r['path']} ({fa['path']})")
 
-        # Save night report to DB
-        import json as _json
-        _query("INSERT INTO admin_night_reports (scan_data, review_data, health_score, findings_count, created_at) VALUES (?,?,?,?,?)",
-               (_json.dumps({'total_files': inventory['total_files'], 'total_lines': inventory['total_lines']}),
-                _json.dumps(findings[:50]),
-                health, len(findings), datetime.utcnow().isoformat()))
+            # Save night report to DB
+            import json as _json
+            _query("INSERT INTO admin_night_reports (scan_data, review_data, health_score, findings_count, created_at) VALUES (?,?,?,?,?)",
+                   (_json.dumps({'total_files': inventory['total_files'], 'total_lines': inventory['total_lines']}),
+                    _json.dumps(findings[:50]),
+                    health, len(findings), datetime.utcnow().isoformat()))
 
         # Save findings to admin_findings table
-        for f in findings:
-            _query("INSERT INTO admin_findings (severity, category, file, issue, fix, status) VALUES (?,?,?,?,?,?)",
-                   (f['severity'], f['category'], f.get('file', ''), f['issue'], f.get('fix', ''), 'open'))
+        # #728 B.7: один INSERT … executemany в ОДНОЙ транзакции вместо
+        # _query на каждый finding (прод 20.11: сотни мелких транзакций
+        # подряд в окно Grapher-чанков — «database is locked» 02:24–02:25).
+        # Соединение с busy_timeout B.5; rollback/close на любом пути.
+            if findings:
+                _tf = time.monotonic()
+                conn = sqlite3.connect(str(DB_FILE), timeout=DB_TIMEOUT_SECS)
+                try:
+                    conn.execute(f"PRAGMA busy_timeout={int(DB_TIMEOUT_SECS * 1000)}")
+                    conn.executemany(
+                        "INSERT INTO admin_findings (severity, category, file, issue, fix, status) VALUES (?,?,?,?,?,?)",
+                        [(f['severity'], f['category'], f.get('file', ''), f['issue'], f.get('fix', ''), 'open')
+                         for f in findings])
+                    conn.commit()
+                    _ua_tx_log("night_documenter_findings", rows=len(findings),
+                               held_ms=int((time.monotonic() - _tf) * 1000))
+                    _log_audit("ua_night_cycle_findings", {"saved": len(findings)})
+                except Exception:
+                    conn.rollback()  # findings-пакет атомарен: либо все, либо ни одного
+                    raise
+                finally:
+                    conn.close()
 
         # Close open findings that are resolved
-        _query("UPDATE admin_findings SET status='closed' WHERE status='open' AND created_at < datetime('now', '-7 days')")
+            _query("UPDATE admin_findings SET status='closed' WHERE status='open' AND created_at < datetime('now', '-7 days')")
 
-        summary = (f"UA NIGHT CYCLE COMPLETE\n"
-                   f"  Files: {inventory['total_files']} ({inventory['total_lines']:,} lines)\n"
-                   f"  Patterns: {sum(len(f['patterns']) for f in analysis)}\n"
-                   f"  Routes: {sum(len(f['routes']) for f in analysis)}\n"
-                   f"  Graph: {nodes_saved} nodes, {edges_saved} edges\n"
-                   f"  Findings: {len(findings)} (h={len([f for f in findings if f['severity']=='high'])} "
-                   f"m={len([f for f in findings if f['severity']=='medium'])} "
-                   f"l={len([f for f in findings if f['severity']=='low'])})\n"
-                   f"  Health: {health}/10")
+            _ua_tx_log("night_documenter", rows=len(structure_lines) + len(api_lines),
+                       held_ms=int((time.monotonic() - _t4) * 1000))
 
-        _log_audit("ua_night_cycle", {"files": inventory['total_files'], "nodes": nodes_saved,
-                                       "edges": edges_saved, "findings": len(findings), "health": health})
+            summary = (f"UA NIGHT CYCLE COMPLETE\n"
+                       f"  Files: {inventory['total_files']} ({inventory['total_lines']:,} lines)\n"
+                       f"  Patterns: {sum(len(f['patterns']) for f in analysis)}\n"
+                       f"  Routes: {sum(len(f['routes']) for f in analysis)}\n"
+                       f"  Graph: {nodes_saved} nodes, {edges_saved} edges\n"
+                       f"  Findings: {len(findings)} (h={len([f for f in findings if f['severity']=='high'])} "
+                       f"m={len([f for f in findings if f['severity']=='medium'])} "
+                       f"l={len([f for f in findings if f['severity']=='low'])})\n"
+                       f"  Health: {health}/10")
 
-        return {'status': 'ok', 'summary': summary, 'health_score': health,
-                'findings_count': len(findings)}
+            _log_audit("ua_night_cycle", {"files": inventory['total_files'], "nodes": nodes_saved,
+                                           "edges": edges_saved, "findings": len(findings), "health": health})
+
+            return {'status': 'ok', 'summary': summary, 'health_score': health,
+                    'findings_count': len(findings)}
+        finally:
+            # #728 B.6: гейт снят на любом пути (OOM/исключение не оставляют
+            # вечного 409 для graph/keys — держатель сбрасывается)
+            _NightCycleGate.exit()
 
     except Exception as e:
         log.error(f"ua_night_cycle error: {e}", exc_info=True)
@@ -2298,7 +2421,19 @@ def admin_keys_night_check():
 
     Запускает полную проверку манифеста, сохраняет результат и возвращает
     компактный JSON (status/problems_line/ok_count/total) для ночного отчёта.
+    #728 B.6: во время night-cycle — 409 (не ждать): прод 20.11 02:24:40 —
+    check_all/save_results дрались с Grapher-чанками за write-лок и упали
+    «database is locked». Слот mlog зовёт фазу ПОСЛЕ UA-цикла (app.mlog:
+    Phase 5 после Phase 0-поллинга) — на своей ошибке не окажется; если
+    фаза всё же пришла в окно цикла (catch-up-попытка), 409 честно
+    попадает в строку отчёта «недоступна», ключи проверит следующий день.
     """
+    if _NightCycleGate.owner() is not None:
+        _log_error("keys night-check skipped: night cycle in progress",
+                   source="admin_keys", dept="admin", kind="check")
+        return jsonify({"status": "skipped",
+                        "problems_line": "проверка ключей пропущена: ночной цикл ещё идёт",
+                        "ok_count": 0, "total": 0, "checked_at": ""}), 409
     try:
         from proxy.key_health import check_all, save_results, night_summary
         summary = check_all()
