@@ -1,6 +1,18 @@
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y \
+# ── #745 SEC-2 A.1: security-обновления пакетов при каждой сборке ────────────
+# apt-get upgrade в том же слое, что и update: пакеты (libssl3t64 и прочие)
+# получают последние USN, а не версию из снимка базового образа на день
+# сборки (факт аудита 20.11: без upgrade прод остаётся на версии снимка;
+# USN-8847-1 = libssl3t64 3.0.13-0ubuntu3.16 — текущий минимум, CI-гейт в
+# ci.yml job docker-build). Выбор полного upgrade против --only-upgrade
+# libssl3t64: цель наряда — «каждая сборка ставит последние security-
+# обновления пакетов Ubuntu 24.04»; прицел на один пакет оставил бы
+# следующий USN другого пакета неприглашённым. --no-install-recommends —
+# не тянуть рекомендованные пакеты (минимальный прирост размера слоя).
+# Версия пакета НЕ закрепляется (запрет наряда): обновления приходят сами.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y \
     ca-certificates git python3 python3-pip curl nodejs npm gosu \
     tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-jpn tesseract-ocr-kor \
     fonts-dejavu-core \

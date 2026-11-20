@@ -465,6 +465,26 @@ jobs:
         if: steps.detect.outputs.available == 'yes'
         run: docker build -t fosved-office-ci .
 
+      # ── #745 SEC-2 A.1: CI-гейт версии libssl3t64 ────────────────────────
+      # Минимум — USN-8847-1 (29.09.2026, 11 CVE, в т.ч. CVE-2026-84782 High,
+      # DTLS): libssl3t64 3.0.13-0ubuntu3.16. Константа поднимается при новых
+      # USN (правило наряда: минимум — константа в workflow, не пин версии в
+      # apt-get). dpkg --compare-versions на раннере ubuntu-latest доступен.
+      - name: Verify libssl3t64 >= minimum (SEC-2)
+        if: steps.detect.outputs.available == 'yes'
+        env:
+          LIBSSL_MIN: "3.0.13-0ubuntu3.16"
+        run: |
+          GOT=$(docker run --rm fosved-office-ci dpkg-query -W -f='${Version}' libssl3t64)
+          echo "libssl3t64 in image: ${GOT} (minimum: ${LIBSSL_MIN})"
+          docker image ls fosved-office-ci --format 'image size (SEC-2 after-measure): {{.Size}}'
+          if dpkg --compare-versions "${GOT}" ge "${LIBSSL_MIN}"; then
+            echo "OK: libssl3t64 ${GOT} >= ${LIBSSL_MIN}"
+          else
+            echo "FAIL: libssl3t64 ${GOT} < ${LIBSSL_MIN} (USN-8847-1); apt-get upgrade в Dockerfile не принёс минимум — снимок базового образа устарел"
+            exit 1
+          fi
+
       - name: Verify mlog works in container
         if: steps.detect.outputs.available == 'yes'
         run: |

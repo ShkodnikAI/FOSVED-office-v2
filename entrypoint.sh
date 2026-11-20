@@ -31,6 +31,14 @@ echo "miniapp.mlog:   $(md5sum dept/miniapp.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "osp.mlog:       $(md5sum dept/osp.mlog 2>/dev/null | cut -d' ' -f1)"
 echo "expert.mlog:    $(md5sum dept/expert.mlog 2>/dev/null | cut -d' ' -f1)"
 
+# ── #745 SEC-2 A.2: видимая версия security-критичных пакетов образа ─────────
+# dpkg-версия пакета (не строка 'openssl version'): Ubuntu не меняет
+# 'OpenSSL 3.0.13 30 Jan 2024' при бэкпорте исправлений — уровень патчей
+# виден только в версии пакета (факт аудита 20.11). Читается от office
+# (после сброса привилегий): /var/lib/dpkg/status world-readable.
+# Fallback 'unknown' — строка не роняет бут (CI-гейт версии — ci.yml).
+echo "security: libssl3t64=$(dpkg-query -W -f='${Version}' libssl3t64 2>/dev/null || echo unknown) openssl=$(dpkg-query -W -f='${Version}' openssl 2>/dev/null || echo unknown)"
+
 if grep -q "КРИТИЧЕСКОЕ ПРАВИЛО ФОРМАТА" dept/yana.mlog 2>/dev/null; then
   echo "!!! WARNING: dept/yana.mlog still has anti-format code !!!"
 else
