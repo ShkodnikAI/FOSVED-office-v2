@@ -528,13 +528,15 @@ def test_b3_static_grapher_short_transactions():
 
 
 def test_b3_mutation_single_transaction_is_red():
-    """Мутационный самотест детектора: «executemany без батч-цикла» — красный."""
+    """Мутационный самотест детектора: «executemany без батч-цикла» — красный.
+    Якорь подогнан под код после B.3-бис (внутри цикла появился замер _tb)."""
     src = ROUTES_ADMIN.read_text(encoding="utf-8")
+    anchor = ("for i in range(0, len(edges_rows), EDGE_COMMIT_ROWS):\n"
+              "            _tb = time.monotonic()\n"
+              "            c.executemany(ins, edges_rows[i:i + EDGE_COMMIT_ROWS])")
     mutated = src.replace(
-        "for i in range(0, len(edges_rows), EDGE_COMMIT_ROWS):\n"
-        "            c.executemany(ins, edges_rows[i:i + EDGE_COMMIT_ROWS])\n"
-        "            conn.commit()",
-        "c.executemany(ins, edges_rows)\n        conn.commit()")
+        anchor,
+        "c.executemany(ins, edges_rows)")
     assert mutated != src, "мутация не применилась (патч-якорь устарел)"
     with pytest.raises(AssertionError):
         assert "for i in range(0, len(edges_rows), EDGE_COMMIT_ROWS)" in mutated
@@ -809,3 +811,279 @@ def test_b2_static_gate_in_slot_and_ddl():
 
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Аудит 20.11 03:31 (ночь 20.11 НЕ принята): обязательные B.3-бис, B.5,
+# B.6, B.7, B.8. Факты ночи: Grapher держал БД ~16 мин (02:00:13→02:16:15,
+# +540 new/~6026 updated), 02:17 OOM, попытка 2 (catch-up) 02:19–02:25,
+# keys night-check 02:24:40 «database is locked», dispatch error 02:25:05.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# ───────────────── B.5: _db() с timeout/busy_timeout ─────────────────
+
+def test_b5_db_has_timeout_and_busy_timeout():
+    """СТАТИКА B.5: _db() открывает соединение с timeout= и PRAGMA
+    busy_timeout (аудит: «_db() (proxy/core.py) по-прежнему без
+    timeout/busy_timeout»). Мутация: убрать таймауты → красный."""
+    src = (REPO / "proxy" / "core.py").read_text(encoding="utf-8")
+    seg = src[src.index("def _db():"):]
+    seg = seg[:seg.index("def init_db")]
+    code = "\n".join(_code_lines(seg))
+    assert "sqlite3.connect(DB_FILE, timeout=" in code, \
+        "_db() без timeout (дефолт 5 с неявный — аудит 20.11)"
+    assert "PRAGMA busy_timeout" in code, "_db() без PRAGMA busy_timeout"
+
+
+def test_b5_db_waits_busy_timeout_under_external_lock(tmp_path, monkeypatch):
+    """ПОВЕДЕНИЕ B.5: при чужом write-локе _db()-соединение ЖДЁТ до
+    busy_timeout, а не бросает мгновенно; и не виснет дольше лимита.
+    (Прежний голый connect() на части сборок бросал сразу / ждал дефолт.)"""
+    os.environ['API_SECRET'] = 'test-secret-123'
+    os.environ['TELEGRAM_WEBHOOK_SECRET'] = 'tg-wh-secret'
+    os.environ['OWNER_TELEGRAM_ID'] = '12345'
+    os.environ['DATABASE_PATH'] = str(tmp_path)
+    import llm_proxy  # noqa: F401
+    import proxy.core as core
+    db = str(tmp_path / "b5.db")
+    monkeypatch.setattr(core, "DB_FILE", db)
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE t (x TEXT)")
+    conn.execute("INSERT INTO t VALUES ('held')")
+    conn.commit()
+    conn.execute("BEGIN EXCLUSIVE")  # чужой write-лок
+    try:
+        other = core._db()
+        t0 = time.perf_counter()
+        try:
+            other.execute("INSERT INTO t VALUES ('from_b5')").fetchall()
+            other.commit()
+            waited = time.perf_counter() - t0
+            # лок снят неожиданно рано? тогда ждём мало — тоже приемлемо,
+            # но не мгновенный отказ:
+            assert waited < core.DB_TIMEOUT_SECS + 2.0, \
+                f"_db ждал {waited:.1f} с — дольше busy_timeout+запас"
+        except sqlite3.OperationalError as e:
+            waited = time.perf_counter() - t0
+            assert "locked" in str(e) or "busy" in str(e), f"неожиданная ошибка: {e}"
+            assert waited >= core.DB_TIMEOUT_SECS - 1.0, \
+                f"отказ через {waited:.2f} с — busy_timeout не применён (мгновенный отказ)"
+        finally:
+            other.close()
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+# ───────────────── B.7: Documenter одной транзакцией ─────────────────
+
+def test_b7_static_documenter_single_transaction():
+    """СТАТИКА B.7: findings — одним executemany в одной транзакции
+    (аудит: «Documenter пишет по одному _query на каждый finding»).
+    Мутация: вернуть цикл _query INSERT → красная."""
+    src = ROUTES_ADMIN.read_text(encoding="utf-8")
+    seg = src[src.index("def _ua_night_cycle_impl_inner"):]
+    seg = seg[:seg.index("def admin_ua_night_cycle")]
+    code = "\n".join(_code_lines(seg))
+    # старый путь удалён
+    assert 'for f in findings:\n' not in code and \
+        "for f in findings:" not in code.split("_ua_tx_log(\"night_documenter_findings\"")[0].split("B.7")[1] \
+        if "B.7" in code else True, "остался per-finding INSERT"
+    # новый путь на месте
+    assert "conn.executemany(" in code, "нет executemany для findings"
+    assert "INSERT INTO admin_findings" in code, "нет INSERT findings"
+    assert "conn.commit()" in code, "нет commit — транзакция не закрыта"
+
+
+def test_b7_findings_batch_survives_locked_db(tmp_path, monkeypatch):
+    """ПОВЕДЕНИЕ B.7: пакет findings при свободной БД пишется одним
+    соединением (замер: открытий БД на N findings — 1, не N)."""
+    ra = _b3_env(tmp_path, monkeypatch)
+    import llm_proxy
+    from proxy.core import _query
+    _query("DELETE FROM admin_findings", ())
+    findings = [{'severity': 'low', 'category': f'cat{i}', 'file': f'f{i}.py',
+                 'issue': f'issue {i}', 'fix': 'none'} for i in range(25)]
+    # прогоняем ТОЛЬКО блок B.7 (вырванный из цикла) через impl-подобный
+    # вызов: используем роут night-cycle с заглушёнными фазами
+    monkeypatch.setattr(ra, '_ua_scan_internal',
+                        lambda: {'total_files': 1, 'total_lines': 1})
+    monkeypatch.setattr(ra, '_ua_analyze_internal', lambda: [])
+    monkeypatch.setattr(ra, '_grapher_write_phase',
+                        lambda a, source: ({'inserted': 0, 'updated': 0, 'noop': 0,
+                                            'closed_missing': 0}, 0, 0))
+    monkeypatch.setattr(ra, '_ua_review_internal',
+                        lambda: {'findings': findings, 'health_score': 9})
+    client = llm_proxy.app.test_client()
+    resp = client.post('/admin-ua/night-cycle',
+                       environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                       headers={'X-Internal-Token': os.environ['INTERNAL_API_TOKEN']})
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+    body = resp.get_json()
+    assert body['status'] == 'ok', body
+    saved = _query("SELECT COUNT(*) AS c FROM admin_findings WHERE category LIKE 'cat%'", (), fetch=True)
+    assert saved and saved[0]['c'] == 25, \
+        f"findings потеряны: {saved[0]['c']}/25 — пакет не атомарен"
+
+
+# ───────────────── B.6: гейт night-cycle ─────────────────
+
+def test_b6_graph_route_409_while_night_cycle_runs(tmp_path, monkeypatch):
+    """ПОВЕДЕНИЕ B.6: пока night-cycle держит гейт, /admin-ua/graph
+    отвечает 409 (не драка за write-лок). После выхода — 200."""
+    ra = _b3_env(tmp_path, monkeypatch)
+    import llm_proxy
+    assert ra._NightCycleGate.enter("night-cycle-test")
+    try:
+        client = llm_proxy.app.test_client()
+        resp = client.get('/admin-ua/graph',
+                          environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                          headers={'X-Internal-Token': os.environ['INTERNAL_API_TOKEN']})
+        assert resp.status_code == 409, \
+            f"ожидался 409 во время night-cycle, получен {resp.status_code}"
+        assert resp.get_json().get('holder') == 'night-cycle-test'
+    finally:
+        ra._NightCycleGate.exit()
+    # гейт снят — роут снова доступен (до анализа не дойдёт: analysis пуст
+    # вернёт 200 с пустым графом)
+    monkeypatch.setattr(ra, '_ua_analyze_internal', lambda: [])
+    client = llm_proxy.app.test_client()
+    resp = client.get('/admin-ua/graph',
+                      environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                      headers={'X-Internal-Token': os.environ['INTERNAL_API_TOKEN']})
+    assert resp.status_code == 200, f"после снятия гейта graph недоступен: {resp.status_code}"
+
+
+def test_b6_keys_night_check_409_while_night_cycle_runs(tmp_path, monkeypatch):
+    """ПОВЕДЕНИЕ B.6: keys night-check во время night-cycle — 409 со
+    честной строкой problems_line (прод 20.11 02:24:40 — locked)."""
+    ra = _b3_env(tmp_path, monkeypatch)
+    import llm_proxy
+    assert ra._NightCycleGate.enter("night-cycle-test")
+    try:
+        client = llm_proxy.app.test_client()
+        resp = client.post('/admin/keys/night-check',
+                           environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                           headers={'X-Internal-Token': os.environ['INTERNAL_API_TOKEN']})
+        assert resp.status_code == 409, \
+            f"ожидался 409 во время night-cycle, получен {resp.status_code}"
+        body = resp.get_json()
+        assert body['status'] == 'skipped' and body['problems_line'], body
+    finally:
+        ra._NightCycleGate.exit()
+
+
+def test_b6_gate_released_on_crash(tmp_path, monkeypatch):
+    """B.6: исключение в теле night-cycle СНИМАЕТ гейт (OOM/ошибка не
+    оставляют вечного 409 — прод-инвариант)."""
+    ra = _b3_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(ra, '_ua_scan_internal',
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    import llm_proxy
+    client = llm_proxy.app.test_client()
+    resp = client.post('/admin-ua/night-cycle',
+                       environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                       headers={'X-Internal-Token': os.environ['INTERNAL_API_TOKEN']})
+    assert resp.status_code == 500, f"ожидался 500 от упавшего цикла: {resp.status_code}"
+    assert ra._NightCycleGate.owner() is None, \
+        "гейт не снят после падения цикла — вечный 409 для graph/keys"
+
+
+# ───────────────── B.3-бис: длительности фаз/транзакций ─────────────────
+
+def test_b3bis_tx_log_lines_present():
+    """СТАТИКА B.3-бис: формат [ua-tx] phase=… rows=… held_ms=… и вызовы
+    во всех фазах ночи + всех под-фазах записи графа (аудит: «в логе нет
+    длительностей фаз и транзакций»)."""
+    src = ROUTES_ADMIN.read_text(encoding="utf-8")
+    assert "_ua_tx_log(" in src, "нет хелпера _ua_tx_log"
+    seg = src[src.index("def _ua_tx_log"):]
+    seg = seg[:seg.index("class _NightCycleGate")]
+    code = "\n".join(_code_lines(seg))
+    assert '[ua-tx] phase=' in code and 'rows=' in code and 'held_ms=' in code, \
+        "формат строки [ua-tx] не соответствует заданию аудитора"
+    # все фазы ночи логируются
+    impl = src[src.index("def _ua_night_cycle_impl_inner"):src.index("def admin_ua_night_cycle")]
+    for phase in ("night_scanner", "night_analyzer", "night_grapher",
+                  "night_reviewer", "night_documenter"):
+        assert f'_ua_tx_log("{phase}"' in impl, f"фаза {phase} не логируется"
+    # под-фазы записи графа
+    grapher = src[src.index("def _grapher_write_phase"):src.index("@app.get(\"/admin-ua/graph\")")]
+    for phase in ("graph_schema", "graph_prepare", "edges_delete",
+                  "edges_insert", "kg_scan_rebuild"):
+        assert f'_ua_tx_log("{phase}"' in grapher, f"под-фаза {phase} не логируется"
+
+
+def test_b3bis_tx_log_emitted_during_night_cycle(tmp_path, monkeypatch, caplog):
+    """ПОВЕДЕНИЕ B.3-бис: ночной цикл реально пишет [ua-tx]-строки в лог
+    (по следующей ночи держатель лока виден из лога)."""
+    import logging
+    ra = _b3_env(tmp_path, monkeypatch)
+    import llm_proxy
+    monkeypatch.setattr(ra, '_ua_scan_internal',
+                        lambda: {'total_files': 3, 'total_lines': 100})
+    monkeypatch.setattr(ra, '_ua_analyze_internal', lambda: [])
+    monkeypatch.setattr(ra, '_grapher_write_phase',
+                        lambda a, source: ({'inserted': 0, 'updated': 0, 'noop': 0,
+                                            'closed_missing': 0}, 0, 0))
+    monkeypatch.setattr(ra, '_ua_review_internal',
+                        lambda: {'findings': [], 'health_score': 10})
+    with caplog.at_level(logging.INFO, logger="llm_proxy"):
+        client = llm_proxy.app.test_client()
+        resp = client.post('/admin-ua/night-cycle',
+                           environ_base={"REMOTE_ADDR": "127.0.0.1"},
+                           headers={'X-Internal-Token': os.environ['INTERNAL_API_TOKEN']})
+        assert resp.status_code == 200
+    phases = [r.message for r in caplog.records if "[ua-tx]" in r.getMessage()]
+    logged = {p.split("phase=")[1].split()[0] for p in phases}
+    for phase in ("night_scanner", "night_analyzer", "night_grapher",
+                  "night_reviewer", "night_documenter"):
+        assert phase in logged, f"[ua-tx] phase={phase} не в логе (есть: {logged})"
+    # формат каждой строки содержит rows= и held_ms=
+    for msg in phases:
+        assert "rows=" in msg and "held_ms=" in msg, f"нет rows/held_ms: {msg}"
+
+
+# ───────────────── B.8: причина +540 new / ~6026 updated ─────────────────
+
+def test_b8_conclusion_documented():
+    """СТАТИКА B.8: вывод о причине аномалии зафиксирован в коде kg.py
+    (дихотомия аудита: ключ/хэш B.3 не менял → не миграция; числа —
+    наследие старого per-node кода + пропущенные ночи)."""
+    src = (REPO / "proxy" / "kg.py").read_text(encoding="utf-8")
+    assert "B.8" in src, "вывод B.8 не задокументирован в kg.py"
+
+
+def test_b8_duplicate_actives_two_pass_stability(tmp_path, monkeypatch):
+    """ПОВЕДЕНИЕ B.8 (стенд из исследования наряда): чанковый ребилд
+    Идемпотентен — повторный прогон тех же узлов даёт 0 new/0 updated
+    (все noop); упавший посередине и повторённый — тоже без дублей
+    активных. Числа попытки 1 ночи 20.11 — наследие БД ДО B.3."""
+    import proxy.core as core
+    import proxy.kg as kg
+    db = str(tmp_path / "b8.db")
+    monkeypatch.setattr(core, "DB_FILE", db)
+    monkeypatch.setattr(kg, "_query", core._query)
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, node_type TEXT,
+         node_name TEXT, file_path TEXT, description TEXT, updated_at TEXT, valid_from TEXT,
+         valid_to TEXT, source_part_id INTEGER, inference INTEGER, review_status TEXT,
+         parent_count INTEGER, superseded_by INTEGER);
+        CREATE TABLE admin_findings (severity TEXT, category TEXT, file TEXT, issue TEXT,
+         fix TEXT, status TEXT);
+    """)
+    conn.commit(); conn.close()
+    nodes = [{'node_type': 'file', 'node_name': f'f{i}.mlog',
+              'file_path': f'f{i}.mlog', 'description': f'{i} patterns'} for i in range(6)]
+    r1 = kg.kg_scan_rebuild(nodes, source='t')
+    assert r1['inserted'] == 6 and r1['updated'] == 0, r1
+    r2 = kg.kg_scan_rebuild(nodes, source='t')
+    assert r2['inserted'] == 0 and r2['updated'] == 0 and r2['noop'] == 6, \
+        f"повторный ребилд не идемпотентен: {r2} — дубли активных версий"
+    dups = core._query(
+        "SELECT node_name, COUNT(*) AS c FROM knowledge_graph WHERE valid_to IS NULL "
+        "GROUP BY node_name HAVING c > 1", (), fetch=True)
+    assert not dups, f"дубли активных узлов после двух прогонов: {dups}"

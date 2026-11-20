@@ -450,10 +450,19 @@ DEPT_HASHTAGS = {
 }
 
 # ──────────────────────────── SQLITE SETUP ────────────────────────────
+# #728 B.5: все соединения офиса — с явным timeout/busy_timeout. Прежний
+# голый connect() ждал дефолтные 5 с и бросал «database is locked» при
+# чужом write-локе (прод 20.11 02:24–02:25: keys night-check и Documenter
+# падали поверх чанков Grapher). N=5 с: чанк Grapher (KG_CHUNK=500) по
+# замеру ≈30–60 мс — запас ×80; длиннее не нужно (ночной слот не должен
+# висеть на ожидании), короче нельзя (медленный диск Render Starter).
+DB_TIMEOUT_SECS = 5.0
+
 def _db():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn = sqlite3.connect(DB_FILE, timeout=DB_TIMEOUT_SECS, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={int(DB_TIMEOUT_SECS * 1000)}")
     return conn
 
 def init_db():
