@@ -269,3 +269,96 @@ class TestRlimit:
         assert r.returncode == 3
         err = capsys.readouterr().err
         assert "не хватило памяти" in err and "200" in err, err
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Аудит 20.11 05:12: строка брифа считала неверно — «сейчас 1961 МБ,
+# пик 184 МБ» (сумма ВСЕХ тиков за 5 мин ≈ каждый процесс ×5; «пик» —
+# максимум ОДНОГО процесса). Требование: «сейчас» = сумма RSS по
+# процессам последнего тика; «пик» = максимум суммы по минутному
+# срезу за окно; тест на 5 тиков × 3 процесса.
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestMemReportPass3Totals:
+    """5 тиков × 3 процесса: latest_total — ПОСЛЕДНИЙ тик (не ×5),
+    peak_total — максимум минутной СУММЫ (не одного процесса)."""
+
+    @pytest.fixture
+    def five_ticks_db(self, tmp_path, monkeypatch):
+        db = tmp_path / "five.db"
+        con = sqlite3.connect(db)
+        con.execute("""CREATE TABLE IF NOT EXISTS mem_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now')),
+            name TEXT NOT NULL, pid INTEGER, rss_mb REAL NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'tick', ref TEXT DEFAULT '', phase TEXT DEFAULT '')""")
+        from datetime import datetime, timedelta, timezone
+        def ts(minutes_ago, second=0):
+            t = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+            return t.replace(second=second, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+        # 5 минутных тиков × 3 процесса; llm_proxy растёт, пик суммы —
+        # на 4-й минуте (100+40+20=160), последний тик ниже (90+40+20=150)
+        per_tick = [
+            (4, [("llm_proxy.py", 10, 80.0), ("mlog", 20, 40.0), ("reverse_proxy.py", 30, 20.0)]),
+            (3, [("llm_proxy.py", 10, 90.0), ("mlog", 20, 40.0), ("reverse_proxy.py", 30, 20.0)]),
+            (2, [("llm_proxy.py", 10, 95.0), ("mlog", 20, 41.0), ("reverse_proxy.py", 30, 21.0)]),
+            (1, [("llm_proxy.py", 10, 100.0), ("mlog", 20, 40.0), ("reverse_proxy.py", 30, 20.0)]),
+            (0, [("llm_proxy.py", 10, 90.0), ("mlog", 20, 40.0), ("reverse_proxy.py", 30, 20.0)]),
+        ]
+        for minutes_ago, procs in per_tick:
+            for name, pid, mb in procs:
+                con.execute("INSERT INTO mem_samples (ts,name,pid,rss_mb,kind) VALUES (?,?,?,?, 'tick')",
+                            (ts(minutes_ago), name, pid, mb))
+        con.commit()
+        con.close()
+        import proxy.core
+        monkeypatch.setattr(proxy.core, "DB_FILE", str(db))
+        return db
+
+    def test_latest_total_is_last_tick_sum_not_all_ticks(self, five_ticks_db, monkeypatch):
+        """«Сейчас» = сумма ПОСЛЕДНЕГО тика 3 процессов = 150 МБ.
+        Прежняя формула (SUM за 5 мин) дала бы ~756 МБ — каждый процесс
+        посчитан 5 раз (прод 20.11: «сейчас 1961 МБ» при лимите 512)."""
+        from proxy import mem_sampler as ms
+        monkeypatch.setattr(ms, "_SCHEMA_READY", True)
+        rep = ms.mem_report(hours=24)
+        assert rep["latest_total_mb"] == pytest.approx(150.0, abs=0.5), \
+            rep["latest_total_mb"]
+
+    def test_peak_total_is_max_minute_sum(self, five_ticks_db, monkeypatch):
+        """«Пик» = максимум СУММЫ по минутному срезу = 160 МБ (тик 4-й
+        минуты: 100+40+20). Прежний «пик» был максимумом одного
+        процесса (100) — метрика другой природы (аудит 05:12)."""
+        from proxy import mem_sampler as ms
+        monkeypatch.setattr(ms, "_SCHEMA_READY", True)
+        rep = ms.mem_report(hours=24)
+        assert rep["peak_total_mb"] == pytest.approx(160.0, abs=0.5), \
+            rep["peak_total_mb"]
+
+    def test_report_line_uses_sum_metrics(self, five_ticks_db, monkeypatch):
+        """Строка брифа: обе метрики про сумму контейнера и согласованы
+        (сейчас ≤ пик; сейчас < 512 — лимит Render сравним напрямую)."""
+        from proxy import mem_sampler as ms
+        monkeypatch.setattr(ms, "_SCHEMA_READY", True)
+        line = ms.mem_report_line(hours=24)
+        assert "сейчас 150" in line, line
+        assert "пик за окно 160" in line, line
+        # инвариант согласованности метрик одной природы
+        now_mb = float(line.split("сейчас ")[1].split(" МБ")[0])
+        peak_mb = float(line.split("пик за окно ")[1].split(" МБ")[0])
+        assert now_mb <= peak_mb, f"сейчас ({now_mb}) > пик ({peak_mb}) — метрики несогласованы"
+        assert now_mb < 512, f"сейчас ({now_mb}) ≥ лимит контейнера — формула всё ещё ×5"
+
+
+class TestGrapherMemMarks:
+    """#712 (аудит 20.11 03:31): RSS-метки по фазам KG-перестройки —
+    graph:write-phase и graph:kg-rebuild (before/after, full-срез)."""
+
+    def test_grapher_marks_static(self):
+        src = ROUTES_ADMIN.read_text(encoding="utf-8")
+        seg = src[src.index("def _grapher_write_phase"):src.index('@app.get("/admin-ua/graph")')]
+        for ref in ("graph:write-phase", "graph:kg-rebuild"):
+            assert f'_mem_mark("slot", "{ref}", "before", full=True)' in seg, \
+                f"нет RSS-метки before для {ref}"
+            assert f'_mem_mark("slot", "{ref}", "after", full=True)' in seg, \
+                f"нет RSS-метки after для {ref}"

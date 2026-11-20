@@ -1823,6 +1823,10 @@ def _grapher_write_phase(analysis, source):
     # #728 B.3-бис: длительности фаз записи графа — в лог (держатель лока
     # по следующей ночи обязан быть виден из лога, не из догадок)
     _t0 = time.monotonic()
+    # #712 (аудит 20.11 03:31): RSS-метки по фазам KG-перестройки — пик
+    # Grapher виден в mem_samples (kind='slot', ref='graph:<фаза>',
+    # full-срез всех процессов); приёмка MEM-1 — ночь без oomKilled.
+    _mem_mark("slot", "graph:write-phase", "before", full=True)
     conn = sqlite3.connect(str(DB_FILE), timeout=GRAPH_BUSY_TIMEOUT_MS / 1000.0)
     try:
         c = conn.cursor()
@@ -1866,11 +1870,17 @@ def _grapher_write_phase(analysis, source):
     # #728 B.3: батчинг по узлам — kg_scan_rebuild больше не открывает
     # транзакцию на каждый апсерт (прод: ~8.5k соединений = минуты лока).
     _t3 = time.monotonic()
+    # #712 (аудит 20.11 03:31): kg_scan_rebuild — главный подозреваемый
+    # OOM 02:17Z (пик KG-перестройки +540 new/~6026 updated) — метки RSS
+    # до/после именно этой фазы; длительность — #728 B.3-бис.
+    _mem_mark("slot", "graph:kg-rebuild", "before", full=True)
     kg_res = kg_scan_rebuild(nodes_list, source=source)
+    _mem_mark("slot", "graph:kg-rebuild", "after", full=True)
     _ua_tx_log("kg_scan_rebuild",
                rows=kg_res['inserted'] + kg_res['updated'],
                held_ms=int((time.monotonic() - _t3) * 1000), source=source,
                new=kg_res['inserted'], noop=kg_res['noop'], closed=kg_res['closed_missing'])
+    _mem_mark("slot", "graph:write-phase", "after", full=True)
     return kg_res, nodes_saved, len(edges_rows)
 
 
