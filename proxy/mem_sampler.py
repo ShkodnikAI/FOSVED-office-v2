@@ -528,7 +528,8 @@ def mem_report_line(hours=24):
 
 def run_tracked(cmd, mem_limit_mb=SUBPROCESS_MEM_LIMIT_MB, **kwargs):
     """subprocess.run + RSS-метки полного среза до/после (kind='subprocess')
-    + предел памяти дочернему процессу (#712 A.4).
+    + предел памяти дочернему процессу (#712 A.4)
+    + срезы ВО ВРЕМЯ дочки каждые 5 с (#712, аудит 21.11).
 
     Дочерний процесс с RLIMIT_AS=mem_limit_mb: превышение → дочка падает
     сама (MemoryError / exit non-zero), контейнер жив — «тяжёлая разовая
@@ -542,9 +543,32 @@ def run_tracked(cmd, mem_limit_mb=SUBPROCESS_MEM_LIMIT_MB, **kwargs):
     вызывающие слоты уже переводят его в честные строки отчётов.
     Аргументы — как у subprocess.run (кроме preexec_fn: наш совместим по
     смыслу — если вызывающий передал свой, предел НЕ применяется).
+
+    #712 (аудит 21.11 03:31): OOM 02:00:20 через 16 с после старта
+    NightTickSlot — до первой UA-фазы, подозреваемый backup. Тики
+    сборщика раз в 60 с: 16-секундный пик дочки попадал МЕЖДУ тиками,
+    mem_samples его не видел (только before/after вокруг мёртвой дочки).
+    Live-срезы каждые 5 с (kind='subprocess', ref тот же, phase='live')
+    закрывают окно: пик виден с именем процесса-виновника.
     """
     ref = _cmd_ref(cmd)
     mark("subprocess", ref, "before", full=True)
+
+    def _live_sample():
+        """Срез всех процессов каждые 5 с, пока дочка жива (daemon-тред)."""
+        while not _live_stop.is_set():
+            _live_stop.wait(5.0)
+            if _live_stop.is_set():
+                break
+            try:
+                store_samples(sample_processes(), kind="subprocess", ref=ref, phase="live")
+            except Exception:  # noqa: BLE001 — телеметрия не роняет дочку
+                pass
+
+    _live_stop = threading.Event()
+    _live_t = threading.Thread(target=_live_sample, daemon=True,
+                               name=f"mem-live-{ref}")
+    _live_t.start()
     try:
         if kwargs.get("preexec_fn") is None and mem_limit_mb:
             kwargs["preexec_fn"] = _make_preexec(mem_limit_mb)
@@ -556,10 +580,12 @@ def run_tracked(cmd, mem_limit_mb=SUBPROCESS_MEM_LIMIT_MB, **kwargs):
             _report_rlimit_kill(ref, mem_limit_mb, rc)
         return proc
     except subprocess.CalledProcessError as e:
-        # check=True у вызывающего: то же сообщение, исключение пробрасываем
+        # check=True у вызывающего: то же сообщение, исключение пробрасывается
         _report_rlimit_kill(ref, mem_limit_mb, getattr(e, "returncode", None))
         raise
     finally:
+        _live_stop.set()
+        _live_t.join(timeout=2.0)
         mark("subprocess", ref, "after", full=True)
 
 
