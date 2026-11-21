@@ -88,7 +88,9 @@ def test_market_block_wired_in_context():
     line = [l for l in body.splitlines() if "=== News ===" in l and "factpack_block" in l]
     assert line, "market_block обязан вплетаться в строку сборки контекста"
     l = line[0]
-    assert "+ factpack_block + fred_data + market_block" in l
+    # #740 A.1: между factpack и FRED вплетён live_extra (доп-поиск при
+    # устаревшей теме) — market_block по-прежнему после fred_data
+    assert "+ factpack_block + live_extra + fred_data + market_block" in l
     assert l.index("+ fred_data + market_block") < l.index("=== Corrections ===")
 
 
