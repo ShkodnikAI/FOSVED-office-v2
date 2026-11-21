@@ -60,11 +60,10 @@ def no_trace(monkeypatch):
 class TestBudget:
     def test_floor_over_chain_minus_reserve(self):
         b = comp.get_context_budget("qa", chain=STD_CHAIN)
-        # флор цепи — минимум лимитов провайдеров цепи. #727: kimi (262144)
-        # выведен, его место занял sakana с НЕИЗВЕСТНЫМ лимитом → дефолт
-        # 32768 стал минимумом цепи (до вывода /v1/models владельцем);
-        # резерв std-департамента 8192
-        assert b == 32768 - comp.resolve_output_reserve("qa")
+        # флор цепи — deepseek 65536; резерв std-департамента 8192.
+        # #727: kimi (262144) выведен; отмена 21.11 — sakana ролей не
+        # обслуживает, минимума 32768 в цепи больше нет
+        assert b == 65536 - comp.resolve_output_reserve("qa")
         assert comp.resolve_output_reserve("yana") == 16384  # большой департамент
 
     def test_big_dept_reserve(self):

@@ -65,9 +65,6 @@ PROVIDERS = {
     "cerebras": {"url": "https://api.cerebras.ai/v1/chat/completions", "env_key": "CEREBRAS_API_KEY", "format": "openai", "timeout": 120},
     # №586 A.1: Qwen (Alibaba DashScope, OpenAI-совместимый режим); регион — QWEN_BASE_URL
     "qwen": {"url": _qwen_base_url() + "/chat/completions", "env_key": "QWEN_API_KEY", "format": "openai", "timeout": 120},
-    # #727 KEYS-3: sakana — принял роли kimi (модель sakana-namazu, model-id
-    # от владельца 21.11); соединение — зеркало mlog-реестра (app.mlog llm)
-    "sakana": {"url": "https://api.sakana.ai/v1/chat/completions", "env_key": "SAKANA_API_KEY", "format": "openai", "timeout": 120},
 }
 
 # №715 KEYS-2 (решение владельца 12.11 по #708): Grok и NVIDIA удалены из
@@ -164,14 +161,12 @@ COMBO_CHAINS = {
         ("deepseek", ["deepseek-chat"]),
     ],
     "fosved-standard": [
-        ("sakana", ["sakana-namazu"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6", "glm-4-plus"]),
         ("groq", ["openai/gpt-oss-20b"]),
         ("cerebras", ["gpt-oss-120b"]),
     ],
     "fosved-deep": [
-        ("sakana", ["sakana-namazu"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6"]),
         ("groq", ["openai/gpt-oss-20b"]),
@@ -179,7 +174,6 @@ COMBO_CHAINS = {
         ("anthropic", ["claude-sonnet-4-20250514"]),
     ],
     "fosved-fusion": [
-        ("sakana", ["sakana-namazu"]),
         ("deepseek", ["deepseek-chat"]),
         ("zai", ["glm-4.6"]),
         ("groq", ["openai/gpt-oss-20b"]),
@@ -576,7 +570,8 @@ def _provider_for_model(model):
     №586 A.2: сначала явная форма «провайдер:модель» (если провайдер из
     PROVIDERS); затем префиксы в порядке, где gpt-oss проверяется РАНЬШЕ gpt
     (gpt-oss-* — cerebras, openai/gpt-oss-* — groq; прежний порядок отправлял
-    gpt-oss в OpenAI), добавлены qwen; ветка kimi/moonshot снята (#727 —\n    провайдер выведен из реестра, роли перешли sakana)."""
+    gpt-oss в OpenAI), добавлены qwen; ветки kimi/moonshot и sakana нет (#727: kimi выведен;
+    установка sakana отменена владельцем 21.11 — ролей не передавал)."""
     explicit, rest = _split_explicit_model(model)
     if explicit:
         return explicit
@@ -608,9 +603,6 @@ def _provider_for_model(model):
         provider = "nvidia"
     elif model.startswith("zai-glm"):
         provider = "cerebras"
-    elif model.startswith("sakana"):
-        # #727 KEYS-3: sakana-namazu — иначе тихий фолбэк на priority-provider
-        provider = "sakana"
     return provider
 
 
