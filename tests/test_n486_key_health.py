@@ -159,13 +159,14 @@ def test_missing_key_and_unverified(monkeypatch):
     assert r2["status"] == "unverified"
 
 
-def test_n715_manifest_14_keys_no_removed():
-    """№715 KEYS-2 (решение владельца 12.11 по #708): в манифесте 14 ключей,
-    GROK/NVIDIA/Яндекс.Маркет удалены; оставшиеся (Qwen, FRED, Alpha
-    Vantage и 11 рабочих) на месте."""
+def test_n715_manifest_13_keys_no_removed():
+    """№715 KEYS-2 (решение владельца 12.11 по #708) + #727 KEYS-3:
+    в манифесте 13 ключей (kimi выведен 21.11), GROK/NVIDIA/Яндекс.Маркет
+    удалены; оставшиеся (Qwen, FRED, Alpha Vantage и 10 рабочих) на месте."""
     env_keys = [e["env_key"] for e in key_health.KEY_MANIFEST]
-    assert len(env_keys) == 14, f"ожидалось 14 ключей, стало {len(env_keys)}"
-    for gone in ("GROK_API_KEY", "NVIDIA_API_KEY", "YANDEX_MARKET_API_KEY"):
+    assert len(env_keys) == 13, f"ожидалось 13 ключей, стало {len(env_keys)}"
+    for gone in ("GROK_API_KEY", "NVIDIA_API_KEY", "YANDEX_MARKET_API_KEY",
+                 "KIMI_API_KEY"):
         assert gone not in env_keys, gone
     for keep in ("QWEN_API_KEY", "FRED_API_KEY", "ALPHAVANTAGE_API_KEY",
                  "TAVILY_API_KEY", "TELEGRAM_BOT_TOKEN", "ZAI_API_KEY"):
