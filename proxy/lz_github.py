@@ -158,9 +158,18 @@ if GITHUB_TOKEN:
     GITHUB_HEADERS["Authorization"] = f"token {GITHUB_TOKEN}"
 
 # Queries for GitHub scanning — tuned to Fosved's tech stack
-# Dates are dynamic: search repos updated/created in last 14 days
+# #735 A.3: глубина скана — константы (прежде 8×3=24→~17 и 4×3=12 —
+# потолок, заложенный в код, аудит 20.11: «пять дней подряд 17/12»).
+# sort=stars вместо sort=updated (updated каждый день возвращает одни
+# и те же крупные репо) + фильтр pushed:>=<сегодня-7> — только живые.
+LZ_REPOS_PER_QUERY = 10
+LZ_RELEASES_PER_REPO = 5
+
+
 def _build_github_queries():
-    """Build GitHub search queries for Fosved's tech stack."""
+    """Build GitHub search queries for Fosved's tech stack (#735 A.3:
+    каждая строка получает суффикс pushed:>=<сегодня-7 дней> в
+    _github_search — сюда только тематические фильтры)."""
     return [
         "LLM agent framework language:python stars:>10",
         "telegram bot AI assistant python stars:>5",
@@ -231,7 +240,112 @@ _STACK_CLAIM_RE = re.compile(r"(?i)\b(?:наш\w*|офис\w*)\b")
 # «Пакет + версия» — кандидат на упоминание релиза пакета
 _PKG_VER_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_.\-]*)\s+\d+\.\d+(?:\.\d+)?\b")
 # Базовые имена, которые НЕ pip-пакеты, но стек офиса (A.1) описывают
-_STACK_KNOWN_BASE = ("python", "metalogos", "ubuntu")
+_STACK_KNOWN_BASE = ("python", "metalogos", "ubuntu",
+                     # #735 A.4: системные библиотеки образа ubuntu:24.04
+                     # (Dockerfile: apt-пакеты, не requirements.txt) — речи о
+                     # pip-стеке быть не может, пометка «не используется»
+                     # ложна (инцидент 20.11: OpenSSL в пункте 1 отчёта).
+                     "openssl", "libssl", "glibc", "libc", "bash", "coreutils",
+                     "curl", "git", "ca-certificates", "tzdata", "zlib",
+                     "libffi", "libgcc", "libstdc++", "sqlite", "tcl", "tk",
+                     "xz", "bzip2", "libbz2", "readline", "ncurses",
+                     "liblzma", "libncurses", "libreadline")
+
+# #735 A.4: стоп-лист токенов, которые регэксп _PKG_VER_RE принимает за
+# «пакет <имя> версии N.N» (инцидент 20.11: «CVSS 9.8» → «пакет cvss
+# версии 9.8» → ложная пометка на абзаце про СИСТЕМНЫЙ OpenSSL образа).
+_NOT_A_PACKAGE = frozenset((
+    "cvss", "cve", "nvd", "tls", "ssl", "pr", "v", "iso", "usn",
+    "ghsa", "pypa", "pypi", "npm", "api", "llm", "ai", "ml", "io",
+    "cpu", "gpu", "ram", "ssd", "hdd", "http", "https", "tcp", "udp",
+    "dns", "url", "uri", "id", "uuid", "sha", "md5", "rsa", "ecdsa",
+    "ed25519", "aes", "gcm", "cbc", "mac", "mit", "bsd", "gpl",
+    "lts", "rc", "beta", "alpha", "nightly", "x", "n", "no",
+))
+
+
+# ── #735 A.5: сверка CVE с NVD ──────────────────────────────────────────
+# Аудит 20.11: CVE-2026-121481 и PR openssl/openssl#33652 подтвердить не
+# смог (пусто в поиске; похожая — CVE-2026-31789). Каждый CVE-YYYY-N в
+# отчёте сверяется с NVD API 2.0; не найден — пометка «не подтверждён»,
+# найден — CVSS и дата из NVD, не из генерации модели.
+_CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
+_NVD_CACHE = {}  # cve -> (ok, cvss, published) — один запрос на CVE за прогон
+NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+
+def nvd_lookup(cve_id):
+    """NVD API 2.0 по cveId. Возврат (ok, cvss, published) или (False, None, None).
+
+    Таймаут 8 с, один ретрай; отказ сети/5xx — (False, None, None) с
+    пометкой «не подтверждён (NVD недоступен)» — честно, не молча.
+    Кэш в памяти на прогон: один CVE встречается в абзацах многократно.
+    """
+    cve_id = cve_id.upper()
+    if cve_id in _NVD_CACHE:
+        return _NVD_CACHE[cve_id]
+    result = (False, None, None)
+    for attempt in (1, 2):
+        try:
+            resp = http_requests.get(
+                NVD_API, params={"cveId": cve_id}, timeout=8,
+                headers={"Accept": "application/json"})
+            if resp.status_code == 200:
+                vulns = (resp.json() or {}).get("vulnerabilities", [])
+                if vulns:
+                    v = vulns[0].get("cve", {})
+                    metrics = v.get("metrics", {})
+                    cvss = None
+                    # cvssMetricV31 → V30 → V2: первое найденное
+                    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+                        if metrics.get(key):
+                            cvss = metrics[key][0].get("cvssData", {}).get("baseScore")
+                            break
+                    published = (v.get("published") or "")[:10]
+                    result = (True, cvss, published)
+                else:
+                    result = (False, None, None)
+                break
+            if resp.status_code == 404:
+                result = (False, None, None)
+                break
+            # 403/503 — rate limit NVD (5_req/30s без ключа): пауза и ретрай
+            time.sleep(7)
+        except Exception:
+            if attempt == 2:
+                result = (False, None, None)
+            else:
+                time.sleep(3)
+    _NVD_CACHE[cve_id] = result
+    return result
+
+
+def verify_cves(text):
+    """Каждый CVE-YYYY-N в тексте — строка сверки с NVD.
+
+    Возвращает (текст с блоком сверки в конце, число проверенных).
+    Формат: «CVE-…: CVSS X.X, опубликован ГГГГ-ММ-ДД (NVD)» либо
+    «CVE-…: ⚠️ CVE не подтверждён в NVD». Строки — факты из NVD,
+    не из модели (наряд: CVSS и дата — из NVD, а не от модели).
+    """
+    cves = []
+    for m in _CVE_RE.finditer(str(text)):
+        cid = m.group(0).upper()
+        if cid not in cves:
+            cves.append(cid)
+    if not cves:
+        return str(text), 0
+    lines = []
+    for cid in cves:
+        ok, cvss, published = nvd_lookup(cid)
+        if ok:
+            cvss_s = f"CVSS {cvss}" if cvss is not None else "CVSS n/a"
+            pub_s = f", опубликован {published}" if published else ""
+            lines.append(f"{cid}: {cvss_s}{pub_s} (NVD)")
+        else:
+            lines.append(f"{cid}: ⚠️ CVE не подтверждён в NVD")
+    block = "\nПроверка CVE (NVD):\n" + "\n".join(lines)
+    return str(text) + block, len(cves)
 
 
 def annotate_foreign_stack_claims(text, known_packages=None):
@@ -254,6 +368,9 @@ def annotate_foreign_stack_claims(text, known_packages=None):
         foreign = False
         for m in _PKG_VER_RE.finditer(block):
             cand = m.group(1).lower()
+            # #735 A.4: стоп-лист не-пакетов — «CVSS 9.8» не пакет
+            if cand in _NOT_A_PACKAGE:
+                continue
             if cand in known or cand.replace("-", "").replace("_", "") in known_norm:
                 continue
             foreign = True
@@ -280,9 +397,17 @@ def strip_disrupting_scores(text):
     return "\n".join(lines), count
 
 
-def _github_search(query, sort="updated", per_page=5):
-    """Search GitHub repos, return list of dicts. Works without token (public API)."""
+def _github_search(query, sort="stars", per_page=LZ_REPOS_PER_QUERY):
+    """Search GitHub repos, return list of dicts. Works without token (public API).
+
+    #735 A.3: дефолт sort=stars (updated возвращал одни и те же крупные
+    репо день за днём) + фильтр pushed:>=<сегодня-7> — в выдаче только
+    репо с пушем за последнюю неделю (свежесть по определению наряда).
+    """
     try:
+        pushed_from = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+        if "pushed:" not in query:
+            query = f"{query} pushed:>={pushed_from}"
         params = {"q": query, "sort": sort, "order": "desc", "per_page": per_page}
         headers = {"Accept": "application/vnd.github.v3+json"}
         if GITHUB_TOKEN and not GITHUB_TOKEN.startswith("["):
@@ -299,6 +424,9 @@ def _github_search(query, sort="updated", per_page=5):
                 "stars": r.get("stargazers_count", 0),
                 "lang": r.get("language", ""),
                 "updated": r.get("updated_at", "")[:10],
+                # #735 A.1: pushed_at — факт свежего пуша для пометки
+                # «обновлён» (репо в базе, но пуш новее даты записи)
+                "pushed_at": r.get("pushed_at", ""),
                 "url": r.get("html_url", ""),
                 "created": r.get("created_at", "")[:10],
             } for r in items]
@@ -320,7 +448,7 @@ def _github_releases(repo_full_name):
         if GITHUB_TOKEN and not GITHUB_TOKEN.startswith("["):
             headers["Authorization"] = f"token {GITHUB_TOKEN}"
         resp = http_requests.get(
-            f"https://api.github.com/repos/{repo_full_name}/releases?per_page=3",
+            f"https://api.github.com/repos/{repo_full_name}/releases?per_page={LZ_RELEASES_PER_REPO}",
             headers=headers, timeout=10
         )
         if resp.status_code == 200:
@@ -373,31 +501,77 @@ def scheduler_lz_daily():
     return scheduler_lz_daily_core(dry_run=dry_run, owner_id=owner_id, deliver=deliver)
 
 
+def _seen_updates():
+    """#735 A.1: update_id → дата последней записи (lz_github_updates).
+
+    Формат — как пишет Phase 3: «gh:repo:<name>» для репо, «gh:<repo>:<tag>»
+    для релизов. Таблицы/колонки может не быть (стенд/молодый деплой) —
+    честный пустой dict, фильтр не блокирует первый прогон.
+    """
+    try:
+        rows = _query(
+            "SELECT update_id, MAX(date) AS d FROM lz_github_updates "
+            "GROUP BY update_id", fetch=True) or []
+        return {r[0]: (r[1] or "") for r in rows if r and r[0]}
+    except Exception as e:
+        log.warning(f"LZ Daily: seen_updates read failed (non-fatal): {e}")
+        return {}
+
+
 def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
     try:
         # ── Phase 1: GitHub Scan (direct API) ─────────────────
         log.info("LZ Daily: starting GitHub scan")
+        # #735 A.1: фильтр новизны НА ВХОДЕ — update_id из прошлых прогонов
+        # читаются ДО анализа (прежде lz_github_updates писалась ПОСЛЕ и на
+        # входе не читалась: модель каждый день получала те же релизы как
+        # новые; seen_release_keys был локальным set() на один прогон —
+        # комментарий обещал «across runs», факт — нет).
+        seen_updates = _seen_updates()
         all_repos = []
         seen = set()
+        repos_new = 0
         for q in _build_github_queries():
-            repos = _github_search(q, per_page=3)
+            repos = _github_search(q, per_page=LZ_REPOS_PER_QUERY)
             time.sleep(1)
             for r in repos:
-                if r["name"] not in seen:
-                    seen.add(r["name"])
+                uid = f"gh:repo:{r['name']}"
+                if r["name"] in seen:
+                    continue
+                seen.add(r["name"])
+                last_date = seen_updates.get(uid)
+                if last_date is None:
+                    repos_new += 1
                     all_repos.append(r)
+                    continue
+                # A.1: репо уже сообщалось. Исключение — свежий пуш:
+                # pushed_at новее даты прошлой записи → репо возвращается
+                # с пометкой «обновлён». pushed_at нет в выдаче (старый
+                # мок/смена API) — консервативно пропускаем репо: лучше
+                # меньше нового, чем ложное «обновление».
+                pushed = (r.get("pushed_at") or "")[:10]
+                if pushed and pushed > str(last_date)[:10]:
+                    r["_update_label"] = "(обновлён)"
+                    all_repos.append(r)
+                # иначе: репо уже было, ничего не изменилось — не новый
 
         # Check watched repos for new releases
         all_releases = []
-        seen_release_keys = set()  # dedup by (repo, tag) across runs
+        seen_release_keys = set()  # dedup by (repo, tag) внутри прогона
+        releases_new = 0
         for repo in GITHUB_WATCH_RELEASES:
             releases = _github_releases(repo)
             time.sleep(1)
             for r in releases:
                 rkey = f"{r['repo']}@{r['tag']}"
-                if rkey not in seen_release_keys:
-                    seen_release_keys.add(rkey)
-                    all_releases.append(r)
+                uid = f"gh:{r['repo']}:{r['tag']}"
+                if rkey in seen_release_keys:
+                    continue
+                seen_release_keys.add(rkey)
+                if uid in seen_updates:
+                    continue  # A.1: релиз уже в lz_github_updates — не новый
+                releases_new += 1
+                all_releases.append(r)
 
         github_ok = bool(all_repos or all_releases)
         if not github_ok:
@@ -578,6 +752,12 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
             except Exception as e:  # noqa: BLE001 — не роняет отчёт
                 log.warning(f"LZ Daily: stack-claim annotate failed (non-fatal): {e}")
                 stack_marks = 0
+            # ── #735 A.5: сверка CVE с NVD — факты из NVD, не от модели
+            cves_checked = 0
+            try:
+                analysis, cves_checked = verify_cves(analysis)
+            except Exception as e:  # noqa: BLE001 — не роняет отчёт
+                log.warning(f"LZ Daily: NVD verify failed (non-fatal): {e}")
 
         # ── Phase 3: Save to DB + Memory (with cross-run dedup) ───────────
         if not dry_run:
@@ -627,13 +807,19 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
         if not analysis:
             # №597 A.2: нового нет — модель не вызывалась, владельцу одна строка
             report = (f"🔍 ЛЗ: за сутки новых находок нет "
-                      f"(просмотрено {len(all_repos)} репозиториев, {len(all_releases)} релизов, {news_count} новостей)")
+                      f"(просмотрено {len(all_repos)} репозиториев (новых {repos_new}), "
+                      f"{len(all_releases)} релизов (новых {releases_new}), {news_count} новостей)")
         else:
             report = f"🔍 LZ DAILY REPORT — {datetime.utcnow().isoformat()[:10]}\n"
             report += f"{'=' * 40}\n\n"
             report += analysis
             report += f"\n\n{'─' * 40}\n"
-            report += f"Скан: {len(all_repos)} repos, {len(all_releases)} releases, {news_count} новостей, {len(monitor_topics)} monitors\n"
+            # #735 A.2: подвал честно показывает новизну: «просмотрено M
+            # репозиториев (новых N), K релизов (новых L)» — прежде те же
+            # 17/12 без фильтра выглядели ежедневным потоком новинок.
+            report += (f"Скан: {len(all_repos)} репозиториев (новых {repos_new}), "
+                       f"{len(all_releases)} релизов (новых {releases_new}), "
+                       f"{news_count} новостей, {len(monitor_topics)} monitors\n")
             # #689 A.2: учёт пропущенного — программой. URL входных новостей
             # сверяется с текстом отчёта (после фильтра повторов — счёт честен
             # к итоговому тексту); подвал показывает расхождение, модель
@@ -652,6 +838,10 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
             if dp_removed:
                 # #721 A.3: вырезано баллов disrupting potential
                 report += f"вырезано баллов disrupting potential: {dp_removed}\n"
+            if cves_checked:
+                # #735 A.5: сколько CVE сверено с NVD (блок сверки — в конце
+                # анализа; неподтверждённые помечены там же)
+                report += f"CVE сверено с NVD: {cves_checked}\n"
             report += f"Provider: {result.get('provider', '?')} | Tokens: {result.get('tokens_in', 0)}+{result.get('tokens_out', 0)}"
 
         # ── Phase 5: Send to Owner (Admin) ────────────────────
