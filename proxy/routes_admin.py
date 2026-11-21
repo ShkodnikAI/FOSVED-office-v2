@@ -270,7 +270,7 @@ def api_models():
 # №715 KEYS-2: grok (xAI) и nvidia удалены из подписей каталога — решение владельца 12.11.
 _MODEL_LABELS = {"zai": "Z.ai", "deepseek": "DeepSeek", "groq": "Groq",
                  "anthropic": "Anthropic", "openai": "OpenAI", "cerebras": "Cerebras",
-                 "kimi": "Kimi", "qwen": "Qwen"}
+                 "sakana": "Sakana", "qwen": "Qwen"}  # #727: kimi выведен
 _MODEL_CATALOG_EXTRA = {"openai": ["gpt-4o"]}
 _RE_MODEL_NAME = re.compile(r"^[A-Za-z0-9/._:+-]{1,120}$")
 

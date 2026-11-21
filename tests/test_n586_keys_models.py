@@ -6,7 +6,8 @@
 - A.1: Qwen в PROVIDERS / INTEGRATIONS_REGISTRY / KEY_MANIFEST / TOKEN_COSTS /
   PROVIDER_CONTEXT_LIMITS; URL из QWEN_BASE_URL (международный по умолчанию);
 - A.2: _provider_for_model — явная форма «провайдер:модель», порядок gpt-oss
-  РАНЬШЕ gpt, qwen/kimi-moonshot распознаются (табличный тест 14 имён);
+  РАНЬШЕ gpt, qwen распознаются (табличный тест 12 имён; #727: строки
+  kimi/moonshot сняты — провайдер выведен из реестра);
 - B.1: POST /api/integrations/<env_key>/check — 200 → ok + models_sample,
   401 → invalid; значения ключа в ответе НЕТ; без Bearer → 401;
 - C.1: назначение override_<dept>.txt вызывается ПЕРВЫМ (до model_for и combo);
@@ -106,8 +107,6 @@ def test_a1_qwen_url_honors_env(monkeypatch):
     ("qwen-plus", "qwen"),
     ("qwen:qwen3-max", "qwen"),
     ("qwen:qwen-plus-latest", "qwen"),
-    ("kimi-k3", "kimi"),
-    ("moonshot-v1-8k", "kimi"),
     ("glm-4.6", "zai"),
     ("claude-sonnet-4-20250514", "anthropic"),
     ("deepseek-chat", "deepseek"),

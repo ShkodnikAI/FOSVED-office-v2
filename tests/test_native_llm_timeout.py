@@ -56,7 +56,7 @@ def test_a2_deepseek_first():
     )
     order = re.findall(r"alias: (\w+)", block)
     rest = [a for a in order if a != "deepseek"]
-    assert rest == ["kimi", "zai", "groq", "cerebras", "sakana"], (
+    assert rest == ["zai", "groq", "cerebras", "sakana"], (  # #727: kimi выведен
         f"относительный порядок остальных провайдеров нарушен: {rest}"
     )
     assert 'default_model: "deepseek-chat"' in block, (

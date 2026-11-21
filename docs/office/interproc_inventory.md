@@ -28,7 +28,7 @@
 сверяются машиной тестом `tests/test_n717_sec1.py` — документ не может разойтись
 с кодом.
 
-**Сводка (на дату фиксации):**
+**Сводка (на дату фиксации; #727 KEYS-3 — KIMI_API_KEY выведен из llm-блоков):**
 
 | Метрика | Значение |
 |---|---|
@@ -60,9 +60,9 @@
 | Блок | Файл:строка | env-переменные |
 |---|---|---|
 | `db` | app.mlog:30 | `DATABASE_URL` |
-| `llm` | app.mlog:39 | `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `KIMI_API_KEY`, `SAKANA_API_KEY`, `ZAI_API_KEY` |
+| `llm` | app.mlog:39 | `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `SAKANA_API_KEY`, `ZAI_API_KEY` |
 | `db` | dogfood_staging.mlog:20 | `DATABASE_URL` |
-| `llm` | dogfood_staging.mlog:26 | `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `KIMI_API_KEY`, `SAKANA_API_KEY`, `ZAI_API_KEY` |
+| `llm` | dogfood_staging.mlog:26 | `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `SAKANA_API_KEY`, `ZAI_API_KEY` |
 | `db` | dept/forge_create_bridge.mlog:19 | `DATABASE_URL` |
 | `db` | dept/osp.mlog:48 | `DATABASE_URL` |
 

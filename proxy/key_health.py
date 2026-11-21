@@ -94,11 +94,6 @@ KEY_MANIFEST = [
      "how_link": "https://sakana.ai",
      "why": "LLM-провайдер (mlog llm-блок, app.mlog).",
      "check": {"type": "openai_models", "url": "https://api.sakana.ai/v1/models"}},
-    {"env_key": "KIMI_API_KEY", "label": "Kimi (Moonshot)", "kind": "model",
-     "required": False, "sanctions_ok": True,
-     "how_link": "https://platform.moonshot.ai/console/api-keys",
-     "why": "LLM-провайдер.",
-     "check": {"type": "openai_models", "url": "https://api.moonshot.ai/v1/models"}},
     {"env_key": "QWEN_API_KEY", "label": "Qwen (Alibaba)", "kind": "model",  # №586 A.1
      "required": False, "sanctions_ok": True,
      "how_link": "https://bailian.console.alibabacloud.com",

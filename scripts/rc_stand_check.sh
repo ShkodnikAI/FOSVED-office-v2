@@ -190,7 +190,7 @@ if [ "${RC_SKIP_E2E:-0}" != "1" ]; then
   export API_SECRET="api-token-123456" CRON_SECRET="cron-token-123456"
   export GITHUB_TOKEN_METALOGOS="gh-token-12345678"
   export DEEPSEEK_API_KEY="deepseek-token-12345" ZAI_API_KEY="zai-token-12345678"
-  export KIMI_API_KEY="kimi-token-12345678" GROQ_API_KEY="groq-token-12345678"
+  export GROQ_API_KEY="groq-token-12345678"
   export GROK_API_KEY="grok-token-12345678" ANTHROPIC_API_KEY="anth-token-12345678"
   export OPENAI_API_KEY="oai-token-12345678" CEREBRAS_API_KEY="cerebras-12345678"
   export NVIDIA_API_KEY="nvidia-token-1234567" TAVILY_API_KEY="tavily-token-1234567"
