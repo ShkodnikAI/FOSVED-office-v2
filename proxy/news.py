@@ -447,3 +447,78 @@ def get_night_news_digest():
     """Top-5 events over last 12 hours for morning brief (#597: только новые)."""
     text, _items = get_night_news_items()
     return text
+
+
+# ── #740 OSP-FRESH: свежесть данных перед прогнозом/ответом ──────────────
+
+def osp_freshness(query, dept=None):
+    """#740 A.1/A.2: возраст данных по теме + время последнего сбора.
+
+    Возврат — dict для /news/freshness (mlog-потребители: BuildOSPContext,
+    HandleYana, HandleLz):
+      topic_latest      — published (fallback collected) самой свежей записи
+                          по теме; матчачится по основам, как get_fresh_news
+                          (те же основы слов — наряд), все категории
+                          департамента, БЕЗ окна 48 ч: возраст меряем честно,
+                          «старое» ≠ «нет данных»;
+      topic_age_hours   — возраст записи в часах (None — записей по теме нет);
+      last_collect      — MAX(collected) по всей news_cache (последний
+                          успешный сбор любого коллектора);
+      collect_age_hours — возраст сбора в часах (None — кэш пуст).
+
+    Инцидент-кейс (владелец, 17.11): прогноз OSP-2026-11-17-CRIMEAN-BRIDGE-02
+    построен 05:47 по данным до 16.11 — модель не видела ночную атаку 01:35;
+    слот сбора (раз в 6 ч) при цикле server_failed не работал.
+    """
+    keywords = _extract_keywords(query)
+    stems = {_stem(k) for k in keywords if len(k) >= 3}
+    cats = DEPT_CATEGORIES.get(dept, ("news_ru", "tech", "geopolitics"))
+    cat_filter = " OR ".join(["category = ?"] * len(cats))
+
+    latest = None
+    if stems:
+        rows = _query(f"""SELECT title, summary, published, collected FROM news_cache
+                          WHERE ({cat_filter})
+                          ORDER BY COALESCE(published, collected) DESC LIMIT 500""",
+                      list(cats), fetch=True) or []
+        for r in rows:
+            doc = _doc_stems(f"{r[0] or ''} {r[1] or ''}")
+            if any(st in doc or (len(st) >= 5 and any(d.startswith(st) for d in doc))
+                   for st in stems):
+                latest = r[2] or r[3]
+                break
+    col = _query("SELECT MAX(collected) AS m, COUNT(*) AS n FROM news_cache",
+                 (), fetch=True)
+    last_collect = col[0][0] if col else None
+    return {
+        "topic_latest": latest,
+        "topic_age_hours": _age_hours(latest),
+        "last_collect": last_collect,
+        "collect_age_hours": _age_hours(last_collect),
+        "searched": False,
+    }
+
+
+def _age_hours(ts):
+    """Возраст SQLite-таймстемпа UTC 'YYYY-MM-DD HH:MM:SS' в часах; None —
+    пусто/нераспознано (тихо: вызывающий трактует как «нет данных»)."""
+    if not ts:
+        return None
+    from datetime import datetime, timezone
+    try:
+        t = datetime.strptime(str(ts)[:19], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc)
+        return round((datetime.now(timezone.utc) - t).total_seconds() / 3600.0, 1)
+    except ValueError:
+        return None
+
+
+def topic_matches_news(query, row_title_summary):
+    """#740 A.3: запись news_cache релевантна теме (те же основы)."""
+    keywords = _extract_keywords(query)
+    stems = {_stem(k) for k in keywords if len(k) >= 3}
+    if not stems:
+        return False
+    doc = _doc_stems(row_title_summary or "")
+    return any(st in doc or (len(st) >= 5 and any(d.startswith(st) for d in doc))
+               for st in stems)

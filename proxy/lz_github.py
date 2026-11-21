@@ -994,6 +994,25 @@ def news_fresh():
     return jsonify({"news": news})
 
 
+# ── #740 OSP-FRESH: свежесть данных по теме (возраст кэша + последний сбор) ──
+@app.route("/news/freshness", methods=["POST"])
+def news_freshness():
+    """Возраст данных для ОСП/Яны/ЛЗ перед прогнозом или «нет данных».
+
+    Read-only по news_cache: тяжёлым писателям (ночная цепочка — Grapher,
+    keys night-check) не мешает. Факт живого поиска (searched) кладёт
+    вызывающий ПОСЛЕ своей попытки — протокол ответа «нет данных только
+    после поиска» собирается на стороне mlog.
+    """
+    d = request.get_json(force=True)
+    query = d.get("query", "")
+    dept = d.get("dept") or None
+    if not query:
+        return jsonify({"error": "query required"}), 400
+    from proxy.news import osp_freshness
+    return jsonify(osp_freshness(query, dept=dept))
+
+
 # ── /lz/github-scan endpoint (used by ScanGitHub in lz.mlog) ──
 @app.route("/lz/github-scan", methods=["POST"])
 def lz_github_scan():

@@ -459,13 +459,43 @@ pattern LZClassifyDomain(query: String) -> String {
   return result
 }
 
+// ── #740 A.2: свежесть кэша в контексте ЛЗ ──────────────────────────
+// Инцидент 17.11 19:25: «blocked — нет предмета запроса и нет канала
+// данных» при мёртвом слоте сбора (цикл server_failed #728). Возраст
+// кэша и время последнего сбора — в контекст: констатация «данных нет»
+// в отчёте допустима только при пустом живом поиске (Tavily идёт в
+// HandleLz), возраст и факт поиска модель называет. Read-only
+// /news/freshness — тяжёлым писателям ночи не мешает.
+pattern LZFreshnessBlock(query: String) -> String {
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/news/freshness", json_encode({query: query, dept: "lz"}), "application/json"))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "" }
+  let latest = redact(to_string(json_get(parsed, "topic_latest", "")), "all")
+  let age = to_string(to_int(to_float(to_string(json_get(parsed, "topic_age_hours", "-1")))))
+  let last_collect = redact(to_string(json_get(parsed, "last_collect", "")), "all")
+  let c_age = to_string(to_int(to_float(to_string(json_get(parsed, "collect_age_hours", "-1")))))
+  let mut block = "\n\n=== Свежесть кэша новостей ===\n"
+  if latest == "" or latest == "()" or latest == "None" then {
+    let block = block + "По теме в кэше новостей записей нет.\n"
+  } else {
+    let block = block + "Данные кэша по теме на: " + latest + " (возраст " + age + " ч).\n"
+  }
+  if c_age != "" and to_float(c_age) > 12.0 then {
+    let block = block + "ВНИМАНИЕ: сбор новостей не работает с " + last_collect + " (последний успешный сбор " + c_age + " ч назад).\n"
+  }
+  let block = block + "Правило: констатация «данных нет» — только если живой поиск (Tavily ниже) тоже пуст; в этом случае назови возраст кэша и факт поиска. Если сбор новостей не работает — назови, с какого времени."
+  return block
+}
+
 pattern BuildLZContext(query: String, domain: String, chat_id: String) -> String {
   let kb = LZWorldKB(domain)
   let watch = LZWatchRelevance(query)
   let recent = LZRecentArtifacts(domain, 5.0)
   let scan = LZApiScanContext(query, domain, chat_id)
   // #402 A.2: данные LZ Daily по GitHub — только при GitHub-теме запроса
-  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan + LZGithubContextIfRelevant(query) + TeamAskBlock("lz") + TeamBoardBlock("lz")
+  // #740 A.2: свежесть кэша — возраст + последний сбор (событийная честность)
+  return "KB: " + kb + "\nWatch: " + watch + "\nRecent: " + recent + "\n" + scan + LZGithubContextIfRelevant(query) + LZFreshnessBlock(query) + TeamAskBlock("lz") + TeamBoardBlock("lz")
 }
 
 // ── FORGE (#221): детерминированные API-источники в общем пути /lz ──────

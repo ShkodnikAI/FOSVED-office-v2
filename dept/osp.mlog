@@ -561,6 +561,77 @@ pattern OSPFreshnessGate(query: String, live_raw: String, attempted: Bool) -> St
   return "\n\n=== ГЕЙТ АКТУАЛЬНОСТИ: СВЕЖИХ ДАННЫХ НЕТ ===\nЖивой поиск не выполнен, вернул 0 или отказал (точная причина — в секции LIVE разведсводки выше). ЗАПРЕЩЕНО: таблицы вероятностей, сценарные P=, выводы уровня «экспозиция минимальна», «прямая угроза отсутствует», «нарратив тревоги опережает поток». ВЫДАЙ вместо прогноза: «нужна проверка свежих событий» + конкретный список, что именно проверить (источники, запросы, окно времени). Собственные оценки — только [ИНТЕРПРЕТАЦИЯ], без вероятностных таблиц."
 }
 
+// ── #740 A.1: живой поиск при устаревшей теме — тонкая обёртка над
+// OSPLiveSearchBlock (не сам блок: инвариант #474 — автоматический путь
+// не зовёт собственный Tavily-вызов по имени блока; гвард #423 держит).
+pattern OSPStaleTopicLive(query: String) -> String {
+  return OSPLiveSearchBlock(query)
+}
+
+// ── #740 OSP-FRESH: возраст данных по теме (A.1) ─────────────────────
+// Инцидент 17.11: OSP-2026-11-17-CRIMEAN-BRIDGE-02 построен 05:47 на
+// данных до 16.11 — ночная атака 01:35 не попала в контекст, слот сбора
+// (раз в 6 ч) при цикле server_failed не работал. Возраст кэша меряем
+// ДО прогноза, шапка «Данные на: …» — в каждый отчёт ОСП.
+// Возврат: "latest|age|collect_age" (часы, "-1" = нет данных/None).
+pattern OSPFreshnessData(query: String, dept: String) -> String {
+  let resp = TryVal(try http_post("http://127.0.0.1:4000/news/freshness", json_encode({query: query, dept: dept}), "application/json"))
+  if to_string(resp) == "()" then { return "unavailable|-1|-1" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "unavailable|-1|-1" }
+  let latest = redact(to_string(json_get(parsed, "topic_latest", "")), "all")
+  let age = to_string(to_int(to_float(to_string(json_get(parsed, "topic_age_hours", "-1")))))
+  let c_age = to_string(to_int(to_float(to_string(json_get(parsed, "collect_age_hours", "-1")))))
+  if latest == "" or latest == "()" or latest == "None" then { let latest = "нет записей" }
+  return latest + "|" + age + "|" + c_age
+}
+
+// Шапка свежести для отчёта (A.1: «Данные на: <время> (возраст N ч)»).
+// freshest — строка OSPFreshnessData. Для вневременных вопросов
+// (OSPSkipLiveSearch) шапка не нужна — данные не событийные.
+pattern OSPFreshnessHeader(query: String, freshest: String) -> String {
+  if OSPSkipLiveSearch(query) then { return "" }
+  let parts = split(freshest, "|")
+  let latest = to_string(get(parts, 0.0))
+  let age = to_string(get(parts, 1.0))
+  if latest == "нет записей" then {
+    return "\n\n=== ДАННЫЕ: НЕТ ЗАПИСЕЙ ПО ТЕМЕ ===\nКэш новостей не содержит записей по теме вопроса. Это НЕ «события не было» — данных просто нет. Требование: открой отчёт оговоркой «данных по теме нет, прогноз строится на базовой модели», вероятности — с явной оговоркой неуверенности."
+  }
+  return "\n\n=== ДАННЫЕ ===\nДанные на: " + latest + " (возраст " + age + " ч)"
+}
+
+// A.1, решение об откладывании: событийная тема (военные/событийные
+// ключи — константа ниже), возраст темы > 6 ч → живой поиск обязателен
+// (вызывает BuildOSPContext поверх factpack); возраст > 12 ч И живой
+// поиск ничего не дал → прогноз не публикуется.
+pattern OSPEventfulTopic(query: String) -> Bool {
+  let t = lower(query)
+  return contains(t, "удар") or contains(t, "атак") or contains(t, "обруш") or contains(t, "взрыв") or contains(t, "обстрел") or contains(t, "ракет") or contains(t, "дрон") or contains(t, "нашеств") or contains(t, "прорыв") or contains(t, "войн") or contains(t, "конфликт") or contains(t, "авари") or contains(t, "катастроф") or contains(t, "катастроф") or contains(t, "теракт") or contains(t, "землетрясен") or contains(t, "наводнен") or contains(t, "пожар") or contains(t, "эпидем") or contains(t, "выбор") or contains(t, "мост") or contains(t, "станци") or contains(t, "завода") or contains(t, "прорыва") or contains(t, "наступлен")
+}
+
+// A.1: вердикт свежести для пути публикации. Вход: query, данные
+// OSPFreshnessData, live_ok — дал ли живой поиск (factpack LIVE или
+// дополнительный Tavily) непустой результат (BuildOSPContext кладёт
+// факт в kv osp_fresh_live_ok — между контекстом и публикацией минуты
+// LLM-прогона, тот же запрос-цикл).
+// Возврат: "ok" | "defer|<причина>" — defer = прогноз не публикуется.
+pattern OSPFreshnessVerdict(query: String, freshest: String, live_ok: Bool) -> String {
+  if OSPSkipLiveSearch(query) then { return "ok" }
+  let parts = split(freshest, "|")
+  let age_s = to_string(get(parts, 1.0))
+  let age = to_float(age_s)
+  if age < 0.0 then { return "ok" }
+  if OSPEventfulTopic(query) then {
+    if age > 6.0 and live_ok == false then {
+      if age > 12.0 then { return "defer|данные устарели на " + age_s + " ч, живой поиск ничего не дал — прогноз отложен" }
+      return "ok"
+    }
+  } else {
+    if age > 12.0 and live_ok == false then { return "defer|данные устарели на " + age_s + " ч, живой поиск ничего не дал — прогноз отложен" }
+  }
+  return "ok"
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // MARKET DATA — наряд #467: текущие цены для рыночных вопросов
 // ═══════════════════════════════════════════════════════════════════════
@@ -703,6 +774,29 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String, depth: I
     let factpack_block = "\n\n" + consult
     let live_raw = TeamExtractSection(consult, "[LIVE]", "[NEWS]")
   }
+  // ── #740 A.1: возраст данных по теме ДО гейта; событийная тема с
+  // возрастом > 6 ч — ДОПОЛНИТЕЛЬНЫЙ живой поиск Tavily поверх factpack
+  // (инцидент 17.11: factpack честно показал пусто/старое, прогноз вышел
+  // уверенный; теперь отсутствие свежих данных — явное и проверяемое).
+  let freshness = OSPFreshnessData(query, "osp")
+  let mut live_extra = ""
+  if OSPSkipLiveSearch(query) == false then {
+    let f_parts = split(freshness, "|")
+    let f_age = to_float(to_string(get(f_parts, 1.0)))
+    if OSPEventfulTopic(query) and f_age > 6.0 then {
+      let live_extra = OSPStaleTopicLive(query)
+    }
+  }
+  let fresh_header = OSPFreshnessHeader(query, freshness)
+  // #740 A.1: факт живого поиска — в kv для OSPSaveCard (вердикт
+  // свежести при публикации). Непустой live = factpack LIVE без
+  // скобки-отказа или непустой дополнительный Tavily-блок.
+  let mut live_any_ok = false
+  if length(trim(live_raw)) > 0.0 and starts_with(trim(live_raw), "(") == false then { let live_any_ok = true }
+  if length(trim(live_extra)) > 0.0 and starts_with(trim(live_extra), "(") == false and starts_with(trim(live_extra), "[") == false then { let live_any_ok = true }
+  let _ = TryVal(try kv_set("osp_fresh_live_ok", "0"))
+  if live_any_ok then { let _ = TryVal(try kv_set("osp_fresh_live_ok", "1")) }
+  if OSPSkipLiveSearch(query) then { let _ = TryVal(try kv_set("osp_fresh_live_ok", "1")) }
   // #474 A.2: гейт актуальности судит live-часть разведсводки ЛЗ
   // (та же скобка-причина — отказ, тот же "•" — свежие данные).
   // #474 A.2: гейт актуальности — риск-вопрос без свежих данных не
@@ -748,7 +842,7 @@ pattern BuildOSPContext(query: String, domain: String, chat_id: String, depth: I
   if s_now == "()" then { let s_now = "" }
   let s_sk = to_string(skills)
   if s_sk == "()" then { let s_sk = "" }
-  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + factpack_block + fred_data + market_block + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg + fresh_gate
+  let context = profile + "\n\n=== Дата ===\n" + s_now + "\n\n=== Domain: " + domain + " ===\n" + domain_kb + "\n\n=== Skills ===\n" + s_sk + "\n\n=== News ===\n" + news + factpack_block + live_extra + fred_data + market_block + "\n\n=== Corrections ===\n" + s_cor + "\n\n=== Memory ===\n" + s_mem + "\n\n=== Консолидированные факты ===\n" + s_facts + "\n\n=== Dialog ===\n" + s_dlg + fresh_header + fresh_gate
   let context = context + "\n\n" + TeamAskBlock("osp")
   let context = context + "\n\n=== ПОВТОР: ДАТА ===\n" + s_now
   // TEAM-3 #482 A.3: доска находок (алерты ЛЗ — с подписью источника)
@@ -1467,6 +1561,21 @@ pattern OSPFSourcesToDB(context: String, analysis_id: Int, as_of: String) -> Str
 // methods_json/assumptions_json — из CARD-хвоста (опциональные поля §7.2).
 pattern OSPSaveCard(question: String, p_raw: Float, criteria: String, as_of: String, resolve_by: String, src_json: String, analysis_id: Int, prose: String, crowd_p: Float, dissent: String, methods_json: String, assumptions_json: String, depth: Int) -> String {
   let _ = OSPFEnsureSchema()
+  // #740 A.1: свежесть ДО публикации — карточка создаётся (история не
+  // теряется), но при defer остаётся в gated: данные старше 12 ч и живой
+  // поиск ничего не дал → прогноз не публикуется, владельцу — строка с
+  // возрастом (инцидент 17.11: прогноз по мосту 72% вышел на данных
+  // суток давности и был опровергнут в тот же день).
+  let fresh_check = OSPFreshnessVerdict(question, OSPFreshnessData(question, "osp"), kv_get("osp_fresh_live_ok") == "1")
+  if starts_with(fresh_check, "defer|") then {
+    let reason = substring(fresh_check, 7.0, length(fresh_check))
+    let _ = db_execute("INSERT INTO osp_forecast (kind, question, resolution_criteria, as_of, resolve_by, status, p_raw, crowd_p, sources_json, analysis_id, models_json, gate_report) VALUES ('owner', ?, ?, ?, ?, 'gated', ?, -1, ?, ?, '{\"n_runs\":1}', ?)", [question, criteria, as_of, resolve_by, to_string(p_raw), src_json, to_string(analysis_id), reason])
+    let rows0 = query("SELECT id FROM osp_forecast WHERE question = ? ORDER BY id DESC LIMIT 1", [question])
+    let id0 = to_float(to_string(json_get(get(rows0, 0.0), "id", "0")))
+    let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, 'gated', 'REFUSED>published', ?, 'osp', datetime('now'))", [to_string(id0), reason])
+    let _ = try OutboxPut("osp-fresh", "⏸️ Прогноз отложен: " + reason + " — вопрос: " + substring(question, 0.0, 120.0))
+    return "GATED|" + to_string(id0) + "|FAIL: свежесть данных: " + reason
+  }
   let _ = db_execute("INSERT INTO osp_forecast (kind, question, resolution_criteria, as_of, resolve_by, status, p_raw, p_ensemble, n_runs, crowd_p, sources_json, analysis_id, models_json, gate_report) VALUES ('owner', ?, ?, ?, ?, 'drafted', ?, ?, 1, ?, ?, ?, '{\"n_runs\":1}', '')", [question, criteria, as_of, resolve_by, to_string(p_raw), to_string(p_raw), to_string(crowd_p), src_json, to_string(analysis_id)])
   let rows = query("SELECT id FROM osp_forecast WHERE question = ? ORDER BY id DESC LIMIT 1", [question])
   let id = to_float(to_string(json_get(get(rows, 0.0), "id", "0")))
@@ -3403,6 +3512,64 @@ pattern OSPArchiveExpired(now_iso: String) -> String {
   return out
 }
 
+// ── #740 A.3: новое событие по теме watching-прогноза ────────────────
+// Инцидент 17.11: прогноз по мосту (P=72% «не будет выведен из строя»)
+// опровергнут в тот же день — а авто-пометки «требует пересмотра» не
+// существовало. Ночная вахта: для каждого watching-прогноза ищем в
+// news_cache запись НОВЕЕ даты прогноза (created_at) с ключами события
+// (удар/атака/обрушение/взрыв) и релевантную теме (основы — тот же
+// матчер, что get_fresh_news, через call_python news.topic_matches_news).
+// Пометка — статусная строка в events + уведомление владельцу одной
+// строкой (OutboxPut, окно 07:15). Статус watching НЕ меняется — исход
+// всё равно ставит владелец (/osp resolve); пометка — сигнал пересмотра.
+pattern OSPWatchNewsCheck() -> String {
+  let _ = OSPFEnsureSchema()
+  let rows = query("SELECT id, question, created_at FROM osp_forecast WHERE status = 'watching' ORDER BY id LIMIT 20", [])
+  if length(rows) == 0.0 then { return "вахта: watching-прогнозов нет" }
+  // ключи события (наряд): удар/атака/обрушение/взрыв (+обстрел/ракета —
+  // тот же класс; списки инцидентного словаря ОСП уже шире — здесь точно
+  // по наряду, расширение — отдельным решением)
+  let event_keys = "удар,атак,обруш,взрыв"
+  let news_rows = query("SELECT title, summary, published, collected FROM news_cache WHERE COALESCE(published, collected) > datetime('now', '-2 days') ORDER BY COALESCE(published, collected) DESC LIMIT 200", [])
+  let mut out = ""
+  each r in rows {
+    let fid = to_string(json_get(r, "id", ""))
+    let question = to_string(json_get(r, "question", ""))
+    let created = to_string(json_get(r, "created_at", ""))
+    let mut matched = ""
+    each nr in news_rows {
+      let title = redact(to_string(json_get(nr, "title", "")), "all")
+      let summary = redact(to_string(json_get(nr, "summary", "")), "all")
+      let pub = to_string(json_get(nr, "published", ""))
+      let coll = to_string(json_get(nr, "collected", ""))
+      let ts = pub
+      if ts == "" or ts == "()" then { let ts = coll }
+      // новее даты прогноза (строковое сравнение ISO — SQLite-формат)
+      if ts > created then {
+        let tl = lower(title + " " + summary)
+        let has_event = contains(tl, "удар") or contains(tl, "атак") or contains(tl, "обруш") or contains(tl, "взрыв")
+        if has_event then {
+          let m_resp = TryVal(try call_python("news", "topic_matches_news", json_encode([question, title + " " + summary])))
+          let m_parsed = TryVal(try parse_json(to_string(m_resp)))
+          if to_string(m_parsed) != "()" then {
+            if to_string(json_get(m_parsed, "result", "")) == "true" then {
+              let matched = title
+            }
+          }
+        }
+      }
+    }
+    if matched != "" then {
+      let _ = db_execute("INSERT INTO osp_forecast_events (forecast_id, from_status, to_status, reason, actor, created_at) VALUES (?, 'watching', 'watching', ?, 'osp-watch', datetime('now'))", [fid, "требует пересмотра: новое событие по теме — " + substring(matched, 0.0, 100.0)])
+      let line = "🔁 карточка " + fid + " требует пересмотра: новое событие по теме — " + substring(matched, 0.0, 90.0)
+      if out == "" then { let out = line } else { let out = out + "\n" + line }
+    }
+  }
+  if out == "" then { return "вахта: новых событий по watching-темам нет" }
+  let _ = try OutboxPut("osp-watch", "🔁 Прогнозы ОСП требуют пересмотра (новые события):\n" + out)
+  return out
+}
+
 // Ночной слот: обход due + архивация; находки — в ночной отчёт 07:15
 // (OutboxPut → OutboxFlush 07:15, механизм #550)
 pattern OSPWatchSlot() -> String {
@@ -3411,10 +3578,15 @@ pattern OSPWatchSlot() -> String {
   let now_iso = to_string(json_get(get(today, 0.0), "d", ""))
   let due = OSPWatchDue(now_iso)
   let expired = OSPArchiveExpired(now_iso)
+  // #740 A.3: новые события по watching-темам — в тот же слот вахты
+  let news_check = OSPWatchNewsCheck()
   let mut rep = "🌙 Ночная вахта ОСП:\n" + due
   if expired != "вахта: истёкших нет" then {
     rep = rep + "\n" + expired
     let _ = try OutboxPut("osp-watch", rep)
+  }
+  if news_check != "вахта: новых событий по watching-темам нет" then {
+    rep = rep + "\n" + news_check
   }
   let _ = try AuditLog("osp_watch_slot", "osp", substring(rep, 0.0, 120.0))
   return rep
