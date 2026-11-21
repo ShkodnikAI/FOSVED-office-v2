@@ -408,7 +408,7 @@ proxy/core.py:163). Классы:
 | Класс | Переменные | Комментарий |
 |---|---|---|
 | **Секреты-учётные данные** | `TELEGRAM_BOT_TOKEN`, `TAVILY_API_KEY`, `ALPHAVANTAGE_API_KEY`, `CRON_SECRET`, `INTERNAL_API_TOKEN`, `LOCKDOWN_PASSWORD`, `TELEGRAM_WEBHOOK_SECRET`, `API_SECRET`, `GITHUB_TOKEN_METALOGOS`, `WHISPER_API_KEY` | Значение = мандат; утечка в лог/ответ/URL-параметр — инцидент |
-| **Ключи провайдеров LLM** | `DEEPSEEK_API_KEY`, `KIMI_API_KEY`, `ZAI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `SAKANA_API_KEY` (+ Python-only: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `QWEN_API_KEY`) | Читает конфиг-блок `llm {}` mlog-рантайма и Python-слой `get_secret` |
+| **Ключи провайдеров LLM** | `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `SAKANA_API_KEY` (+ Python-only: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `QWEN_API_KEY`) | Читает конфиг-блок `llm {}` mlog-рантайма и Python-слой `get_secret` |
 | **Чувствительный конфиг (идентификаторы владельца)** | `OWNER_TELEGRAM_ID`, `TELEGRAM_ARCHIVE_CHANNEL_ID` | Не мандаты, но персональные данные; уходят в chat_id сообщений |
 | **Конфиг (не секреты)** | `RENDER_URL`, `SHOP_ENABLED`, `OSP_TAVILY_DAILY_BUDGET`, `OSP_TAVILY_CACHE_MIN`, `METALOGOS_LLM_MODEL`, `METALOGOS_LLM_PROVIDER`, `METALOGOS_EXEC_TIMEOUT_SECS`, `FORGE_REPOS_DIR`, `FORGE_RUN_ENABLED`, `FORGE_RUN_VLIMIT_KB`, `FORGE_GITHUB_OWNER`, `FNP_*`, `TEAM_MAX_CONSULTS`, `TEAM_MAX_LLM_CALLS`, `DATABASE_URL` | Пороги, флаги, пути; `DATABASE_URL` — строка подключения (может нести креды СУБД, но в офисе это `sqlite:...`) |
 

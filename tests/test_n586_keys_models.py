@@ -107,6 +107,7 @@ def test_a1_qwen_url_honors_env(monkeypatch):
     ("qwen-plus", "qwen"),
     ("qwen:qwen3-max", "qwen"),
     ("qwen:qwen-plus-latest", "qwen"),
+    ("sakana-namazu", "sakana"),  # #727: ветка sakana (без неё — тихий фолбэк)
     ("glm-4.6", "zai"),
     ("claude-sonnet-4-20250514", "anthropic"),
     ("deepseek-chat", "deepseek"),
