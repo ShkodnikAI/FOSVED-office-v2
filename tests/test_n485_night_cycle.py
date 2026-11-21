@@ -54,9 +54,16 @@ def test_night_tick_core_delegates_to_slot():
 
 
 def test_admin_night_cycle_phases_protected():
-    """A.2: каждый http_get фаз AdminNightCycle — под try; сбой не роняет цикл."""
+    """A.2: каждый http_get фаз AdminNightCycle — под try; сбой не роняет цикл.
+
+    #728 B.9: /admin-ua/graph УДАЛЁН из AdminNightCycle (второй полный
+    Grapher за ночь — аудит 21.11; итог Grapher — через kv-мост
+    admin_last_kg_temporal из night-cycle). Потому фаза graph здесь не
+    перечислена; её отсутствие гвардится отдельным тестом
+    test_n728_b9_b12.py::test_b9_admin_night_cycle_no_second_grapher.
+    """
     seg = "\n".join(_code_lines(_segment(ADMIN, "pattern AdminNightCycle")))
-    for ep in ("admin-ua/scan", "admin-ua/analyze", "admin-ua/graph", "admin-ua/review", "admin-ua/docs"):
+    for ep in ("admin-ua/scan", "admin-ua/analyze", "admin-ua/review", "admin-ua/docs"):
         lines = [l for l in seg.splitlines() if ep in l]
         assert lines and "try http_get" in lines[0], f"{ep} не защищён try"
     naked = [l for l in seg.splitlines() if "http_get(" in l and "try http_get" not in l]

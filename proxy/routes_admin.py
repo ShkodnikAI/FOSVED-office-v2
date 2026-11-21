@@ -2217,8 +2217,16 @@ def _ua_night_cycle_impl_inner():
             _log_audit("ua_night_cycle", {"files": inventory['total_files'], "nodes": nodes_saved,
                                            "edges": edges_saved, "findings": len(findings), "health": health})
 
+            # #728 B.9: kg_temporal — строка KG-итога Grapher в payload
+            # night-cycle. Прежде Phase 1c AdminNightCycle (dept/admin.mlog)
+            # звала /admin-ua/graph — ВТОРОЙ полный прогон Grapher за ночь
+            # (свой _ua_analyze_internal + полный rebuild графа; аудит 21.11:
+            # 02:06:33–02:09:12 поверх night-cycle 02:03–02:05, наложился на
+            # keys night-check и NightTickSlot). Итог одной записи — здесь.
+            kg_temporal = (f"KG temporal: +{kg_res['inserted']} new, ~{kg_res['updated']} updated, "
+                           f"={kg_res['noop']} unchanged, -{kg_res['closed_missing']} closed")
             return {'status': 'ok', 'summary': summary, 'health_score': health,
-                    'findings_count': len(findings)}
+                    'findings_count': len(findings), 'kg_temporal': kg_temporal}
         finally:
             # #728 B.6: гейт снят на любом пути (OOM/исключение не оставляют
             # вечного 409 для graph/keys — держатель сбрасывается)
@@ -2437,6 +2445,12 @@ def admin_keys_night_check():
     Phase 5 после Phase 0-поллинга) — на своей ошибке не окажется; если
     фаза всё же пришла в окно цикла (catch-up-попытка), 409 честно
     попадает в строку отчёта «недоступна», ключи проверит следующий день.
+    #728 B.12 (аудит 21.11: keys упали 02:08:36 database is locked поверх
+    ВТОРОГО Grapher-прогона — тот убран B.9, но краткое окно возможно и
+    от других писателей): при sqlite3.OperationalError (locked/busy) —
+    ОДНА повторная попытка через 60 с; неудача — честный статус
+    «not_run» с строкой «не выполнена (БД занята)» и записью в error_log,
+    не 500-стек.
     """
     if _NightCycleGate.owner() is not None:
         _log_error("keys night-check skipped: night cycle in progress",
@@ -2444,12 +2458,33 @@ def admin_keys_night_check():
         return jsonify({"status": "skipped",
                         "problems_line": "проверка ключей пропущена: ночной цикл ещё идёт",
                         "ok_count": 0, "total": 0, "checked_at": ""}), 409
-    try:
+
+    def _attempt():
         from proxy.key_health import check_all, save_results, night_summary
         summary = check_all()
         save_results(summary)
         _log_audit("admin_keys_night_check", {"ok": summary["ok_count"], "total": summary["total"], "problems": len(summary["problems"])})
-        return jsonify(night_summary(summary))
+        return night_summary(summary)
+
+    import sqlite3 as _sq
+    try:
+        return jsonify(_attempt())
+    except _sq.OperationalError as e:
+        if not ("locked" in str(e) or "busy" in str(e)):
+            raise  # не БД-занятость — обычная обработка ниже
+        _log_error(f"keys night-check db busy, retry in 60s: {e}",
+                   source="admin_keys", dept="admin", kind="check")
+        time.sleep(60)  # #728 B.12: одна повторная попытка
+        try:
+            return jsonify(_attempt())
+        except _sq.OperationalError as e2:
+            # честное «не выполнена (БД занята)» — не 500; алерт и так есть
+            # в error_log, строка уходит в ночной отчёт слотом
+            _log_error(f"keys night-check retry failed: {e2}",
+                       source="admin_keys", dept="admin", kind="check")
+            return jsonify({"status": "not_run",
+                            "problems_line": "проверка ключей не выполнена (БД занята)",
+                            "ok_count": 0, "total": 0, "checked_at": ""}), 200
     except Exception as e:
         log.error(f"admin keys night-check error: {e}")
         _log_error(f"admin keys night-check failed: {e}", source="admin_keys", dept="admin", kind="check")

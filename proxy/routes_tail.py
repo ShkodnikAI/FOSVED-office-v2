@@ -1347,10 +1347,24 @@ def cron_collect_news():
 @app.route("/cron/backup", methods=["GET"])
 @slot_mem_guard  # #712 MEM-1 A.1: RSS всех процессов до/после слота
 def cron_backup():
-    """Nightly backup cron: VACUUM INTO + integrity check + retention."""
+    """Nightly backup cron: VACUUM INTO + integrity check + retention.
+
+    #712 (аудит 21.11): OOM 02:00:20 — через 16 с после старта NightTickSlot,
+    до первой UA-фазы: первая фаза тика — этот бэкап (dept/scheduler.mlog,
+    порядок backup → indicators → shop → evals → night). Как копирует:
+    дочка backup_db.py под run_tracked с RLIMIT_AS 256 МБ (A.4) —
+    VACUUM INTO пишет копию БД на диск из отдельного процесса, НЕ из
+    памяти родителя; метки night:backup-rotate (ротация журналов в
+    памяти родителя) + subprocess backup_db.py before/live×5с/after
+    (live — #712 аудит 21.11: пик между 60-с тиками сборщика невидим).
+    """
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
+    # #712: фазовая метка с ИМЕНЕМ фазы ночного тика (не только путь)
+    from proxy.mem_sampler import mark as _night_mark
+    _night_mark("slot", "night:backup-rotate", "before", full=True)
     _rotate_service_logs()  # FO-007: ротация журналов перед бэкапом
+    _night_mark("slot", "night:backup-rotate", "after", full=True)
     import subprocess
     upload = request.args.get("upload", "0") == "1"
     cmd = [sys.executable, "scripts/backup_db.py", "backup"]
@@ -1411,12 +1425,17 @@ def cron_narad_tick():
 def cron_shop_tick():
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
-    from proxy.shop_watch import tick_shop_watches
+    # #712 (аудит 21.11): фазовая метка ночного тика
+    from proxy.mem_sampler import mark as _night_mark
+    _night_mark("slot", "night:shop", "before", full=True)
     try:
+        from proxy.shop_watch import tick_shop_watches
         result = tick_shop_watches()
         return jsonify(result)
     except Exception as e:  # noqa: BLE001 — крон должен видеть ошибку, а не 500-стек
         return jsonify({"ok": False, "error": str(e)[:300]}), 500
+    finally:
+        _night_mark("slot", "night:shop", "after", full=True)
 
 
 # ── #429 A.3: прогрев каталога схем Onliner ──────────────────────────────
@@ -2390,9 +2409,14 @@ def scheduler_golden_evals():
     """
     if not cron_secret_ok():  # №425: декодированное ИЛИ сырое значение query
         return "Forbidden", 403
+    # #712 (аудит 21.11): фазовая метка ночного тика (старт evals; сам прогон
+    # async — под реестром заданий, итоговые метки у job-обёртки)
+    from proxy.mem_sampler import mark as _night_mark
+    _night_mark("slot", "night:evals", "before", full=True)
     d = request.get_json(silent=True) or {}
     dept_list = d.get("depts") or sorted(p.stem for p in _GOLDEN_DIR.glob("*.json"))
     if not dept_list:
+        _night_mark("slot", "night:evals", "after", full=True)
         return jsonify({"status": "ok", "message": "no golden sets found", "results": []})
     # №596 A.2: async=1 — фоном (реестр proxy/jobs), сразу {"job_id"};
     # статус — GET /scheduler/golden-evals/status?job=<id>. Прогон длиннее
@@ -2740,6 +2764,17 @@ def scheduler_indicator_pre_reminders():
     if not owner_id:
         return jsonify({"status": "error", "message": "OWNER_TELEGRAM_ID not set"}), 400
 
+    # #712 (аудит 21.11): фазовая метка ночного тика — имя фазы, не только путь
+    from proxy.mem_sampler import mark as _night_mark
+    _night_mark("slot", "night:indicators", "before", full=True)
+    try:
+        return _indicator_pre_reminders_impl()
+    finally:
+        _night_mark("slot", "night:indicators", "after", full=True)
+
+
+def _indicator_pre_reminders_impl():
+    owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
     d = request.get_json(force=True, silent=True) or {}
     days_ahead = int(d.get("days_ahead", 7))
 

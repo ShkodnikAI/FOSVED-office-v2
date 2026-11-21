@@ -504,12 +504,26 @@ pattern AdminNightCycle() -> String {
   }
   let report = report + "Phase 1b/7: Analyzer\n" + analyze_summary + "\n\n"
 
-  // Phase 1c: Grapher (Python UA — knowledge graph → SQLite) — #485 A.2
-  let tr_graph = try http_get("http://127.0.0.1:4000/admin-ua/graph?itok=" + AdminUaToken())
-  let mut graph_summary = "Phase 1c: недоступна (" + redact(substring(to_string(TryVal(try to_string(tr_graph.error.message))), 0.0, 120.0), "all") + ")"
-  let graph_ok = redact(to_string(TryVal(tr_graph)), "all")
-  if graph_ok != "()" then {
-    graph_summary = redact(to_string(json_get(parse_json(graph_ok), "summary", "Grapher failed")), "all")
+  // Phase 1c: Grapher — ИТОГ из night-cycle, без второго прогона (#728 B.9).
+  // Прежде здесь был http_get /admin-ua/graph — ВТОРОЙ полный Grapher за
+  // ночь (свой analyze + полный rebuild графа): night-cycle (Phase 0
+  // NightSlot, источник admin_ua_night_cycle) уже записал граф, а этот
+  // прогон шёл поверх — аудит 21.11: 02:06:33–02:09:12 kg_scan_rebuild
+  // 142 с вторым удержанием лока, наложение на keys night-check (02:08:36
+  // database is locked) и завершение NightTickSlot (02:09:02). Теперь:
+  // NightSlot кладёт kg_temporal из ответа night-cycle в kv
+  // admin_last_kg_temporal (app.mlog, разбор Phase 0), здесь — чтение.
+  // Гейт B.6 на /admin-ua/graph при живом night-cycle остаётся (ручной
+  // вызов админом защищён); маршрут — для ручного/аварийного прогона.
+  let kg_cached = redact(kv_get("admin_last_kg_temporal"), "all")
+  let mut graph_summary = ""
+  if kg_cached != "" then {
+    graph_summary = kg_cached + " (итог ночного цикла, без повтора)"
+  } else {
+    // kv пуст (night-cycle упал до Grapher / старый деплой): честная
+    // строка, НЕ тихий пропуск; граф перестроит следующий night-cycle
+    // или ручной /admin-ua/graph после окна ночи.
+    graph_summary = "Phase 1c: Grapher не выполнен в ночном цикле (итог недоступен) — граф перестроит следующий цикл"
   }
   let report = report + "Phase 1c/7: Grapher\n" + graph_summary + "\n\n"
 

@@ -32,6 +32,7 @@ valid_to IS NULL AND superseded_by IS NULL — сироты close-без-insert
 старого кода. Новый чанковый путь атомарен (close+insert в одном
 чанке) — тест test_b8_duplicate_actives_two_pass_stability.
 """
+import time
 from datetime import datetime, timezone
 
 from proxy.core import _query, _log_error
@@ -151,6 +152,10 @@ def _kg_upsert_conn(node_type, node_name, file_path, description, source,
     active_rows — уже прочитанные активные узлы ключа (кэш kg_scan_rebuild,
     по одному SELECT на ключ вместо четырёх запросов на узел). Управление
     транзакцией — у вызывающего (чанки): commit на границе чанка.
+
+    #728 B.10: в массовом пути НЕ используется — kg_scan_rebuild пишет
+    предвычисленными executemany-пакетами (см. ниже), этот путь — для
+    одиночного живого kg_upsert (conn=None → _query) и наследуется им.
     """
     def _run(sql, params, fetch=False):
         if conn is None:
@@ -211,19 +216,31 @@ def kg_scan_rebuild(nodes, source="scan"):
     Отличие от прежнего DELETE+INSERT: исчезнувшие со скана узлы закрываются
     (valid_to=now), а не стираются; неизменённые узлы не дублируются.
 
-    #728 B.3: массовая запись — чанками по KG_CHUNK узлов, транзакция на чанк
-    (одно соединение с busy_timeout на весь проход). Прежде kg_upsert на
-    каждый узел открывал до 4 собственных соединений через _query — при
-    ~6.1k узлов скана это тысячи мелких транзакций подряд, практически
-    непрерывный write-лок общей БД (прод 19.11: Grapher ~11 мин).
+    #728 B.3: массовая запись — чанками по KG_CHUNK узлов, транзакция на чанк.
+    #728 B.10 (аудит 21.11: kg_scan_rebuild держал запись 135–143 с —
+    per-node SELECT id внутри чанковой транзакции, ~170 мс/узел): план
+    записи строится ЦЕЛИКОМ в памяти по предпрочитанным активным строкам
+    (один SELECT активных + один SELECT id до BEGIN), чанк = один
+    executemany-пакет UPDATE + один INSERT-пакет без промежуточных
+    SELECT'ов; commit на каждый чанк; [ua-tx] kg_chunk — held_ms чанка.
+    #728 B.11 (аудит 21.11: ~815–855 updated каждую ночь при неизменных
+    файлах): сущность узла — (node_type, node_name, file_path), НЕ
+    (node_type, node_name). Прежний ключ схлопывал одноимённые паттерны
+    разных файлов (Main1 ×30 файлов, _client ×28, main ×23 — расчёт по
+    дереву 21.11: 917 «updated»/ночь без единого изменения) в один стек
+    версий, перезаписываемый каждую ночь. Теперь одноимённые узлы разных
+    файлов — самостоятельные сущности; сравнение содержимого — прежнее
+    (file_path + description строкой): проверка на дереве 21.11 — новый
+    ключ при идентичном скане даёт churn=0, нормализация не требуется.
     """
     now = _now()
+    # ── предвычисление (ноль локов): активные строки по РАСШИРЕННОМУ ключу
     active = _query("SELECT * FROM knowledge_graph WHERE valid_to IS NULL", fetch=True) or []
     by_key = {}
     for r in active:
-        by_key.setdefault((r["node_type"], r["node_name"]), []).append(r)
+        # B.11: file_path — часть ключа сущности
+        by_key.setdefault((r["node_type"], r["node_name"], (r["file_path"] or "")), []).append(r)
 
-    # parent_count (FO-020) — один агрегатный запрос вместо запроса на узел
     parent_counts = {}
     try:
         rows = _query(
@@ -233,60 +250,106 @@ def kg_scan_rebuild(nodes, source="scan"):
     except Exception as e:
         _log_error(f"kg parent_count batch failed: {e}", source="kg", kind="db_read")
 
-    # Планирование БЕЗ записи: noop / close_missing / upsert-очередь
+    # ── планирование БЕЗ записи (B.10): для каждого узла скана — решение
+    # new / updated / noop и ГОТОВЫЕ пакеты строк; SELECT'ов в транзакции нет
     seen_keys = set()
-    upsert_queue = []   # узлы, требующие kg_upsert (new/updated)
+    insert_rows = []      # (nt, nn, fp, desc, now, now, source_part_id, inference, review_status, parent_count)
+    close_keys = []       # (node_type, node_name, file_path) — ключи со сменой содержимого
     inserted = updated = noop = 0
+    from proxy.routes_admin import _ua_tx_log  # поздний импорт (цикл импортов)
     for n in nodes:
-        key = (n.get("node_type"), n.get("node_name"))
+        key = (n.get("node_type"), n.get("node_name"), (n.get("file_path") or ""))
         seen_keys.add(key)
         rows = by_key.get(key) or []
-        match = [r for r in rows if (r["file_path"] or "") == (n.get("file_path") or "")
+        match = [r for r in rows
+                 if (r["file_path"] or "") == (n.get("file_path") or "")
                  and (r["description"] or "") == (n.get("description") or "")]
         if rows and match:
             noop += 1
             continue
-        upsert_queue.append(n)
+        if rows:
+            close_keys.append(key)   # закрыть активные версии ключа
+            updated += 1
+        else:
+            inserted += 1
+        insert_rows.append(
+            (n.get("node_type"), n.get("node_name"), n.get("file_path"),
+             n.get("description"), now, now, None, 1, "pending",
+             parent_counts.get((n.get("node_type"), n.get("node_name")), 1)))
 
-    # Чанковая запись: KG_CHUNK узлов → одна транзакция (свой conn с
-    # busy_timeout; #728 B.3 — короткие транзакции вместо per-node коннектов)
+    # ── запись чанками (B.10): executemany-пакеты, commit на чанк,
+    #    ни одного SELECT внутри транзакции
     import sqlite3
     from proxy.core import DB_FILE
     conn = sqlite3.connect(str(DB_FILE), timeout=5.0)
-    conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA busy_timeout=5000")
-        for i in range(0, len(upsert_queue), KG_CHUNK):
-            chunk = upsert_queue[i:i + KG_CHUNK]
+        for i in range(0, len(insert_rows), KG_CHUNK):
+            _tc = time.monotonic()
+            chunk_ins = insert_rows[i:i + KG_CHUNK]
+            # ключи закрытия для этого чанка (по вхождениям close-ключей
+            # узлов чанка — порядок параллелен insert_rows)
+            chunk_close = close_keys[i:i + KG_CHUNK] if len(close_keys) == len(insert_rows) else []
             try:
-                for n in chunk:
-                    key = (n.get("node_type"), n.get("node_name"))
-                    node_id, action = _kg_upsert_conn(
-                        n.get("node_type"), n.get("node_name"),
-                        n.get("file_path"), n.get("description"), source=source,
-                        inference=1, review_status="pending",
-                        parent_count=parent_counts.get(key, 1),
-                        now=now, conn=conn, active_rows=by_key.get(key) or [])
-                    if action == "new":
-                        inserted += 1
-                    elif action == "updated":
-                        updated += 1
-                    else:
-                        noop += 1
-                conn.commit()  # граница чанка: write-лок снят
+                if chunk_close:
+                    conn.executemany(
+                        "UPDATE knowledge_graph SET valid_to = ? "
+                        "WHERE node_type = ? AND node_name = ? AND file_path = ? AND valid_to IS NULL",
+                        [(now, k[0], k[1], k[2]) for k in chunk_close])
+                conn.executemany(
+                    "INSERT INTO knowledge_graph (node_type, node_name, file_path, description, "
+                    "updated_at, valid_from, valid_to, source_part_id, inference, review_status, parent_count) "
+                    "VALUES (?,?,?,?,?,?,NULL,?,?,?,?)",
+                    chunk_ins)
+                conn.commit()  # write-лок чанка снят
+                try:
+                    _ua_tx_log("kg_chunk", rows=len(chunk_ins),
+                               held_ms=int((time.monotonic() - _tc) * 1000), source=source,
+                               batch=i // KG_CHUNK,
+                               closed=len(chunk_close))
+                except Exception:
+                    pass  # телеметрия не роняет запись
             except sqlite3.Error:
                 conn.rollback()
                 raise
     finally:
         conn.close()
 
-    # узлы, исчезнувшие со скана, — закрыть (чанками той же транзакционной дисциплиной)
+    # superseded_by: одна связка «закрытые → новые» вне горячего пути —
+    # INSERT'ы чанка имеют id > всех закрытых; по ключу, без SELECT на узел
+    if close_keys:
+        try:
+            conn2 = sqlite3.connect(str(DB_FILE), timeout=5.0)
+            try:
+                conn2.execute("PRAGMA busy_timeout=5000")
+                for i in range(0, len(close_keys), KG_CHUNK):
+                    ck = close_keys[i:i + KG_CHUNK]
+                    conn2.execute(
+                        "UPDATE knowledge_graph SET superseded_by = ("
+                        "  SELECT id FROM knowledge_graph n"
+                        "  WHERE n.node_type = knowledge_graph.node_type"
+                        "    AND n.node_name = knowledge_graph.node_name"
+                        "    AND n.file_path = knowledge_graph.file_path"
+                        "    AND n.valid_from = ? ORDER BY n.id DESC LIMIT 1)"
+                        "WHERE valid_to = ? AND superseded_by IS NULL"
+                        "  AND (node_type, node_name, file_path) IN (VALUES "
+                        + ",".join("(?,?,?)" for _ in ck) + ")",
+                        tuple([now, now] + [v for k in ck for v in k]))
+                    conn2.commit()
+            finally:
+                conn2.close()
+        except sqlite3.Error as e:
+            # superseded_by — производная цепочка истории; сбой связки не
+            # роняет ребилд (версии закрыты/вставлены), пишем в error_log
+            _log_error(f"kg superseded_by link failed: {e}", source="kg", kind="db_write")
+
+    # узлы, исчезнувшие со скана, — закрыть (чанками той же дисциплиной)
     closed_missing = 0
     missing = [key for key, rows in by_key.items() if key not in seen_keys]
     for i in range(0, len(missing), KG_CHUNK):
         chunk = missing[i:i + KG_CHUNK]
         _query("UPDATE knowledge_graph SET valid_to = ? WHERE valid_to IS NULL AND "
-               "(node_type, node_name) IN (VALUES " + ",".join("(?,?)" for _ in chunk) + ")",
+               "(node_type, node_name, file_path) IN (VALUES " + ",".join("(?,?,?)" for _ in chunk) + ")",
                tuple([now] + [v for key in chunk for v in key]))
         closed_missing += sum(len(by_key[key]) for key in chunk)
     return {"inserted": inserted, "updated": updated, "noop": noop, "closed_missing": closed_missing}
