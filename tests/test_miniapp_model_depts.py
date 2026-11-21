@@ -82,13 +82,13 @@ def test_get_lists_all_depts_empty():
 
 
 def test_get_catalog_derived_from_combo_chains():
-    """Каталог выводится из COMBO_CHAINS: zai с glm-4.6, sakana с
-    sakana-namazu (#727), и т.д.; kimi в каталоге нет."""
+    """Каталог выводится из COMBO_CHAINS: zai с glm-4.6 и т.д.; kimi и
+    sakana в каталоге нет (#727: kimi выведен; отмена 21.11 — sakana без ролей)."""
     r = _client().get("/api/model/depts", headers=API_AUTH)
     cat = {c["provider"]: c["models"] for c in r.get_json()["catalog"]}
     assert "glm-4.6" in cat["zai"]
-    assert "sakana-namazu" in cat["sakana"]
     assert "kimi" not in cat  # #727: провайдер выведен
+    assert "sakana" not in cat  # отмена 21.11: ролей нет — в каталог не попадает
     assert "deepseek-chat" in cat["deepseek"]
     assert "claude-sonnet-4-20250514" in cat["anthropic"]
     assert all(c["label"] for c in r.get_json()["catalog"])

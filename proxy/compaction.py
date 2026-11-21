@@ -45,12 +45,11 @@ from proxy.core import log, _query, _write_llm_trace
 # ────────────────────────── лимиты контекста ──────────────────────────
 # Консервативные окна контекста по провайдерам (токены). Значение — не
 # рекламный максимум, а минимальное окно среди моделей провайдера, реально
-# используемых в COMBO_CHAINS (sakana-namazu, deepseek-chat, glm-4.6/glm-4-plus,
+# используемых в COMBO_CHAINS (deepseek-chat, glm-4.6/glm-4-plus,
 # gpt-oss-20b/120b, claude-sonnet-4). №715 KEYS-2: nemotron (nvidia) удалён.
-# #727 KEYS-3: kimi выведен; для sakana контекст-лимит НЕИЗВЕСТЕН (владелец
-# дал только model-id sakana-namazu, вывод /v1/models не предоставлен) —
-# записи в таблице НЕТ, действует дефолт _UNKNOWN_PROVIDER_LIMIT 32768
-# (безопасно мало; поднимем явной строкой, когда владелец пришлёт вывод).
+# #727 KEYS-3: kimi выведен; sakana ролей не обслуживает (установка отменена
+# владельцем 21.11) и в таблице не участвует — вне таблицы действует дефолт
+# _UNKNOWN_PROVIDER_LIMIT 32768 (безопасно мало).
 # Провайдер вне таблицы считается окном _UNKNOWN_PROVIDER_LIMIT (безопасно мало).
 PROVIDER_CONTEXT_LIMITS = {
     "anthropic": 200000,   # claude-sonnet-4 — 200k
