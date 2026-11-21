@@ -54,8 +54,15 @@ def test_factpack_default_on_in_build_context():
         "условие пустого кэша новостей обязано быть снято (#474 A.1)")
     # TEAM-1 #480: секция — консультация с ЛЗ, не собственный Tavily
     assert 'TeamConsult("osp", "lz", "factpack"' in body
-    # собственный live-вызов из автоматического пути УБРАН (остался /osp tavily)
-    assert "OSPLiveSearchBlock(query)" not in body
+    # собственный live-вызов из автоматического пути УБРАН (остался /osp tavily).
+    # #740 A.1: при устаревшей событийной теме (>6 ч) дополнительный поиск —
+    # через обёртку OSPStaleTopicLive (инвариант #474 жив: прямого вызова
+    # блока в автоматическом пути по-прежнему нет).
+    assert "OSPLiveSearchBlock(query)" not in body, (
+        "прямой вызов OSPLiveSearchBlock вернулся в BuildOSPContext — "
+        "устаревшая тема ищется через OSPStaleTopicLive (#740 A.1)")
+    assert "OSPStaleTopicLive(query)" in body or "OSPFreshnessData(" in body, (
+        "#740 A.1: живой поиск при устаревшей теме не подключён")
     # live-часть для гейта извлекается по маркерам разведсводки
     assert 'TeamExtractSection(consult, "[LIVE]", "[NEWS]")' in body
     idx_if = body.index("if OSPSkipLiveSearch")
@@ -63,11 +70,15 @@ def test_factpack_default_on_in_build_context():
     idx_fred_comment = body.index("FRED (McpMarketsCall)")
     assert idx_if < idx_section < idx_fred_comment, "Разведсводка ЛЗ должна стоять между news-блоком и FRED"
     # секция вплетается в строку сборки контекста между News и FRED
+    # #740 A.1: между factpack и FRED добавлен live_extra (доп-поиск при
+    # устаревшей событийной теме) — порядок News → factpack → FRED сохранён
     ctx_line = [l for l in body.splitlines() if "=== News ===" in l and "factpack_block" in l]
     assert ctx_line, "factpack_block должен вплетаться в строку сборки контекста"
     line = ctx_line[0]
-    assert line.index("+ news + factpack_block + fred_data") > line.index("=== News ===")
-    assert line.index("+ news + factpack_block + fred_data") < line.index("=== Corrections ===")
+    assert line.index("+ news + factpack_block") > line.index("=== News ===")
+    assert line.index("+ fred_data") < line.index("=== Corrections ===")
+    assert line.index("factpack_block") < line.index("live_extra") < line.index("fred_data") or \
+        "live_extra" not in line, "live_extra должен стоять между factpack и FRED"
 
 
 def test_honest_degradation_exact_causes():

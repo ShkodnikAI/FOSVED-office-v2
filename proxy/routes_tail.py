@@ -2870,6 +2870,9 @@ CALL_PYTHON_ALLOWED = {
     "forge_secrets": {"set", "get"},
     # FORGE #221: детерминированные источники ЛЗ (arXiv/HN/GitHub) в общем пути /lz
     "lz_sources": {"lz_api_scan"},
+    # #740 A.3: матчинг темы watching-прогноза ОСП с записью news_cache
+    # (основы — тот же матчер, что get_fresh_news) для «требует пересмотра»
+    "news": {"topic_matches_news"},
     # Наряд #336: реальные объявления av.by для Эксперта (НЕ Закупки)
     "avby_collector": {"search_avby"},
     # Data processing

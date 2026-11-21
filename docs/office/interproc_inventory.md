@@ -33,17 +33,17 @@
 | Метрика | Значение |
 |---|---|
 | Файлов в поверхности | 36 |
-| Паттернов (вхождений) | 1407 |
-| Уникальных имён паттернов | 1323 |
+| Паттернов (вхождений) | 1415 |
+| Уникальных имён паттернов | 1331 |
 | Конфиг-блоков верхнего уровня с env | 6 |
 | Паттернов-источников всего | 215 |
 | env/env_or-читатели (имена) | 36 |
 | Возврат вывода LLM (call_llm) | 177 |
 | Читатели ввода запроса (json_body/query_param) | 3 |
-| Паттернов-стоков (уникальных имён) | 94 |
+| Паттернов-стоков (уникальных имён) | 97 |
 | HTTP-маршрутов serve | 75 |
-| Транзитивных потоков источник→сток | 323 |
-| Прямых рёбер «источник→сток» | 122 |
+| Транзитивных потоков источник→сток | 326 |
+| Прямых рёбер «источник→сток» | 123 |
 | Швов — источников, чьё значение достигает стока в ДРУГОМ теле | 187 |
 | Интра-процедурных потоков (источник и сток в одном теле — видит аудит сегодня) | 21 |
 
@@ -121,7 +121,7 @@
 | `ReposTaskPage` | app.mlog:2669 | query_param |
 | `WebhookBody` | app.mlog:2739 | json_body |
 
-### 2.4 Паттерны-стоки (94 уникальных имён)
+### 2.4 Паттерны-стоки (97 уникальных имён)
 
 | Паттерн | Файл:строка | Стоки |
 |---|---|---|
@@ -138,6 +138,8 @@
 | `BuildContext` | dogfood_staging.mlog:1021 | http_post |
 | `BuildContext` | dept/context.mlog:9 | http_post |
 | `BuildOSPContext` | dept/osp.mlog:678 | http_post |
+| `LZFreshnessBlock` | dept/lz.mlog:469 | http_post |
+| `OSPFreshnessData` | dept/osp.mlog:577 | http_post |
 | `CallLLMProxy` | app.mlog:717 | http_post |
 | `CallLLMProxy` | dogfood_staging.mlog:537 | http_post |
 | `CallLLMResilient` | app.mlog:899 | http_post |
@@ -228,6 +230,7 @@
 | `UpdateConsensus` | dogfood_staging.mlog:1504 | write_file |
 | `WebhookBody` | app.mlog:2739 | http_get, http_post, respond, send_message, write_file |
 | `YanaAutoMemorize` | dogfood_staging.mlog:2152 | http_post |
+| `YanaNewsFreshnessBlock` | dept/yana.mlog:212 | http_post |
 | `YanaAutoMemorize` | dept/yana.mlog:405 | http_post |
 | `YanaCheckShop` | dogfood_staging.mlog:2204 | http_post |
 | `YanaCheckShop` | dept/yana.mlog:447 | http_post |
