@@ -39,7 +39,7 @@ from proxy.compaction import PROVIDER_CONTEXT_LIMITS  # noqa: E402
 from proxy import shop_collectors as sc  # noqa: E402
 from proxy import shop_watch as sw  # noqa: E402
 
-REMOVED_ENV_KEYS = ("GROK_API_KEY", "NVIDIA_API_KEY", "YANDEX_MARKET_API_KEY")
+REMOVED_ENV_KEYS = ("GROK_API_KEY", "NVIDIA_API_KEY", "YANDEX_MARKET_API_KEY", "KIMI_API_KEY")  # #727
 REMOVED_PROVIDERS = ("grok", "nvidia")
 REMOVAL_TEXT = "провайдер удалён решением владельца 12.11"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,9 +54,10 @@ API_AUTH = {"Authorization": "Bearer test-secret-123"}
 
 # ─────────────────────────── A.1: манифест ───────────────────────────
 
-def test_a1_manifest_14_keys():
+def test_a1_manifest_13_keys():
+    """#727 KEYS-3: kimi выведен — 13 ключей (было 14)."""
     env_keys = [e["env_key"] for e in key_health.KEY_MANIFEST]
-    assert len(env_keys) == 14
+    assert len(env_keys) == 13
     for gone in REMOVED_ENV_KEYS:
         assert gone not in env_keys, gone
     for keep in ("QWEN_API_KEY", "FRED_API_KEY", "ALPHAVANTAGE_API_KEY",

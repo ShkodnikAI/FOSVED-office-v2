@@ -48,7 +48,7 @@ def test_tier_files_have_models():
         lines = [l.strip() for l in content.splitlines()
                  if l.strip() and not l.strip().startswith("#")]
         assert lines, f"config/tier_{tier}.txt пуст (одни комментарии)"
-        # формат: provider/model или голое имя модели (kimi-k2)
+        # формат: provider/model или голое имя модели (sakana-namazu)
         for l in lines:
             assert re.fullmatch(r"[\w.\-/]+", l), f"tier_{tier}: подозрительная строка {l!r}"
 
