@@ -548,6 +548,11 @@ def init_db():
             ("ALTER TABLE miniapp_responses ADD COLUMN archived INTEGER DEFAULT 0", "archived"),
             # #498 A.2: связь версий уточнений — новый отчёт ссылается на исходный
             ("ALTER TABLE miniapp_responses ADD COLUMN parent_doc_id TEXT DEFAULT ''", "parent_doc_id"),
+            # #737 SRC-1 A.1: метки источника в news_cache (origin/ownership/
+            # conflict_party) — заполняются при сборе RSS/Tavily
+            ("ALTER TABLE news_cache ADD COLUMN origin TEXT DEFAULT ''", "origin"),
+            ("ALTER TABLE news_cache ADD COLUMN ownership TEXT DEFAULT ''", "ownership"),
+            ("ALTER TABLE news_cache ADD COLUMN conflict_party TEXT DEFAULT ''", "conflict_party"),
         ]:
             try:
                 c.execute(col_sql)

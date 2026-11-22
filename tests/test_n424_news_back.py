@@ -60,7 +60,12 @@ def test_by_feeds_present_and_categorized():
 
 
 def test_osp_sees_news_by():
-    assert '"osp": ("news_ru", "geopolitics", "news_en", "news_by")' in NEWS_PY
+    # #737 SRC-1 A.2: osp расширен news_ua/news_eu — гвард теперь по
+    # вхождению news_by (смысл прежний: белорусская повестка в ОСП)
+    m = NEWS_PY[NEWS_PY.index('"osp": ('):NEWS_PY.index('"osp": (') + 200]
+    m = m[:m.index(")")]
+    assert '"news_by"' in m, "news_by обязана быть в категориях ОСП"
+    assert '"news_ua"' in m and '"news_eu"' in m  # #737
 
 
 def test_slot_in_registry():
