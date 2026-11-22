@@ -195,7 +195,8 @@ Reverse Proxy (Flask)
 
 | Команда | Назначение |
 |---|---|
-| `/lz_channel add` <параметры> | добавить канал |
+| `/lz channel add` <username> | канал войны в мониторинг osint_ua: живая проверка публичной страницы `t.me/s/<username>` (#741 MON-5), метки #737, сборщик t.me/s |
+| `/lz_channel add` <параметры> | добавить канал (общий реестр `lz_channels`) |
 | `/lz_channels` | список каналов |
 | `/lz_monitor` <тема> | монитор темы |
 

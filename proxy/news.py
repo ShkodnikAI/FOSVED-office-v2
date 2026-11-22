@@ -490,11 +490,23 @@ def osp_freshness(query, dept=None):
     col = _query("SELECT MAX(collected) AS m, COUNT(*) AS n FROM news_cache",
                  (), fetch=True)
     last_collect = col[0][0] if col else None
+    # #741 MON-5 A.3: самый свежий пост Telegram-мониторинга учитывается
+    # в «Данные на:» — osint_ua-каналы сообщают первыми (решение владельца
+    # 20.11); если пост свежее новости — шапка честно показывает его
+    try:
+        tg = _query("SELECT MAX(date) AS m FROM lz_channel_posts",
+                    (), fetch=True)
+        tg_latest = tg[0][0] if tg else None
+    except Exception:  # noqa: BLE001 — таблицы нет (до бута) — не мешаем
+        tg_latest = None
+    if tg_latest and (latest is None or str(tg_latest) > str(latest)):
+        latest = tg_latest
     return {
         "topic_latest": latest,
         "topic_age_hours": _age_hours(latest),
         "last_collect": last_collect,
         "collect_age_hours": _age_hours(last_collect),
+        "tg_latest": tg_latest,
         "searched": False,
     }
 

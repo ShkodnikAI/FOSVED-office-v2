@@ -71,6 +71,9 @@ DEFAULT_TASK_TIMEOUT_S = 900
 # запросу). open_url/check_price — задел на будущее (наряд #421), в эту
 # волну не заполняются.
 TASK_TYPE_SEARCH = "search"
+# #741 MON-5 B.1: тип задания «забрать посты канала» (Telegram t.me/s —
+# запасной путь с домашнего IP; TikTok — только через снабженца)
+TASK_TYPE_FETCH_CHANNEL = "fetch_channel"
 
 # Статусы очереди: pending → dispatched → done | failed.
 STATUS_PENDING = "pending"
@@ -282,6 +285,38 @@ def enqueue_supply_task(product_id, platform, query):
     return task_id
 
 
+def enqueue_fetch_channel(platform: str, url: str, channel_id: str = ""):
+    """#741 B.1: задание fetch_channel (platform: telegram|tiktok, url).
+    Не больше 1 задания на канал за TG_PUBLIC_INTERVAL_S (10 мин): живой
+    pending/dispatched fetch_channel с тем же url — no-op (возврат None).
+    Возвращает task_id или None, если задание уже стоит."""
+    from proxy.core import _query
+    ensure_schema()
+    expire_stale_tasks()
+    if platform not in ("telegram", "tiktok"):
+        raise ValueError("platform должен быть telegram|tiktok")
+    # лимит «1 на канал за интервал»: незакрытые задания с этим url
+    dup = _query(
+        "SELECT task_id FROM shop_supply_queue WHERE type=? AND url=? "
+        "AND status IN (?, ?) "
+        "AND datetime(created_at, '+' || ? || ' seconds') > datetime('now')",
+        (TASK_TYPE_FETCH_CHANNEL, url, STATUS_PENDING, STATUS_DISPATCHED,
+         600), fetch=True)
+    if dup:
+        return None
+    task_id = str(uuid.uuid4())
+    _query(
+        "INSERT INTO shop_supply_queue (task_id, product_id, platform, type, "
+        "query, url, status, created_at, timeout_s, wave_id) "
+        "VALUES (?, NULL, ?, ?, ?, ?, ?, datetime('now'), ?, NULL)",
+        (task_id, platform, TASK_TYPE_FETCH_CHANNEL,
+         f"channel:{channel_id}" if channel_id else "", url,
+         STATUS_PENDING, _default_timeout_s()))
+    _audit(f"enqueue fetch_channel task={task_id} platform={platform} "
+           f"url={url}", STATUS_PENDING)
+    return task_id
+
+
 def expire_stale_tasks():
     """pending/dispatched без результата дольше timeout_s → failed/task_timeout.
 
@@ -386,6 +421,44 @@ def apply_supply_result(task_id, payload):
     kind = payload.get("kind")
     error = None if ok else str(payload.get("error") or "")
     offers_saved = 0
+    posts_saved = 0
+    # ── #741 B.2: fetch_channel — посты пишутся в lz_channel_posts тем же
+    # кодом, что A.1 (store_posts: INSERT OR IGNORE, дедуп UNIQUE) ──
+    if task["type"] == TASK_TYPE_FETCH_CHANNEL:
+        if ok:
+            posts = payload.get("posts")
+            if not isinstance(posts, list):
+                ok = False
+                kind = "result_format"
+                error = "ok:true без posts[] — формат раздела 4б нарушен"
+            else:
+                bad = [i for i, po in enumerate(posts)
+                       if not isinstance(po, dict)
+                       or not str(po.get("message_id") or "").strip()
+                       or not str(po.get("channel") or "").strip()
+                       or not str(po.get("url") or "").strip()
+                       or not str(po.get("posted_at") or "").strip()]
+                if bad:
+                    ok = False
+                    kind = "result_format"
+                    error = (f"посты {bad} без channel/message_id/posted_at/url"
+                             " — формат раздела 4б нарушен")
+                else:
+                    from proxy.tg_public import store_posts
+                    ch = str(payload.get("channel_id")
+                             or (posts[0].get("channel", "") if posts else "")
+                             or task.get("url", "").rsplit("/", 1)[-1])
+                    posts_saved = store_posts(ch, posts, source="supply")
+        _query(
+            "UPDATE shop_supply_queue SET status=?, result_json=?, kind=?, "
+            "error=? WHERE task_id=?",
+            (STATUS_DONE if ok else STATUS_FAILED, result_json, kind, error,
+             task_id))
+        _audit(f"result fetch_channel task={task_id} platform={task['platform']} "
+               f"ok={ok} kind={kind} posts_saved={posts_saved}",
+               STATUS_DONE if ok else (kind or STATUS_FAILED))
+        return {"applied": True, "ok": ok, "posts_saved": posts_saved,
+                "kind": kind, "error": error}
     if ok:
         offers = payload.get("offers")
         if isinstance(offers, list) and offers:
