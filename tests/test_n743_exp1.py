@@ -201,12 +201,17 @@ def test_a3_tools_real_in_code():
     assert '"operation_cost"' in EXPERT_MLOG or "operation_cost" in EXPERT_MLOG
 
 
-def test_a3_expert_mlog_untouched():
-    """Запрет: dept/expert.mlog (EXP-2) не тронут — KB-паттерны остались
-    на месте (перенос в шкурку, не удаление)."""
-    assert "pattern ExpertAutomotiveKB(" in EXPERT_MLOG
-    assert "pattern ExpertAutomotiveSkillSet(" in EXPERT_MLOG
+def test_a3_expert_mlog_kb_transferred():
+    """EXP-1: перенос знаний в шкурку. После EXP-2 (#744 A.3) KB-паттерны
+    удалены из кода (перенос завершён — шкурка auto живёт в файле);
+    живой поиск и инструменты остаются."""
+    assert "pattern ExpertAutomotiveKB(" not in EXPERT_MLOG
+    assert "pattern ExpertAutomotiveSkillSet(" not in EXPERT_MLOG
     assert "pattern ExpertTavilySearch(" in EXPERT_MLOG
+    assert "pattern ExpertAvByListings(" in EXPERT_MLOG
+    # знания живы в шкурке auto
+    skin = SKIN_AUTO.read_text(encoding="utf-8")
+    assert "| Эконом/компакт | 78 | 65 | 55 | 40 | 28 |" in skin
 
 
 def test_a3_list_skins_catalog():

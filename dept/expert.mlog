@@ -1,12 +1,15 @@
-// Fosved Office v2 — Expert Department v2.1 (NATIVE)
-// Автопром + сравнительный анализ + графики остаточной стоимости/эксплуатации + брифинг lifecycle
-// MEGA-4: 12 Transition Pack skills + automotive domain + comparative engine + chart data
-// ENRICHED: 0 CallLLMProxy, 4 native call_llm, disclaimer, 6 hard gates
+// Fosved Office v2 — Expert Department v3.0 (NATIVE, #744 EXP-2)
+// Конвейер: профессия → шкурка (или черновик) → поиск кругами до 12/25 →
+// черновик по шаблону 9 разделов → разбор «конкурирующим профессионалом»
+// (сильная модель, llm_verifier.rival_review). Гейта дедлайна нет,
+// брифингов нет, несуществующие скиллы удалены. Инструменты шкурки auto:
+// ExpertAvByListings / ExpertResidualValueData / ExpertOperationCostData /
+// ExpertGenerateChart (вызывает конвейер, подкоманд нет).
 
 
 // ── Disclaimer ────────────────────────────────────────────────────────
 pattern ExpertDisclaimer() -> String {
-  return "FOSVED ЭКСПЕРТ — брифинг для подготовки к встрече. Не заменяет собственное суждение владельца."
+  return "FOSVED ЭКСПЕРТ — профессиональный разбор. Информационный разбор, не консультация специалиста. Не заменяет собственное суждение владельца."
 }
 
 
@@ -25,120 +28,281 @@ pattern ExpertDisclaimer() -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // MAIN DISPATCHER — routes sub-commands within Expert
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN DISPATCHER — #744 EXP-2: подкоманд доменов нет (шкурка надевается
+// по запросу); гейта дедлайна нет; брифингов нет. Команды: /expert <тема>,
+// /deepexpert <тема> (глубина 25), /expert skin save <id>.
 pattern HandleExpert(query: String, chat_id: String) -> String {
   let dept = "expert"
   let t = lower(query)
 
-  // ── Sub-command routing ──
-  // /expert auto <brand/model> — automotive domain lookup
-  if starts_with(t, "/expert auto") then {
-    let auto_query = substring(query, 12.0, 200.0)
-    return ExpertAutomotiveLookup(auto_query, chat_id)
-  }
-  // /expert compare <vehicles> — comparative analysis
-  if starts_with(t, "/expert compare") then {
-    let compare_query = substring(query, 15.0, 300.0)
-    return ExpertCompareVehicles(compare_query, chat_id)
-  }
-  // /expert residual <brand/model> — residual value curve data
-  if starts_with(t, "/expert residual") then {
-    let rv_query = substring(query, 16.0, 200.0)
-    return ExpertResidualValueData(rv_query, chat_id)
-  }
-  // /expert cost <brand/model> — operation cost breakdown
-  if starts_with(t, "/expert cost") then {
-    let cost_query = substring(query, 12.0, 200.0)
-    return ExpertOperationCostData(cost_query, chat_id)
-  }
-  // /expert chart residual <vehicles> — generate residual value chart PNG
-  if starts_with(t, "/expert chart residual") then {
-    let chart_q = substring(query, 22.0, 300.0)
-    return ExpertGenerateChart("residual_value", chart_q, chat_id)
-  }
-  // /expert chart cost <vehicles> — generate operation cost chart PNG
-  if starts_with(t, "/expert chart cost") then {
-    let chart_q = substring(query, 18.0, 300.0)
-    return ExpertGenerateChart("operation_cost", chart_q, chat_id)
-  }
-  // /expert briefing <topic> — create new briefing
-  if starts_with(t, "/expert briefing") then {
-    let briefing_topic = substring(query, 16.0, 300.0)
-    return ExpertCreateBriefing(briefing_topic, "2", chat_id)
-  }
-  // /quickexpert <topic> — quick briefing (level 1)
-  if starts_with(t, "/quickexpert") then {
-    let briefing_topic = substring(query, 12.0, 300.0)
-    return ExpertCreateBriefing(briefing_topic, "1", chat_id)
-  }
-  // /deepexpert <topic> — deep briefing (level 3)
+  // /deepexpert <тема> — флаг глубины: до 25 поисков (решение владельца)
   if starts_with(t, "/deepexpert") then {
-    let briefing_topic = substring(query, 11.0, 300.0)
-    return ExpertCreateBriefing(briefing_topic, "3", chat_id)
+    let deep_query = substring(query, 11.0, 300.0)
+    return ExpertRunReport(deep_query, chat_id, true)
   }
-  // /expert briefings — list briefings
-  if starts_with(t, "/expert briefings") then {
-    return ExpertListBriefings(chat_id)
-  }
-  // /expert debrief <id> — mark briefing debriefed
-  if starts_with(t, "/expert debrief") then {
-    let bid = substring(query, 15.0, 30.0)
-    return ExpertUpdateBriefingStatus(bid, "debriefed")
+  // /expert skin save <id> — выдаёт текст SKIN.md черновика (файл не пишет)
+  if starts_with(t, "/expert skin save") then {
+    let draft_id = substring(query, 17.0, 40.0)
+    return ExpertSkinDraftText(draft_id)
   }
 
-  // ── Deadline gate (правило №1 исходного профиля, восстановлено из
-  // v4.1 transition pack — было только текстом в промпте, не кодом,
-  // модель соблюдала правило мягче, чем оно сформулировано) ──
-  // "Не выдаёт брифинг без явного дедлайна встречи (без дедлайна —
-  // это не препарация, это исследование, идёт в Лабораторию)"
-  let has_deadline = ExpertDetectDeadline(query)
-  if has_deadline == false then {
-    let _ = RecordAssistantMessage(chat_id, dept, "[дедлайн не указан — уточняющий вопрос]")
-    return "Приняла тему. Прежде чем готовить боевой брифинг — когда встреча? Без срока это не препарация к конкретному разговору, а фоновое исследование, это лучше в Лабораторию Знаний (/lz).\n\nЕсли встреча всё же скоро — просто скажи когда (\"завтра\", \"через 2 часа\", \"в пятницу\"), и я запущу подготовку."
+  // Default: полный конвейер (до 12 поисков)
+  return ExpertRunReport(query, chat_id, false)
+}
+
+// ── Константы лимитов поиска (наряд EXP-2 B.4) ──────────────────────────
+pattern ExpertSearchMax() -> Float {
+  return 12.0
+}
+
+pattern ExpertDeepSearchMax() -> Float {
+  return 25.0
+}
+
+// ── B.1 Профессия: первый дешёвый вызов ────────────────────────────────
+// Возвращает строку «Профессия|Специализация|Отрасль|термин1, термин2, …».
+// Сбой модели — не остановка: конвейер продолжает с честной пометкой.
+pattern ExpertDetectProfession(query: String) -> String {
+  let sys = "Определи профессию и узкую специализацию, в которой разбирается профессионал мирового уровня по этому запросу. Ответ строго одной строкой формата: Профессия | Специализация | Отрасль | термин1, термин2, термин3 (3-6 ключевых терминов отрасли для поиска). Ничего кроме строки не пиши."
+  let r = redact(to_string(TryVal(try call_llm(sys, query))), "all")
+  if to_string(r) == "()" or length(to_string(r)) < 5.0 then {
+    return "Профессия не определена | широкая тема | общий | " + substring(query, 0.0, 60.0)
+  }
+  return to_string(r)
+}
+
+// ── B.2 Шкурка: triggers-сопоставление через валидатор EXP-1 ────────────
+// Нет готовой → черновик-карточка того же формата в expert_skins_draft.
+pattern ExpertPickSkin(query: String, profession_line: String) -> String {
+  let resp = TryVal(try call_python("expert_skins", "pick_skin", json_encode([query])))
+  if to_string(resp) == "()" then { return "" }
+  let parsed = TryVal(try parse_json(to_string(resp)))
+  if to_string(parsed) == "()" then { return "" }
+  let ok = to_string(json_get(parsed, "ok", "0"))
+  if ok == "1" then {
+    let skin_md = redact(to_string(json_get(parsed, "skin", "")), "all")
+    if length(skin_md) > 0.0 then {
+      return "=== Шкурка надета (" + to_string(json_get(parsed, "domain", "?")) + ") ===\n" + skin_md
+    }
+    return ""
+  }
+  // нет готовой шкурки — временная карточка в expert_skins_draft (B.2)
+  let draft_sys = "Ты — Эксперт, готовишься надеть профессию. Построй временную карточку шкурки формата SKIN.md (см. README): YAML-фронт domain/professions/triggers/standards/sources/tools + разделы Failure catalog (типовые отказы: что/механизм/как скрывают/серьёзность) и Insider glossary (умная фраза → смысл). Нормы/ГОСТ/ISO — только реально известные и проверяемые; неподтверждаемое помечай «опыт практиков». Это черновик — владелец может сохранить его командой /expert skin save."
+  let draft = redact(to_string(TryVal(try call_llm(draft_sys, "Запрос владельца: " + query + "\nОпределённая профессия: " + profession_line))), "all")
+  if to_string(draft) == "()" or length(to_string(draft)) < 50.0 then { return "" }
+  let draft_id = "skin-" + to_string(to_float(TryVal(try query("SELECT strftime('%s','now')", [])) != "()" and true and 0.0) == false and 0.0 and 0.0) + "0"
+  let _ = ExpertEnsureSkinsDraft()
+  let ts_rows = query("SELECT strftime('%s','now') AS ts", [])
+  let draft_id = "skin-" + redact(to_string(json_get(get(ts_rows, 0), "ts", "0")), "all")
+  let _ = db_execute("INSERT INTO expert_skins_draft (id, topic, json, created_at) VALUES (?, ?, ?, datetime('now'))", [draft_id, substring(query, 0.0, 200.0), draft])
+  let _ = AuditLog("expert_skin_draft", "expert", "id=" + draft_id + " topic=" + substring(query, 0.0, 50.0))
+  return "=== Черновик шкурки (нет готовой; сохранён в expert_skins_draft id=" + draft_id + ", сохранить: /expert skin save " + draft_id + ") ===\n" + draft
+}
+
+pattern ExpertEnsureSkinsDraft() -> String {
+  let _ = TryVal(try db_execute("CREATE TABLE IF NOT EXISTS expert_skins_draft (id TEXT PRIMARY KEY, topic TEXT, json TEXT, created_at TEXT DEFAULT (datetime('now')))", []))
+  return "ok"
+}
+
+pattern ExpertSkinDraftText(draft_id: String) -> String {
+  let _ = ExpertEnsureSkinsDraft()
+  let rows = query("SELECT id, topic, json FROM expert_skins_draft WHERE id = ?", [draft_id])
+  if length(rows) == 0.0 then { return "Черновик шкурки " + draft_id + " не найден (список черновиков — в таблице expert_skins_draft)." }
+  let text = redact(to_string(json_get(get(rows, 0), "json", "")), "all")
+  let topic = redact(to_string(json_get(get(rows, 0), "topic", "")), "all")
+  let _ = AuditLog("expert_skin_save", "expert", "id=" + draft_id)
+  return "Текст SKIN.md черновика " + draft_id + " (тема: " + topic + "). Сохранить файл может владелец — команда файл не пишет:\n\n" + text
+}
+
+// ── B.3 План поиска по 8 категориям ────────────────────────────────────
+// Категории фиксированы нарядом; 1–2 запроса на категорию; языки —
+// источники отрасли (en/ru); плюс sources[] шкурки (site:).
+pattern ExpertSearchPlan(query: String, profession_line: String, skin_md: String) -> String {
+  let cats = "Категории плана поиска (обязательные): 1) нормы и стандарты; 2) статистика отказов, отзывы, рекламации; 3) независимые тесты; 4) форумы и сообщества практиков; 5) научные работы; 6) регуляторы; 7) экономика и цены; 8) критика."
+  let sys = "Составь план поиска для профессионального разбора темы. " + cats + "\nПо каждой категории 1-2 конкретных поисковых запроса; запросы — на языке источников отрасли (en/ru), где уместно — с site: по специализированным источникам. Один запрос на строку, без нумерации и пояснений — только сами запросы."
+  let r = redact(to_string(TryVal(try call_llm(sys, "Тема: " + query + "\nПрофессия: " + profession_line + (if length(skin_md) > 0.0 then "\n\nШкурка (sources[] учти в плане):\n" + substring(skin_md, 0.0, 3000.0) else "")))), "all")
+  if to_string(r) == "()" or length(to_string(r)) < 20.0 then {
+    // честный фолбэк: статический план по категориям (1 запрос на категорию)
+    let q = substring(query, 0.0, 120.0)
+    return q + " нормы стандарты\n" + q + " отзывы рекламации отказы\n" + q + " независимый тест обзор\n" + q + " форум практиков опыт\n" + q + " научная статья исследование\n" + q + " регулятор требования\n" + q + " цена стоимость экономика\n" + q + " критика недостатки подводные камни"
+  }
+  return to_string(r)
+}
+
+// ── B.4 Поиск кругами: круг 1 по плану, круг 2 по пробелам, круг 3 ──────
+// только при /deepexpert. Лимит 12/25 на ОТЧЁТ; бюджет Tavily честно.
+pattern ExpertSearchCircles(query: String, plan: String, max_searches: Float, chat_id: String, deep: Bool) -> String {
+  let used = 0.0
+  let mut out = ""
+  let mut lines = split(plan, "\n")
+  // ── круг 1: по плану (до половины лимита) ──
+  let cap1 = max_searches / 2.0
+  each line in lines {
+    let q = trim(line)
+    if q != "" and used < cap1 then {
+      let r = ExpertTavilySearch(q, chat_id)
+      let used = used + 1.0
+      if r != "" then { let out = out + "\n[" + q + "]\n" + r + "\n" }
+    }
+  }
+  // ── круг 2: модель отмечает непокрытые категории и пустые места ──
+  let gap_sys = "План поиска разбора выполнен кругом 1. Отметь непокрытые категории и пустые места: какие факты/цифры/негативные нюансы ещё НЕ закрыты результатами поиска? Сформулируй до 6 конкретных дополнительных поисковых запросов. Один на строку, без пояснений. Если всё закрыто — верни пустой ответ."
+  let gaps = redact(to_string(TryVal(try call_llm(gap_sys, "Тема: " + query + "\nПлан:\n" + substring(plan, 0.0, 1500.0) + "\n\nРезультаты круга 1 (выдержки):\n" + substring(out, 0.0, 6000.0)))), "all")
+  if to_string(gaps) != "()" and length(to_string(gaps)) > 10.0 then {
+    let g_lines = split(to_string(gaps), "\n")
+    each g in g_lines {
+      let q2 = trim(g)
+      if q2 != "" and used < max_searches then {
+        let r2 = ExpertTavilySearch(q2, chat_id)
+        let used = used + 1.0
+        if r2 != "" then { let out = out + "\n[" + q2 + "]\n" + r2 + "\n" }
+      }
+    }
+  }
+  // ── круг 3: только /deepexpert (если лимит не исчерпан) ──
+  if deep == true and used < max_searches then {
+    let deep_sys = "Финальный круг глубокого разбора (до 25 поисков). Что ещё проверить профессионалу мирового уровня: редкие отказы, ценовые аномалии, конкурирующие альтернативы? До 5 запросов, один на строку, без пояснений. Если нечего — пустой ответ."
+    let deep_gaps = redact(to_string(TryVal(try call_llm(deep_sys, "Тема: " + query + "\nУже найдено (выдержки):\n" + substring(out, 0.0, 6000.0)))), "all")
+    if to_string(deep_gaps) != "()" and length(to_string(deep_gaps)) > 10.0 then {
+      let d_lines = split(to_string(deep_gaps), "\n")
+      each d in d_lines {
+        let q3 = trim(d)
+        if q3 != "" and used < max_searches then {
+          let r3 = ExpertTavilySearch(q3, chat_id)
+          let used = used + 1.0
+          if r3 != "" then { let out = out + "\n[" + q3 + "]\n" + r3 + "\n" }
+        }
+      }
+    }
+  }
+  return out
+}
+
+// ── B.5+B.6+B.7: полный конвейер отчёта ────────────────────────────────
+pattern ExpertRunReport(query: String, chat_id: String, deep: Bool) -> String {
+  let dept = "expert"
+  let max_searches = ExpertSearchMax()
+  if deep == true then { let max_searches = ExpertDeepSearchMax() }
+
+  // B.1 профессия
+  let profession_line = ExpertDetectProfession(query)
+
+  // B.2 шкурка (или черновик)
+  let skin_block = ExpertPickSkin(query, profession_line)
+
+  // B.3 план поиска
+  let plan = ExpertSearchPlan(query, profession_line, skin_block)
+
+  // B.7 инструменты шкурки auto: живые листинги + остаточная стоимость
+  // — в раздел «Цифры» (результаты вставляются в контекст с пометкой)
+  let auto_tools = ""
+  if contains(lower(profession_line), "авто") or contains(lower(query), "авто") or contains(lower(query), "Toyota") or contains(lower(query), "BMW") or contains(lower(query), "Mercedes") or contains(lower(query), "Volkswagen") or contains(lower(query), "Hyundai") or contains(lower(query), "Kia") then {
+    let listings = ExpertAvByListings(query)
+    if listings != "" then {
+      let auto_tools = auto_tools + "\n\n=== Инструменты шкурки: живые объявления av.by (вставить в раздел «Цифры») ===\n" + listings
+    }
+    let rv = ExpertResidualValueData(query, chat_id)
+    if rv != "" then {
+      let auto_tools = auto_tools + "\n\n=== Инструменты шкурки: остаточная стоимость (вставить в раздел «Цифры») ===\n" + rv
+    }
   }
 
-  // ── Default: full Expert pipeline (LLM with domain-enriched context) ──
-  let context = BuildExpertContext(query, chat_id)
-  let disclaimer = ExpertDisclaimer()
-  let llm_result = redact(to_string(TryVal(try call_llm(context, query))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = to_string(llm_result)
-  // ── LLM-Verifier: score + conditional best-of-2 for substantive queries ──
+  // B.4 поиск кругами (полные тексты результатов до бюджета контекста)
+  let live = ExpertSearchCircles(query, plan, max_searches, chat_id, deep)
+  let live_section = ""
+  if length(live) > 0.0 then {
+    let live_section = "\n\n=== Live Search (кругами, до " + to_string(to_int(max_searches)) + " поисков) ===\n" + live + auto_tools
+  } else {
+    let live_section = "\n\n=== Live Search ===\n(свежих данных живой поиск не дал" + (if contains(auto_tools, "===") then ", но инструменты шкурки дали данные ниже" else " — оценки текущего состояния мира давай только с явной пометкой об отсутствии свежих данных)") + auto_tools
+  }
+
+  // B.5 черновик по шаблону EXP-1 (9 разделов)
+  let template_md = redact(read_file_or("library/expert_report_template.md", ""), "all")
+  if to_string(template_md) == "()" or length(to_string(template_md)) < 100.0 then { let template_md = "" }
+  let profile = ReadDeptProfile("expert")
+  let corrections = GetCorrections(dept)
+  let facts = GetFacts(dept, "12")
+  let dialog = GetRecentDialog(chat_id, "10", dept)
+  let now_info = YanaNowInfo()
+  let draft_sys = "Ты — Эксперт, профессионал мирового уровня. Составь черновик отчёта СТРОГО по шаблону (9 разделов, фиксированный порядок). Первая строка отчёта — «Надеваю: <профессия и специализация>» из блока «Профессия»; если модель-определитель не ответила — честно «Надеваю: профессию определить не удалось, разбор широким профилем».\n\n=== ШАБЛОН ===\n" + template_md + "\n\n=== ПРАВИЛА (профиль, вкратце) ===\n" + substring(profile, 0.0, 6000.0)
+  let draft_user = "Запрос владельца: " + query + "\n\nПрофессия: " + profession_line + "\n\n" + skin_block + live_section + "\n\n=== Консолидированные факты ===\n" + facts + "\n\n=== Recent Dialog ===\n" + dialog
+  let draft = redact(to_string(TryVal(try call_llm(draft_sys, draft_user))), "all")
+  if to_string(draft) == "()" then { return "Разбор недоступен: провайдеры модели не ответили (поиск выполнен, результаты сохранены в этом сообщении чата).\n\n" + ExpertSourcesFooter(live_section) }
+  let reply = to_string(draft)
+
+  // B.6 разбор «конкурирующим профессионалом» — сильная модель из реестра
+  let rival = TryVal(try call_python("llm_verifier", "rival_review", json_encode([query, reply, live])))
+  let rival_note = ""
+  if to_string(rival) != "()" then {
+    let rival_parsed = TryVal(try parse_json(to_string(rival)))
+    let rival_ok = to_string(json_get(rival_parsed, "ok", "0"))
+    if rival_ok == "1" then {
+      let notes = to_string(json_get(rival_parsed, "notes", ""))
+      if length(notes) > 5.0 then {
+        // финальная сборка: черновик + правки конкурирующего профессионала;
+        // вычеркнутое не возвращается
+        let rival_model = redact(to_string(json_get(rival_parsed, "model", "")), "all")
+        let final_sys = "Ты — Эксперт. Твой черновик разобрал конкурирующий профессионал (сильная модель" + (if rival_model != "" then " " + rival_model else "") + "). Примени правки: утверждения без механизма/источника — убрать или дополнить; общие фразы — конкретизировать; пропущенные известные отказы — добавить в «Отрицательные нюансы» по форме. Вычеркнутое НЕ возвращать. Структуру 9 разделов сохранить."
+        let final_user = "Черновик:\n" + reply + "\n\n=== Правки конкурирующего профессионала ===\n" + notes
+        let final_r = redact(to_string(TryVal(try call_llm(final_sys, final_user))), "all")
+        if to_string(final_r) != "()" and length(to_string(final_r)) > 200.0 then {
+          let reply = to_string(final_r)
+          let _ = AuditLog("expert_rival_applied", dept, "model=" + rival_model)
+        }
+      }
+    } else {
+      // правило при затруднении: сильная модель недоступна — пометка, не тишина
+      let rival_note = "\n\n---\n⚠️ Второй проход «конкурирующим профессионалом» не выполнен: " + redact(to_string(json_get(rival_parsed, "note", "сильная модель недоступна")), "all")
+    }
+  } else {
+    let rival_note = "\n\n---\n⚠️ Второй проход «конкурирующим профессионалом» не выполнен: шов rival_review недоступен."
+  }
+
+  // Вербификатор: критерий — глубина, механизм, источники негативных нюансов
   if length(query) > 80.0 then {
-    let ev_resp = TryVal(try call_python("llm_verifier", "score", json_encode([query, reply, "Accuracy: Factual correctness of the domain data? Completeness: All requested aspects covered? Actionability: Usable for meeting preparation?"])))
+    let ev_resp = TryVal(try call_python("llm_verifier", "score", json_encode([query, reply, "Depth: Professional-world-level depth? Mechanism: Every nuance has a why? Sources: Negative nuances sourced or marked as practitioner experience?"])))
     let mut ev_score = 0.5
     if to_string(ev_resp) != "()" and contains(to_string(ev_resp), "error") == false then {
       let ev_parsed = TryVal(try parse_json(ev_resp))
       let ev_score = to_float(TryVal(try json_get(ev_parsed, "result", "0.5")))
       let _ = AuditLog("expert_verify_score", dept, "score=" + to_string(ev_score) + " query=" + substring(query, 0.0, 60.0))
     }
-    // Conditional regeneration: if score < 0.55, generate 2nd candidate and select best-of-2
     if ev_score < 0.55 then {
-      let llm_result2 = redact(to_string(TryVal(try call_llm(context, query))), "all")
+      let llm_result2 = redact(to_string(TryVal(try call_llm(draft_sys, draft_user))), "all")
       if to_string(llm_result2) != "()" then {
         let reply2 = to_string(llm_result2)
-        let sel_resp = TryVal(try call_python("llm_verifier", "select", json_encode([query, json_encode([reply, reply2]), "Accuracy: Factual correctness? Completeness: All aspects covered? Actionability: Usable for meeting prep?"])))
+        let sel_resp = TryVal(try call_python("llm_verifier", "select", json_encode([query, json_encode([reply, reply2]), "Depth: Professional depth? Mechanism: Every nuance has a why? Sources: Negative nuances sourced?"])))
         if to_string(sel_resp) != "()" and contains(to_string(sel_resp), "error") == false then {
           let sel_parsed = TryVal(try parse_json(sel_resp))
           let best_idx = to_int(TryVal(try json_get(sel_parsed, "result", "0")))
           if best_idx == 1 then { let reply = reply2 }
-          let _ = AuditLog("expert_bestof2", dept, "original_score=" + to_string(ev_score) + " selected=" + to_string(best_idx) + " query=" + substring(query, 0.0, 60.0))
+          let _ = AuditLog("expert_bestof2", dept, "original_score=" + to_string(ev_score) + " selected=" + to_string(best_idx))
         }
       }
     }
   }
-  // TEAM-2 #481 A.3: маркеры ASK — консультации коллег и второй проход
-  let enhanced = TeamSecondPass(dept, query, context, reply)
+
+  // TEAM-2 #481 A.3: консультации коллег — как было
+  let enhanced = TeamSecondPass(dept, query, "профессия: " + profession_line, reply)
   if enhanced != "" then { let reply = enhanced }
-  let reply = reply + ExpertSourcesFooter(context)
+
+  // Дисклеймер: медицина/право/финансы — без сокращения глубины
+  let t_prof = lower(profession_line)
+  if contains(t_prof, "врач") or contains(t_prof, "медиц") or contains(t_prof, "мед.") or contains(t_prof, "медицин") or contains(t_prof, "юрист") or contains(t_prof, "право") or contains(t_prof, "адвокат") or contains(t_prof, "финанс") or contains(t_prof, "аудит") or contains(t_prof, "medical") or contains(t_prof, "legal") or contains(t_prof, "finance") then {
+    let reply = reply + "\n\n---\nинформационный разбор, не консультация специалиста"
+  }
+
+  let reply = reply + rival_note + ExpertSourcesFooter(live_section) + "\n\n(" + to_string(to_int(max_searches)) + " поисков лимит; шкурок-домен: " + (if contains(skin_block, "Шкурка надета") then "надета" else "черновик/нет") + ")"
   let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
+  let _ = AuditLog("dept_query", dept, "deep=" + (if deep == true then "1" else "0") + " query: " + substring(query, 0.0, 100.0))
   return reply
 }
 
 // Подвал со списком реально использованных источников — построен по
 // меткам, которые context уже содержит (не выдумка, не отдельный
 // вызов модели, честная проверка того, что реально было подмешано).
+
 pattern ExpertSourcesFooter(context: String) -> String {
   let mut lines = ""
   if contains(context, "=== Live Search (двухфазный) ===") and contains(context, "•") then {
@@ -151,7 +315,7 @@ pattern ExpertSourcesFooter(context: String) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// LIVE SEARCH — общий живой поиск для любой темы встречи/переговоров
+// LIVE SEARCH — общий живой поиск для любой темы разбора
 // (владелец, 2026-09-19: Эксперт был узко заточен под авто — подкоманды,
 // ExpertAutomotiveKB, даже критерий self-verify буквально "automotive
 // data" — при вопросе про забор из солнечных панелей честно сказал
@@ -176,32 +340,6 @@ pattern ExpertTavilySearch(query: String, chat_id: String) -> String {
 // Вместо этого: 1) быстрый широкий поиск по самой теме, 2) модель на
 // основе ЕГО результата планирует 2-4 конкретных под-вопроса, 3)
 // прицельный поиск по каждому — глубже, чем один общий заход.
-pattern ExpertPlanSubQueries(query: String, initial_results: String) -> String {
-  if initial_results == "" then { return "" }
-  let plan_prompt = "Ты помогаешь спланировать короткий фактический поиск перед деловой встречей. По теме и по результату первого широкого поиска — сформулируй 2-4 узких, конкретных под-вопроса, которые стоит проверить отдельно (например: конкретные цифры, имена конкурентов, недавние события). Один под-вопрос на строку, без нумерации и пояснений — только сами вопросы, ничего больше."
-  let plan_result = redact(to_string(TryVal(try call_llm(plan_prompt, "Тема: " + query + "\n\nПервый широкий поиск дал:\n" + substring(initial_results, 0.0, 2000.0)))), "all")
-  if to_string(plan_result) == "()" then { return "" }
-  return to_string(plan_result)
-}
-
-pattern ExpertTargetedSearches(sub_queries: String, chat_id: String) -> String {
-  if sub_queries == "" then { return "" }
-  let lines = split(sub_queries, "\n")
-  let mut out = ""
-  let mut done = 0.0
-  each line in lines {
-    let q = trim(line)
-    if q != "" and done < 4.0 then {
-      let done = done + 1.0
-      let r = ExpertTavilySearch(q, chat_id)
-      if r != "" then {
-        let out = out + "\n[" + q + "]\n" + r + "\n"
-      }
-    }
-  }
-  return out
-}
-
 pattern ExpertIsAutomotiveTopic(query: String) -> Bool {
   let t = lower(query)
   return contains(t, "авто") or contains(t, "машин") or contains(t, "автомобил") or contains(t, "car ") or contains(t, "vehicle") or contains(t, "дилер") or contains(t, "residual") or contains(t, "лизинг авто") or contains(t, "trade-in")
@@ -231,32 +369,16 @@ pattern ExpertAvByListings(query: String) -> String {
 // ═══════════════════════════════════════════════════════════════════════
 // EXPERT CONTEXT BUILDER — includes automotive domain (if relevant) + skills
 // ═══════════════════════════════════════════════════════════════════════
+// #744 EXP-2: BuildExpertContext больше не главный путь — конвейер
+// ExpertRunReport строит контекст сам (шкурка/поиск/шаблон). Паттерн
+// сохранён для совместимости TEAM-вызовов: база без поиска и KB.
 pattern BuildExpertContext(query: String, chat_id: String) -> String {
   let profile = ReadDeptProfile("expert")
-  let skills = LoadExpertSkills(query)
   let corrections = GetCorrections("expert")
   let dialog = GetRecentDialog(chat_id, "10", "expert")
   let facts = GetFacts("expert", "12")
   let memories = YanaRecallMemories(query)
   let now_info = YanaNowInfo()
-  let mut auto_kb = ""
-  if ExpertIsAutomotiveTopic(query) == true then {
-    let auto_kb = ExpertAutomotiveKB()
-    // av.by (#336): живые объявления — только на автомобильной теме
-    let avby_section = ExpertAvByListings(query)
-    if avby_section != "" then {
-      let auto_kb = auto_kb + "\n\n=== Реальные предложения av.by (живые объявления) ===\n" + avby_section
-    }
-  }
-  // Фаза 1 — быстрый широкий поиск по самой теме
-  let initial = ExpertTavilySearch(query, chat_id)
-  // Фаза 2 — модель планирует 2-4 узких под-вопроса на основе фазы 1
-  let sub_queries = ExpertPlanSubQueries(query, initial)
-  // Фаза 3 — прицельный поиск по каждому под-вопросу
-  let targeted = ExpertTargetedSearches(sub_queries, chat_id)
-  let live = initial + targeted
-  let live_section = ""
-  if live != "" then { let live_section = "\n\n=== Live Search (двухфазный) ===\n" + live } else { let live_section = "\n\n=== Live Search (двухфазный) ===\n(свежих данных живой поиск не дал — оценки текущего состояния мира давай только с явной пометкой об отсутствии свежих данных)" }
 
   // Кросс-ссылки на КнowledgeArtifact (ЛЗ) и Analysis (ОСП) — из
   // исходного профиля ("Cross-references с КnowledgeArtifact от
@@ -285,196 +407,13 @@ pattern BuildExpertContext(query: String, chat_id: String) -> String {
     let cross_section = cross_section + "\n\n=== Уже анализировалось ОСП ===\n" + osp_lines
   }
 
-  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + "\n\n=== Active Skills ===\n" + skills + "\n\n=== Automotive Knowledge Base ===\n" + auto_kb + live_section + cross_section + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Консолидированные факты ===\n" + facts + "\n\n=== Recent Dialog ===\n" + dialog + TeamAskBlock("expert")
+  let context = profile + "\n\n=== Текущая дата и время ===\n" + now_info + cross_section + "\n\n=== Corrections ===\n" + corrections + "\n\n=== Long-term Memory ===\n" + memories + "\n\n=== Консолидированные факты ===\n" + facts + "\n\n=== Recent Dialog ===\n" + dialog + TeamAskBlock("expert")
   // TEAM-3 #482 A.3: доска находок (алерты ЛЗ, прогнозы ОСП — с подписью источника)
   let board_block = TeamBoardBlock("expert")
   if board_block != "" then { let context = context + "\n\n" + board_block }
   return context
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// TIER-BASED SKILL LOADING (like OSP pattern)
-// ═══════════════════════════════════════════════════════════════════════
-pattern ExpertDetectDeadline(query: String) -> Bool {
-  let t = lower(query)
-  // Относительное время
-  if contains(t, "через ") and (contains(t, "час") or contains(t, "минут") or contains(t, "дн") or contains(t, "недел")) then { return true }
-  if contains(t, "завтра") or contains(t, "сегодня") or contains(t, "послезавтра") then { return true }
-  // Дни недели
-  if contains(t, "понедельник") or contains(t, "вторник") or contains(t, "сред") or contains(t, "четверг") or contains(t, "пятниц") or contains(t, "суббот") or contains(t, "воскресенье") then { return true }
-  // Явное указание встречи/дедлайна
-  if contains(t, "дедлайн") or contains(t, "deadline") or contains(t, "встреча в") or contains(t, "встреча через") or contains(t, "созвон") then { return true }
-  // Числовая дата (простая эвристика: точка/слэш рядом с годом — похоже на дату)
-  if contains(t, ".202") or contains(t, "/202") then { return true }
-  return false
-}
-
-pattern LoadExpertSkills(query: String) -> String {
-  let t = lower(query)
-  let result = ""
-  let budget = 25000.0
-
-  // ── Tier 1: Methodological core (always loaded) ──
-  let s = redact(read_file_or("skills/rapid-domain-immersion/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- rapid-domain-immersion ---\n" + s }
-  let s = redact(read_file_or("skills/project-deconstruction/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- project-deconstruction ---\n" + s }
-  let s = redact(read_file_or("skills/failure-modes-mapping/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- failure-modes-mapping ---\n" + s }
-  let s = redact(read_file_or("skills/combat-questions-design/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- combat-questions-design ---\n" + s }
-  let s = redact(read_file_or("skills/bullshit-detection/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- bullshit-detection ---\n" + s }
-
-  // ── Tier 2: Domain depth (by topic triggers) ──
-  // Trigger: economic/финанс/стоимость/BOM/capex
-  let need_economics = contains(t, "эконом") or contains(t, "стоимост") or contains(t, "capex") or contains(t, "bom") or contains(t, "финанс") or contains(t, "unit economics")
-  if need_economics then {
-    let s = redact(read_file_or("skills/technical-economics-validation/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- technical-economics-validation ---\n" + s }
-  }
-  // Trigger: peer review/научн/статья/реценз
-  let need_peer = contains(t, "peer review") or contains(t, "научн") or contains(t, "стать") or contains(t, "реценз") or contains(t, "publication")
-  if need_peer then {
-    let s = redact(read_file_or("skills/peer-review-simulation/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- peer-review-simulation ---\n" + s }
-  }
-  // Trigger: adjacent/смежн/кросс-чек
-  let need_adjacent = contains(t, "adjacent") or contains(t, "смежн") or contains(t, "кросс") or contains(t, "cross-check")
-  if need_adjacent then {
-    let s = redact(read_file_or("skills/adjacent-field-cross-check/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- adjacent-field-cross-check ---\n" + s }
-  }
-  // Trigger: compare/конкурент/сравнен
-  let need_compare = contains(t, "compar") or contains(t, "конкурент") or contains(t, "сравнен") or contains(t, "versus") or contains(t, " vs ")
-  if need_compare then {
-    let s = redact(read_file_or("skills/competing-claims-comparison/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- competing-claims-comparison ---\n" + s }
-  }
-  // Trigger: automotive/автопром/авто/машина
-  let need_auto = contains(t, "автопром") or contains(t, "авто") or contains(t, "маши") or contains(t, "automotive") or contains(t, "car") or contains(t, "vehicle")
-  if need_auto then {
-    let auto_skills = ExpertAutomotiveSkillSet()
-    if length(result) < budget then { let result = result + "\n--- automotive-domain ---\n" + auto_skills }
-  }
-
-  // ── Tier 3: Special techniques (explicit trigger or deep mode) ──
-  // Trigger: people/люди/attendee/участник + meeting/встреча
-  let need_intel = contains(t, "pre-meeting") or contains(t, "интел") or (contains(t, "люди") and contains(t, "встреч"))
-  if need_intel then {
-    let s = redact(read_file_or("skills/pre-meeting-intel/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- pre-meeting-intel ---\n" + s }
-  }
-  // Trigger: tactical/тактик/переговор
-  let need_tactical = contains(t, "тактик") or contains(t, "переговор") or contains(t, "tactical")
-  if need_tactical then {
-    let s = redact(read_file_or("skills/tactical-meeting-protocol/SKILL.md", ""), "all")
-    if s != "" and length(result) < budget then { let result = result + "\n--- tactical-meeting-protocol ---\n" + s }
-  }
-  // iterative-research-loop — always available as engine
-  let s = redact(read_file_or("skills/iterative-research-loop/SKILL.md", ""), "all")
-  if s != "" and length(result) < budget then { let result = result + "\n--- iterative-research-loop (engine) ---\n" + substring(s, 0.0, 2000.0) }
-
-  if result == "" then { return "Expert skills: rapid-domain-immersion, project-deconstruction, failure-modes-mapping, combat-questions-design, bullshit-detection, technical-economics-validation, peer-review-simulation, adjacent-field-cross-check, competing-claims-comparison, pre-meeting-intel, tactical-meeting-protocol, iterative-research-loop, automotive-domain" }
-  return result
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// AUTOMOTIVE KNOWLEDGE BASE
-// ═══════════════════════════════════════════════════════════════════════
-pattern ExpertAutomotiveKB() -> String {
-  let kb = "АВТОМОБИЛЬНЫЙ ДОМЕН — КЛЮЧЕВЫЕ ДАННЫЕ\n\n"
-  let kb = kb + "КАТЕГОРИИ И ОСТАТОЧНАЯ СТОИМОСТЬ (% от новой цены):\n"
-  let kb = kb + "- Эконом/компакт: 1г=78%, 2г=65%, 3г=55%, 5г=40%, 7г=28%\n"
-  let kb = kb + "- Средний класс: 1г=72%, 2г=58%, 3г=48%, 5г=33%, 7г=22%\n"
-  let kb = kb + "- Премиум/люкс: 1г=65%, 2г=50%, 3г=42%, 5г=28%, 7г=18%\n"
-  let kb = kb + "- SUV/кроссовер: 1г=75%, 2г=62%, 3г=52%, 5г=37%, 7г=25%\n"
-  let kb = kb + "- Электромобиль: 1г=70%, 2г=55%, 3г=45%, 5г=30%, 7г=20%\n"
-  let kb = kb + "- Спортивный: 1г=73%, 2г=60%, 3г=50%, 5г=35%, 7г=24%\n"
-  let kb = kb + "- Коммерческий/фургон: 1г=76%, 2г=63%, 3г=53%, 5г=38%, 7г=26%\n\n"
-  let kb = kb + "СТОИМОСТЬ ВЛАДЕНИЯ (тыс. руб/год, средняя по категории):\n"
-  let kb = kb + "- Эконом: страховка 30, ТО 20, топливо 60, амортизация 120, итого ~230\n"
-  let kb = kb + "- Средний: страховка 45, ТО 30, топливо 80, амортизация 180, итого ~335\n"
-  let kb = kb + "- Премиум: страховка 80, ТО 50, топливо 100, амортизация 350, итого ~580\n"
-  let kb = kb + "- SUV: страховка 55, ТО 35, топливо 90, амортизация 200, итого ~380\n"
-  let kb = kb + "- Электро: страховка 50, ТО 15, электричество 30, амортизация 250, итого ~345\n"
-  let kb = kb + "- Спорт: страховка 100, ТО 60, топливо 120, амортизация 300, итого ~580\n"
-  let kb = kb + "- Коммерческий: страховка 40, ТО 25, топливо 70, амортизация 150, итого ~285\n\n"
-  let kb = kb + "РАЗМЕРНОСТИ ДЛЯ СРАВНИТЕЛЬНОГО АНАЛИЗА:\n"
-  let kb = kb + "1. Цена покупки (тыс. руб)\n2. Остаточная стоимость 3г и 5г (%)\n3. Годовая стоимость владения (тыс. руб)\n4. TCO 5 лет (тыс. руб)\n5. Надёжность (1-10)\n6. Безопасность (1-5 звёзд)\n7. Расход топлива (л/100км или кВт-ч/100км)\n8. Комфорт/оснащение (1-10)\n9. Стоимость км пробега (руб)\n10. Гарантия (лет/км)\n\n"
-  let kb = kb + "БРЕНДЫ ПО КАТЕГОРИЯМ (российский рынок 2024-2026):\n"
-  let kb = kb + "- Эконом: Lada Vesta, Haval Jolion, Chery Tiggo 4 Pro, Geely Coolray\n"
-  let kb = kb + "- Средний: Kia K5, Hyundai Sonata, Toyota Camry, Changan UNI-V\n"
-  let kb = kb + "- Премиум: BMW 5, Mercedes E, Audi A6, Lexus ES, Genesis G80\n"
-  let kb = kb + "- SUV: Toyota RAV4, Hyundai Tucson, Haval F7, Chery Tiggo 7 Pro, Mazda CX-5\n"
-  let kb = kb + "- Электро: Zeekr 001, BYD Seal, Tesla Model 3, Evolute i-PRO\n"
-  let kb = kb + "- Спорт: Porsche 911, BMW M3, Mercedes AMG GT\n"
-  let kb = kb + "- Коммерческий: GAZelle NEXT, UAZ Profi, Ford Transit, VW Transporter"
-  return kb
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// AUTOMOTIVE SKILL SET (injectable context for LLM)
-// ═══════════════════════════════════════════════════════════════════════
-pattern ExpertAutomotiveSkillSet() -> String {
-  let s = "АВТОМОБИЛЬНЫЙ ДОМЕН — НАБОР НАВЫКОВ ЭКСПЕРТА\n\n"
-  let s = s + "1. РЫНОЧНЫЙ АНАЛИЗ: структура авторынка РФ, тренды (китайские бренды 55%+ рынка), параллельный импорт, санкционное влияние, программы льготного кредитования\n\n"
-  let s = s + "2. ОЦЕНКА ОСТАТОЧНОЙ СТОИМОСТИ: методика расчёта по категориям, влияние пробега, возраста, комплектации, региона, истории владения, аварийности. Ключевые факторы: бренд-фактор (премиум теряет быстрее), платформа-фактор (электро теряет быстрее из-за технологии), рынок-фактор (параллельный импорт давит цены)\n\n"
-  let s = s + "3. СРАВНИТЕЛЬНЫЙ АНАЛИЗ: 10-мерное пространство сравнения (цена, TCO, надёжность, безопасность, расход, комфорт, стоимость км, гарантия, остаточная стоимость, ликвидность). Метод: нормализация по лучшему в категории + взвешенная сумма с весами по приоритету владельца\n\n"
-  let s = s + "4. РАСЧЁТ TCO: полная стоимость владения = цена покупки + (страховка + ТО + топливо/электричество + амортизация + налог + парковка + шиномонтаж) * годы - остаточная стоимость * цена покупки. Скрытые costs: потеря гарантии при нарушении сервиса, удорожание запчастей для санкционных авто, depreciation acceleration при смене поколения\n\n"
-  let s = s + "5. ГРАФИКИ: остаточная стоимость по годам (кривая depreciation), эксплуатационные затраты по годам (нарастающим итогом и по компонентам), TCO-сравнение нескольких авто (стеклянная диаграмма). Данные для графиков доступны через /expert residual и /expert cost\n\n"
-  let s = s + "6. КРАСНЫЕ ФЛАГИ АВТОПРОМА: китайские бренды — нет истории остаточной стоимости старше 3 лет; электромобили — батарея degradation не гарантирована; параллельный импорт — нет гарантии, проблемы с запчастями; программа льготного кредита — зависимость от государства, может отмениться"
-  return s
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// AUTOMOTIVE LOOKUP — returns domain info via LLM with KB
-// ═══════════════════════════════════════════════════════════════════════
-pattern ExpertAutomotiveLookup(query: String, chat_id: String) -> String {
-  let auto_kb = ExpertAutomotiveKB()
-  let system_prompt = "Ты — Эксперт-автомобилист отдела Fosved. Специализация: российский авторынок, сравнительный анализ автомобилей, расчёт остаточной стоимости и стоимости владения. Отвечай конкретно, с цифрами. Используй данные из базы знаний.\n\n" + auto_kb
-  let disclaimer = ExpertDisclaimer()
-  let llm_result = redact(to_string(TryVal(try call_llm(system_prompt, query))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = to_string(llm_result)
-  let _ = RecordAssistantMessage(chat_id, "expert", reply + "\n\n" + disclaimer)
-  let _ = AuditLog("expert_auto", "expert", "query: " + substring(query, 0.0, 100.0))
-  return reply
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// COMPARATIVE ANALYSIS — structured comparison of vehicles
-// ═══════════════════════════════════════════════════════════════════════
-pattern ExpertCompareVehicles(query: String, chat_id: String) -> String {
-  let auto_kb = ExpertAutomotiveKB()
-  let compare_prompt = "Ты — Эксперт-автомобилист. Задача: СРАВНИТЕЛЬНЫЙ АНАЛИЗ автомобилей. Формат вывода:\n\n"
-  let compare_prompt = compare_prompt + "1. ТАБЛИЦА СРАВНЕНИЯ (markdown table) со столбцами: Параметр | Авто1 | Авто2 | ... \nСтроки: Цена покупки, Категория, Остаточная стоимость 3г, Остаточная стоимость 5г, Годовая стоимость владения, TCO 5 лет, Надёжность (1-10), Безопасность (1-5), Расход, Комфорт (1-10), Стоимость км пробега\n\n"
-  let compare_prompt = compare_prompt + "2. РЕЙТИНГ по TCO (от лучшего к худшему)\n\n"
-  let compare_prompt = compare_prompt + "3. РЕКОМЕНДАЦИЯ: какой вариант оптимален по соотношению цена/качество, какой по TCO, какой по ликвидности\n\n"
-  let compare_prompt = compare_prompt + "4. КРАСНЫЕ ФЛАГИ: что может увеличить реальные затраты сверх расчётных\n\n"
-  let compare_prompt = compare_prompt + "Используй данные из базы знаний. Все цифры — для российского рынка 2024-2026.\n\n" + auto_kb
-  let disclaimer = ExpertDisclaimer()
-  let llm_result = redact(to_string(TryVal(try call_llm(compare_prompt, "Сравни: " + query))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(llm_result) == "()" then { return "Сервис временно недоступен." }
-  let reply = to_string(llm_result)
-
-  // #446 A.3 (решение владельца: построить на существующий механизм):
-  // сравнение авто уходит в общий исходящий путь SendReport (dept/miniapp.mlog):
-  // владелец получает TG-превью, длинные отчёты — в архив miniapp_responses
-  // (/archive/browse, dept=expert), гвард обрезки #399 включён.
-  // Раньше: несуществующий роут :4000/archive/save — сравнения молча терялись
-  // (класс ошибок №1, #381).
-  let _ = SendReport(substring(reply, 0.0, 2000.0), "expert", "compare: " + query, "3", chat_id)
-
-  let _ = RecordAssistantMessage(chat_id, "expert", reply)
-  let _ = AuditLog("expert_compare", "expert", "compare: " + substring(query, 0.0, 100.0))
-  return reply
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// RESIDUAL VALUE DATA — returns JSON curve data for chart generation
 // ═══════════════════════════════════════════════════════════════════════
 pattern ExpertResidualValueData(query: String, chat_id: String) -> String {
   let t = lower(query)
@@ -662,79 +601,7 @@ pattern ExpertGenerateChart(chart_type: String, query: String, chat_id: String) 
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// BRIEFING LIFECYCLE
 // ═══════════════════════════════════════════════════════════════════════
-pattern ExpertCreateBriefing(topic: String, depth: String, chat_id: String) -> String {
-  // Generate unique ID
-  let ts = query("SELECT strftime('%s','now')", [])
-  let brief_id = redact("brf-" + to_string(json_get(parse_json(json_encode(ts)), "0", "0")), "all")
-
-  // Insert into DB
-  let _ = db_execute("INSERT INTO expert_briefings (id, topic, depth_level, status, chat_id, created_at) VALUES (?, ?, ?, 'requested', ?, datetime('now'))", [brief_id, topic, depth, chat_id])
-
-  // Build briefing via LLM with full Expert pipeline
-  let auto_kb = ExpertAutomotiveKB()
-  let skills = LoadExpertSkills(topic)
-  let depth_name = "Standard (уровень 2)"
-  if depth == "1" then { let depth_name = "Quick (уровень 1)" }
-  if depth == "3" then { let depth_name = "Deep (уровень 3)" }
-
-  let system_prompt = "Ты — Эксперт Fosved (Технический Препаратор). Готовишь боевой брифинг.\nГлубина: " + depth_name + "\n\nЖёсткие правила:\n1. Не выдаёт брифинг без дедлайна встречи\n2. Не использует упрощения которые исказят суть\n3. Не генерирует вопросы без указания правильного/уклончивого ответа\n4. Не игнорирует экономическую сторону\n5. Не доверяет официальным презентациям — ищи независимые источники\n6. Не использует абстрактные формулировки — каждое утверждение проверяемое\n7. Вопросы звучат естественно из уст понимающего человека\n8. Не публикует брифинг без прохода по всем 4 слоям Rapid Domain Immersion (основы, state-of-art, школы/дебаты, числовые якоря) — по каждому слою минимум конкретное содержание, не общие слова\n9. Не публикует брифинг без прохода по всем 7 категориям Failure Modes Mapping (технические узкие места, масштабирование, цепочка поставок, регуляторика, экономика, зависимость от кадров, рынок) — минимум одна конкретная находка на категорию; если по категории реально нечего сказать — явно написать «не применимо, потому что...», не пропустить молча\n\nПротокол:\nPhase 1: Rapid Domain Immersion (4 слоя: основы → state-of-art → школы/дебаты → числовые якоря)\nPhase 2: Project Deconstruction (что реально утверждают vs что показывают)\nPhase 3: Failure Modes Mapping (7 категорий)\nPhase 4: Combat Questions Design (5-7 вопросов с ожидаемыми ответами)\n\n" + skills + "\n\n" + auto_kb
-
-  let disclaimer = ExpertDisclaimer()
-  // ── Deep briefing: best-of-2 with LLM-Verifier select ──
-  let llm_result = redact(to_string(TryVal(try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic))), "all")
-  if to_string(llm_result) == "()" then { let llm_result = "[оценка недоступна — провайдеры модели не ответили]" }
-  if to_string(llm_result) == "()" then { return "Ошибка генерации брифинга." }
-  let reply = to_string(llm_result)
-  if depth == "3" then {
-    let llm_result2 = redact(to_string(TryVal(try call_llm(system_prompt, "Подготовь брифинг на тему: " + topic))), "all")
-    if to_string(llm_result2) != "()" then {
-      let reply2 = to_string(llm_result2)
-      let sel_resp = TryVal(try call_python("llm_verifier", "select", json_encode(["Подготовь брифинг на тему: " + topic, json_encode([reply, reply2]), "Completeness: All 4 phases covered (immersion, deconstruction, failure modes, combat questions)? Depth: Sufficient technical detail? Actionability: Usable combat questions with expected answers?"])))
-      if to_string(sel_resp) != "()" and contains(to_string(sel_resp), "error") == false then {
-        let sel_parsed = TryVal(try parse_json(sel_resp))
-        let best_idx = to_int(TryVal(try json_get(sel_parsed, "result", "0")))
-        if best_idx == 1 then { let reply = reply2 }
-        let _ = AuditLog("expert_briefing_bestof2", "expert", "id=" + brief_id + " selected=" + to_string(best_idx))
-      }
-    }
-  }
-
-  // Update briefing status and content
-  let _ = db_execute("UPDATE expert_briefings SET status='briefing_ready', content=? WHERE id=?", [substring(reply, 0.0, 5000.0), brief_id])
-
-  let _ = RecordAssistantMessage(chat_id, "expert", reply)
-  let _ = AuditLog("expert_briefing", "expert", "id=" + brief_id + " depth=" + depth + " topic=" + substring(topic, 0.0, 50.0))
-
-  let header = "Брифинг " + brief_id + " [" + depth_name + "]\n\n"
-  return header + reply
-}
-
-pattern ExpertListBriefings(chat_id: String) -> String {
-  let rows = query("SELECT id, topic, depth_level, status, created_at FROM expert_briefings ORDER BY created_at DESC LIMIT 20", [])
-  return json_encode(rows)
-}
-
-pattern ExpertUpdateBriefingStatus(brief_id: String, new_status: String) -> String {
-  let _ = db_execute("UPDATE expert_briefings SET status=? WHERE id=?", [new_status, brief_id])
-  let _ = AuditLog("expert_briefing_update", "expert", "id=" + brief_id + " status=" + new_status)
-  return "Брифинг " + brief_id + " обновлён: статус " + new_status
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// API ROUTES — served at /api/expert/*
-// ═══════════════════════════════════════════════════════════════════════
-
-// TODO: REST-обёртки удалены (несуществующий синтаксис serve), функции ниже работают напрямую. Восстановить через mlogserver route — отдельным нарядом.
-// GET /api/expert/automotive?query=<brand/model> — ExpertAutomotiveLookup
-// GET /api/expert/compare?vehicles=<v1,v2,...> — ExpertCompareVehicles
-// GET /api/expert/residual-value?vehicle=<brand/model> — ExpertResidualValueData
-// GET /api/expert/operation-cost?vehicle=<brand/model> — ExpertOperationCostData
-// POST /api/expert/chart  {chart_type, vehicle} — ExpertGenerateChart
-// GET /api/expert/briefings — ExpertListBriefings
-// POST /api/expert/briefing  {topic, depth} — ExpertCreateBriefing
-
 // ── TEAM-2 #481 A.1: навык expert/brief (реестр dept/team.mlog) ──────
 // Тихая облегчённая функция: погружение в тему и слабые места позиции.
 pattern ExpertBrief(question: String) -> String {
