@@ -92,9 +92,10 @@ def test_night_cycle_failure_releases_write_lock(night_env, monkeypatch):
     До правки #569 красный: kg_scan_rebuild падал на само-блокировке,
     raw-conn оставался с незавершённой транзакцией — WRITE-лок держался.
     """
-    monkeypatch.setattr(ra, '_ua_scan_internal',
-                        lambda: {'total_files': 1, 'total_lines': 10})
-    monkeypatch.setattr(ra, '_ua_analyze_internal', _stub_analysis)
+    # #712: фазы 1–2 ночи — воркер (_ua_night_scan_analyze), заглушки
+    # прежних _ua_*_internal больше не перехватывают ночной путь
+    monkeypatch.setattr(ra, '_ua_night_scan_analyze',
+                        lambda: ({'total_files': 1, 'total_lines': 10}, _stub_analysis()))
     monkeypatch.setattr(ra, '_ua_review_internal',
                         lambda: {'findings': [], 'health_score': 9})
 

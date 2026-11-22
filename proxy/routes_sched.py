@@ -1836,6 +1836,13 @@ def scheduler_mem_recycle():
     import gc
     collected = gc.collect()
 
+    # #712 (аудит 21–22.11): malloc_trim — возврат свободных страниц кучи
+    # glibc ОС ПОСЛЕ gc (python освобождает объекты, но страницы остаются
+    # у процесса — фрагментация кучи копила базу покоя до 403 из 512 МБ).
+    # На не-glibc libc — честный None (no-op).
+    from proxy.mem_sampler import malloc_trim
+    trim_freed = malloc_trim()
+
     # Кэш провайдеров (_cfg_cache) НЕ трогаем: он live-критичный —
     # _provider_for_model читает priority_provider на каждом вызове
     # (KeyError пойман CI: tests/test_n715_keys_removal). Памяти в нём —
@@ -1844,9 +1851,11 @@ def scheduler_mem_recycle():
     caches_cleared = []
 
     _log_audit("scheduler_mem_recycle",
-               {"gc_collected": collected, "caches_cleared": caches_cleared},
+               {"gc_collected": collected, "caches_cleared": caches_cleared,
+                "malloc_trim_freed_mb": trim_freed},
                "system")
     return jsonify({"status": "ok", "gc_collected": collected,
+                    "malloc_trim_freed_mb": trim_freed,
                     "caches_cleared": caches_cleared,
                     "note": "RSS до/после — по меткам slot в mem_samples "
                             "(см. /admin-ua/mem-report, hours=1)"})
