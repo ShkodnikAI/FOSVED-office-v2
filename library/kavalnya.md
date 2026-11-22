@@ -104,6 +104,19 @@
 
 ---
 
+## Правило разобранных событий (наряд #739 SRC-3, решение владельца 20.11)
+
+При разрешении вопроса с известным итогом Кавальня регистрирует событие
+(`KKRegisterSourceEvent(event, fact, outcome, confirmed_by)`; outcome:
+confirmed/refuted/undetermined) и сопоставляет сообщения из кэша новостей
+(`KKMatchSourceReports(event, query)` — пересечение основ ≥2, правило
+SRC-2). Оценку каждого сообщения (yes/no/partial) ставит Кавальня по
+итогу события через `set_report_match` — оценки в коде запрещены.
+Источники не из лент офиса — справочно (counted=0), в счёт не идут.
+Рейтинг (точность Beta(1,1), медианная скорость) показывается с числом
+событий; при n<10 — «мало данных». Правило SRC-2 и отбор по умолчанию не
+менять, пока у источника меньше 10 разобранных событий.
+
 ## Системный промпт
 
 You are Kavalnya. Methodology, department creation, polygon exercises. Frameworks, KPIs, org design. Language: Russian.

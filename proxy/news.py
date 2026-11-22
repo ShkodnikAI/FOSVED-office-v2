@@ -393,6 +393,235 @@ def _doc_stems(text):
 EU_CONFIRMING_ORIGINS = {"DE", "FR", "EU", "GB"}
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  #739 SRC-3: репутационный рейтинг источников по разобранным событиям
+#  (скорость/точность). Ведёт Кавальня (A.3). ОСП/ЛЗ видят счёт рядом с
+#  меткой источника (A.4). Оценки в коде НЕ ставятся — только из
+#  разобранных событий (запрет наряда).
+# ══════════════════════════════════════════════════════════════════════
+
+SRC_EVENT_OUTCOMES = ("confirmed", "refuted", "undetermined", "pending")
+SRC_MATCH_VALUES = ("yes", "no", "partial", "pending")
+
+
+def _ensure_source_tables():
+    """#739 A.1: реестр разобранных событий и оценок сообщений источников.
+    Ленивая схема (идиома rss_sources #203). counted=0 — справочные строки
+    (источник не из лент офиса) — не участвуют в счёте."""
+    _query("""CREATE TABLE IF NOT EXISTS source_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event TEXT NOT NULL UNIQUE,
+            fact TEXT,
+            outcome TEXT DEFAULT 'pending',
+            confirmed_at TEXT,
+            confirmed_by TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    _query("""CREATE TABLE IF NOT EXISTS source_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            published TEXT,
+            claim TEXT,
+            match TEXT DEFAULT 'pending',
+            counted INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+
+def register_resolved_event(event, fact, outcome, confirmed_by):
+    """#739 A.3: Кавальня при разрешении вопроса с известным итогом
+    создаёт/обновляет событие. Возврат (event_id, created_bool).
+    outcome: confirmed | refuted | undetermined."""
+    _ensure_source_tables()
+    if outcome not in SRC_EVENT_OUTCOMES:
+        raise ValueError(f"outcome={outcome!r}: {SRC_EVENT_OUTCOMES}")
+    row = _query("SELECT id FROM source_events WHERE event = ?",
+                 (event,), fetch=True)
+    if row:
+        _query("""UPDATE source_events SET fact = COALESCE(NULLIF(?, ''), fact),
+                       outcome = ?, confirmed_at = COALESCE(NULLIF(?, ''), confirmed_at),
+                       confirmed_by = COALESCE(NULLIF(?, ''), confirmed_by)
+                   WHERE id = ?""",
+               (fact, outcome, _confirmed_at_now(), confirmed_by, row[0]["id"]))
+        return row[0]["id"], False
+    _query("""INSERT INTO source_events (event, fact, outcome, confirmed_at, confirmed_by)
+               VALUES (?, ?, ?, ?, ?)""",
+           (event, fact, outcome, _confirmed_at_now(), confirmed_by))
+    row = _query("SELECT id FROM source_events WHERE event = ?", (event,), fetch=True)
+    return row[0]["id"], True
+
+
+def _confirmed_at_now():
+    """Дата подтверждения: now (событие создаётся в момент разрешения)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def match_reports_from_news_cache(event, query, window_hours=48, limit=20):
+    """#739 A.3: сопоставление сообщений события из news_cache за окно —
+    правило пересечения основ из SRC-2 A.1 (≥2 общих основ запроса).
+    Создаёт source_reports-кандидатов (match='pending' — оценку совпадения
+    с итогом ставит Кавальня/владелец). Идемпотентно: дубликаты
+    (event, source, published) пропускаются. Возврат: число новых строк."""
+    _ensure_source_tables()
+    row = _query("SELECT id FROM source_events WHERE event = ?", (event,), fetch=True)
+    if not row:
+        raise ValueError(f"событие не зарегистрировано: {event!r}")
+    event_id = row[0]["id"]
+    stems = {_stem(k) for k in _extract_keywords(query) if len(k) >= 3}
+    if not stems:
+        return 0
+    rows = _query(f"""SELECT source, title, summary, url, published, origin
+                      FROM news_cache
+                      WHERE collected > datetime('now', '-{int(window_hours)} hours')
+                      ORDER BY published DESC LIMIT 500""", fetch=True) or []
+    added = 0
+    for r in rows:
+        doc = _doc_stems(f"{r[1] or ''} {r[2] or ''}")
+        if len({st for st in stems if st in doc}) < 2:
+            continue
+        dup = _query("SELECT id FROM source_reports WHERE event_id = ? AND source = ? "
+                     "AND COALESCE(published, '') = COALESCE(?, '')",
+                     (event_id, r[0], r[4]), fetch=True)
+        if dup:
+            continue
+        _query("""INSERT INTO source_reports (event_id, source, published, claim, match, counted)
+                   VALUES (?, ?, ?, ?, 'pending', 1)""",
+               (event_id, r[0], r[4], (r[1] or "")[:300]))
+        added += 1
+        if added >= limit:
+            break
+    return added
+
+
+def set_report_match(event, source, match, counted=1):
+    """#739 A.3: Кавальня/владелец оценивает сообщение события
+    (match: yes | no | partial | pending; counted — в счёт или справочно:
+    источники не из лент офиса не участвуют в счёте). Оценки в коде
+    запрещены — только по решению разбора. Возврат (report_id, ok)."""
+    _ensure_source_tables()
+    if match not in SRC_MATCH_VALUES:
+        raise ValueError(f"match={match!r}: {SRC_MATCH_VALUES}")
+    row = _query("SELECT id FROM source_events WHERE event = ?", (event,), fetch=True)
+    if not row:
+        raise ValueError(f"событие не зарегистрировано: {event!r}")
+    event_id = row[0]["id"]
+    rep = _query("SELECT id FROM source_reports WHERE event_id = ? AND source = ? "
+                 "ORDER BY id LIMIT 1", (event_id, source), fetch=True)
+    if rep:
+        _query("UPDATE source_reports SET match = ?, counted = ? WHERE id = ?",
+               (match, int(counted), rep[0]["id"]))
+        return rep[0]["id"], True
+    _query("""INSERT INTO source_reports (event_id, source, published, claim, match, counted)
+               VALUES (?, ?, NULL, '', ?, ?)""",
+           (event_id, source, match, int(counted)))
+    rep = _query("SELECT id FROM source_reports WHERE event_id = ? AND source = ? "
+                 "ORDER BY id LIMIT 1", (event_id, source), fetch=True)
+    return rep[0]["id"], True
+
+
+def source_accuracy(source):
+    """#739 A.1: точность источника — доля «да» (+0.5 за «частично») с
+    байесовским сглаживанием Beta(1,1): (s + 1) / (n + 2). Только counted
+    строки по событиям с известным итогом. Возврат (accuracy, n)."""
+    _ensure_source_tables()
+    rows = _query("""SELECT r.match FROM source_reports r
+                     JOIN source_events e ON e.id = r.event_id
+                     WHERE r.source = ? AND r.counted = 1
+                       AND e.outcome IN ('confirmed', 'refuted')""",
+                  (source,), fetch=True) or []
+    n = len(rows)
+    s = 0.0
+    for r in rows:
+        m = r["match"] if isinstance(r, dict) else r[0]
+        if m not in SRC_MATCH_VALUES:
+            # мусорная/чужая строка (мок-кортежи #475): не роняем счёт
+            continue
+        s += 1.0 if m == "yes" else (0.5 if m == "partial" else 0.0)
+    return (s + 1.0) / (n + 2.0), n
+
+
+def source_speed(source):
+    """#739 A.1: медиана отставания (минут) от ПЕРВОГО верного сообщения
+    среди counted-сообщений события, по всем событиям с известным итогом,
+    где у источника есть counted-сообщение. Возврат (median_min | None, n)."""
+    _ensure_source_tables()
+    events = _query("""SELECT DISTINCT e.id, e.event FROM source_events e
+                       JOIN source_reports r ON r.event_id = e.id
+                       WHERE r.source = ? AND r.counted = 1
+                         AND e.outcome IN ('confirmed', 'refuted')""",
+                    (source,), fetch=True) or []
+    lags = []
+    for ev in events:
+        eid = ev["id"] if isinstance(ev, dict) else ev[0]
+        reps = _query("""SELECT source, published, match FROM source_reports
+                         WHERE event_id = ? AND counted = 1
+                           AND published IS NOT NULL""",
+                      (eid,), fetch=True) or []
+        def _pub(r):
+            return r["published"] if isinstance(r, dict) else r[1]
+        def _m(r):
+            return r["match"] if isinstance(r, dict) else r[2]
+        def _src(r):
+            return r["source"] if isinstance(r, dict) else r[0]
+        first_yes = min((_pub(r) for r in reps if _m(r) == "yes"), default=None)
+        if not first_yes:
+            continue
+        mine = [r for r in reps if _src(r) == source]
+        from datetime import datetime as _dt
+        try:
+            fy = _dt.fromisoformat(first_yes)
+        except Exception:  # noqa: BLE001 — битая дата: событие пропускаем
+            continue
+        for r in mine:
+            try:
+                lag = (_dt.fromisoformat(_pub(r)) - fy).total_seconds() / 60.0
+                lags.append(lag)
+            except Exception:  # noqa: BLE001
+                continue
+    if not lags:
+        return None, len(lags)
+    lags.sort()
+    k = len(lags)
+    med = lags[k // 2] if k % 2 else (lags[k // 2 - 1] + lags[k // 2]) / 2.0
+    return med, k
+
+
+OWNERSHIP_RU = {"state": "гос.", "independent": "независ.", "public": "обществ."}
+
+
+def source_label_suffix(source):
+    """#739 A.4: хвост метки источника — ', точн. 0.40 (n=3)'; при n<10 —
+    добавка ', мало данных'. n=0 — счёт не набран, пусто (рейтинг не
+    показывается)."""
+    try:
+        acc, n = source_accuracy(source)
+    except Exception:  # noqa: BLE001 — рейтинг не роняет выдачу
+        return ""
+    if n == 0:
+        return ""
+    tail = f", точн. {acc:.2f} (n={n})"
+    if n < 10:
+        tail += ", мало данных"
+    return tail
+
+
+def source_rating_table():
+    """#739 A.4: таблица рейтинга (для Mini App по запросу владельца,
+    без графиков в этом проходе). Источники — все counted в source_reports."""
+    _ensure_source_tables()
+    rows = _query("""SELECT DISTINCT source FROM source_reports
+                     WHERE counted = 1 ORDER BY source""", fetch=True) or []
+    out = []
+    for r in rows:
+        s = r["source"] if isinstance(r, dict) else r[0]
+        acc, n = source_accuracy(s)
+        med, sn = source_speed(s)
+        out.append({"source": s, "accuracy": round(acc, 2), "events": n,
+                    "speed_median_min": round(med, 1) if med is not None else None,
+                    "speed_events": sn, "few_data": n < 10})
+    out.sort(key=lambda x: (-x["events"], -x["accuracy"]))
+    return out
+
+
 def _ru_confirmation_gate(rows, stems, pool=None):
     """#738 SRC-2 A.1: запись origin=RU проходит в контекст, только если
     среди собранных за окно (pool — полный релевантный набор, не только
@@ -591,12 +820,18 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
     news_text = "=== СВЕЖИЕ СОБЫТИЯ (последние 48ч) ===\n\n"
     current_len = 0
     for r in rows:
-        # #737 A.4: метка источника в каждой строке — [origin, ownership];
-        # имя источника сохранено (SRC-2 будет сопоставлять по нему).
+        # #737 A.4 + #739 SRC-3 A.4: метка источника — [origin, ownership,
+        # точн. X (n=Y)]. ownership — по-русски (формат примера #739:
+        # «[RU, гос., точн. 0.40 (n=3)]»); n=0 — без счёта; n<10 — «мало
+        # данных». Имя источника сохранено (SRC-2 сопоставляет по нему).
         # len-гвард: мок-тесты #475 дают 6-колоночные кортежи.
         _origin = (r[6] or "").strip() if len(r) > 6 else ""
         _ownership = (r[7] or "").strip() if len(r) > 7 else ""
-        tag = f"{_origin or '?'}, {_ownership or '?'}"
+        _ow_ru = OWNERSHIP_RU.get(_ownership, _ownership or "?")
+        tag = f"{_origin or '?'}, {_ow_ru}"
+        _rating = source_label_suffix(r[0])
+        if _rating:
+            tag += _rating
         entry = f"[{tag}] {r[0]}: {r[1]}\n"
         # #738 SRC-2 A.2: пометка стороны конфликта / гос. источника
         _mk = _conflict_marks(r)

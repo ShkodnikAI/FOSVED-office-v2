@@ -237,8 +237,10 @@ def test_a4_prefix_labels_in_output(db):
                 "news_ua", "2026-11-22T12:20:00", "n1"))
     db.commit()
     text = news.get_fresh_news("Крымский мост", dept="osp", limit=5)
-    assert "[DE, public]" in text
-    assert "[RU, state]" in text
+    # #739 SRC-3 A.4: ownership в метке по-русски (формат примера наряда
+    # «[RU, гос., точн. 0.40 (n=3)]»)
+    assert "[DE, обществ.]" in text
+    assert "[RU, гос.]" in text
     assert "[?, ?]" in text, "запись без меток обязана быть [?, ?]"
     assert "Deutsche Welle (en):" in text, "имя источника сохранено в строке"
 

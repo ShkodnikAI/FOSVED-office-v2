@@ -76,8 +76,10 @@ def test_get_fresh_news_matches_by_stems_not_exact_form():
         out = get_fresh_news("вероятность эпидемии лёгочной чумы в Иркутске", dept="osp")
     assert "чумы" in out and "Иркутске" in out, "релевантная запись обязана найтись по основам"
     assert "доллара" not in out, "нерелевантная запись фильтруется"
-    # стем-матч идёт по 48-часовому окну (один запрос без LIKE)
-    sql = q.call_args[0][0]
+    # стем-матч идёт по 48-часовому окну (один запрос без LIKE);
+    # #739 SRC-3: после SQL из метки вызываются рейтинговые SELECT'ы —
+    # гвард смотрит ПЕРВЫЙ вызов (news-SQL)
+    sql = q.call_args_list[0][0][0]
     assert "LIKE" not in sql, "LIKE-поиск обязан быть снят (#475 A.2)"
     assert "-48 hours" in sql
 
@@ -105,8 +107,11 @@ def test_get_fresh_news_fallback_generic_latest():
     with patch("proxy.news._query", return_value=[fresh]) as q:
         out = get_fresh_news("зюганов вулкан марсианский", dept="osp")
     assert "Обычная новость дня" in out
-    sql = q.call_args[0][0]
-    assert "-24 hours" in sql, "фолбэк обязан остаться 24-часовым"
+    # #739 SRC-3: после фолбэка вызываются рейтинговые SELECT'ы — гвард
+    # ищет news_cache-запрос с 24-часовым окном среди ВСЕХ вызовов
+    sqls = [c[0][0] for c in q.call_args_list if c[0] and isinstance(c[0][0], str)]
+    assert any("-24 hours" in s and "news_cache" in s for s in sqls), \
+        "фолбэк обязан остаться 24-часовым"
 
 
 def test_get_fresh_news_empty_cache_returns_empty():
