@@ -1091,6 +1091,13 @@ pattern LZFactpack(question: String) -> String {
       let tg_part = "мониторы активны по темам: " + topics + "выжимка — /lz digest"
     }
   }
+  // ── #741 MON-5 A.3: Telegram-мониторинг — посты osint_ua за 48 ч по
+  // основам слов вопроса (#475), до 10, с каналом/временем (Минск)/ссылкой.
+  // Пустая выборка при неработающем сборе — честная строка, не тишина.
+  let tg_block = TryVal(try call_python("tg_public", "factpack_block", json_encode([q, 48.0, 10.0])))
+  if tg_block != "()" and trim(to_string(tg_block)) != "" then {
+    let tg_part = to_string(tg_block)
+  }
   let mut fresh_mark = "Свежесть: живых данных нет (причина в секции LIVE) — вероятностные выводы по свежим событиям запрещены"
   if starts_with(trim(live_part), "(") == false and trim(live_part) != "" then {
     let fresh_mark = "Свежесть: живой поиск только что — данные можно считать свежими"
@@ -1371,6 +1378,23 @@ pattern LZMonitor(topic: String) -> String {
 pattern LZChannels() -> String {
   let rows = query("SELECT channel_id, category, status FROM lz_channels ORDER BY category", [])
   return "📡 Channels:\n" + to_string(rows)
+}
+
+// ── #741 MON-5 A.2: /lz channel add <username> — канал мониторинга войны
+// (категория osint_ua, source=public, метки #737). Проверка A.0 на лету:
+// GET t.me/s/<username> через call_python (tg_public.check_channel_live);
+// 200 с постами → добавляем, иначе честный отказ с кодом.
+pattern LZPublicChannelAdd(username: String) -> String {
+  let uname = trim(replace(username, "@", ""))
+  if uname == "" then { return "⚠️ Формат: /lz channel add <username>" }
+  let live = TryVal(try call_python("tg_public", "check_channel_live", json_encode([uname])))
+  if contains(live, "\"ok\": true") then {
+    let exists = query("SELECT id FROM lz_telegram_channels WHERE channel_id = ?", [uname])
+    if length(exists) > 0.0 then { return "Канал @" + uname + " уже в мониторинге" }
+    db_execute("INSERT INTO lz_telegram_channels (channel_id, channel_name, category, source, origin, ownership, conflict_party) VALUES (?, ?, 'osint_ua', 'public', 'UA', 'independent', 'UA')", [uname, uname])
+    return "✅ Канал @" + uname + " добавлен в мониторинг (osint_ua, публичные страницы) — сборщик подхватит в течение 10 минут"
+  }
+  return "⚠️ Канал @" + uname + " недоступен на публичных страницах (" + live + ") — не добавлен"
 }
 
 // ── Грейдинг предсказаний (#565) ─────────────────────────────────────────

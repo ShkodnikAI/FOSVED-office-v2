@@ -1848,6 +1848,7 @@ def supply_result_endpoint():
         return jsonify({"ok": False, "error": res.get("error")}), 404
     return jsonify({"ok": True, "task_id": task_id,
                     "offers_saved": res.get("offers_saved", 0),
+                    "posts_saved": res.get("posts_saved", 0),
                     "platform_ok": res.get("ok"),
                     "kind": res.get("kind")})
 

@@ -355,6 +355,17 @@ SKILLS_SENTINEL = Path("skills/deconstruct/SKILL.md")
 _PROCESS_BOOT_TS = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
 
 
+def tg_monitor_line_safe():
+    """#741 C: строка 📡 Telegram-мониторинга; сбой сбора — пустая строка
+    (бриф не роняем; ⚠️-ветка уходит в раздел внимания выше)."""
+    try:
+        from proxy.tg_public import tg_monitor_line
+        return tg_monitor_line()
+    except Exception as e:  # noqa: BLE001 — строка не роняет бриф
+        log.warning(f"[morning_brief] tg line failed: {e}")
+        return ""
+
+
 def skills_status():
     """#755 A.3: (развёрнуты ли навыки, число каталогов). Сентинел —
     тот же файл, что проверяет bootstrap_skills.sh; счёт каталогов —
@@ -384,7 +395,8 @@ def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
                             forge_attention: str, errors_digest: str,
                             night_line: str = "",
                             night_tick_line: str = "",
-                            skills_line: str = "") -> list:
+                            skills_line: str = "",
+                            tg_line: str = "") -> list:
     """#684 A.1: алерты раздела «Что требует внимания» — программой.
 
     Источники — те же сигналы, что и ниже в отчёте (модель их видит, но
@@ -405,6 +417,8 @@ def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
          ответов за 24 ч.
      13. (#755) навыки отделов не развёрнуты (сентинел skills/ отсутствует)
          — отделы работают без методик.
+     14. (#741) Telegram-мониторинг не работает (нет успешного сбора
+         30 мин при живых каналах) — посты osint_ua не собираются.
     Резерв при нуле проектов — не алерт (#687 A.6.2: резервировать нечего).
     Пустой список — валидный результат («Внимания не требуется»).
     """
@@ -414,6 +428,11 @@ def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
     _sl = (skills_line or "").strip()
     if _sl:
         items.append(_sl)
+    # ── #741 C: Telegram-мониторинг ⚠️ — в раздел внимания (строка
+    # «НЕ РАБОТАЕТ» из tg_public.tg_monitor_line)
+    _tl = (tg_line or "").strip()
+    if _tl.startswith("⚠️"):
+        items.append(_tl)
     # #687 A.6.1: просроченная ночная проверка видна разделу внимания
     nl = (night_line or "").strip()
     if "НЕ выполнялась" in nl:
@@ -945,6 +964,8 @@ def scheduler_morning_brief():
             night_tick_line=night_tick_report_line(),
             # #755 A.3: навыки отделов — тревога, если сентинела нет
             skills_line=skills_status_line(),
+            # #741 C: строка Telegram-мониторинга (⚠️-ветка — в внимание)
+            tg_line=tg_monitor_line_safe(),
         )
 
         # ── 3. LZ daily findings (from memory) ──
@@ -1097,6 +1118,13 @@ def scheduler_morning_brief():
                 brief = brief + "\n\n" + _skl
         except Exception as e:  # noqa: BLE001 — строка навыков не роняет бриф
             log.warning(f"[morning_brief] skills line failed: {e}")
+        # #741 C: строка Telegram-мониторинга — в тело брифа дословно
+        try:
+            _tgl = tg_monitor_line_safe()
+            if _tgl:
+                brief = brief + "\n\n" + _tgl
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"[morning_brief] tg body line failed: {e}")
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         # №587 A.2: ряд оценки к брифу Яны (kind=brief)
@@ -1235,6 +1263,8 @@ def scheduler_admin_morning_reply():
             night_tick_line=night_tick_report_line(),
             # #755 A.3: тот же статус навыков, что у брифа
             skills_line=skills_status_line(),
+            # #741 C: тот же Telegram-мониторинг, что у брифа
+            tg_line=tg_monitor_line_safe(),
         )
         messages = [
             {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и даёшь замечания к нему по фактам из данных ниже. Не отдавай поручений отделам и людям, не ставь сроков. Упомяни находки Лаборатории Знаний, если они релевантны. Форматирование: *жирный* для ключевых слов, эмодзи только как маркеры секций. НЕ используй кавычки."},

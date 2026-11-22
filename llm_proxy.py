@@ -273,6 +273,19 @@ if __name__ == "__main__":
     # лишний python-процесс стоил бы ~30 МБ RSS при лимите контейнера 512 МБ.
     from proxy.mem_sampler import start_sampler_thread
     start_sampler_thread()
+    # #741 MON-5 A.1/A.2: поток публичных t.me/s-страниц (osint_ua) +
+    # идемпотентный засев каналов владельца. Ошибки БД/сети не роняют
+    # старт (канал деградирует честно: строка ⚠️ в брифе — блок C).
+    try:
+        from proxy.tg_public import (seed_osint_ua_channels,
+                                     start_tg_public_thread)
+        seeded = seed_osint_ua_channels()
+        if seeded:
+            print(f"[tg-public] засеяно каналов osint_ua: {seeded}",
+                  file=sys.stderr, flush=True)
+        start_tg_public_thread()
+    except Exception as e:  # noqa: BLE001 — мониторинг не роняет офис
+        print(f"[tg-public] старт упал: {e}", file=sys.stderr, flush=True)
     log.info(f"Endpoints: health, detect-dept, ask, rate_cmd, voice-set, "
              f"archive/digest, archive/publish, archive/daily-digest, miniapp, enrich, tg-send, dept-dashboard, office-dashboard, "
              f"expert/chart, tts, stt, scheduler/*, learning/*, audit/recent, search, generate-image, lz/deep-research, lz/osint, memory/*, "
