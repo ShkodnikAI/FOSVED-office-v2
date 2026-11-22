@@ -2032,8 +2032,10 @@ def _ua_night_scan_analyze():
     finally:
         try:
             os.unlink(out_path)
-        except OSError:
-            pass
+        except OSError as e:
+            # временный файл не удалён — не повод ронять ночь, но и не
+            # тишина (FO-007): /tmp копится, причина видна в логе
+            log.warning("ua_night_worker: temp %s не удалён: %s", out_path, e)
 
 
 def _ua_night_cycle_impl():
