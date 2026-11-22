@@ -24,38 +24,55 @@ from proxy.core import (
 #  NEWS MONITORING: RSS + GDELT + Telegram channels
 # ══════════════════════════════════════════════════════════════════════
 
+# #737 SRC-1 A.1: каждая лента несёт метки источника — origin (ISO страны),
+# ownership (state | independent | public — общественное вещание),
+# conflict_party (RU | UA | none) — и domains (для сопоставления Tavily-
+# результатов, A.4). Обоснования меток — таблица в PR наряда. Словарь origin
+# открыт (ISO-коды; EU — наднациональная редакция, LV и др. добавляются).
 RSS_FEEDS = {
-    "ria": {"url": "https://ria.ru/export/rss2/archive/index.xml", "category": "news_ru", "language": "ru", "name": "РИА Новости"},
-    "tass": {"url": "https://tass.ru/rss/v2.xml", "category": "news_ru", "language": "ru", "name": "ТАСС"},
-    "rbk": {"url": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss", "category": "news_ru", "language": "ru", "name": "РБК"},
-    "interfax": {"url": "https://www.interfax.ru/rss.asp", "category": "news_ru", "language": "ru", "name": "Интерфакс"},
-    "kommersant": {"url": "https://www.kommersant.ru/RSS/news.xml", "category": "news_ru", "language": "ru", "name": "Коммерсантъ"},
+    "ria": {"url": "https://ria.ru/export/rss2/archive/index.xml", "category": "news_ru", "language": "ru", "name": "РИА Новости", "origin": "RU", "ownership": "state", "conflict_party": "RU", "domains": "ria.ru"},
+    "tass": {"url": "https://tass.ru/rss/v2.xml", "category": "news_ru", "language": "ru", "name": "ТАСС", "origin": "RU", "ownership": "state", "conflict_party": "RU", "domains": "tass.ru"},
+    "rbk": {"url": "https://rssexport.rbc.ru/rbcnews/news/30/full.rss", "category": "news_ru", "language": "ru", "name": "РБК", "origin": "RU", "ownership": "independent", "conflict_party": "RU", "domains": "rbc.ru"},
+    "interfax": {"url": "https://www.interfax.ru/rss.asp", "category": "news_ru", "language": "ru", "name": "Интерфакс", "origin": "RU", "ownership": "independent", "conflict_party": "RU", "domains": "interfax.ru"},
+    "kommersant": {"url": "https://www.kommersant.ru/RSS/news.xml", "category": "news_ru", "language": "ru", "name": "Коммерсантъ", "origin": "RU", "ownership": "independent", "conflict_party": "RU", "domains": "kommersant.ru"},
     # NB: Reuters закрыл публичные RSS-ленты (подозрение AGENTS §7 подтверждено
     # живой проверкой нарядом #424, 2026-09-29: feeds.reuters.com не отвечает,
     # ConnectionError) — заменена на The Guardian World. Живая проверка всех
     # лент и замены — в отчёте наряда #424; arXiv-ленты живы (1446/621 записей,
     # ложная тревога чекера с brotli — feedparser видит обе).
-    "guardian_world": {"url": "https://www.theguardian.com/world/rss", "category": "news_en", "language": "en", "name": "The Guardian World"},
-    "bbc": {"url": "http://feeds.bbci.co.uk/news/world/rss.xml", "category": "news_en", "language": "en", "name": "BBC World"},
-    "aljazeera": {"url": "https://www.aljazeera.com/xml/rss/all.xml", "category": "news_en", "language": "en", "name": "Al Jazeera"},
-    "techcrunch": {"url": "https://techcrunch.com/feed/", "category": "tech", "language": "en", "name": "TechCrunch"},
-    "theverge": {"url": "https://www.theverge.com/rss/index.xml", "category": "tech", "language": "en", "name": "The Verge"},
-    "hackernews": {"url": "https://hnrss.org/frontpage", "category": "tech", "language": "en", "name": "Hacker News"},
-    "arxiv_ai": {"url": "https://rss.arxiv.org/rss/cs.AI", "category": "science", "language": "en", "name": "arXiv AI"},
-    "arxiv_cl": {"url": "https://rss.arxiv.org/rss/cs.CL", "category": "science", "language": "en", "name": "arXiv NLP"},
-    "investing_ru": {"url": "https://ru.investing.com/rss/news.rss", "category": "finance", "language": "ru", "name": "Investing.com RU"},
-    "foreignaffairs": {"url": "https://www.foreignaffairs.com/rss.xml", "category": "geopolitics", "language": "en", "name": "Foreign Affairs"},
+    "guardian_world": {"url": "https://www.theguardian.com/world/rss", "category": "news_en", "language": "en", "name": "The Guardian World", "origin": "GB", "ownership": "independent", "conflict_party": "none", "domains": "theguardian.com,guardian.com"},
+    "bbc": {"url": "http://feeds.bbci.co.uk/news/world/rss.xml", "category": "news_en", "language": "en", "name": "BBC World", "origin": "GB", "ownership": "public", "conflict_party": "none", "domains": "bbc.com,bbc.co.uk"},
+    "aljazeera": {"url": "https://www.aljazeera.com/xml/rss/all.xml", "category": "news_en", "language": "en", "name": "Al Jazeera", "origin": "QA", "ownership": "public", "conflict_party": "none", "domains": "aljazeera.com"},
+    "techcrunch": {"url": "https://techcrunch.com/feed/", "category": "tech", "language": "en", "name": "TechCrunch", "origin": "US", "ownership": "independent", "conflict_party": "none", "domains": "techcrunch.com"},
+    "theverge": {"url": "https://www.theverge.com/rss/index.xml", "category": "tech", "language": "en", "name": "The Verge", "origin": "US", "ownership": "independent", "conflict_party": "none", "domains": "theverge.com"},
+    "hackernews": {"url": "https://hnrss.org/frontpage", "category": "tech", "language": "en", "name": "Hacker News", "origin": "US", "ownership": "independent", "conflict_party": "none", "domains": "news.ycombinator.com,hnrss.org"},
+    "arxiv_ai": {"url": "https://rss.arxiv.org/rss/cs.AI", "category": "science", "language": "en", "name": "arXiv AI", "origin": "US", "ownership": "public", "conflict_party": "none", "domains": "arxiv.org"},
+    "arxiv_cl": {"url": "https://rss.arxiv.org/rss/cs.CL", "category": "science", "language": "en", "name": "arXiv NLP", "origin": "US", "ownership": "public", "conflict_party": "none", "domains": "arxiv.org"},
+    "investing_ru": {"url": "https://ru.investing.com/rss/news.rss", "category": "finance", "language": "ru", "name": "Investing.com RU", "origin": "IL", "ownership": "independent", "conflict_party": "none", "domains": "investing.com"},
+    "foreignaffairs": {"url": "https://www.foreignaffairs.com/rss.xml", "category": "geopolitics", "language": "en", "name": "Foreign Affairs", "origin": "US", "ownership": "independent", "conflict_party": "none", "domains": "foreignaffairs.com"},
     # Наряд #424 A.2: белорусские источники (news_by), проверены вживую
     # 2026-09-29 — все отдают 200 и свежие записи (метод и таблица — в отчёте
     # наряда). Баланс: государственные (БелТА, Sputnik, Минск-Новости) и
     # независимые (Zerkalo, Onliner). Отклонённые кандидаты: sb.by (403
     # антибот), charter97.org (403), belsat.eu (connection reset), euroradio
     # (404), naviny.by (timeout), tvr.by (timeout) — в отчёте наряда.
-    "belta": {"url": "https://www.belta.by/rss", "category": "news_by", "language": "ru", "name": "БелТА"},
-    "sputnik_by": {"url": "https://sputnik.by/export/rss2/archive/index.xml", "category": "news_by", "language": "ru", "name": "Sputnik Беларусь"},
-    "minsknews": {"url": "https://minsknews.by/feed/", "category": "news_by", "language": "ru", "name": "Минск-Новости"},
-    "zerkalo": {"url": "https://news.zerkalo.io/rss/all.rss", "category": "news_by", "language": "ru", "name": "Зеркало"},
-    "onliner": {"url": "https://people.onliner.by/feed", "category": "news_by", "language": "ru", "name": "Onlíner"},
+    "belta": {"url": "https://www.belta.by/rss", "category": "news_by", "language": "ru", "name": "БелТА", "origin": "BY", "ownership": "state", "conflict_party": "none", "domains": "belta.by"},
+    "sputnik_by": {"url": "https://sputnik.by/export/rss2/archive/index.xml", "category": "news_by", "language": "ru", "name": "Sputnik Беларусь", "origin": "BY", "ownership": "state", "conflict_party": "RU", "domains": "sputnik.by,riab.ru"},
+    "minsknews": {"url": "https://minsknews.by/feed/", "category": "news_by", "language": "ru", "name": "Минск-Новости", "origin": "BY", "ownership": "state", "conflict_party": "none", "domains": "minsknews.by"},
+    "zerkalo": {"url": "https://news.zerkalo.io/rss/all.rss", "category": "news_by", "language": "ru", "name": "Зеркало", "origin": "BY", "ownership": "independent", "conflict_party": "none", "domains": "zerkalo.io"},
+    "onliner": {"url": "https://people.onliner.by/feed", "category": "news_by", "language": "ru", "name": "Onlíner", "origin": "BY", "ownership": "independent", "conflict_party": "none", "domains": "onliner.by,people.onliner.by"},
+    # #737 SRC-1 A.2: украинские и европейские ленты. Живая проверка из CI
+    # 2026-11-22 (метод как в #424): ПРОШЛИ — Kyiv Independent (news-archive/
+    # rss, 200, свежие), DW en/ru (RDF, 140/75 записей), Politico EU (200,
+    # 10), Le Monde in English (200, 14). ОТКЛОНЕНЫ по правилу при
+    # затруднении (таблица с кодами — в отчёте наряда): Українська правда
+    # (403 антибот), Укрінформ (404 все URL), Суспільне (403), Европейская
+    # правда (403), Euronews (406), France 24 (403), RFI (403).
+    "kyivindependent": {"url": "https://kyivindependent.com/news-archive/rss/", "category": "news_ua", "language": "en", "name": "The Kyiv Independent", "origin": "UA", "ownership": "independent", "conflict_party": "UA", "domains": "kyivindependent.com"},
+    "dw_en": {"url": "https://rss.dw.com/rdf/rss-en-all", "category": "news_eu", "language": "en", "name": "Deutsche Welle (en)", "origin": "DE", "ownership": "public", "conflict_party": "none", "domains": "dw.com"},
+    "dw_ru": {"url": "https://rss.dw.com/rdf/rss-ru-all", "category": "news_eu", "language": "ru", "name": "Deutsche Welle (ru)", "origin": "DE", "ownership": "public", "conflict_party": "none", "domains": "dw.com"},
+    "politico_eu": {"url": "https://www.politico.eu/feed/", "category": "news_eu", "language": "en", "name": "Politico Europe", "origin": "EU", "ownership": "independent", "conflict_party": "none", "domains": "politico.eu"},
+    "lemonde_en": {"url": "https://www.lemonde.fr/en/rss/une.xml", "category": "news_eu", "language": "en", "name": "Le Monde in English", "origin": "FR", "ownership": "independent", "conflict_party": "none", "domains": "lemonde.fr"},
 }
 
 GDELT_BASE = "https://api.gdeltproject.org/api/v2"
@@ -72,15 +89,33 @@ DEPT_QUERIES = {
 DEPT_CATEGORIES = {
     # news_by добавлена нарядом #424: белорусская повестка — событийное ядро
     # ОСП (smoke-кейс 2: /news/fresh по Беларуси должен возвращать news_by).
-    "osp": ("news_ru", "geopolitics", "news_en", "news_by"),
+    # #737 A.2: ОСП и legal получают news_ua/news_eu (решение владельца:
+    # украинские и европейские ленты в событийном ядре)
+    "osp": ("news_ru", "geopolitics", "news_en", "news_by", "news_ua", "news_eu"),
     "lz": ("tech", "science"),
     "finance": ("finance",),
-    "legal": ("geopolitics", "news_ru"),
+    "legal": ("geopolitics", "news_ru", "news_ua", "news_eu"),
     "marketing": ("tech", "news_en"),
 }
 
 
 # ── Tavily collection (merged into cron_collect_news, no extra cron slot needed) ──
+def _tavily_source_labels(url):
+    """#737 A.4: домен результата Tavily → метки реестра. Совпадение с
+    domains ленты — её метки; нет совпадения — пусто («не в реестре»)."""
+    try:
+        host = re.sub(r"^https?://", "", (url or "")).split("/")[0].lower()
+        host = host.removeprefix("www.")
+    except Exception:
+        return "", ""
+    for fc in RSS_FEEDS.values():
+        for d in (fc.get("domains") or "").split(","):
+            d = d.strip().lower().removeprefix("www.")
+            if d and (host == d or host.endswith("." + d)):
+                return fc.get("origin", ""), fc.get("ownership", "")
+    return "", ""
+
+
 def collect_tavily():
     """Collect real-time web results via Tavily API. Uses same DEPT_QUERIES as GDELT."""
     tavily_key = os.environ.get("TAVILY_API_KEY", "")
@@ -112,10 +147,13 @@ def collect_tavily():
                 content_hash = hashlib.md5((title + url).encode()).hexdigest()
                 cat = DEPT_CATEGORIES.get(dept, ("tech",))[0]
                 try:
+                    # #737 A.4: домен результата → метки реестра (нет — пусто)
+                    _t_origin, _t_ownership = _tavily_source_labels(url)
                     _query("""INSERT OR IGNORE INTO news_cache
-                        (source,title,summary,url,category,language,published,hash)
-                        VALUES (?,?,?,?,?,?,?,?)""",
-                        (f"Tavily", title, summary, url, cat, "en", None, content_hash))
+                        (source,title,summary,url,category,language,published,hash,origin,ownership,conflict_party)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (f"Tavily", title, summary, url, cat, "en", None, content_hash,
+                         _t_origin, _t_ownership, ""))
                     collected += 1
                 except Exception as e:
                     _log_error(f"tavily news insert failed: {e}", source="collector", dept="news", kind="data_loss")
@@ -185,7 +223,16 @@ def rss_enabled_feeds():
     rows = _query("SELECT feed, url, name, tag FROM rss_sources "
                   "WHERE enabled=1 AND deleted=0 ORDER BY feed", fetch=True) or []
     for r in rows:
-        out[r["feed"]] = {"url": r["url"], "name": r["name"], "category": r["tag"], "language": ""}
+        fc = {"url": r["url"], "name": r["name"], "category": r["tag"], "language": ""}
+        # #737 A.1: метки источника (origin/ownership/conflict_party/domains)
+        # — из код-реестра, если лента в нём; БД-таблица хранит только
+        # url/name/tag — метки не теряются при слиянии
+        reg = RSS_FEEDS.get(r["feed"])
+        if reg:
+            for k in ("origin", "ownership", "conflict_party", "domains", "language"):
+                if reg.get(k):
+                    fc[k] = reg[k]
+        out[r["feed"]] = fc
     return out
 
 
@@ -232,10 +279,12 @@ def collect_rss():
                     # #550 A.4: .get вместо [..] — ленты без language/category/name
                     # (в т.ч. все ленты из БД) не должны ронять вставку записей:
                     # KeyError 'language' терял ВСЕ записи ленты (data_loss).
+                    # #737 A.1: метки источника — из реестра ленты
                     _query("""INSERT OR IGNORE INTO news_cache
-                        (source,title,summary,url,category,language,published,hash)
-                        VALUES (?,?,?,?,?,?,?,?)""",
-                        (fc.get("name", feed_id), title, summary, url, fc.get("category", ""), fc.get("language", ""), pub_date, content_hash))
+                        (source,title,summary,url,category,language,published,hash,origin,ownership,conflict_party)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (fc.get("name", feed_id), title, summary, url, fc.get("category", ""), fc.get("language", ""), pub_date, content_hash,
+                         fc.get("origin", ""), fc.get("ownership", ""), fc.get("conflict_party", "")))
                     collected += 1
                 except Exception as e2:
                     _log_error(f"feedparser news insert failed: {e2}", source="collector", dept="news", kind="data_loss")
@@ -339,6 +388,15 @@ def _doc_stems(text):
     return {_stem(m) for m in re.findall(r"[а-яёa-z]{3,}", (text or "").lower())}
 
 
+# #737 SRC-1 A.3: ни один источник не занимает больше NEWS_MAX_PER_SOURCE
+# мест в отборе для отделов (частые ленты вытесняли редкие: окно 500
+# забивалось РИА/ТАСС)
+NEWS_MAX_PER_SOURCE = 2
+# #737 A.3: окно выборки — до 60 свежих записей на каждую ленту (не 500
+# общих), чтобы ленты с высокой частотой публикаций не вытесняли редкие
+NEWS_WINDOW_PER_FEED = 60
+
+
 def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
     """Get recent news relevant to query. Used by BuildContext in mlog.
 
@@ -347,17 +405,29 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
     точному LIKE. Документ релевантен, если в нём есть хотя бы одна основа
     запроса; сортировка — по числу совпавших основ, затем по дате.
     Фолбэк прежний: если по основам ничего — общие свежие записи по
-    категориям департамента (за 24 ч)."""
+    категориям департамента (за 24 ч).
+    #737 A.3: окно — до 60 свежих на ленту (ROW_NUMBER по source), после
+    оценки — не больше NEWS_MAX_PER_SOURCE записей от одного source.
+    #737 A.4: каждая строка выдачи — префикс [<origin>, <ownership>]
+    (записи без меток — [?, ?])."""
     keywords = _extract_keywords(query)
     stems = {_stem(k) for k in keywords if len(k) >= 3}
 
     cats = DEPT_CATEGORIES.get(dept, ("news_ru", "tech", "geopolitics"))
     cat_filter = " OR ".join(["category = ?" for _ in cats])
 
-    rows = _query(f"""SELECT source, title, summary, url, published, relevance_score
-                      FROM news_cache WHERE ({cat_filter})
-                      AND collected > datetime('now', '-48 hours')
-                      ORDER BY published DESC LIMIT 500""", list(cats), fetch=True) or []
+    # #737 A.3: до NEWS_WINDOW_PER_FEED свежих записей НА КАЖДУЮ ленту
+    rows = _query(f"""SELECT source, title, summary, url, published, relevance_score,
+                             origin, ownership
+                      FROM (
+                          SELECT news_cache.*,
+                                 ROW_NUMBER() OVER (PARTITION BY source
+                                                    ORDER BY published DESC) AS rn
+                          FROM news_cache WHERE ({cat_filter})
+                          AND collected > datetime('now', '-48 hours')
+                      )
+                      WHERE rn <= ?
+                      ORDER BY published DESC""", list(cats) + [NEWS_WINDOW_PER_FEED], fetch=True) or []
 
     scored = []
     for r in rows:
@@ -370,13 +440,30 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
             scored.append((score, r))
     if scored:
         scored.sort(key=lambda t: (t[0], t[1][4] or ""), reverse=True)
-        rows = [r for _, r in scored][:limit]
+        picked = []
+        per_source = {}
+        for score, r in scored:
+            # #737 A.3: не больше NEWS_MAX_PER_SOURCE записей от источника
+            if per_source.get(r[0], 0) >= NEWS_MAX_PER_SOURCE:
+                continue
+            per_source[r[0]] = per_source.get(r[0], 0) + 1
+            picked.append(r)
+            if len(picked) >= limit:
+                break
+        rows = picked
     else:
-        sql2 = f"""SELECT source, title, summary, url, published, relevance_score
-                  FROM news_cache WHERE ({cat_filter})
-                  AND collected > datetime('now', '-24 hours')
+        sql2 = f"""SELECT source, title, summary, url, published, relevance_score,
+                          origin, ownership
+                  FROM (
+                      SELECT news_cache.*,
+                             ROW_NUMBER() OVER (PARTITION BY source
+                                                ORDER BY published DESC) AS rn
+                      FROM news_cache WHERE ({cat_filter})
+                      AND collected > datetime('now', '-24 hours')
+                  )
+                  WHERE rn <= ?
                   ORDER BY published DESC LIMIT ?"""
-        rows = _query(sql2, list(cats) + [limit], fetch=True)
+        rows = _query(sql2, list(cats) + [NEWS_WINDOW_PER_FEED, limit], fetch=True)
 
     if not rows:
         return ""
@@ -384,7 +471,13 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
     news_text = "=== СВЕЖИЕ СОБЫТИЯ (последние 48ч) ===\n\n"
     current_len = 0
     for r in rows:
-        entry = f"[{r[0]}] {r[1]}\n"
+        # #737 A.4: метка источника в каждой строке — [origin, ownership];
+        # имя источника сохранено (SRC-2 будет сопоставлять по нему).
+        # len-гвард: мок-тесты #475 дают 6-колоночные кортежи.
+        _origin = (r[6] or "").strip() if len(r) > 6 else ""
+        _ownership = (r[7] or "").strip() if len(r) > 7 else ""
+        tag = f"{_origin or '?'}, {_ownership or '?'}"
+        entry = f"[{tag}] {r[0]}: {r[1]}\n"
         if r[3]:
             entry += f"  Ссылка: {r[3]}\n"
         if r[2] and r[2] != r[1]:
