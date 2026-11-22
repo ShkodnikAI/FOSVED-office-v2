@@ -346,12 +346,45 @@ def night_tick_report_line():
         return ""
 
 
+# #755 SKILLS-1: сентинел навыков (тот же, что bootstrap_skills.sh —
+# единая точка правды о «развёрнуты ли навыки»)
+SKILLS_SENTINEL = Path("skills/deconstruct/SKILL.md")
+# Время старта процесса — для строки тревоги «не загружены с …» (наряд:
+# «с <время старта>»; это старт текущего контейнера, НЕ момент пропажи —
+# глубина прод-логов ограничена, реальный момент умершего токена неизвестен)
+_PROCESS_BOOT_TS = datetime.now(timezone.utc).strftime("%d.%m %H:%M UTC")
+
+
+def skills_status():
+    """#755 A.3: (развёрнуты ли навыки, число каталогов). Сентинел —
+    тот же файл, что проверяет bootstrap_skills.sh; счёт каталогов —
+    для поля skills в /version и строки брифа."""
+    if not SKILLS_SENTINEL.is_file():
+        return False, 0
+    try:
+        n = len([d for d in os.listdir("skills") if os.path.isdir(os.path.join("skills", d))])
+    except OSError:
+        n = 0
+    return True, n
+
+
+def skills_status_line():
+    """#755 A.3: строка для сигналов брифа. Пустая — навыки на месте
+    (наряд: «при наличии — ничего»)."""
+    ok, n = skills_status()
+    if ok:
+        return ""
+    return (f"⚠️ Навыки отделов НЕ загружены (сентинел отсутствует) — "
+            f"отделы работают без методик; старт контейнера {_PROCESS_BOOT_TS}")
+
+
 def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
                             forge_backup_stale: bool, keys_line: str,
                             dept_fail_line: str, kk_line: str,
                             forge_attention: str, errors_digest: str,
                             night_line: str = "",
-                            night_tick_line: str = "") -> list:
+                            night_tick_line: str = "",
+                            skills_line: str = "") -> list:
     """#684 A.1: алерты раздела «Что требует внимания» — программой.
 
     Источники — те же сигналы, что и ниже в отчёте (модель их видит, но
@@ -370,10 +403,17 @@ def collect_attention_items(forge_backup_ok: bool, forge_backup_line: str,
      11. (#720) здоровье ночного цикла ≤ NIGHT_HEALTH_ALERT_MAX (3/10);
      12. (#720) Кавальня: провал формы ≥ KK_FORM_FAIL_ALERT_PCT (30%)
          ответов за 24 ч.
+     13. (#755) навыки отделов не развёрнуты (сентинел skills/ отсутствует)
+         — отделы работают без методик.
     Резерв при нуле проектов — не алерт (#687 A.6.2: резервировать нечего).
     Пустой список — валидный результат («Внимания не требуется»).
     """
     items = []
+    # ── #755 A.3: тревога о навыках — первой строкой: неделя 15–22.11
+    # прошла незаметно именно потому, что сигнал был только в логе старта
+    _sl = (skills_line or "").strip()
+    if _sl:
+        items.append(_sl)
     # #687 A.6.1: просроченная ночная проверка видна разделу внимания
     nl = (night_line or "").strip()
     if "НЕ выполнялась" in nl:
@@ -903,6 +943,8 @@ def scheduler_morning_brief():
             night_line=night_line,
             # #720 A.2: night-tick этой ночи — FAIL-компоненты в раздел внимания
             night_tick_line=night_tick_report_line(),
+            # #755 A.3: навыки отделов — тревога, если сентинела нет
+            skills_line=skills_status_line(),
         )
 
         # ── 3. LZ daily findings (from memory) ──
@@ -1045,6 +1087,16 @@ def scheduler_morning_brief():
                 brief = brief + "\n\n" + mem_line
         except Exception as e:  # noqa: BLE001 — строка памяти не роняет бриф
             log.warning(f"[morning_brief] mem line failed: {e}")
+        # #755 A.3: если навыков нет — предупреждение и в ТЕЛЕ брифа
+        # (раздел внимания уже несёт её через collect_attention_items;
+        # здесь — дословная строка статуса, чтобы владелец увидел в любом
+        # случае, даже если раздел внимания модель перескажет)
+        try:
+            _skl = skills_status_line()
+            if _skl:
+                brief = brief + "\n\n" + _skl
+        except Exception as e:  # noqa: BLE001 — строка навыков не роняет бриф
+            log.warning(f"[morning_brief] skills line failed: {e}")
 
         msg_id = _tg_send_formatted(owner_id, brief, dept="yana")
         # №587 A.2: ряд оценки к брифу Яны (kind=brief)
@@ -1181,6 +1233,8 @@ def scheduler_admin_morning_reply():
             night_line=night_line,
             # #720 A.2: тот же night-tick, что у брифа — единый источник
             night_tick_line=night_tick_report_line(),
+            # #755 A.3: тот же статус навыков, что у брифа
+            skills_line=skills_status_line(),
         )
         messages = [
             {"role": "system", "content": admin_prompt + "\n\nТы — Админ Фосвед Офиса. Ты прочитал утренний отчёт Яны и даёшь замечания к нему по фактам из данных ниже. Не отдавай поручений отделам и людям, не ставь сроков. Упомяни находки Лаборатории Знаний, если они релевантны. Форматирование: *жирный* для ключевых слов, эмодзи только как маркеры секций. НЕ используй кавычки."},

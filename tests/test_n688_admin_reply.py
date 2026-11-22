@@ -156,7 +156,16 @@ def test_a2_priorities_from_signals_in_reply(monkeypatch, green_signals):
     assert "Приоритетов по сбоям нет" not in reply
 
 
-def test_a2_priorities_none_when_all_green(monkeypatch, green_signals):
+def test_a2_priorities_none_when_all_green(monkeypatch, green_signals, tmp_path):
+    """#755: навыки в тесте — «на месте» (сентинел в tmp): CI-клон без
+    skills/ иначе даёт честную тревогу «Навыки НЕ загружены» — это не
+    «сбой-приоритет» теста о зелёных сигналах прочих систем."""
+    import proxy.routes_sched as rs
+    from pathlib import Path as _P
+    _sk = tmp_path / "skills" / "deconstruct"
+    _sk.mkdir(parents=True)
+    (_sk / "SKILL.md").write_text("# ok\n", encoding="utf-8")
+    monkeypatch.setattr(rs, "SKILLS_SENTINEL", _sk / "SKILL.md")
     _patch_model(monkeypatch, "💬 Замечаний нет.\n🔍 Из находок ЛЗ: всё спокойно.")
     r = _client().post("/scheduler/admin-morning-reply", headers=API_AUTH, json={"owner_id": "12345"})
     reply = r.get_json()["reply"]
