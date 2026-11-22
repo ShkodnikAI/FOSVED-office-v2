@@ -65,7 +65,7 @@ class TestOutboxMlogGuards:
         seg = "\n".join(_code_lines(SCHEDULES))
         assert 'name: "night-report"' in seg, "запись night-report отсутствует в реестре"
         assert 'cron: "15 7 * * *"' in seg, "расписание night-report не 07:15"
-        assert 'tz: "Europe/Moscow"' in seg
+        assert 'tz: "Europe/Minsk"' in seg
         assert 'target: "NightReportSlot"' in seg
         assert 'catch_up: "run_once"' in seg
         # включённость — прямое решение владельца в наряде

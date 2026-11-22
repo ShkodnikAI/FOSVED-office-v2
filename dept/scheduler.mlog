@@ -13,7 +13,7 @@ import dept/lz
 // MorningBrief and ReminderCheck still delegate (complex: weather API / RRULE logic).
 
 // ---------------------------------------------------------------------------
-// 1. Morning Brief — 07:20 MSK daily (4:20 UTC)
+// 1. Morning Brief — 07:20 Минск daily (4:20 UTC)
 // Яна: дата, время, погода, статус офиса, мировые события, находки ЛЗ
 // STILL DELEGATED: Python endpoint collects weather, metrics, LZ findings.
 // Migration path: add http_get for OpenWeatherMap API → then migrate.
@@ -447,7 +447,7 @@ pattern LzDailySlot() -> String {
   return "lz-daily ok"
 }
 
-// ── #712 MEM-1 A.3: плановая очистка памяти в тихое окно (03:40 MSK) ──────
+// ── #712 MEM-1 A.3: плановая очистка памяти в тихое окно (03:40 Минск) ──────
 // Временная мера наряда (если рост не устранён в источнике): gc.collect() +
 // сброс кэшей провайдеров в Python-процессе. Тихо (никакого Telegram),
 // итог — в audit_log (разбор — /admin-ua/mem-report). Слот в реестре
@@ -537,11 +537,11 @@ pattern DbBackupSlot() -> String {
 // ── #550 A.1: отложенная доставка владельцу — ночная почта ─────────────────
 // Всё, что отправляется владельцу во время NightTickSlot/night-цикла (итог
 // тика, FO-027-алерты, «Ночная проверка», ночной LZ DAILY), пишется в
-// owner_outbox (OutboxPut) и выгружается слотом night-report (07:15 MSK)
+// owner_outbox (OutboxPut) и выгружается слотом night-report (07:15 Минск)
 // одним сообщением (OutboxFlush). Ночью — тишина (цель наряда #550).
 // Таблица — общая с Python (proxy/core.py init_db): ночной LZ DAILY пишется
 // из proxy/lz_github.py (deliver="outbox"), выгружается той же меткой.
-// ── #720 A.1: блоки-сводки ночи — одна запись на ночь (MSK-дату) ─────────
+// ── #720 A.1: блоки-сводки ночи — одна запись на ночь (дату по Минску) ─────────
 // Факт 12.11: «usage-by-key» пришёл в отчёт дважды (131 и 133) — NightSlot
 // отработал два раза (нативный слот night-tick + внешний триггер /cron/night*),
 // у OutboxPut не было дедупликации. Источники-сводки (фикс-список ниже) при
@@ -549,9 +549,9 @@ pattern DbBackupSlot() -> String {
 // один. Источники-ленты (fo027 — по цепочке, osp-watch — по находке) пишутся
 // как раньше: каждый вызов — своя запись. UPDATE, а не DELETE: голый DELETE —
 // irreversible-sink (мост №391), аудит не должен краснеть на каждом ночном
-// прогоне. sent_at IS NULL: выгруженное (07:15 MSK) не трогаем — блок,
+// прогоне. sent_at IS NULL: выгруженное (07:15 Минск) не трогаем — блок,
 // пришедший ПОСЛЕ выгрузки, честно уходит в следующий отчёт.
-// Дата — MSK (created_at в UTC): ночь 02:00–05:00 UTC = один MSK-день.
+// Дата — по Минску (created_at в UTC): ночь 02:00–05:00 UTC = один день по Минску.
 pattern OutboxPut(source: String, text: String) -> String {
   let _ = InitDB()
   // #720 A.1: mlog-тесты и чистый mlog run не поднимают Python-слой,
@@ -727,9 +727,9 @@ pattern NightPhaseBegin(name: String) -> String {
 // Механика: попытка фиксируется ДО фаз; незавершённая (finished_at IS NULL)
 // не позволяет бесконечно догонять: после N728_MAX_ATTEMPTS незавершённых
 // попыток за дату догон отказывает — громко (audit + owner_outbox), без
-// тихого пропуска. Датирование — MSK (оконное время слота 05:00 MSK),
+// тихого пропуска. Датирование — по Минску (оконное время слота 05:00 Минск),
 // формат как у night_run_state date('now','+3 hours') в №588: UTC-день
-// менялся в 03:00 MSK и резал окно ночи; здесь наоборот нужен ДЕНЬ ОКНА,
+// менялся в 03:00 Минск и резал окно ночи; здесь наоборот нужен ДЕНЬ ОКНА,
 // а не день календаря UTC.
 pattern NightTickAttemptDay() -> String {
   let rows = query("SELECT date('now', '+3 hours') as d", [])
@@ -818,7 +818,7 @@ pattern PollJobStatus(base: String, query: String) -> String {
   return json_encode({state: "timeout", error: "job not done in 25 min"})
 }
 
-// Слот 07:15 MSK (dept/schedules.mlog: night-report) — единственная точка
+// Слот 07:15 Минск (dept/schedules.mlog: night-report) — единственная точка
 // доставки ночной почты. TryVal — сбой выгрузки не роняет крон-прогон,
 // причина уходит в audit_log.
 pattern NightReportSlot() -> String {
@@ -838,10 +838,10 @@ pattern NightReportSlot() -> String {
 // Тело /cron/night-tick: диспетчер обходит /cron/*-роуты по порядку —
 // backup → indicator-reminders → shop-tick → golden-evals → night.
 // #550 A.1: итог тика больше не уходит немедленно в Telegram — через
-// OutboxPut в owner_outbox, доставка слотом night-report в 07:15 MSK.
+// OutboxPut в owner_outbox, доставка слотом night-report в 07:15 Минск.
 pattern NightTickSlot() -> String {
   let _ = InitDB()
-  // #728 B.2: гейт догона. Плановый запуск (05:00 MSK) всегда проходит:
+  // #728 B.2: гейт догона. Плановый запуск (05:00 Минск) всегда проходит:
   // таблица попыток пуста на начало даты. Спираль продавала ДО фикса:
   // контейнер умирал среди тика → тик за дату не завершён → рестарт →
   // catch-up снова запускал слот → снова смерть. Теперь: ≥2 незавершённых
@@ -994,7 +994,7 @@ pattern NightTickSlot() -> String {
   // операция и выполняется при любом исходе фаз, текст ошибки в report
   // (night=FAIL(...)) уже собран try-веткой выше.
   let _ = TryVal(try AuditLog("cron_night_tick", "system", report))
-  // #550 A.1: итог тика — в outbox (доставка слотом night-report в 07:15 MSK),
+  // #550 A.1: итог тика — в outbox (доставка слотом night-report в 07:15 Минск),
   // немедленной ночной отправки больше нет.
   let _ = OutboxPut("night-tick", report)
   // #728 B.2: тик дошёл до конца — попытка закрыта; следующий catch-up
@@ -1143,7 +1143,7 @@ test "n637 A2d: маршрутизация /visual-image и /visual — оба �
 }
 
 // ── #720 A.1: дедуп блоков-сводок ночи (факт 12.11: usage-by-key дважды) ──
-// Инвариант к накоплению (идиома n636): до теста в текущем MSK-дне может
+// Инвариант к накоплению (идиома n636): до теста в текущем дне по Минску может
 // лежать 0 или 1 незакрытая запись usage-by-key (последняя, если ночь или
 // прошлый прогон уже писали); два OutboxPut подряд обязаны оставить РОВНО
 // одну (вторая — «replaced», заменяет текст), в тексте — последний блок.

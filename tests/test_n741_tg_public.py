@@ -226,7 +226,7 @@ def test_a3_factpack_block_by_stems(db_env):
     assert "НПЗ" in block
     assert "Лиссабон" not in block and "акций" not in block
     assert "https://t.me/exilenova_plus/1" in block
-    assert "МСК" in block
+    assert "Минск" in block
 
 
 def test_a3_factpack_block_empty_vs_broken(db_env):

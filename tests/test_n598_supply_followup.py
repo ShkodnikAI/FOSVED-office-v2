@@ -235,7 +235,7 @@ def test_connection_status_stale():
     _set_last_seen("-15 minutes")
     text = sd.humanize_source_status({"ok": False, "kind": "supply_pending"})
     assert text.startswith("снабженец недоступен с ")
-    assert " МСК — задание ждёт его" in text
+    assert " Минск — задание ждёт его" in text
 
 
 def test_next_poll_makes_status_fresh(client):

@@ -17,7 +17,7 @@ HARNESS = (REPO_ROOT / "dogfood_staging.mlog").read_text(encoding="utf-8")
 ENTRYPOINT = (REPO_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
 
 # Целевой расклад (docs/render-dashboard.md, «native cron»): 7 слотов +
-# night-tick + служебный lz-daily. Времена — MSK wall-clock (tz Europe/Moscow).
+# night-tick + служебный lz-daily. Времена — MSK wall-clock (tz Europe/Minsk).
 EXPECTED_SLOTS = {
     "admin-reply": "25 7 * * *",
     "morning-brief": "20 7 * * *",
@@ -36,7 +36,7 @@ def test_registry_has_all_target_slots_with_msk():
     for name, expr in EXPECTED_SLOTS.items():
         assert f'name: "{name}"' in SCHEDULES, f"слот {name} отсутствует в реестре"
         assert f'cron: "{expr}"' in SCHEDULES, f"расписание {name} не {expr} (MSK)"
-    assert SCHEDULES.count('"Europe/Moscow"') >= 8, "не все записи в Europe/Moscow"
+    assert SCHEDULES.count('"Europe/Minsk"') >= 8, "не все записи в Europe/Minsk"
 
 
 def test_registry_keep_alive_is_external_and_disabled():

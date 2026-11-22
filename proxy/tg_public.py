@@ -356,7 +356,7 @@ def _extract_stems(text, min_len=3):
 def factpack_block(question, hours=48, limit=10):
     """A.3: блок «Telegram-мониторинг» для LZFactpack/контекста ОСП —
     посты за N часов по основам слов вопроса, до limit, с каналом,
-    временем (МСК) и ссылкой t.me/<username>/<id>. Пустая выборка при
+    временем (Минск) и ссылкой t.me/<username>/<id>. Пустая выборка при
     неработающем сборе — честная строка, не пустота."""
     import json as _json
     try:
@@ -389,12 +389,12 @@ def factpack_block(question, hours=48, limit=10):
         lines = []
         for r in picked:
             dt = r["date"] or ""
-            # МСК = UTC+3 (бриф/офис работают по Минску)
+            # Минск = UTC+3 (бриф/офис работают по Минску)
             try:
                 d = datetime.fromisoformat(dt)
                 msk = (d if d.tzinfo else d.replace(tzinfo=timezone.utc))                     .astimezone(timezone(offset=__import__("datetime")
                                          .timedelta(hours=3)))
-                when = msk.strftime("%d.%m %H:%M МСК")
+                when = msk.strftime("%d.%m %H:%M Минск")
             except ValueError:
                 when = dt[:16]
             lines.append(f"- @{r['channel_id']} ({when}): "
