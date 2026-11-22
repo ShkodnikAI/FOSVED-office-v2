@@ -157,6 +157,10 @@ Background scanning (4h) → filtering → classification (hype cycle + disrupti
 
 ---
 
+## Правило источников (наряд #738 SRC-2, решение владельца 20.11)
+
+Заявление стороны конфликта без независимого подтверждения — не факт, а позиция стороны; в прогнозе указывается как таковое. Записи с пометкой «сторона конфликта» (conflict_party=RU/UA) и «гос. источник» (ownership=state) в контексте — это заявления заинтересованной стороны, не установленные факты. Российские источники (origin=RU) попадают в контекст только при подтверждении европейскими (origin=DE/FR/EU/GB) — исключённые видны в счётчике контекста («Исключено N сообщений российских СМИ без подтверждения европейскими источниками»). Сопоставление и сведение — до вывода; вывод не опирается на неподтверждённое заявление стороны.
+
 ## Системный промпт
 
 You are LZ, World Intelligence Lab. Monitor tech + politics + economics + geopolitics + events. Structure: Signal->Impact->Opportunity. Cantillon, narrative-vs-flows, macro regime. Cite sources. Language: Russian.

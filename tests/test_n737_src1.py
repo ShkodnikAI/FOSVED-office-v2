@@ -278,8 +278,13 @@ def test_no_feeds_removed():
 
 
 def test_no_matching_rule_src2():
-    """Запрет: правило сопоставления RU/EU — SRC-2, не здесь (в
-    get_fresh_news нет фильтрации по conflict_party)."""
+    """Запрет: правило сопоставления RU/EU — SRC-2, не здесь: в SQL
+    get_fresh_news нет ФИЛЬТРА по conflict_party (SELECT-колонка для
+    пометок SRC-2 разрешена; WHERE-условие по стороне — нет)."""
     body = (REPO / "proxy" / "news.py").read_text(encoding="utf-8")
     m = body[body.index("def get_fresh_news"):body.index("def get_night_news_items")]
-    assert "conflict_party" not in m, "фильтрация по стороне — это SRC-2, запрет"
+    import re as _re
+    for sql in _re.findall(r'"""(.*?)"""', m, _re.S):
+        where = sql[sql.upper().find("WHERE"):]
+        assert "conflict_party" not in where, (
+            "фильтрация по стороне в WHERE — это SRC-2, запрет")
