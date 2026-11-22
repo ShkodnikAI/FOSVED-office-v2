@@ -181,15 +181,19 @@ def test_worker_memoryerror_own_rc(tmp_path):
     import resource
     office = tmp_path / "office"
     office.mkdir()
-    # большой текст (~58 МБ сырых строк в списках при splitlines-подходе;
-    # стримингу нужно меньше, но и ему при таком объёме анализа не хватит
-    # узкого RLIMIT) — предел подобран: python стартует (старт сам требует
-    # ~30+ МБ AS), анализ падает
-    (office / "big.mlog").write_text("line\n" * 2_000_000, encoding="utf-8")
+    # Предел RLIMIT_AS и объём данных подобраны так, чтобы воркер НЕ смог
+    # закончить: python-старт требует ~30 МБ AS; результат воркера — JSON
+    # с инвентарём + анализом. Делаем файлов много (10k) с телом, чтобы
+    # итоговый JSON-пейлоад гарантированно не влез в остаток от 40 МБ:
+    # 10k файлов × ~1.4 КБ записи инвентаря+анализа ≈ 14+ МБ JSON
+    # (строки-пути, регулярные структуры) + сама запись json.dump
+    # удваивает память (структуры + сериализация).
+    for i in range(10_000):
+        (office / f"f{i}.mlog").write_text("line\n" * 50, encoding="utf-8")
     out = tmp_path / "out.json"
 
     def _rlimit():
-        lim = 48 * 1024 * 1024
+        lim = 40 * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
 
     p = subprocess.run([sys.executable, str(WORKER), str(out), str(office)],
