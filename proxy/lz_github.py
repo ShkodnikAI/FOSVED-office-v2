@@ -1185,6 +1185,19 @@ def news_fresh():
 
 
 # ── #740 OSP-FRESH: свежесть данных по теме (возраст кэша + последний сбор) ──
+# ── #739 SRC-3 A.4: таблица репутационного рейтинга источников ───────────
+@app.route("/news/source_rating", methods=["GET", "POST"])
+def news_source_rating():
+    """Рейтинг источников по разобранным событиям (точность Beta(1,1),
+    медианная скорость, n). Mini App запрашивает по запросу владельца;
+    без графиков в этом проходе (наряд)."""
+    try:
+        from proxy.news import source_rating_table
+        return jsonify({"rating": source_rating_table()})
+    except Exception as e:  # noqa: BLE001 — честная деградация
+        return jsonify({"rating": [], "error": str(e)[:200]})
+
+
 @app.route("/news/freshness", methods=["POST"])
 def news_freshness():
     """Возраст данных для ОСП/Яны/ЛЗ перед прогнозом или «нет данных».
