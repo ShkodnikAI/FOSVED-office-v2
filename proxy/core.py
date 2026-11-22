@@ -492,7 +492,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS error_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, dept TEXT, error_type TEXT, query_text TEXT, correction TEXT, created_at TEXT DEFAULT (datetime('now')));
         -- #550 A.1: отложенная доставка владельцу — ночная почта (NightTickSlot,
         -- NightSlot FO-027/«Ночная проверка», ночной lz-daily) пишется сюда,
-        -- слот night-report (07:15 MSK) выгружает одним сообщением (OutboxFlush).
+        -- слот night-report (07:15 Минск) выгружает одним сообщением (OutboxFlush).
         CREATE TABLE IF NOT EXISTS owner_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT DEFAULT (datetime('now')), source TEXT NOT NULL, text TEXT NOT NULL, sent_at TEXT);
         CREATE INDEX IF NOT EXISTS idx_owner_outbox_sent ON owner_outbox(sent_at);
         -- №587 A.1: оценки владельца «+»/«−» (DDL дублирует InitDB app.mlog)

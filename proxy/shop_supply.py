@@ -33,7 +33,7 @@ SUPPLY_AGENT_COLLECTORS, дефолт 7745) режут очередь до ин�
 SUPPLY_AGENT_PLATFORMS ∩ supply_platforms; статус связи — живой в
 humanize_source_status (shop_dossier); закрытие волны заданий товара →
 одно сообщение «Досье обновлено» владельцу (shop_supply_waves.notified,
-ночь 00:00–06:59 МСК → owner_outbox).
+ночь 00:00–06:59 Минск → owner_outbox).
 
 CONTRACT.md (закрытый репо fosved-supply-agent @ 212fcb19) исполнителю
 недоступен (токен офиса не имеет доступа — 403, проверено клоном
@@ -96,8 +96,8 @@ SUPPLY_COLLECTORS_DEFAULT = "7745"
 SUPPLY_FRESH_SECS = 300
 
 # №598 A.3: ночное окно тишины для сообщений «Досье обновлено» —
-# 00:00–06:59 МСК (МСК = UTC+3): ночью — в owner_outbox (доставка слотом
-# night-report 07:15 МСК), днём — сразу в Telegram.
+# 00:00–06:59 Минск (Минск = UTC+3): ночью — в owner_outbox (доставка слотом
+# night-report 07:15 Минск), днём — сразу в Telegram.
 SOURCE_OUTBOX = "shop-supply"
 
 # Process-local выдача (см. докстринг модуля про модель гонок).
@@ -211,10 +211,10 @@ def supplier_last_seen():
 
 
 def _is_supply_night_msk(now=None):
-    """№598 A.3: ночное окно 00:00–06:59 МСК (МСК = UTC+3, фиксированный пояс).
+    """№598 A.3: ночное окно 00:00–06:59 Минск (Минск = UTC+3, фиксированный пояс).
 
     Ночью сообщение о обновлённом досье уходит в owner_outbox (доставка
-    слотом night-report 07:15 МСК), днём — сразу в Telegram. Отдельная
+    слотом night-report 07:15 Минск), днём — сразу в Telegram. Отдельная
     функция (не routes_tail._is_night_msk): окно наряда #598 — 00:00,
     а не 22:00 тишины #550.
     """
@@ -548,8 +548,8 @@ def _wave_task_line(row):
 
 
 def _send_owner_update(text):
-    """Доставка владельцу (№598 A.3): день — Telegram, ночь 00:00–06:59 МСК —
-    owner_outbox (доставка слотом night-report 07:15 МСК). Адресат —
+    """Доставка владельцу (№598 A.3): день — Telegram, ночь 00:00–06:59 Минск —
+    owner_outbox (доставка слотом night-report 07:15 Минск). Адресат —
     OWNER_TELEGRAM_ID (тот же источник, что у golden-evals/budget),
     фолбэк — system_settings owner_chat_id. Пусто → честный warning.
     """

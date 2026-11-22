@@ -486,7 +486,7 @@ def scheduler_lz_daily():
     LZ Daily Report: scan GitHub → LLM analysis → save to memory → return report.
     Called by /cron/lz-daily or manually.
     #550 A.1: deliver="outbox" — ночной прогон (NightSlot Phase 1) пишет отчёт
-    в owner_outbox (доставка слотом night-report в 07:15 MSK), дефолт "telegram"
+    в owner_outbox (доставка слотом night-report в 07:15 Минск), дефолт "telegram"
     — утренний слот/ручные прогоны шлют как раньше.
     """
     d = request.get_json(force=True) or {}
@@ -847,7 +847,7 @@ def scheduler_lz_daily_core(dry_run, owner_id, deliver="telegram"):
         # ── Phase 5: Send to Owner (Admin) ────────────────────
         # #550 A.1: deliver="outbox" (ночной прогон из NightSlot Phase 1) —
         # отчёт пишется в owner_outbox; Telegram-доставку выполняет OutboxFlush
-        # слота night-report в 07:15 MSK. Дефолт — немедленная отправка.
+        # слота night-report в 07:15 Минск. Дефолт — немедленная отправка.
         msg_id = None
         sent_ok = False
         if owner_id and not dry_run:

@@ -73,7 +73,7 @@ def test_slot_in_registry():
     seg = SCHEDULES_MLOG[SCHEDULES_MLOG.index('{ name: "collect-news"'):]
     seg = seg[: seg.index("}") + 1]
     assert 'cron: "0 */6 * * *"' in seg, "частота — раз в 6 часов (лимиты Tavily)"
-    assert 'tz: "Europe/Moscow"' in seg
+    assert 'tz: "Europe/Minsk"' in seg
     assert 'target: "CollectNewsSlot"' in seg
     assert 'catch_up: "skip"' in seg, "пробуждение free-инстанса не догоняет окна"
     assert "enabled: true" in seg, "прямое решение владельца в тексте наряда #424"

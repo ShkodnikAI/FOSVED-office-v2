@@ -2279,9 +2279,9 @@ _GOLDEN_MIN_SCORE = float(os.environ.get("GOLDEN_MIN_SCORE", "0.6"))       # а�
 _GOLDEN_REGRESSION_DROP = float(os.environ.get("GOLDEN_REGRESSION_DROP", "0.15"))  # падение vs предыдущий прогон
 
 def _is_night_msk(now=None):
-    """№588 B.3: ночное окно тишины (#550) — 22:00–06:59 MSK (MSK = UTC+3,
+    """№588 B.3: ночное окно тишины (#550) — 22:00–06:59 Минск (Минск = UTC+3,
     фиксированный пояс). Ночью алерты качества уходят в owner_outbox
-    (доставка слотом night-report 07:15 MSK), днём — сразу в Telegram."""
+    (доставка слотом night-report 07:15 Минск), днём — сразу в Telegram."""
     now = now or datetime.now(timezone.utc)
     msk_hour = (now.hour + 3) % 24
     return msk_hour >= 22 or msk_hour < 7
@@ -2481,7 +2481,7 @@ def _golden_evals_impl(dept_list):
             alerts.append(summary)
         results.append(summary)
 
-    # Сигнал владельцу: №588 B.3 — причины раздельно; ночью (22:00–06:59 MSK,
+    # Сигнал владельцу: №588 B.3 — причины раздельно; ночью (22:00–06:59 Минск,
     # тишина #550) алерт уходит в owner_outbox (доставка 07:15), днём — сразу.
     owner_id = os.environ.get("OWNER_TELEGRAM_ID", "")
     if alerts and owner_id:
@@ -2656,7 +2656,7 @@ from proxy.news import (
 # ══════════════════════════════════════════════════════════════════════
 #  WATCH SWEEP — daily sweep of WatchlistItem table
 #  Checks all active items, updates lastCheckAt/nextCheckAt, detects deltas
-#  Called by Render cron at 06:00 UTC = 09:00 MSK
+#  Called by Render cron at 06:00 UTC = 09:00 Минск
 # ══════════════════════════════════════════════════════════════════════
 
 @app.post("/scheduler/watch-sweep")
@@ -2748,7 +2748,7 @@ def scheduler_watch_sweep():
 # ══════════════════════════════════════════════════════════════════════
 #  INDICATOR PRE-REMINDERS — 7-day pre-verification reminders
 #  Finds indicators with verifyDate within N days, sends reminder to owner
-#  Called by Render cron at 03:00 UTC = 06:00 MSK (before morning brief)
+#  Called by Render cron at 03:00 UTC = 06:00 Минск (before morning brief)
 # ══════════════════════════════════════════════════════════════════════
 
 @app.post("/scheduler/indicator-pre-reminders")
