@@ -4,6 +4,7 @@
 """
 
 import os
+import sys
 import re
 import json
 import time
@@ -20,6 +21,7 @@ import requests as http_requests
 from flask import request, jsonify, Response, send_file
 
 from proxy.kg import kg_scan_rebuild, kg_active
+from proxy import ua_scan  # #712: потоковый Scanner/Analyzer (мем-безопасный)
 from proxy import jobs as n596_jobs  # №596 A.2: фоновые задания ночных фаз
 # #712 MEM-1 (P0) A.1: RSS-метки ночного UA-цикла и subprocess (proxy/mem_sampler.py)
 from proxy.mem_sampler import slot_mem_guard, run_tracked, mark as _mem_mark
@@ -1430,7 +1432,7 @@ def api_admin_status():
 #  ADMIN UA — Understand Anything (6 sub-agents)
 # ══════════════════════════════════════════════════════════════════════
 
-SKIP_DIRS = {'data', '.git', 'node_modules', '__pycache__', 'отчёты', 'tool-results', 'scripts', 'upload'}
+SKIP_DIRS = ua_scan.SKIP_DIRS  # #712: единый набор с потоковым сканером (proxy/ua_scan.py)
 KNOWN_BUILTINS = ['send_message', 'query', 'db_execute', 'kv_set', 'kv_get',
     'http_post', 'http_get', 'read_file', 'write_file', 'call_llm',
     'json_get', 'parse_json', 'json_encode', 'respond', 'respond_html',
@@ -1446,29 +1448,13 @@ KNOWN_BUILTINS = ['send_message', 'query', 'db_execute', 'kv_set', 'kv_get',
 
 @app.get("/admin-ua/scan")
 def admin_ua_scan():
-    """Scanner: inventory of all files in /office."""
-    inventory = {'files': [], 'total_lines': 0, 'total_files': 0, 'by_type': {}, 'by_dir': {}}
-    office_dir = Path('/office')
+    """Scanner: inventory of all files in /office.
 
-    for root, dirs, files in os.walk(office_dir):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for f in files:
-            fpath = Path(root) / f
-            rel = str(fpath.relative_to(office_dir))
-            try:
-                lines = len(fpath.read_text(errors='ignore').splitlines())
-            except Exception:
-                lines = 0
-            ext = fpath.suffix
-            dir_name = rel.split('/')[0] if '/' in rel else 'root'
-            inventory['files'].append({
-                'path': rel, 'lines': lines, 'ext': ext, 'dir': dir_name,
-                'size_kb': round(fpath.stat().st_size / 1024, 1),
-            })
-            inventory['total_lines'] += lines
-            inventory['total_files'] += 1
-            inventory['by_type'][ext] = inventory['by_type'].get(ext, 0) + 1
-            inventory['by_dir'][dir_name] = inventory['by_dir'].get(dir_name, 0) + 1
+    #712: делегирует потоковому сканеру proxy/ua_scan.py — прежде
+    read_text().splitlines() на 36-МБ bin/mlog давало пик ~100 МБ
+    (аудит 22.11: OOM 02:00:20–24 в Phase 1).
+    """
+    inventory = ua_scan.scan_inventory('/office')
 
     inventory['files'].sort(key=lambda x: x['lines'], reverse=True)
     summary = (f"SCAN COMPLETE\n  Files: {inventory['total_files']} | "
@@ -1483,46 +1469,12 @@ def admin_ua_scan():
 
 @app.get("/admin-ua/analyze")
 def admin_ua_analyze():
-    """Analyzer: extract patterns, routes, imports, builtins from each file."""
-    office_dir = Path('/office')
-    analysis = []
+    """Analyzer: extract patterns, routes, imports, builtins from each file.
 
-    for root, dirs, files in os.walk(office_dir):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for f in files:
-            fpath = Path(root) / f
-            ext = fpath.suffix
-            if ext not in ('.mlog', '.py'):
-                continue
-            rel = str(fpath.relative_to(office_dir))
-            try:
-                content = fpath.read_text(errors='ignore')
-            except Exception:
-                continue
-
-            fa = {'path': rel, 'patterns': [], 'routes': [], 'imports': [],
-                  'builtins_used': [], 'tables': []}
-
-            if ext == '.mlog':
-                for m in re.finditer(r'pattern\s+(\w+)\(([^)]*)\)\s*->\s*(\w+)', content):
-                    fa['patterns'].append({'name': m.group(1), 'args': m.group(2), 'returns': m.group(3)})
-                for m in re.finditer(r'route\s+"([^"]+)"\s+method=(\w+)', content):
-                    fa['routes'].append({'path': m.group(1), 'method': m.group(2)})
-                for m in re.finditer(r'import\s+([\w/]+)', content):
-                    fa['imports'].append(m.group(1))
-                for b in KNOWN_BUILTINS:
-                    if b + '(' in content:
-                        fa['builtins_used'].append(b)
-                for m in re.finditer(r'CREATE TABLE (?:IF NOT EXISTS )?(\w+)', content):
-                    fa['tables'].append(m.group(1))
-
-            elif ext == '.py':
-                for m in re.finditer(r'def\s+(\w+)\(', content):
-                    fa['patterns'].append({'name': m.group(1), 'args': '', 'returns': ''})
-                for m in re.finditer(r"@\w+\.route\(['\"]([^'\"]+)", content):
-                    fa['routes'].append({'path': m.group(1), 'method': 'GET/POST'})
-
-            analysis.append(fa)
+    #712: делегирует потоковому анализатору proxy/ua_scan.py (факты без
+    текстов файлов; прежде — полные тексты всех .py/.mlog в памяти).
+    """
+    analysis = ua_scan.analyze_files('/office')
 
     total_patterns = sum(len(f['patterns']) for f in analysis)
     total_routes = sum(len(f['routes']) for f in analysis)
@@ -1534,77 +1486,22 @@ def admin_ua_analyze():
 
 
 def _ua_analyze_internal():
-    """Internal analyzer — returns list of file analysis dicts (no Flask)."""
-    office_dir = Path('/office')
-    analysis = []
+    """Internal analyzer — delegates to proxy/ua_scan.analyze_files (no Flask).
 
-    for root, dirs, files in os.walk(office_dir):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for f in files:
-            fpath = Path(root) / f
-            ext = fpath.suffix
-            if ext not in ('.mlog', '.py'):
-                continue
-            rel = str(fpath.relative_to(office_dir))
-            try:
-                content = fpath.read_text(errors='ignore')
-            except Exception:
-                continue
-
-            fa = {'path': rel, 'patterns': [], 'routes': [], 'imports': [],
-                  'builtins_used': [], 'tables': []}
-
-            if ext == '.mlog':
-                for m in re.finditer(r'pattern\s+(\w+)\(([^)]*)\)\s*->\s*(\w+)', content):
-                    fa['patterns'].append({'name': m.group(1), 'args': m.group(2), 'returns': m.group(3)})
-                for m in re.finditer(r'route\s+"([^"]+)"\s+method=(\w+)', content):
-                    fa['routes'].append({'path': m.group(1), 'method': m.group(2)})
-                for m in re.finditer(r'import\s+([\w/]+)', content):
-                    fa['imports'].append(m.group(1))
-                for b in KNOWN_BUILTINS:
-                    if b + '(' in content:
-                        fa['builtins_used'].append(b)
-                for m in re.finditer(r'CREATE TABLE (?:IF NOT EXISTS )?(\w+)', content):
-                    fa['tables'].append(m.group(1))
-
-            elif ext == '.py':
-                for m in re.finditer(r'def\s+(\w+)\(', content):
-                    fa['patterns'].append({'name': m.group(1), 'args': '', 'returns': ''})
-                for m in re.finditer(r"@\w+\.route\(['\"]([^'\"]+)", content):
-                    fa['routes'].append({'path': m.group(1), 'method': 'GET/POST'})
-
-            analysis.append(fa)
-
-    return analysis
+    #712: потоковая реализация; сигнатура/формат прежние (ночной цикл,
+    /admin-ua/graph). Тексты файлов в памяти не держатся — только факты.
+    """
+    return ua_scan.analyze_files('/office')
 
 
 def _ua_scan_internal():
-    """Internal scanner — returns inventory dict (no Flask)."""
-    inventory = {'files': [], 'total_lines': 0, 'total_files': 0, 'by_type': {}, 'by_dir': {}}
-    office_dir = Path('/office')
+    """Internal scanner — delegates to proxy/ua_scan.scan_inventory (no Flask).
 
-    for root, dirs, files in os.walk(office_dir):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for f in files:
-            fpath = Path(root) / f
-            rel = str(fpath.relative_to(office_dir))
-            try:
-                lines = len(fpath.read_text(errors='ignore').splitlines())
-            except Exception:
-                lines = 0
-            ext = fpath.suffix
-            dir_name = rel.split('/')[0] if '/' in rel else 'root'
-            inventory['files'].append({
-                'path': rel, 'lines': lines, 'ext': ext, 'dir': dir_name,
-                'size_kb': round(fpath.stat().st_size / 1024, 1),
-            })
-            inventory['total_lines'] += lines
-            inventory['total_files'] += 1
-            inventory['by_type'][ext] = inventory['by_type'].get(ext, 0) + 1
-            inventory['by_dir'][dir_name] = inventory['by_dir'].get(dir_name, 0) + 1
-
-    inventory['files'].sort(key=lambda x: x['lines'], reverse=True)
-    return inventory
+    #712: потоковый подсчёт строк (пик — чанк 256 КБ на любом файле, прежде
+    read_text().splitlines() на bin/mlog давало пик ~3 размера файла);
+    формат прежний (ночной цикл, /admin-ua/scan).
+    """
+    return ua_scan.scan_inventory('/office')
 
 
 def _ua_review_internal():
@@ -2054,10 +1951,9 @@ def admin_ua_docs():
             if fpath.suffix not in ('.mlog', '.py', '.txt', '.html'):
                 continue
             rel = str(fpath.relative_to(office_dir))
-            try:
-                lines = len(fpath.read_text(errors='ignore').splitlines())
-            except Exception:
-                lines = 0
+            # #712: потоковый подсчёт (как Scanner) — splitlines на 36-МБ
+            # bin/mlog* не случится и здесь (докстринг Documenter'а)
+            lines = ua_scan.count_lines(fpath)
             files_info.append({'path': rel, 'lines': lines})
     files_info.sort(key=lambda x: x['path'])
 
@@ -2085,6 +1981,59 @@ def admin_ua_docs():
                     api += f"### `{m.group(1)}`\nFile: `{rel}`\n\n"
 
     return jsonify({'structure': structure, 'api': api})
+
+
+# #712 MEM-1: предел памяти воркера фаз 1–2 (Scanner+Analyzer). База
+# фактов: полный текст .py/.mlog — 6.7 МБ; инвентарь ~790 записей; пик
+# python-аллокаций воркера на полном дереве (tracemalloc, см. отчёт) —
+# единицы МБ (стриминг). RLIMIT_AS 64 МБ = запас ×8 от пика аллокаций;
+# ниже не опускаемся: старт python + импорты proxy.* сами занимают
+# ~20–30 МБ адресного пространства (RLIMIT_AS — про ВЕСЬ адресный
+# пространство процесса, не только данные).
+UA_NIGHT_WORKER_MEM_LIMIT_MB = 64
+
+
+def _ua_night_scan_analyze():
+    """#712 MEM-1: фазы 1–2 ночного цикла (Scanner+Analyzer) дочерним
+    процессом под RLIMIT_AS — run_tracked, как backup (аудит 22.11).
+
+    Воркер scripts/ua_night_worker.py пишет JSON во временный файл;
+    форматы inventory/analysis — прежние (_ua_scan/_ua_analyze_internal).
+    Падение воркера (нехватка памяти под пределом, rc=2; ошибка записи,
+    rc=3) — честная громкая ошибка ночи, а не тихий пропуск: ночная
+    цепочка не продолжается с пустыми данными (kg-граф строился бы из
+    пустого анализа). Исключение пробрасывается — реестр заданий №596
+    помечает job ошибкой, /admin-ua/night-cycle отдаёт 500.
+    """
+    import tempfile
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out_fd, out_path = tempfile.mkstemp(prefix="ua_night_", suffix=".json")
+    os.close(out_fd)
+    try:
+        proc = run_tracked(
+            [sys.executable, os.path.join(repo_root, "scripts", "ua_night_worker.py"),
+             out_path, "/office"],
+            mem_limit_mb=UA_NIGHT_WORKER_MEM_LIMIT_MB,
+            capture_output=True, text=True, timeout=600, cwd=repo_root)
+        # Наяд A.4: падение воркера — громкая понятная ошибка ночи
+        # (rc=2 — MemoryError под пределом; 3 — запись; 1 — прочее),
+        # не тихий пропуск с пустыми данными.
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip()[-300:]
+            raise RuntimeError(
+                f"UA night worker: не хватило памяти либо сбой (предел "
+                f"{UA_NIGHT_WORKER_MEM_LIMIT_MB} МБ, rc={proc.returncode}): {tail}")
+        with open(out_path, encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload["inventory"], payload["analysis"]
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"UA night worker: результат нечитаем ({e}) — фазы Scanner/Analyzer не выполнены")
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
 
 
 def _ua_night_cycle_impl():
@@ -2118,14 +2067,18 @@ def _ua_night_cycle_impl_inner():
             raise RuntimeError("night cycle already running (holder: %s)" % _NightCycleGate.owner())
         try:
             _t0 = time.monotonic()
-            log.info("UA Night Cycle: Phase 1/6 — Scanner")
-            inventory = _ua_scan_internal()
+            log.info("UA Night Cycle: Phase 1/6 — Scanner (+ Analyzer; #712: дочерний процесс)")
+            # #712 MEM-1 (аудит 22.11): OOM 21–22.11 02:00:20–24 — пик
+            # Scanner'а в llm_proxy поверх накопленной за сутки базы
+            # (403 МБ из 512). Фазы 1–2 — в ДОЧЕРНЕМ процессе под RLIMIT_AS
+            # (scripts/ua_night_worker.py через run_tracked — как backup):
+            # пик чтения дерева не суммируется с базой главного процесса;
+            # при нехватке памяти падает воркер (rc=2), не контейнер.
+            # Форматы inventory/analysis — прежние, фазы логируются раздельно.
+            _t1 = time.monotonic()
+            inventory, analysis = _ua_night_scan_analyze()
             _ua_tx_log("night_scanner", rows=inventory.get('total_files', 0),
                        held_ms=int((time.monotonic() - _t0) * 1000))
-
-            _t1 = time.monotonic()
-            log.info("UA Night Cycle: Phase 2/6 — Analyzer")
-            analysis = _ua_analyze_internal()
             _ua_tx_log("night_analyzer", rows=len(analysis),
                        held_ms=int((time.monotonic() - _t1) * 1000))
 

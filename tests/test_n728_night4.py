@@ -908,9 +908,8 @@ def test_b7_findings_batch_survives_locked_db(tmp_path, monkeypatch):
                  'issue': f'issue {i}', 'fix': 'none'} for i in range(25)]
     # прогоняем ТОЛЬКО блок B.7 (вырванный из цикла) через impl-подобный
     # вызов: используем роут night-cycle с заглушёнными фазами
-    monkeypatch.setattr(ra, '_ua_scan_internal',
-                        lambda: {'total_files': 1, 'total_lines': 1})
-    monkeypatch.setattr(ra, '_ua_analyze_internal', lambda: [])
+    monkeypatch.setattr(ra, '_ua_night_scan_analyze',
+                        lambda: ({'total_files': 1, 'total_lines': 1}, []))
     monkeypatch.setattr(ra, '_grapher_write_phase',
                         lambda a, source: ({'inserted': 0, 'updated': 0, 'noop': 0,
                                             'closed_missing': 0}, 0, 0))
@@ -948,7 +947,8 @@ def test_b6_graph_route_409_while_night_cycle_runs(tmp_path, monkeypatch):
         ra._NightCycleGate.exit()
     # гейт снят — роут снова доступен (до анализа не дойдёт: analysis пуст
     # вернёт 200 с пустым графом)
-    monkeypatch.setattr(ra, '_ua_analyze_internal', lambda: [])
+    monkeypatch.setattr(ra, '_ua_night_scan_analyze',
+                        lambda: ({'total_files': 1, 'total_lines': 1}, []))
     client = llm_proxy.app.test_client()
     resp = client.get('/admin-ua/graph',
                       environ_base={"REMOTE_ADDR": "127.0.0.1"},
@@ -979,7 +979,7 @@ def test_b6_gate_released_on_crash(tmp_path, monkeypatch):
     """B.6: исключение в теле night-cycle СНИМАЕТ гейт (OOM/ошибка не
     оставляют вечного 409 — прод-инвариант)."""
     ra = _b3_env(tmp_path, monkeypatch)
-    monkeypatch.setattr(ra, '_ua_scan_internal',
+    monkeypatch.setattr(ra, '_ua_night_scan_analyze',
                         lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     import llm_proxy
     client = llm_proxy.app.test_client()
@@ -1022,9 +1022,8 @@ def test_b3bis_tx_log_emitted_during_night_cycle(tmp_path, monkeypatch, caplog):
     import logging
     ra = _b3_env(tmp_path, monkeypatch)
     import llm_proxy
-    monkeypatch.setattr(ra, '_ua_scan_internal',
-                        lambda: {'total_files': 3, 'total_lines': 100})
-    monkeypatch.setattr(ra, '_ua_analyze_internal', lambda: [])
+    monkeypatch.setattr(ra, '_ua_night_scan_analyze',
+                        lambda: ({'total_files': 3, 'total_lines': 100}, []))
     monkeypatch.setattr(ra, '_grapher_write_phase',
                         lambda a, source: ({'inserted': 0, 'updated': 0, 'noop': 0,
                                             'closed_missing': 0}, 0, 0))

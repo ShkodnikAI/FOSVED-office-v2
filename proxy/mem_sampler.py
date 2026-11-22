@@ -60,6 +60,40 @@ BUSY_TIMEOUT_MS = 500
 PROC_ROOT = "/proc"
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
 
+# ── #712 (аудит 21–22.11): снижение базы покоя ──────────────────────────
+# Факт аудита 21.11: контейнер в покое держит 403 МБ из 512 (79%), запас
+# 109 МБ — любая ночная фаза поверх базы давала oomKilled. Два слагаемых
+# базы: (а) фрагментация кучи glibc — свободные из python-объектов
+# страницы НЕ возвращаются ОС (RSS не падает после пиковых ночей);
+# (б) собственно живые данные процессов. Против (а) — malloc_trim(0)
+# (glibc ≥ 2.8): возвращает свободные страницы top-of-heap ОС; вызывается
+# на буте llm_proxy (после импортов), раз в час в петле сборщика и в
+# MemRecycleSlot. Безопасен: не трогает занятые страницы (возвращает 0,
+# если отдать нечего). На musl (Render — glibc) нет — честный no-op.
+TRIM_EVERY_SECS = 3600
+
+
+def malloc_trim():
+    """#712: вернуть ОС свободные страницы кучи glibc. Возвращает МБ,
+    отданные ОС (по разнице RSS до/после), либо None, если libc — не
+    glibc (musl/алпайн) — там трим не нужен и отсутствует."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim.argtypes = [ctypes.c_size_t]
+        libc.malloc_trim.restype = ctypes.c_int
+    except (OSError, AttributeError):
+        return None
+    before = self_rss_mb()
+    libc.malloc_trim(0)
+    after = self_rss_mb()
+    if before is None or after is None:
+        return None
+    # шум чтения statm (страница-две) может дать крошечный минус —
+    # честный 0.0, не «отрицательный трим»
+    return max(0.0, round(before - after, 1))
+
+
 # Self-имя для записей kind=call_python (процесс, где живёт endpoint).
 _SELF_NAME = None
 
@@ -474,6 +508,18 @@ def mem_report(hours=24):
             out["top_slots"] = [{"ref": r[0], "avg_step_mb": round(r[1], 1),
                                  "runs": r[2]} for r in slots]
 
+            # 3б) #712 (аудит 21.11 04:33): разбивка базы покоя по
+            #     процессам — последний тик каждого имени (idle-срез).
+            #     Формат для отчёта и строки брифа: имя → МБ.
+            idle = conn.execute(
+                "SELECT m.name, m.rss_mb FROM mem_samples m "
+                "WHERE m.kind='tick' AND m.id = ("
+                "  SELECT t2.id FROM mem_samples t2 WHERE t2.kind='tick' "
+                "  AND t2.name = m.name AND t2.ts >= datetime('now', '-10 minutes') "
+                "  ORDER BY t2.ts DESC, t2.id DESC LIMIT 1) "
+                "ORDER BY m.rss_mb DESC").fetchall()
+            out["idle_breakdown_mb"] = {r[0]: round(r[1], 1) for r in idle}
+
             # 4) исчезнувшие пиды (кандидаты на OOM-жертву 11.11 04:38):
             #    имя писало тики, но не пишет последние 10 минут
             gone = conn.execute(
@@ -523,6 +569,12 @@ def mem_report_line(hours=24):
     if grows:
         line += "; растёт: " + ", ".join(
             f"{p['name']} +{p['growth_mb']}" for p in grows)
+    # #712 (аудит 21.11): разбивка базы покоя по процессам — топ-3 в скобках
+    # (владелец видит, ЧТО занимает 403 из 512 МБ, без захода в отчёт)
+    idle = rep.get("idle_breakdown_mb") or {}
+    top3 = sorted(idle.items(), key=lambda kv: -kv[1])[:3]
+    if top3:
+        line += " (" + ", ".join(f"{k} {v}" for k, v in top3) + ")"
     return line
 
 
@@ -617,6 +669,11 @@ def sampler_loop(interval=SAMPLER_INTERVAL_SECS, threshold_mb=TOTAL_WARN_MB,
                 _last_purge = time.monotonic()
                 with _purge_lock:
                     purge_old()
+                # #712: ежечасный возврат свободных страниц кучи ОС
+                # (снижение базы покоя; см. malloc_trim)
+                freed = malloc_trim()
+                if freed and freed > 0:
+                    print(f"[mem-sampler] malloc_trim: -{freed} MB RSS", file=sys.stderr, flush=True)
         except Exception as e:  # noqa: BLE001 — петля живёт
             print(f"[mem-sampler] loop iteration failed: {e}", file=sys.stderr, flush=True)
         if once:
@@ -631,6 +688,11 @@ def start_sampler_thread(interval=SAMPLER_INTERVAL_SECS,
     for t in threading.enumerate():
         if t.name == "mem-sampler":
             return t
+    # #712: бут-трим — сразу после импортов llm_proxy (куча фрагментирована
+    # загрузкой модулей; аудиты 20–22.11: база покоя 403 из 512 МБ)
+    freed = malloc_trim()
+    if freed and freed > 0:
+        print(f"[mem-sampler] boot malloc_trim: -{freed} MB RSS", file=sys.stderr, flush=True)
     t = threading.Thread(target=sampler_loop, name="mem-sampler",
                          args=(interval, threshold_mb), daemon=True)
     t.start()
