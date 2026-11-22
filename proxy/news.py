@@ -388,6 +388,105 @@ def _doc_stems(text):
     return {_stem(m) for m in re.findall(r"[а-яёa-z]{3,}", (text or "").lower())}
 
 
+# #738 SRC-2 A.1: европейские origin, чьё подтверждение пропускает
+# российскую запись в контекст (наряд: «news_eu и GB»)
+EU_CONFIRMING_ORIGINS = {"DE", "FR", "EU", "GB"}
+
+
+def _ru_confirmation_gate(rows, stems, pool=None):
+    """#738 SRC-2 A.1: запись origin=RU проходит в контекст, только если
+    среди собранных за окно (pool — полный релевантный набор, не только
+    срез picked) есть запись с европейским origin, содержащая те же ≥2
+    основы ключевых слов (#475) — то же событие подтверждено.
+    Не прошедшие исключаются (счётчик — в строку контекста).
+    Возврат (прошедшие, исключено_N).
+    ЗАМЕР B.1 (22.11, 50 живых RU-записей): precision 0.37 / recall 0.70 —
+    ПОРОГ 0.8 НЕ ПРОЙДЕН; гейт выключен по умолчанию (см. PR наряда)."""
+    if not stems:
+        return rows, 0
+    pool = pool if pool is not None else rows
+
+    def _origin_of(r):
+        try:
+            return ((r["origin"] if len(r) > 6 else "") or "")
+        except Exception:  # noqa: BLE001 — записи-моки без колонок
+            return ""
+
+    eu_docs = [_doc_stems(f"{r[1] or ''} {r[2] or ''}")
+               for r in pool if _origin_of(r) in EU_CONFIRMING_ORIGINS]
+    kept, excluded = [], 0
+    for r in rows:
+        if _origin_of(r) == "RU":
+            ru_doc = _doc_stems(f"{r[1] or ''} {r[2] or ''}")
+            confirmed = any(
+                len({st for st in stems if st in ru_doc and st in eu_doc}) >= 2
+                for eu_doc in eu_docs)
+            if not confirmed:
+                excluded += 1
+                continue
+        kept.append(r)
+    return kept, excluded
+
+
+def _conflict_marks(r):
+    """#738 SRC-2 A.2: пометки записи — сторона конфликта (RU/UA) и
+    гос. источник. Возвращает строку-суффикс или ""."""
+    parts = []
+    try:
+        cp = (r[8] or "").strip() if len(r) > 8 else ""
+        ow = (r[7] or "").strip() if len(r) > 7 else ""
+        if cp in ("RU", "UA"):
+            parts.append(f"⚠️ сторона конфликта: {cp}")
+        if ow == "state":
+            parts.append("гос. источник")
+    except Exception:  # noqa: BLE001 — пометка не роняет выдачу
+        return ""
+    return ("  (" + "; ".join(parts) + ")") if parts else ""
+
+
+def tavily_ru_gate(query, response_json):
+    """#738 SRC-2 A.1 для TavilySearch-ветки LZFactpack (mlog-шов через
+    call_python): результаты с RU-доменами (метки по _tavily_source_labels)
+    проходят, только если среди прочих результатов есть европейский с ≥2
+    общими основами запроса. Возврат — JSON {"results": [...],
+    "excluded": N}; не-JSON/пусто — вход как есть (деградация честная)."""
+    # #738 SRC-2: замер B.1 — порог 0.8 не пройден (см. PR), гейт выключен
+    # по умолчанию; включение — решение владельца после исправления
+    # сопоставления (NEWS_RU_CONFIRMATION_GATE=1)
+    if os.environ.get("NEWS_RU_CONFIRMATION_GATE", "0") != "1":
+        return response_json
+    try:
+        d = json.loads(response_json or "")
+        results = d.get("results") if isinstance(d, dict) else None
+        if not isinstance(results, list) or not results:
+            return response_json
+        stems = {_stem(k) for k in _extract_keywords(query) if len(k) >= 3}
+        if not stems:
+            return response_json
+        def _doc(r):
+            return _doc_stems(f"{r.get('title', '')} {r.get('content', '')}")
+        def _origin(r):
+            o, _ = _tavily_source_labels(r.get("url", ""))
+            return o
+        eu_docs = [_doc(r) for r in results if _origin(r) in EU_CONFIRMING_ORIGINS]
+        kept, excluded = [], 0
+        for r in results:
+            if _origin(r) == "RU":
+                ru_doc = _doc(r)
+                confirmed = any(
+                    len({st for st in stems if st in ru_doc and st in ed}) >= 2
+                    for ed in eu_docs)
+                if not confirmed:
+                    excluded += 1
+                    continue
+            kept.append(r)
+        return json.dumps({"results": kept, "excluded": excluded},
+                          ensure_ascii=False)
+    except Exception as e:  # noqa: BLE001 — гейт не роняет фактпак
+        log.warning("[news] tavily_ru_gate: %s", e)
+        return response_json
+
+
 # #737 SRC-1 A.3: ни один источник не занимает больше NEWS_MAX_PER_SOURCE
 # мест в отборе для отделов (частые ленты вытесняли редкие: окно 500
 # забивалось РИА/ТАСС)
@@ -416,9 +515,10 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
     cats = DEPT_CATEGORIES.get(dept, ("news_ru", "tech", "geopolitics"))
     cat_filter = " OR ".join(["category = ?" for _ in cats])
 
-    # #737 A.3: до NEWS_WINDOW_PER_FEED свежих записей НА КАЖДУЮ ленту
+    # #737 A.3: до NEWS_WINDOW_PER_FEED свежих записей НА КАЖДУЮ ленту;
+    # #738 SRC-2: conflict_party в выборке (пометки сторон)
     rows = _query(f"""SELECT source, title, summary, url, published, relevance_score,
-                             origin, ownership
+                             origin, ownership, conflict_party
                       FROM (
                           SELECT news_cache.*,
                                  ROW_NUMBER() OVER (PARTITION BY source
@@ -438,6 +538,7 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
                 score += 1
         if score > 0:
             scored.append((score, r))
+    ru_excluded = 0
     if scored:
         scored.sort(key=lambda t: (t[0], t[1][4] or ""), reverse=True)
         picked = []
@@ -450,10 +551,20 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
             picked.append(r)
             if len(picked) >= limit:
                 break
+        # #738 SRC-2 A.1: RU-запись — только при EU-подтверждении события.
+        # ЗАМЕР B.1 (22.11, 50 живых RU-записей, разметка исполнителя):
+        # precision 0.37 / recall 0.70 — ПОРОГ 0.8 НЕ ПРОЙДЕН (пересечение
+        # основ RU/EN текстов ловит общие топонимы=FP и не ловит реальные
+        # совпадения=FN). По правилу при затруднении: порог НЕ снижаем,
+        # гейт ВЫКЛЮЧЕН по умолчанию до исправления сопоставления
+        # (мультиязычные эмбеддинги/перевод) — замер в PR наряду.
+        if os.environ.get("NEWS_RU_CONFIRMATION_GATE", "0") == "1":
+            picked, ru_excluded = _ru_confirmation_gate(
+                picked, stems, pool=[r for _, r in scored])
         rows = picked
     else:
         sql2 = f"""SELECT source, title, summary, url, published, relevance_score,
-                          origin, ownership
+                          origin, ownership, conflict_party
                   FROM (
                       SELECT news_cache.*,
                              ROW_NUMBER() OVER (PARTITION BY source
@@ -464,8 +575,17 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
                   WHERE rn <= ?
                   ORDER BY published DESC LIMIT ?"""
         rows = _query(sql2, list(cats) + [NEWS_WINDOW_PER_FEED, limit], fetch=True)
+        # #738 SRC-2: в фолбэке гейт не применяется (основы запроса не
+        # совпали — «то же событие» не определено), пометки сторон — да
 
     if not rows:
+        # #738 SRC-2: все записи исключены гейтом — счётчик обязан быть
+        # виден (наряд: «это видно в ответе»), а не тихая пустота
+        if ru_excluded:
+            return ("=== СВЕЖИЕ СОБЫТИЯ (последние 48ч) ===\n\n"
+                    f"Исключено {ru_excluded} сообщений российских СМИ "
+                    "без подтверждения европейскими источниками\n"
+                    "=== КОНЕЦ СОБЫТИЙ ===\n")
         return ""
 
     news_text = "=== СВЕЖИЕ СОБЫТИЯ (последние 48ч) ===\n\n"
@@ -478,6 +598,10 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
         _ownership = (r[7] or "").strip() if len(r) > 7 else ""
         tag = f"{_origin or '?'}, {_ownership or '?'}"
         entry = f"[{tag}] {r[0]}: {r[1]}\n"
+        # #738 SRC-2 A.2: пометка стороны конфликта / гос. источника
+        _mk = _conflict_marks(r)
+        if _mk:
+            entry += _mk + "\n"
         if r[3]:
             entry += f"  Ссылка: {r[3]}\n"
         if r[2] and r[2] != r[1]:
@@ -490,6 +614,11 @@ def get_fresh_news(query, dept=None, limit=5, max_chars=1500):
         news_text += entry
         current_len += len(entry)
 
+    # #738 SRC-2 A.1: счётчик исключённых без EU-подтверждения — в конце
+    # блока контекста (наряд: «это видно в ответе»)
+    if ru_excluded:
+        news_text += (f"Исключено {ru_excluded} сообщений российских СМИ "
+                      f"без подтверждения европейскими источниками\n")
     news_text += "=== КОНЕЦ СОБЫТИЙ ===\n"
     return news_text
 
