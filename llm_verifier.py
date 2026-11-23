@@ -68,6 +68,36 @@ _VERIFIER_PROVIDERS = [
 
 # ──────────────────────────── LLM CALL PRIMITIVE ────────────────────────────
 
+def _call_llm_with(prov, api_key, messages, max_tokens=256, temperature=0.1):
+    """#744 EXP-2: один вызов конкретного провайдера (для rival_review —
+    сильная модель). Возврат reply или None."""
+    from urllib.request import Request, urlopen
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": prov["model"],
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    try:
+        req = Request(
+            prov["url"],
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        log.info(f"llm_with: provider={prov['name']} err={e}")
+        return None
+
+
 def _call_verifier_llm(messages, max_tokens=256, temperature=0.1):
     """Call a verifier LLM with fallback chain. Returns reply string or None.
     Uses low temperature (0.1) for deterministic scoring."""
@@ -386,3 +416,59 @@ def rank(problem, candidates, criteria="Correctness: Does the response solve the
     results.sort(key=lambda x: x["score"], reverse=True)
     log.info(f"rank: {len(results)} candidates, top={results[0] if results else 'none'}")
     return results
+
+
+# ── #744 EXP-2 B.6: разбор «конкурирующим профессионалом» ────────────────
+# Сильная модель из реестра: флагман ZAI (glm-4.6 — самая сильная
+# доступная в реестре провайдеров офиса), fallback — verifier-цепочка
+# (deepseek-chat и далее). Недоступно всё — честный {"ok": 0, "note": …}:
+# конвейер кладёт пометку в отчёт (правило при затруднении наряда).
+STRONG_PROVIDERS = [
+    {
+        "name": "zai",
+        "url": "https://api.z.ai/api/paas/v4/chat/completions",
+        "env_key": "ZAI_API_KEY",
+        "model": "glm-4.6",
+        "format": "openai",
+    },
+]
+
+RIVAL_PROMPT = """Ты — конкурирующий профессионал мирового уровня в этой же отрасли. Тебе прислали черновик профессионального разбора (9 разделов). Твоя задача — найти, где автор разбора уязвим перед настоящим профессионалом:
+1. Утверждения без механизма («почему так») или без источника.
+2. Общие фразы без содержания («в целом», «как правило», «существуют риски»).
+3. Известные в отрасли отказы/подводные камни, которые пропущены.
+Верни список конкретных правок (до 12 пунктов), каждая: раздел → что не так → правка (сформулировано готовым текстом или «ВЫЧЕРКНУТЬ»). Если черновик хорош — верни «ПРАВОК НЕТ» и краткое обоснование. Пиши по-русски."""
+
+
+def rival_review(problem, draft, sources=""):
+    """Конкурирующий профессионал: список правок к черновику.
+    Возврат JSON-строки: {"ok": 1, "notes": str, "model": str} или
+    {"ok": 0, "note": str} при недоступности сильной модели.
+    Вызывается из mlog: call_python("llm_verifier", "rival_review",
+    json_encode([query, draft, sources]))."""
+    if not draft or len(draft) < 200:
+        return json.dumps({"ok": 0, "note": "черновик пуст или слишком короткий"},
+                          ensure_ascii=False)
+    user = "Тема разбора: " + str(problem)[:500] + "\n\n=== ЧЕРНОВИК ===\n" + str(draft)[:24000]
+    if sources:
+        user += "\n\n=== РЕЗУЛЬТАТЫ ПОИСКА (источники) ===\n" + str(sources)[:20000]
+    messages = [
+        {"role": "system", "content": RIVAL_PROMPT},
+        {"role": "user", "content": user},
+    ]
+    providers = STRONG_PROVIDERS + _VERIFIER_PROVIDERS
+    for prov in providers:
+        api_key = os.environ.get(prov["env_key"])
+        if not api_key:
+            continue
+        raw = _call_llm_with(prov, api_key, messages, max_tokens=2048, temperature=0.3)
+        if not raw:
+            continue
+        notes = raw.strip()
+        if notes:
+            log.info(f"rival_review: model={prov['model']} notes={len(notes)}")
+            return json.dumps({"ok": 1, "notes": notes, "model": prov["model"]},
+                              ensure_ascii=False)
+    return json.dumps({"ok": 0,
+                       "note": "сильная модель недоступна (ни один провайдер не ответил)"},
+                      ensure_ascii=False)

@@ -65,6 +65,34 @@ def validate_skin(path):
     return (len(errors) == 0), errors
 
 
+def pick_skin(query):
+    """#744 EXP-2 B.2: сопоставление запроса с triggers[] шкурок.
+    Возврат JSON-строки: {"ok": 1, "domain", "skin"} при совпадении
+    (триггеры по подстрокам, lowercase), иначе {"ok": 0} — конвейер
+    строит черновик (expert_skins_draft). Вызывается из mlog
+    (call_python("expert_skins", "pick_skin", [query]))."""
+    import json as _json
+    q = (query or "").lower()
+    root = Path(__file__).resolve().parent.parent / "skills" / "expert" / "skins"
+    best = None
+    for skin in sorted(root.glob("*/SKIN.md")):
+        ok, errors = validate_skin(skin)
+        if not ok:
+            continue
+        try:
+            meta, _body = parse_skin(skin)
+        except (ValueError, yaml.YAMLError):
+            continue
+        triggers = [str(t).lower() for t in (meta.get("triggers") or [])]
+        hits = [t for t in triggers if t and t in q]
+        if hits and (best is None or len(hits) > best[0]):
+            best = (len(hits), skin.parent.name, skin.read_text(encoding="utf-8"), hits)
+    if best is None:
+        return _json.dumps({"ok": 0}, ensure_ascii=False)
+    return _json.dumps({"ok": 1, "domain": best[1], "skin": best[2],
+                        "matched": best[3][:5]}, ensure_ascii=False)
+
+
 def list_skins(skins_dir):
     """Каталог надетых шкурок: [(domain, path)] для валидных; битые —
     ('<domain>', path, errors). Используется EXP-2 при выборе шкурки."""

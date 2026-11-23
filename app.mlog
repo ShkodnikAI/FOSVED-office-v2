@@ -2224,20 +2224,11 @@ mlogserver {
   // диспетчерами; вся логика — в dept/expert.mlog (паттерны Expert*).
   // Auth — CRON_SECRET, обе формы (конвенция №376, как /osp/analyze).
   // reverse_proxy форвардит префикс /api/expert/ сюда (MLOG_ROUTES_PREFIXES).
-  route "/api/expert/automotive" method=GET {
-    let secret = redact(query_param("secret"), "hash_only")
-    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
-    let _ = InitDB()
-    return respond(ExpertAutomotiveLookup(redact(query_param("query"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
-  }
-
-  route "/api/expert/compare" method=GET {
-    let secret = redact(query_param("secret"), "hash_only")
-    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
-    let _ = InitDB()
-    return respond(ExpertCompareVehicles(redact(query_param("vehicles"), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
-  }
-
+  // Наряд #744 A.1/A.3 (решение владельца 20.11): брифинги и подкоманды авто
+  // удалены из Эксперта — маршруты /api/expert/automotive|compare|briefings|briefing
+  // сняты вместе с паттернами (вызов несуществующего паттерна = UNDEFINED_FUNCTION,
+  // гейт #523 не давал serve подняться; гвард замыкания #604 в CI).
+  // Остальные три обёртки — инструменты шкурки auto (B.7 наряда).
   route "/api/expert/residual-value" method=GET {
     let secret = redact(query_param("secret"), "hash_only")
     if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
@@ -2258,21 +2249,6 @@ mlogserver {
     let data = json_body()
     let _ = InitDB()
     return respond(ExpertGenerateChart(redact(to_string(json_get(data, "chart_type", "")), "all"), redact(to_string(json_get(data, "vehicle", "")), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
-  }
-
-  route "/api/expert/briefings" method=GET {
-    let secret = redact(query_param("secret"), "hash_only")
-    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
-    let _ = InitDB()
-    return respond(ExpertListBriefings(redact(env("OWNER_TELEGRAM_ID"), "all")))
-  }
-
-  route "/api/expert/briefing" method=POST {
-    let secret = redact(query_param("secret"), "hash_only")
-    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
-    let data = json_body()
-    let _ = InitDB()
-    return respond(ExpertCreateBriefing(redact(to_string(json_get(data, "topic", "")), "all"), redact(to_string(json_get(data, "depth", "2")), "all"), redact(env("OWNER_TELEGRAM_ID"), "all")))
   }
 
   // ============================================================
@@ -5264,7 +5240,11 @@ return respond("200 ok") }
     }
     if dept == "expert" then {
       let _ = RecordUserMessage(chat_id, "expert", text)
-      let reply = HandleExpert(query, chat_id)
+      // #744 EXP-2: Эксперту — исходный текст команды, а не «rest» без первого
+      // токена: диспетчер снимал «/expert», из-за чего «/deepexpert» (флаг
+      // глубины 25) и «/expert skin save <id>» не доходили до HandleExpert.
+      // Префикс с темы снимает сам Эксперт (ExpertStripCommand).
+      let reply = HandleExpert(text, chat_id)
       let _ = SendVoiceReply(chat_id, reply, "expert")
       let _ = SendReport(reply, "expert", query, "2.0", chat_id)
       let handled = 1.0

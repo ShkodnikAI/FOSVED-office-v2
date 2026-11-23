@@ -103,14 +103,15 @@ def test_a2_inflection_alert_via_osp_analyze():
     assert "5.0)" in seg, "fire-and-forget: короткий таймаут (прецедент LZGateOSPReferral)"
 
 
-def test_a3_expert_compare_uses_send_report():
-    """ExpertCompareVehicles сохраняет сравнение через SendReport (архив
-    miniapp_responses), не через мёртвый /archive/save."""
-    seg = EXPERT[EXPERT.index("pattern ExpertCompareVehicles"):]
-    seg = seg[:seg.index("\npattern ", 10)]
-    code = _code_lines(seg)
-    assert "SendReport(" in code, "сравнение должно уходить в общий исходящий путь SendReport"
-    assert "4000/archive/save" not in code
+def test_a3_expert_compare_removed_by_n744():
+    """Наряд #744 A.3 (решение владельца 20.11): ExpertCompareVehicles удалён
+    вместе с подкомандами авто; сравнение — часть конвейера EXP-2
+    (llm_verifier.rival_review) и инструменты шкурки auto (B.7). Требование
+    #446 A.3 (SendReport, не /archive/save) было выполнено при жизни
+    паттерна — гвард снят вместе с паттерном и не даёт ему вернуться."""
+    assert "pattern ExpertCompareVehicles(" not in EXPERT
+    assert "/expert compare" not in EXPERT
+    assert "4000/archive/save" not in EXPERT
 
 
 # ── 3. Детектор мёртвых вызовов ─────────────────────────────────────────────
