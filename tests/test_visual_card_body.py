@@ -66,7 +66,8 @@ def test_a2_dark_theme():
 
 
 def test_a3_empty_content_gate():
-    assert 'if verdict == "" and theses == "" and probs == "" then' in VISUAL_SRC
+    # #742 VIS-2: plain_summary — полноценное содержимое, гейт учитывает его
+    assert 'if verdict == "" and theses == "" and probs == "" and plain_sum == "" then' in VISUAL_SRC
     assert '"card_skipped_empty"' in VISUAL_SRC, "пропуск пустой карточки не журналируется"
 
 
