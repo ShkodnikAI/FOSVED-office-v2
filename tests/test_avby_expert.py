@@ -106,12 +106,17 @@ def test_mlog_pattern_exists_and_is_gated_by_automotive_topic():
     assert "pattern ExpertAvByListings(query: String)" in EXPERT_MLOG
     # мост по контракту lz_sources: call_python + redact недоверенных данных
     assert 'call_python("avby_collector", "search_avby", json_encode([query]))' in EXPERT_MLOG
-    # вызов живёт ТОЛЬКО внутри автомобильной ветки BuildExpertContext
-    ctx = EXPERT_MLOG[EXPERT_MLOG.index("pattern BuildExpertContext"):]
-    assert "ExpertAvByListings(query)" in ctx
-    avby_call_pos = ctx.index("ExpertAvByListings(query)")
-    automotive_gate_pos = ctx.index("if ExpertIsAutomotiveTopic(query) == true")
-    assert automotive_gate_pos < avby_call_pos
+    # #744 EXP-2 (раунд 2): вызов живёт ТОЛЬКО под гейтом auto_on конвейера
+    # ExpertRunReport (до раунда 2 — в автомобильной ветке BuildExpertContext);
+    # гейт: шкурка надета (auto) / automotive-тема #336 / «авто» в профессии /
+    # марки в теме (в нижнем регистре — contains регистрозависим)
+    assert EXPERT_MLOG.count("ExpertAvByListings(query)") == 1, "ровно один вызов"
+    run = EXPERT_MLOG[EXPERT_MLOG.index("pattern ExpertRunReport("):]
+    avby_pos = run.index("ExpertAvByListings(query)")
+    gate_line = next(l for l in run.splitlines() if "let auto_on = " in l)
+    assert 'contains(skin_block, "Шкурка надета (auto)")' in gate_line
+    assert "ExpertIsAutomotiveTopic(query) == true" in gate_line
+    assert run.index("let auto_on = ") < avby_pos < run.index("let live = ExpertSearchCircles(")
     # не попал в закупочный контур (#336: НЕ shop_engine)
     assert "avby" not in (REPO_ROOT / "proxy" / "shop_watch.py").read_text(encoding="utf-8")
     assert "avby" not in TAIL_ROUTES.split("CALL_PYTHON_ALLOWED")[0]

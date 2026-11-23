@@ -33,15 +33,15 @@
 | Метрика | Значение |
 |---|---|
 | Файлов в поверхности | 36 |
-| Паттернов (вхождений) | 1417 |
-| Уникальных имён паттернов | 1333 |
+| Паттернов (вхождений) | 1418 |
+| Уникальных имён паттернов | 1334 |
 | Конфиг-блоков верхнего уровня с env | 6 |
 | Паттернов-источников всего | 215 |
 | env/env_or-читатели (имена) | 36 |
 | Возврат вывода LLM (call_llm) | 177 |
 | Читатели ввода запроса (json_body/query_param) | 3 |
 | Паттернов-стоков (уникальных имён) | 97 |
-| HTTP-маршрутов serve | 75 |
+| HTTP-маршрутов serve | 71 |
 | Транзитивных потоков источник→сток | 326 |
 | Прямых рёбер «источник→сток» | 122 |
 | Швов — источников, чьё значение достигает стока в ДРУГОМ теле | 187 |
@@ -148,7 +148,7 @@
 | `CreateDefect` | dept/qa.mlog:396 | send_message |
 | `DetectDepartment` | app.mlog:1652 | http_post |
 | `DetectDepartment` | dogfood_staging.mlog:1742 | http_post |
-| `ExpertGenerateChart` | dept/expert.mlog:633 | http_post |
+| `ExpertGenerateChart` | dept/expert.mlog:642 | http_post |
 | `ForgeCreateRepo` | dept/forge.mlog:119 | http_post |
 | `ForgeGateSend` | dept/forge.mlog:1332 | http_post |
 | `ForgeRollback` | dept/forge.mlog:300 | exec |

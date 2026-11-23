@@ -4,14 +4,10 @@
 // (сильная модель, llm_verifier.rival_review). Гейта дедлайна нет,
 // брифингов нет, несуществующие скиллы удалены. Инструменты шкурки auto:
 // ExpertAvByListings / ExpertResidualValueData / ExpertOperationCostData /
-// ExpertGenerateChart (вызывает конвейер, подкоманд нет).
-
-
-// ── Disclaimer ────────────────────────────────────────────────────────
-pattern ExpertDisclaimer() -> String {
-  return "FOSVED ЭКСПЕРТ — профессиональный разбор. Информационный разбор, не консультация специалиста. Не заменяет собственное суждение владельца."
-}
-
+// ExpertGenerateChart (данные + график через chart-сервер; подкоманд нет).
+// ExpertDisclaimer удалён (раунд 2): с EXP-1 без вызовов, значение не
+// использовалось; отраслевая строка «информационный разбор, не консультация
+// специалиста» — в ExpertRunReport.
 
 // ═══════════════════════════════════════════════════════════════════════
 // HARD GATES — 6 non-negotiable constraints for Expert Department
@@ -26,29 +22,64 @@ pattern ExpertDisclaimer() -> String {
 
 
 // ═══════════════════════════════════════════════════════════════════════
-// MAIN DISPATCHER — routes sub-commands within Expert
-// ═══════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════
 // MAIN DISPATCHER — #744 EXP-2: подкоманд доменов нет (шкурка надевается
 // по запросу); гейта дедлайна нет; брифингов нет. Команды: /expert <тема>,
 // /deepexpert <тема> (глубина 25), /expert skin save <id>.
+//
+// Диспетчер app.mlog передаёт сюда ИСХОДНЫЙ текст команды (до фикса EXP-2
+// он снимал первый токен: «/deepexpert X» приходил как «X» — флаг глубины
+// терялся, а «/expert skin save <id>» уходил в полный разбор); из chain
+// приходит голая тема. Разбор устойчив к обоим видам: ExpertStripCommand,
+// ExpertSkinDraftId.
 pattern HandleExpert(query: String, chat_id: String) -> String {
-  let dept = "expert"
-  let t = lower(query)
+  let t = lower(trim(query))
 
-  // /deepexpert <тема> — флаг глубины: до 25 поисков (решение владельца)
-  if starts_with(t, "/deepexpert") then {
-    let deep_query = substring(query, 11.0, 300.0)
-    return ExpertRunReport(deep_query, chat_id, true)
-  }
   // /expert skin save <id> — выдаёт текст SKIN.md черновика (файл не пишет)
-  if starts_with(t, "/expert skin save") then {
-    let draft_id = substring(query, 17.0, 40.0)
+  if starts_with(t, "/expert skin save") or starts_with(t, "skin save") then {
+    let draft_id = ExpertSkinDraftId(query)
+    if draft_id == "" then {
+      return "Укажи id черновика: /expert skin save <id> — id стоит в сообщении Эксперта, где выдан черновик шкурки."
+    }
     return ExpertSkinDraftText(draft_id)
   }
 
+  let topic = ExpertStripCommand(query)
+  if topic == "" then {
+    return "Укажи тему разбора: /expert <тема> — или /deepexpert <тема> для глубокого разбора (до 25 поисков)."
+  }
+
+  // /deepexpert <тема> — флаг глубины: до 25 поисков (решение владельца)
+  if starts_with(t, "/deepexpert") then {
+    return ExpertRunReport(topic, chat_id, true)
+  }
   // Default: полный конвейер (до 12 поисков)
-  return ExpertRunReport(query, chat_id, false)
+  return ExpertRunReport(topic, chat_id, false)
+}
+
+// Снятие ведущего токена-команды с темы («/expert», «/deepexpert», алиас
+// диспетчера); голая команда → пусто, тема без команды (chain) — как есть.
+// Без этого токен команды уходил бы в шкурку, в поиск, в av.by и в
+// кросс-ссылки ЛЗ/ОСП. Идемпотентно, как LZStripCommand (#427).
+pattern ExpertStripCommand(query: String) -> String {
+  let q = trim(query)
+  if starts_with(q, "/") then {
+    let sp = index_of(q, " ")
+    if sp > 0.0 then { return trim(substring(q, sp + 1.0, length(q))) }
+    return ""
+  }
+  return q
+}
+
+// id черновика из «/expert skin save <id>» (или уже без «/expert »): токен,
+// начинающийся с «skin-». Нет такого — пустая строка (вызов без id).
+pattern ExpertSkinDraftId(query: String) -> String {
+  let mut draft_id = ""
+  let parts = split(trim(query), " ")
+  each p in parts {
+    let tok = trim(to_string(p))
+    if starts_with(tok, "skin-") then { let draft_id = tok }
+  }
+  return draft_id
 }
 
 // ── Константы лимитов поиска (наряд EXP-2 B.4) ──────────────────────────
@@ -76,9 +107,15 @@ pattern ExpertDetectProfession(query: String) -> String {
 // Нет готовой → черновик-карточка того же формата в expert_skins_draft.
 pattern ExpertPickSkin(query: String, profession_line: String) -> String {
   let resp = TryVal(try call_python("expert_skins", "pick_skin", json_encode([query])))
-  if to_string(resp) == "()" then { return "" }
+  // Идиома честной деградации (как rival_review и бюджет Tavily): шов
+  // недоступен — пометка в materials и в ответе, не молчание «шкурки нет».
+  if to_string(resp) == "()" then {
+    return "=== Шкурка недоступна: шов expert_skins не ответил (разбор пойдёт без отраслевой шкурки) ==="
+  }
   let parsed = TryVal(try parse_json(to_string(resp)))
-  if to_string(parsed) == "()" then { return "" }
+  if to_string(parsed) == "()" then {
+    return "=== Шкурка недоступна: шов expert_skins ответил неуспешно (разбор пойдёт без отраслевой шкурки) ==="
+  }
   let ok = to_string(json_get(parsed, "ok", "0"))
   if ok == "1" then {
     let skin_md = redact(to_string(json_get(parsed, "skin", "")), "all")
@@ -91,11 +128,20 @@ pattern ExpertPickSkin(query: String, profession_line: String) -> String {
   let draft_sys = "Ты — Эксперт, готовишься надеть профессию. Построй временную карточку шкурки формата SKIN.md (см. README): YAML-фронт domain/professions/triggers/standards/sources/tools + разделы Failure catalog (типовые отказы: что/механизм/как скрывают/серьёзность) и Insider glossary (умная фраза → смысл). Нормы/ГОСТ/ISO — только реально известные и проверяемые; неподтверждаемое помечай «опыт практиков». Это черновик — владелец может сохранить его командой /expert skin save."
   let draft = redact(to_string(TryVal(try call_llm(draft_sys, "Запрос владельца: " + query + "\nОпределённая профессия: " + profession_line))), "all")
   if to_string(draft) == "()" or length(to_string(draft)) < 50.0 then { return "" }
-  let draft_id = "skin-" + to_string(to_float(TryVal(try query("SELECT strftime('%s','now')", [])) != "()" and true and 0.0) == false and 0.0 and 0.0) + "0"
+  // id — отпечаток содержимого (идиома engineering.mlog: sha256 + now()),
+  // 16 hex-символов: разные черновики не столкнутся и в одну секунду. Не
+  // «skin-<время>-<число>»: redact «all» маскирует длинные цифровые цепочки
+  // из query() как номер карты (проба: «skin-1795415806-7324» →
+  // [REDACTED:card…]), а id обязан пережить /expert skin save.
   let _ = ExpertEnsureSkinsDraft()
-  let ts_rows = query("SELECT strftime('%s','now') AS ts", [])
-  let draft_id = "skin-" + redact(to_string(json_get(get(ts_rows, 0), "ts", "0")), "all")
-  let _ = db_execute("INSERT INTO expert_skins_draft (id, topic, json, created_at) VALUES (?, ?, ?, datetime('now'))", [draft_id, substring(query, 0.0, 200.0), draft])
+  let draft_id = "skin-" + substring(to_string(sha256(query + "|" + draft + "|" + to_string(now()))), 0.0, 16.0)
+  // Голый db_execute с SQL-ошибкой роняет весь запрос (проверено пробой);
+  // OR IGNORE + результат: «1» — строка записана, иначе честно «не сохранён».
+  let ins = to_string(TryVal(try db_execute("INSERT OR IGNORE INTO expert_skins_draft (id, topic, json, created_at) VALUES (?, ?, ?, datetime('now'))", [draft_id, substring(query, 0.0, 200.0), draft])))
+  if ins != "1" then {
+    let _ = AuditLog("expert_skin_draft_not_saved", "expert", "id=" + draft_id + " topic=" + substring(query, 0.0, 50.0))
+    return "=== Черновик шкурки (нет готовой; в expert_skins_draft НЕ сохранён — id " + draft_id + " занят или таблица недоступна) ===\n" + draft
+  }
   let _ = AuditLog("expert_skin_draft", "expert", "id=" + draft_id + " topic=" + substring(query, 0.0, 50.0))
   return "=== Черновик шкурки (нет готовой; сохранён в expert_skins_draft id=" + draft_id + ", сохранить: /expert skin save " + draft_id + ") ===\n" + draft
 }
@@ -195,16 +241,21 @@ pattern ExpertRunReport(query: String, chat_id: String, deep: Bool) -> String {
   let plan = ExpertSearchPlan(query, profession_line, skin_block)
 
   // B.7 инструменты шкурки auto: живые листинги + остаточная стоимость
-  // — в раздел «Цифры» (результаты вставляются в контекст с пометкой)
+  // — в раздел «Цифры» (результаты вставляются в контекст с пометкой).
+  // Гейт: надета шкурка auto (triggers EXP-1) ИЛИ автомобильная тема по
+  // гейту #336 (ExpertIsAutomotiveTopic) / маркам. contains() в mlog
+  // регистрозависим — иглы только в нижнем регистре, по lower(...).
+  let t_q = lower(query)
+  let auto_on = contains(skin_block, "Шкурка надета (auto)") or ExpertIsAutomotiveTopic(query) == true or contains(lower(profession_line), "авто") or contains(t_q, "toyota") or contains(t_q, "bmw") or contains(t_q, "mercedes") or contains(t_q, "volkswagen") or contains(t_q, "hyundai") or contains(t_q, "kia")
   let auto_tools = ""
-  if contains(lower(profession_line), "авто") or contains(lower(query), "авто") or contains(lower(query), "Toyota") or contains(lower(query), "BMW") or contains(lower(query), "Mercedes") or contains(lower(query), "Volkswagen") or contains(lower(query), "Hyundai") or contains(lower(query), "Kia") then {
+  if auto_on then {
     let listings = ExpertAvByListings(query)
     if listings != "" then {
       let auto_tools = auto_tools + "\n\n=== Инструменты шкурки: живые объявления av.by (вставить в раздел «Цифры») ===\n" + listings
     }
     let rv = ExpertResidualValueData(query, chat_id)
     if rv != "" then {
-      let auto_tools = auto_tools + "\n\n=== Инструменты шкурки: остаточная стоимость (вставить в раздел «Цифры») ===\n" + rv
+      let auto_tools = auto_tools + "\n\n=== Инструменты шкурки: остаточная стоимость — справочные кривые внутренней базы, НЕ живые данные (вставить в раздел «Цифры» с этой пометкой) ===\n" + rv
     }
   }
 
@@ -217,16 +268,17 @@ pattern ExpertRunReport(query: String, chat_id: String, deep: Bool) -> String {
     let live_section = "\n\n=== Live Search ===\n(свежих данных живой поиск не дал" + (if contains(auto_tools, "===") then ", но инструменты шкурки дали данные ниже" else " — оценки текущего состояния мира давай только с явной пометкой об отсутствии свежих данных)") + auto_tools
   }
 
+  // Контекст отдела — общий сборщик BuildExpertContext (как до EXP-2):
+  // профиль, корректировки, память Яны, факты, диалог, кросс-ссылки
+  // Лаборатории Знаний / ОСП (#234), бриф коллег (#481), доска находок (#482).
+  let context = BuildExpertContext(query, chat_id)
+
   // B.5 черновик по шаблону EXP-1 (9 разделов)
   let template_md = redact(read_file_or("library/expert_report_template.md", ""), "all")
   if to_string(template_md) == "()" or length(to_string(template_md)) < 100.0 then { let template_md = "" }
-  let profile = ReadDeptProfile("expert")
-  let corrections = GetCorrections(dept)
-  let facts = GetFacts(dept, "12")
-  let dialog = GetRecentDialog(chat_id, "10", dept)
-  let now_info = YanaNowInfo()
-  let draft_sys = "Ты — Эксперт, профессионал мирового уровня. Составь черновик отчёта СТРОГО по шаблону (9 разделов, фиксированный порядок). Первая строка отчёта — «Надеваю: <профессия и специализация>» из блока «Профессия»; если модель-определитель не ответила — честно «Надеваю: профессию определить не удалось, разбор широким профилем».\n\n=== ШАБЛОН ===\n" + template_md + "\n\n=== ПРАВИЛА (профиль, вкратце) ===\n" + substring(profile, 0.0, 6000.0)
-  let draft_user = "Запрос владельца: " + query + "\n\nПрофессия: " + profession_line + "\n\n" + skin_block + live_section + "\n\n=== Консолидированные факты ===\n" + facts + "\n\n=== Recent Dialog ===\n" + dialog
+  let draft_sys = "Ты — Эксперт, профессионал мирового уровня. Составь черновик отчёта СТРОГО по шаблону (9 разделов, фиксированный порядок). Первая строка отчёта — «Надеваю: <профессия и специализация>» из блока «Профессия»; если модель-определитель не ответила — честно «Надеваю: профессию определить не удалось, разбор широким профилем».\n\n=== ШАБЛОН ===\n" + template_md + "\n\n=== КОНТЕКСТ ОТДЕЛА (профиль и корректировки обязательны) ===\n" + context
+  let materials = skin_block + live_section
+  let draft_user = "Запрос владельца: " + query + "\n\nПрофессия: " + profession_line + "\n\n" + materials
   let draft = redact(to_string(TryVal(try call_llm(draft_sys, draft_user))), "all")
   if to_string(draft) == "()" then { return "Разбор недоступен: провайдеры модели не ответили (поиск выполнен, результаты сохранены в этом сообщении чата).\n\n" + ExpertSourcesFooter(live_section) }
   let reply = to_string(draft)
@@ -284,7 +336,12 @@ pattern ExpertRunReport(query: String, chat_id: String, deep: Bool) -> String {
   }
 
   // TEAM-2 #481 A.3: консультации коллег — как было
-  let enhanced = TeamSecondPass(dept, query, "профессия: " + profession_line, reply)
+  // Второй проход перегенерирует ответ из «context» — это должен быть тот же
+  // промпт, что у первого прохода (шаблон + контекст отдела + материалы:
+  // шкурка, живой поиск, инструменты), иначе финал терял бы структуру 9
+  // разделов и живые данные.
+  let work_context = draft_sys + "\n\n=== МАТЕРИАЛЫ РАЗБОРА ===\nПрофессия: " + profession_line + "\n\n" + materials
+  let enhanced = TeamSecondPass(dept, query, work_context, reply)
   if enhanced != "" then { let reply = enhanced }
 
   // Дисклеймер: медицина/право/финансы — без сокращения глубины
@@ -293,7 +350,20 @@ pattern ExpertRunReport(query: String, chat_id: String, deep: Bool) -> String {
     let reply = reply + "\n\n---\nинформационный разбор, не консультация специалиста"
   }
 
-  let reply = reply + rival_note + ExpertSourcesFooter(live_section) + "\n\n(" + to_string(to_int(max_searches)) + " поисков лимит; шкурок-домен: " + (if contains(skin_block, "Шкурка надета") then "надета" else "черновик/нет") + ")"
+  // Готовой шкурки не было и собран черновик: id должен увидеть владелец,
+  // а не только модель (в промпте он есть, в ответе модели — не обязательно).
+  let skin_note = ""
+  if contains(skin_block, "Черновик шкурки") then {
+    if contains(skin_block, " сохранён в expert_skins_draft id=") then {
+      let p = index_of(skin_block, "id=skin-")
+      let draft_id = substring(skin_block, p + 3.0, p + 24.0)
+      let skin_note = "\n\n---\nГотовой шкурки по этой теме не было — Эксперт собрал черновик шкурки (id " + draft_id + "). Текст черновика: /expert skin save " + draft_id + " (сохранить файл SKIN.md может только владелец)."
+    } else {
+      let skin_note = "\n\n---\nГотовой шкурки по этой теме не было, а черновик шкурки сохранить в expert_skins_draft не удалось (id занят или таблица недоступна). Текст черновика:\n" + skin_block
+    }
+  }
+
+  let reply = reply + skin_note + rival_note + ExpertSourcesFooter(live_section) + "\n\n(лимит поисков: " + to_string(to_int(max_searches)) + "; шкурка: " + (if contains(skin_block, "Шкурка надета") then "надета" else "нет") + ")"
   let _ = RecordAssistantMessage(chat_id, dept, reply)
   let _ = AuditLog("dept_query", dept, "deep=" + (if deep == true then "1" else "0") + " query: " + substring(query, 0.0, 100.0))
   return reply
@@ -305,10 +375,12 @@ pattern ExpertRunReport(query: String, chat_id: String, deep: Bool) -> String {
 
 pattern ExpertSourcesFooter(context: String) -> String {
   let mut lines = ""
-  if contains(context, "=== Live Search (двухфазный) ===") and contains(context, "•") then {
+  // #744 EXP-2: заголовок live-секции конвейера — «кругами, до N поисков»;
+  // ловим общий префикс «=== Live Search» (покрывает и честный пустой путь).
+  if contains(context, "=== Live Search") and contains(context, "•") then {
     // #474 A.3: источник показываем только при реальной выдаче («•»);
     // при отказе в контексте уже стоит честная причина — не приписываем источник
-    let lines = lines + "\n· Живой веб-поиск (двухфазный)"
+    let lines = lines + "\n· Живой веб-поиск (кругами)"
   }
   if length(lines) == 0.0 then { return "" }
   return "\n\n---\n**Источники:**" + lines
@@ -334,12 +406,9 @@ pattern ExpertTavilySearch(query: String, chat_id: String) -> String {
   return TavilyFormatBlock(response)
 }
 
-// Двухфазный поиск (владелец, 2026-09-19: принцип из gpt-researcher,
-// 29k★ на GitHub — не портируем их код, берём только паттерн). Один
-// плоский запрос к живому поиску даёт общий, размытый результат.
-// Вместо этого: 1) быстрый широкий поиск по самой теме, 2) модель на
-// основе ЕГО результата планирует 2-4 конкретных под-вопроса, 3)
-// прицельный поиск по каждому — глубже, чем один общий заход.
+// Гейт автомобильной темы (#336, smoke-пункт 3): под ним в конвейере
+// ExpertRunReport (B.7) вызываются инструменты шкурки auto — av.by по
+// неавтомобильной теме не дёргается вообще.
 pattern ExpertIsAutomotiveTopic(query: String) -> Bool {
   let t = lower(query)
   return contains(t, "авто") or contains(t, "машин") or contains(t, "автомобил") or contains(t, "car ") or contains(t, "vehicle") or contains(t, "дилер") or contains(t, "residual") or contains(t, "лизинг авто") or contains(t, "trade-in")
@@ -348,9 +417,9 @@ pattern ExpertIsAutomotiveTopic(query: String) -> Bool {
 
 // ── av.by (#336): реальные объявления о продаже авто для брифинга ─────
 // Решение владельца зафиксировано в наряде: НЕ Закупки (не shop_engine),
-// отдельная живая функция рядом с ExpertAutomotiveKB (справочник) и
-// двухфазным поиском. Вызывается ТОЛЬКО на автомобильной теме (гейт
-// ExpertIsAutomotiveTopic в BuildExpertContext — неавтомобильная тема
+// отдельная живая функция Эксперта. Вызывается ТОЛЬКО на автомобильной
+// теме — гейт auto_on в конвейере ExpertRunReport (#744 EXP-2: надета
+// шкурка auto / ExpertIsAutomotiveTopic / марки): неавтомобильная тема
 // av.by не дёргает вообще, smoke-пункт 3 наряда).
 // Разведка 2026-09-24: cars.av.by закрыт WAF SafeLine (HTTP 468) с
 // серверных IP — питон-сторона честно деградирует и кэширует вердикт
@@ -367,11 +436,12 @@ pattern ExpertAvByListings(query: String) -> String {
 
 
 // ═══════════════════════════════════════════════════════════════════════
-// EXPERT CONTEXT BUILDER — includes automotive domain (if relevant) + skills
+// EXPERT CONTEXT BUILDER — профиль отдела, память, кросс-ссылки ЛЗ/ОСП, доска
 // ═══════════════════════════════════════════════════════════════════════
-// #744 EXP-2: BuildExpertContext больше не главный путь — конвейер
-// ExpertRunReport строит контекст сам (шкурка/поиск/шаблон). Паттерн
-// сохранён для совместимости TEAM-вызовов: база без поиска и KB.
+// #744 EXP-2: контекст отдела для конвейера ExpertRunReport (и второго
+// прохода TEAM): профиль, корректировки, память Яны, факты, диалог,
+// кросс-ссылки ЛЗ/ОСП (#234), бриф коллег (#481), доска (#482). Шкурку,
+// живой поиск и шаблон конвейер добавляет сам.
 pattern BuildExpertContext(query: String, chat_id: String) -> String {
   let profile = ReadDeptProfile("expert")
   let corrections = GetCorrections("expert")

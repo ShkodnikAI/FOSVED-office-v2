@@ -133,10 +133,13 @@ def test_verdict_english_word():
 def test_expert_footer_honest():
     footer = _pattern_body(EXPERT_MLOG, "ExpertSourcesFooter")
     # источник показывается только при наличии заголовка live-секции,
-    # которая добавляется только при live != "" (см. BuildExpertContext)
-    assert 'contains(context, "=== Live Search (двухфазный) ===")' in footer
-    ctx = _pattern_body(EXPERT_MLOG, "BuildExpertContext")
-    assert 'if live != "" then { let live_section =' in ctx, \
+    # которая добавляется только при непустом live.
+    # #744 EXP-2: live-секция переехала из BuildExpertContext в конвейер
+    # ExpertRunReport (поиск кругами, заголовок «кругами, до N поисков») —
+    # гвард следит за новым домом честного поведения, не за старым паттерном.
+    assert 'contains(context, "=== Live Search")' in footer
+    pipeline = _pattern_body(EXPERT_MLOG, "ExpertRunReport")
+    assert 'if length(live) > 0.0 then {' in pipeline, \
         "live-секция обязана добавляться только при непустом live (пустой live == отказ Tavily)"
     # отказ-путь ExpertTavilySearch возвращает "" (не текст-заглушку)
     search = _pattern_body(EXPERT_MLOG, "ExpertTavilySearch")

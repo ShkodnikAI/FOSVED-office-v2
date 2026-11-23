@@ -356,11 +356,11 @@ def test_app_mlog_secretmatches_coverage():
     assert "pattern SecretMatches(received: String, env_name: String) -> Bool" in src
     calls = (src.count('SecretMatches(secret, "CRON_SECRET")')
              + src.count('SecretMatches(token, "INTERNAL_API_TOKEN")'))
-    assert calls == 33, f"вызовов SecretMatches: {calls}, ожидалось 33 (33 места)"
-    # 29 query-мест + 1 заголовок X-Internal-Token + 3 места (2 × #626 W3:
-    # /cron/osp-watch и /cron/osp-bench; 1 × #627 W4: /cron/osp-monthly —
-    # тот же CRON_SECRET-гвард) = 33
-    assert src.count('redact(query_param("secret"), "hash_only")') == 32, \
+    assert calls == 29, f"вызовов SecretMatches: {calls}, ожидалось 29 (29 места)"
+    # было 33 (29 query + 1 заголовок + 3 cron-места #626/#627); #744 A.1/A.3
+    # снял 4 мёртвых /api/expert-маршрута (automotive, compare, briefings,
+    # briefing) — каждый нёс свой SecretMatches-гвард → 29
+    assert src.count('redact(query_param("secret"), "hash_only")') == 28, \
         "app.mlog: call-site обёртка hash_only не на всех query-местах"
     assert src.count('redact(request_header("X-Internal-Token"), "hash_only")') == 1, \
         "app.mlog: RequireInternalAuth без hash_only-обёртки"

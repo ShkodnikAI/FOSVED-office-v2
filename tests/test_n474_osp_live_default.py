@@ -127,8 +127,9 @@ def test_budget_cause_honest_in_all_four_callers():
 
 
 def test_expert_honest_no_fresh_data_marker():
-    body = _pattern_body(EXPERT_MLOG, "BuildExpertContext")
+    body = _pattern_body(EXPERT_MLOG, "ExpertRunReport")
     # #474 A.3: пустой живой поиск — не тишина, а честная пометка
+    # (#744 EXP-2: маркер переехал из BuildExpertContext в конвейер)
     assert "свежих данных живой поиск не дал" in body
     footer = _pattern_body(EXPERT_MLOG, "ExpertSourcesFooter")
     # источник приписывается только при реальной выдаче

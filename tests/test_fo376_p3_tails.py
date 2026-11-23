@@ -11,21 +11,31 @@ SCHED = (REPO_ROOT / "dept" / "schedules.mlog").read_text(encoding="utf-8")
 SCHEDULER = (REPO_ROOT / "dept" / "scheduler.mlog").read_text(encoding="utf-8")
 
 EXPERT_ROUTES = [
-    ('route "/api/expert/automotive" method=GET', "ExpertAutomotiveLookup"),
-    ('route "/api/expert/compare" method=GET', "ExpertCompareVehicles"),
     ('route "/api/expert/residual-value" method=GET', "ExpertResidualValueData"),
     ('route "/api/expert/operation-cost" method=GET', "ExpertOperationCostData"),
     ('route "/api/expert/chart" method=POST', "ExpertGenerateChart"),
-    ('route "/api/expert/briefings" method=GET', "ExpertListBriefings"),
-    ('route "/api/expert/briefing" method=POST', "ExpertCreateBriefing"),
+]
+
+# Наряд #744 A.1/A.3 (решение владельца 20.11): брифинги и подкоманды авто
+# удалены из Эксперта. Вызовы несуществующих паттернов из app.mlog =
+# UNDEFINED_FUNCTION: гейт #523 не пускал serve, гвард замыкания #604 в CI
+# красный. Маршруты сняты вместе с паттернами и не должны вернуться.
+EXPERT_ROUTES_REMOVED = [
+    ('route "/api/expert/automotive"', "ExpertAutomotiveLookup"),
+    ('route "/api/expert/compare"', "ExpertCompareVehicles"),
+    ('route "/api/expert/briefings"', "ExpertListBriefings"),
+    ('route "/api/expert/briefing"', "ExpertCreateBriefing"),
 ]
 
 
 def test_expert_api_routes_restored():
-    """7 обёрток /api/expert/* живут в mlogserver-блоке app.mlog (TODO :804 закрыт)."""
+    """3 обёртки /api/expert/* (инструменты шкурки auto, B.7 наряда #744)
+    живут в mlogserver-блоке app.mlog; 4 снятых маршрута не вернулись."""
     for decl, handler in EXPERT_ROUTES:
         assert decl in APP, f"нет {decl}"
         assert handler in APP, f"нет вызова {handler}"
+    for decl, handler in EXPERT_ROUTES_REMOVED:
+        assert decl not in APP, f"снятый нарядом #744 маршрут вернулся: {decl}"
 
 
 def test_reverse_proxy_api_lz_routes_to_python():
