@@ -390,6 +390,11 @@ pattern GenerateAnalysisCardEx(src_type: String, src_id: String, chat_id: String
   // Сбой/таймаут/невалидный JSON — честный фолбэк: детерминированный
   // разбор выше остаётся рабочим путём #521. Источник текста — в audit.
   let mut plain_ok = false
+  // #742 VIS-2: «Коротко» простым языком и ключевой прогноз — новые поля
+  // /card-summary; валидатор python-стороны уже отбросил невалидные значения
+  let mut plain_sum = ""
+  let mut kf_text = ""
+  let mut kf_prob = ""
   let cs_raw = TryVal(try http_post("http://127.0.0.1:4000/card-summary", json_encode({raw_text: body_text}), "application/json", 120.0))
   if to_string(cs_raw) != "()" then {
     let cs = TryVal(try parse_json(to_string(cs_raw)))
@@ -420,7 +425,15 @@ pattern GenerateAnalysisCardEx(src_type: String, src_id: String, chat_id: String
           if tee != "" then { let pte = pte + tee + "\n" }
         }
         let pte = trim(pte)
-        if pv != "" or pt != "" or ps != "" then {
+        let plain_sum = redact(to_string(json_get(sum, "plain_summary", "")), "all")
+        let kf_obj = json_get(sum, "key_forecast", sum)
+        let kf_text = redact(to_string(json_get(kf_obj, "text", "")), "all")
+        let kf_prob = redact(to_string(json_get(kf_obj, "prob", "")), "all")
+        if kf_text == "" or kf_prob == "" then {
+          let kf_text = ""
+          let kf_prob = ""
+        }
+        if pv != "" or pt != "" or ps != "" or plain_sum != "" then {
           let plain_ok = true
           let verdict = pv
           let theses = pt
@@ -435,8 +448,9 @@ pattern GenerateAnalysisCardEx(src_type: String, src_id: String, chat_id: String
   let _ = AuditLog("card_text_source", "visual", src_id + ": " + src_label)
 
   // #499 A.3: нет содержимого — короткий ответ без структуры — карточка
-  // не отправляется вовсе (а не слалась пустая)
-  if verdict == "" and theses == "" and probs == "" then {
+  // не отправляется вовсе (а не слалась пустая); #742 VIS-2: plain_summary
+  // — полноценное содержимое (блок «КОРОТКО»)
+  if verdict == "" and theses == "" and probs == "" and plain_sum == "" then {
     let _ = AuditLog("card_skipped_empty", "visual", src_id)
     return ""
   }
@@ -594,7 +608,7 @@ pattern GenerateAnalysisCardEx(src_type: String, src_id: String, chat_id: String
   // ── #673 A.4: PNG по макету Monolith F (1080×1350) — ОСНОВНОЙ путь ──
   // card_json — те же поля, что у PDF-пути, плюс dept (подвал «Отдел …»)
   // и doc_id (подвал «ID …»); состав выборки содержимого не менялся.
-  let card_json = json_encode({badge: badge, topic: CardCleanLine(topic), status: status, confidence: conf_label, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, terms: terms, dept: dept_hint, doc_id: src_id, accent: accent, ink: ink, paper: paper, dim: dim_c, rule: rule, title: title_c, heading: heading_c, verdict_c: verdict_c})
+  let card_json = json_encode({badge: badge, topic: CardCleanLine(topic), status: status, confidence: conf_label, created_at: created_at, verdict: verdict, theses: theses, probs: probs, domains: domains, check_date: check_date, terms: terms, plain_summary: plain_sum, key_forecast_text: kf_text, key_forecast_prob: kf_prob, dept: dept_hint, doc_id: src_id, accent: accent, ink: ink, paper: paper, dim: dim_c, rule: rule, title: title_c, heading: heading_c, verdict_c: verdict_c})
   let png_path = "visuals/card_" + src_type + "_" + src_id + ".png"
   let png_res = RenderCardPngViaProxy(png_path, card_json)
   if png_res == "ok" then {
