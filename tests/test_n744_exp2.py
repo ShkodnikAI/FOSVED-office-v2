@@ -450,3 +450,4 @@ def test_live_v2_pipeline(case):
     assert m.group(2) == "0" and int(m.group(1)) == expected[case], \
         f"сводка {m.group(0)}, ожидалось pass={expected[case]} fail=0"
     assert "FAIL " not in out, out[-1500:]
+
