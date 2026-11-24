@@ -137,18 +137,20 @@ def test_mlog_test_blocks_n771_utils_pass():
 # ── E: Яна молчала при мёртвом llm_proxy (воспроизведено на живом стеке) ──
 
 def test_e_yana_route_guarded():
-    """#771 E: авто-маршрут Яны — HandleYana и DispatchYanaDelegation под try,
-    бросок = честный отказ + маркер, а не 500-тишина «Яна не отвечает»."""
+    """#771 E: обе ветки Яны (dept=="yana" и по умолчанию) — HandleYana и
+    DispatchYanaDelegation под try, бросок = честный отказ + маркер, не 500."""
     anchor = "let reply = TryVal(try HandleYana(yana_query, chat_id))"
-    assert APP.count(anchor) == 1, "HandleYana маршрута не под гвардом"
+    assert APP.count(anchor) == 1, "HandleYana маршрута (ветка dept==yana) не под гвардом"
+    assert APP.count("let reply = TryVal(try HandleYana(text, chat_id))") == 1, (
+        "HandleYana ветки по умолчанию не под гвардом — тот же вектор тишины")
     idx = APP.index(anchor)
     block = APP[idx:idx + 2600]
     assert 'AuditLog("yana_empty_reply"' in block, "нет маркера при броске HandleYana"
     assert "TryVal(try DispatchYanaDelegation(reply, query, chat_id))" in block, (
         "делегирование не под гвардом — бросок отдела ронял маршрут")
     assert 'AuditLog("yana_dispatch_fail"' in block, "нет маркера при броске делегирования"
-    assert APP.count('"Яна: не удалось получить ответ. Попробуйте позже."') == 2, (
-        "честный отказ должен стоять в обеих точках (HandleYana, делегирование)")
+    assert APP.count('"Яна: не удалось получить ответ. Попробуйте позже."') == 4, (
+        "честный отказ должен стоять в 4 точках (2 ветки × 2 гварда)")
 
 
 def test_e_yana_dead_proxy_check_fixed():
