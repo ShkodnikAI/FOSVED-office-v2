@@ -2180,9 +2180,18 @@ mlogserver {
     let _ = AuditLog("osp_analyze", "osp", "bridge source=" + redact(to_string(json_get(data, "source", "?")), "all") + " type=" + redact(to_string(json_get(data, "type", "")), "all") + " domain=" + redact(to_string(json_get(data, "domain", "")), "all"))
     // B3 #640: шов карточки на ответе ОСП (kill-switch card_seam_enabled):
     // при OK/FAIL хвост ```card``` уходит в карточку, владельцу — чистый ответ
-    let mut reply = HandleOSP(query, chat_id)
-    let seam = TryVal(try CardSeamVerdict("osp", reply, 0.0))
-    if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then { reply = CardTailStrip(reply) }
+    // #771 A: гвард — исключение в HandleOSP роняло мост 500; #771 D: пустой
+    // strip (модель открыла весь ответ забором ```card) не применяем
+    let mut reply = TryVal(try HandleOSP(query, chat_id))
+    let seam = TryVal(try CardSeamVerdict("osp", to_string(reply), 0.0))
+    if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+      let stripped = CardTailStrip(to_string(reply))
+      if stripped != "" then { reply = stripped }
+    }
+    if to_string(reply) == "()" or reply == "" then {
+      let _ = TryVal(try AuditLog("osp_empty_reply", "osp", "query=" + substring(query, 0.0, 80.0) + " seam=" + substring(to_string(seam), 0.0, 40.0) + " len=" + to_string(length(to_string(reply)))))
+      return respond("500 osp bridge: empty reply")
+    }
     // #401 A.1: отчёт ОСП уходит через SendReport — как у прямых запросов ОСП
     // (архив miniapp_responses + превью с кнопкой). Прямая отправка полным
     // текстом не делит сообщение: >4096 символов Telegram отклонил бы — длинный
@@ -5064,8 +5073,19 @@ pattern WebhookBody() -> String {
       // полный текст с префиксом /osp — передаём text, а не strip-нутый query.
       let mut reply = TryVal(try HandleOSP(text, chat_id))
       let seam = TryVal(try CardSeamVerdict("osp", to_string(reply), 0.0))
-      if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then { reply = CardTailStrip(to_string(reply)) }
+      // #771 D (корень инцидента 23.11): CardTailStrip отбрасывает всё после
+      // ```card — если модель открыла этим забором ВЕСЬ ответ, strip возвращал
+      // "" и владелец получал «ОСП: не удалось получить ответ». Пустой strip
+      // не применяем: доходит полный ответ (с забором — лучше, чем ничего).
+      if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+        let stripped = CardTailStrip(to_string(reply))
+        if stripped != "" then { reply = stripped }
+      }
       if to_string(reply) == "()" or reply == "" then {
+        // #771 A: причина тихого отказа глотается try — маркер в audit_log
+        // для корреляции со stderr-строкой «[try] caught error» этого запроса
+        // (инцидент 23.11: «ОСП: не удалось получить ответ» без следов в БД).
+        let _ = TryVal(try AuditLog("osp_empty_reply", "osp", "query=" + substring(text, 0.0, 80.0) + " seam=" + substring(seam, 0.0, 40.0) + " len=" + to_string(length(to_string(reply)))))
         let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
       } else {
         let _ = SendReport(reply, "osp", "OSP: " + substring(query, 0.0, 50.0), "3.0", chat_id)
@@ -5224,11 +5244,25 @@ return respond("200 ok") }
     if dept == "osp" then {
       let _ = RecordUserMessage(chat_id, "osp", text)
       // B3 #640: шов карточки на ответе ОСП (kill-switch card_seam_enabled)
-      let mut reply = HandleOSP(query, chat_id)
-      let seam = TryVal(try CardSeamVerdict("osp", reply, 0.0))
-      if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then { reply = CardTailStrip(reply) }
-      let _ = SendVoiceReply(chat_id, reply, "osp")
-      let _ = SendReport(reply, "osp", query, "2.0", chat_id)
+      // #771 A: гвард — исключение в HandleOSP здесь роняло ВЕСЬ маршрут
+      // (500, владелец не получал вообще ничего); теперь маркер + честный отказ
+      let mut reply = TryVal(try HandleOSP(query, chat_id))
+      let seam = TryVal(try CardSeamVerdict("osp", to_string(reply), 0.0))
+      // #771 D (корень инцидента 23.11): CardTailStrip отбрасывает всё после
+      // ```card — если модель открыла этим забором ВЕСЬ ответ, strip возвращал
+      // "" и владелец получал «ОСП: не удалось получить ответ». Пустой strip
+      // не применяем: доходит полный ответ (с забором — лучше, чем ничего).
+      if starts_with(seam, "OK|") or starts_with(seam, "FAIL|") then {
+        let stripped = CardTailStrip(to_string(reply))
+        if stripped != "" then { reply = stripped }
+      }
+      if to_string(reply) == "()" or reply == "" then {
+        let _ = TryVal(try AuditLog("osp_empty_reply", "osp", "query=" + substring(query, 0.0, 80.0) + " seam=" + substring(seam, 0.0, 40.0) + " len=" + to_string(length(to_string(reply)))))
+        let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
+      } else {
+        let _ = SendVoiceReply(chat_id, reply, "osp")
+        let _ = SendReport(reply, "osp", query, "2.0", chat_id)
+      }
       let handled = 1.0
     }
     if dept == "lz" then {
