@@ -83,7 +83,8 @@ def test_verification_unavailable_persists_honestly():
 def test_normbase_switch():
     """Переключатель RF|BY|EU: GetNormSystem читает config, дефолт RF; вызовы без хардкода."""
     assert "pattern GetNormSystem()" in ENG
-    assert 'read_file("config/engineering_normbase.txt")' in ENG
+    # #771 H: чтение через SkillFileRead (try-грейс serve-гейта чтений)
+    assert 'SkillFileRead("config/engineering_normbase.txt")' in ENG
     assert 'if nb == "BY"' in ENG and 'if nb == "EU"' in ENG
     # хардкод "RF" в вызовах устранён
     assert 'SetNormBase(parsed.calc_id, parsed.discipline, "RF", "")' not in ENG
