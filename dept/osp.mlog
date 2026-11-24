@@ -967,7 +967,11 @@ pattern OSPDeepAnalyze(query: String, chat_id: String) -> String {
     body = OSPFStripCard(reply)
     let cj = TryVal(try parse_json(substring(card, 3.0, length(card))))
     if to_string(cj) != "()" then {
-      let p_raw = to_float(to_string(json_get(cj, "p", "-1")))
+      // #771 C: to_float на не-числе БРОСАЕТ TYPE_MISMATCH (№514) и валит весь
+      // запрос — «ОСП: не удалось получить ответ». Схема CARD требует p-число,
+      // но дыра валидатора не повод ронять ветку: мусор → -1 (тот же дефолт,
+      // что и у отсутствующего p — карточка уходит в гейт, проза доходит).
+      let p_raw = to_float_or(to_string(json_get(cj, "p", "-1")), -1.0)
       let crit = to_string(json_get(cj, "resolution_criteria", ""))
       let as_of = to_string(json_get(cj, "as_of", ""))
       let resolve_by = to_string(json_get(cj, "resolve_by", ""))
@@ -1031,7 +1035,11 @@ pattern OSPFullAnalyze(query: String, chat_id: String) -> String {
     body = OSPFStripCard(reply)
     let cj = TryVal(try parse_json(substring(card, 3.0, length(card))))
     if to_string(cj) != "()" then {
-      let p_raw = to_float(to_string(json_get(cj, "p", "-1")))
+      // #771 C: to_float на не-числе БРОСАЕТ TYPE_MISMATCH (№514) и валит весь
+      // запрос — «ОСП: не удалось получить ответ». Схема CARD требует p-число,
+      // но дыра валидатора не повод ронять ветку: мусор → -1 (тот же дефолт,
+      // что и у отсутствующего p — карточка уходит в гейт, проза доходит).
+      let p_raw = to_float_or(to_string(json_get(cj, "p", "-1")), -1.0)
       let crit = to_string(json_get(cj, "resolution_criteria", ""))
       let as_of = to_string(json_get(cj, "as_of", ""))
       let resolve_by = to_string(json_get(cj, "resolve_by", ""))
@@ -3708,6 +3716,29 @@ test "n469 разбор: OSPStrIsNumber — фильтр формата числ
   assert_eq(OSPStrIsNumber("12x"), false)
   assert_eq(OSPStrIsNumber("1.2.3"), false)
   assert_eq(OSPStrIsNumber("1-2"), false)
+}
+
+// ── Наряд #771: тихий отказ ОСП 23.11 — гварды класса TYPE_MISMATCH ────
+// to_float на не-числе БРОСАЕТ (№514), валит HandleOSP → «не удалось
+// получить ответ». Две линии защиты: гейт схемы CARD + to_float_or.
+test "n771 карточка: строковое p — гейт схемы отклоняет (FAIL, не краш)" {
+  let reply = "Проза анализа.\nCARD: {\"p\": \"низкая\", \"resolution_criteria\": \"наблюдаемый критерий исхода достаточно длинный\", \"resolve_by\": \"2026-12-31\", \"as_of\": \"2026-11-23\"}"
+  assert_contains(OSPFExtractCard(reply), "FAIL|")
+}
+
+test "n771 карточка: валидное числовое p — OK" {
+  let reply = "Проза анализа.\nCARD: {\"p\": 0.12, \"resolution_criteria\": \"наблюдаемый критерий исхода достаточно длинный\", \"resolve_by\": \"2026-12-31\", \"as_of\": \"2026-11-23\"}"
+  assert_contains(OSPFExtractCard(reply), "OK|")
+}
+
+test "n771 извлечение p: мусор в json — дефолт -1 через to_float_or, не TYPE_MISMATCH" {
+  let cj = parse_json("{\"p\": \"мусор\"}")
+  assert_eq(to_float_or(to_string(json_get(cj, "p", "-1")), -1.0), -1.0)
+}
+
+test "n771 извлечение p: число-строкой — парсится" {
+  let cj = parse_json("{\"p\": \"0.25\"}")
+  assert_eq(to_float_or(to_string(json_get(cj, "p", "-1")), -1.0), 0.25)
 }
 
 test "n468 подвал: FRED с полученным рядом — источник показан" {

@@ -91,8 +91,8 @@
 | `OSPTelegramSearch` | dept/osp.mlog:1157 | `CRON_SECRET` | env |
 | `OnlinerWarmSlot` | dept/scheduler.mlog:478 | `CRON_SECRET`, `SHOP_ENABLED` | env |
 | `OutboxFlush` | dept/scheduler.mlog:544 | `OWNER_TELEGRAM_ID` | env |
-| `OwnerTelegramId` | dept/utils.mlog:521 | `OWNER_TELEGRAM_ID` | env |
-| `RenderUrl` | dept/utils.mlog:517 | `RENDER_URL` | env |
+| `OwnerTelegramId` | dept/utils.mlog:526 | `OWNER_TELEGRAM_ID` | env |
+| `RenderUrl` | dept/utils.mlog:522 | `RENDER_URL` | env_or (#771 B: фолбэк `http://127.0.0.1:10000` — голый env ронял маршрут ENV_NOT_FOUND) |
 | `ReposAccessToken` | app.mlog:2033 | `CRON_SECRET` | env |
 | `RequireInternalAuth` | app.mlog:825 | `INTERNAL_API_TOKEN` | env_or |
 | `RequireInternalAuth` | dogfood_staging.mlog:620 | `INTERNAL_API_TOKEN` | env_or |
@@ -504,8 +504,8 @@ dept/utils.mlog:473, `json_encode({api_key: …})`) — легальный ст�
 | `TavilyKey` | dept/utils.mlog:403 | `TAVILY_API_KEY` | `TavilySearch` (тело POST), `LZFactpack`, `BuildOSPContext`, `HandleLZ`, `WebhookBody` |
 | `AvKey` | dept/utils.mlog:413 | `ALPHAVANTAGE_API_KEY` | только presence-check (значение не уходит) |
 | `ArchiveChannelId` | dept/utils.mlog:513 | `TELEGRAM_ARCHIVE_CHANNEL_ID` | `PublishToArchive`, `SendReport`, … |
-| `RenderUrl` | dept/utils.mlog:517 | `RENDER_URL` | `PublishToArchive`, `SendReport`, … (ссылки в сообщениях) |
-| `OwnerTelegramId` | dept/utils.mlog:521 | `OWNER_TELEGRAM_ID` | `AdminReplySlot`, `ForgeGateSend`, `LzDailySlot`, `MorningBrief`, … |
+| `RenderUrl` | dept/utils.mlog:522 | `RENDER_URL` | `PublishToArchive`, `SendReport`, … (ссылки в сообщениях; #771 B — env_or с фолбэком) |
+| `OwnerTelegramId` | dept/utils.mlog:526 | `OWNER_TELEGRAM_ID` | `AdminReplySlot`, `ForgeGateSend`, `LzDailySlot`, `MorningBrief`, … |
 | `LZLlm` | dept/lz_seam.mlog:16 | — (вывод LLM) | `HandleLZ`, `LZInflectionDetect`, `WebhookBody` |
 
 Машинная метрика: **187** паттернов-источников (из 215) достигают стока в другом

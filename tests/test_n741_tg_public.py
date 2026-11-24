@@ -26,6 +26,16 @@ os.environ.setdefault("CRON_SECRET", "cron-test-secret")
 from proxy import tg_public  # noqa: E402
 
 
+def _ts_ago(hours: float) -> str:
+    """ISO-метка «N часов назад» — фикстуры не должны стареть.
+
+    #771: абсолютные даты (22.11 05:00) были timebomb — окно «за 48 ч»
+    уползало, CI ловил фейк спустя двое суток после наряда #741.
+    """
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
 def _db(tmp_path):
     """Тестовая БД: таблицы наряда (lz_channel_posts/channels/health)."""
     db = tmp_path / "test.db"
@@ -215,11 +225,11 @@ def test_a3_factpack_block_by_stems(db_env):
     db_env.executemany(
         "INSERT INTO lz_channel_posts (channel_id, message_id, text, date) "
         "VALUES (?,?,?,?)",
-        [("exilenova_plus", "1", "Удар по НПЗ в Краснодарском крае", "2026-11-22T05:00:00+00:00"),
-         ("supernova_plus", "2", "Обстановка: удары по НПЗ продолжаются", "2026-11-22T06:00:00+00:00"),
-         ("exilenova_plus", "3", "НПЗ снова в огне", "2026-11-22T07:00:00+00:00"),
-         ("supernova_plus", "9", "Рынок акций вырос", "2026-11-22T08:00:00+00:00"),
-         ("other_ch", "8", "Погода в Лиссабоне", "2026-11-22T08:30:00+00:00")])
+        [("exilenova_plus", "1", "Удар по НПЗ в Краснодарском крае", _ts_ago(5.0)),
+         ("supernova_plus", "2", "Обстановка: удары по НПЗ продолжаются", _ts_ago(4.0)),
+         ("exilenova_plus", "3", "НПЗ снова в огне", _ts_ago(3.0)),
+         ("supernova_plus", "9", "Рынок акций вырос", _ts_ago(2.0)),
+         ("other_ch", "8", "Погода в Лиссабоне", _ts_ago(1.0))])
     db_env.commit()
     block = tg_public.factpack_block("что с НПЗ сегодня", 48, 10)
     assert "Telegram-мониторинг (3 постов" in block
@@ -237,7 +247,7 @@ def test_a3_factpack_block_empty_vs_broken(db_env):
     assert "не работает" in broken
     db_env.execute(
         "INSERT INTO lz_channel_posts (channel_id, message_id, text, date) "
-        "VALUES ('c','1','совсем другое','2026-11-22T08:00:00+00:00')")
+        "VALUES ('c','1','совсем другое', ?)", (_ts_ago(0.5),))
     db_env.commit()
     off_topic = tg_public.factpack_block("тема", 48, 10)
     assert "подходящих постов нет" in off_topic
