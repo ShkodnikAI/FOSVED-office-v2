@@ -225,3 +225,55 @@ def test_g_throw_causes_reach_owner_and_audit():
     # plain-отказы остаются для пустого ответа (не броска)
     assert APP.count('"Яна: не удалось получить ответ. Попробуйте позже."') == 4
     assert APP.count('"ОСП: не удалось получить ответ. Попробуйте позже."') == 2
+
+
+# ── H: корень инцидентов 23-24.11 — гейт serve-чтений vs внешний DATA_DIR ──
+
+REPO_H = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_h_entrypoint_forces_data_dir_to_app_root():
+    """Корень трёх отказов (23.11, 24.11 ×2): гейт serve-чтений (№455)
+    ограничивает пути METALOGOS_DATA_DIR; дефолт entrypoint '.' перебивался
+    внешним env Render — корпус (skills/, library/, config/) оказывался вне
+    сандбокса, каждый запрос отдела падал с SANDBOX_VIOLATION. ADR-0009:
+    корень containment = корень приложения — entrypoint форсирует его
+    АБСОЛЮТНЫМ значением с громким бут-логом. БД не подчинена DATA_DIR
+    (db { url: env(DATABASE_URL) }); kv-кэш (data/metalogos_kv.db) при смене
+    локации пересобирается сам — это кэш."""
+    ep = open(os.path.join(REPO_H, "entrypoint.sh"), encoding="utf-8").read()
+    assert 'export METALOGOS_DATA_DIR="$(pwd)"' in ep, "DATA_DIR не форсируется в корень приложения"
+    assert "№771H" in ep, "нет громкого бут-лога с прежним значением env"
+    # мягкий дефолт, который молча перебивался снаружи, не должен жить
+    assert 'METALOGOS_DATA_DIR="${METALOGOS_DATA_DIR:-.}"' not in ep
+
+
+def test_h_no_ungated_corpus_reads_in_dept():
+    """Все чтения корпуса в dept/*.mlog — через SkillFileRead (try-грейс,
+    «громкий пропуск» #623 W0) или явный try. Голый read_file/read_file_or —
+    красный: одно чтение роняет весь запрос/слот (класс 24.11)."""
+    import re
+    bad = []
+    import glob
+    for f in sorted(glob.glob(os.path.join(REPO_H, "dept", "*.mlog"))):
+        src = open(f, encoding="utf-8").read()
+        for m in re.finditer(r"read_file(?:_or)?\(", src):
+            pre = src[max(0, m.start() - 80):m.start()]
+            if "try " in pre or "SkillFileRead" in pre:
+                continue
+            line = src[:m.start()].count("\n") + 1
+            bad.append(f"{os.path.basename(f)}:{line}")
+    assert not bad, f"незащищённые чтения корпуса: {bad}"
+
+
+def test_h_skill_file_read_normalizes():
+    """SkillFileRead — единая точка чтений корпуса: try + нормализация
+    «()»/пустоты + redact внутри; бросок гейта превращается в «громкий
+    пропуск», ответ уходит без скилла (доказано пробой n771h V3)."""
+    skills = open(os.path.join(REPO_H, "dept", "skills.mlog"), encoding="utf-8").read()
+    assert "pattern SkillFileRead(path: String) -> String" in skills
+    assert 'TryVal(try read_file_or(path, ""))' in skills
+    assert 'if raw == "()" or raw == "" then' in skills
+    ctx = open(os.path.join(REPO_H, "dept", "context.mlog"), encoding="utf-8").read()
+    assert ctx.count("SkillFileRead(") == 25, "24 скилла Tier1-3 + ReadDeptProfile"
+    assert 'SkillFileRead("library/" + dept + ".md")' in ctx

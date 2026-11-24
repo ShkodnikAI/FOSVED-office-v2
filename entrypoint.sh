@@ -184,7 +184,18 @@ export METALOGOS_TRUSTED_PROXIES="${METALOGOS_TRUSTED_PROXIES:-127.0.0.1}"
 # имён; контент помечается Secret движком меток и на каждом сайте обёрнут
 # в redact(..., "all"). Рантайм-записи (config/priority_*.txt,
 # memories/consensus.mlog) гейту №455 не подчиняются — поведение как в 0.25.
-export METALOGOS_DATA_DIR="${METALOGOS_DATA_DIR:-.}"
+# ── #771 H (инцидент 24.11: SANDBOX_VIOLATION на каждом чтении skills/ в
+# проде, оба отдела) ─────────────────────────────────────────────────────
+# Гейт serve-чтений ограничивает пути METALOGOS_DATA_DIR. Дефолт "." делал
+# корень containment = корню приложения (ADR-0009), но ВНЕШНИЙ env (Render)
+# перебивал его: корпус (skills/, library/, config/) оказывался вне
+# сандбокса — детерминированный отказ каждого запроса. Форсируем АБСОЛЮТНЫЙ
+# корень приложения; БД этому не подчиняется (db { url: env(DATABASE_URL) }),
+# kv-persist "data/metalogos_kv.db" относителен и при смене локации
+# пересобирается сам (это кэш: профили-фолбэки, voice-настройки).
+N771H_DATA_DIR_WAS="${METALOGOS_DATA_DIR:-<не задан>}"
+export METALOGOS_DATA_DIR="$(pwd)"
+echo "--- №771H: METALOGOS_DATA_DIR форсирован = ${METALOGOS_DATA_DIR} (ADR-0009; внешний env был: ${N771H_DATA_DIR_WAS})"
 M455_NAMES="app.mlog,consensus.mlog"
 for M455_F in dept/*.mlog library/*.mlog memories/*.mlog; do
   [ -e "$M455_F" ] || continue
