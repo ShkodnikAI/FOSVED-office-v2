@@ -38,10 +38,10 @@ def _mutant_office(tmp: pathlib.Path, kind: str):
             fixed,
             'let merged = to_string(json_get(parse_json(to_string(rows)), "[0].merged", ""))')
     elif kind == "drop_default_dispatch":
-        # #771 E/F: делегирование в ветке по умолчанию под ретрай-гвардом —
+        # #771 E/F/G: делегирование в ветке по умолчанию под ретрай-гвардом —
         # мутант снимает вызов, оставляя del пустым: голый slug уходит в /tg-send
         block = ('        let del = DispatchYanaDelegationRetry(reply, text, chat_id)\n'
-                 '        if to_string(del) == "()" then {')
+                 '        if to_string(del) == "()" or starts_with(del, "THROW|") then {')
         mutant = src.replace(block, '        let del = ""\n        if to_string(del) == "XX" then {')
     else:
         raise AssertionError(kind)

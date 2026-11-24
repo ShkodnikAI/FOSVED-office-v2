@@ -5084,12 +5084,19 @@ pattern WebhookBody() -> String {
         let stripped = CardTailStrip(to_string(reply))
         if stripped != "" then { reply = stripped }
       }
-      if to_string(reply) == "()" or reply == "" then {
+      if to_string(reply) == "()" or reply == "" or starts_with(reply, "THROW|") then {
         // #771 A: причина тихого отказа глотается try — маркер в audit_log
         // для корреляции со stderr-строкой «[try] caught error» этого запроса
         // (инцидент 23.11: «ОСП: не удалось получить ответ» без следов в БД).
-        let _ = TryVal(try AuditLog("osp_empty_reply", "osp", "query=" + substring(text, 0.0, 80.0) + " seam=" + substring(seam, 0.0, 40.0) + " len=" + to_string(length(to_string(reply)))))
-        let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
+        // #771 G: THROW| несёт причину (TryResult.error.message) — она идёт
+        // в маркер и в сообщение владельцу: отказ само-диагностирующийся.
+        let cause = substring(reply, 6.0, 240.0)
+        let _ = TryVal(try AuditLog("osp_empty_reply", "osp", "query=" + substring(text, 0.0, 80.0) + " seam=" + substring(seam, 0.0, 40.0) + " len=" + to_string(length(to_string(reply))) + " " + cause))
+        if starts_with(reply, "THROW|") then {
+          let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ.\n\nПричина: " + cause + "\n\nПовтори позже или /osp напрямую.")
+        } else {
+          let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
+        }
       } else {
         let _ = SendReport(reply, "osp", "OSP: " + substring(query, 0.0, 50.0), "3.0", chat_id)
       }
@@ -5223,18 +5230,28 @@ return respond("200 ok") }
       // владелец получал тишину («Яна не отвечает»). Пустой ответ — норма:
       // фолбэк или досье [SHOP:] уже ушли владельцу.
       let reply = HandleYanaRetry(yana_query, chat_id)
-      if to_string(reply) == "()" then {
-        let _ = TryVal(try AuditLog("yana_empty_reply", "yana", "query=" + substring(yana_query, 0.0, 80.0)))
-        let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+      // #771 G: THROW| несёт причину (TryResult.error.message) — в маркер
+      // и в сообщение владельцу; делегирование на броске не вызываем.
+      if to_string(reply) == "()" or starts_with(reply, "THROW|") then {
+        let _ = TryVal(try AuditLog("yana_empty_reply", "yana", "query=" + substring(yana_query, 0.0, 80.0) + " " + substring(reply, 0.0, 300.0)))
+        if starts_with(reply, "THROW|") then {
+          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ.\n\nПричина: " + substring(reply, 6.0, 240.0) + "\n\nПовтори позже или /yana напрямую.")
+        } else {
+          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+        }
         let handled = 1.0
       } else {
         // №603 C.1: делегирование вынесено в DispatchYanaDelegation — одна
         // механика для ветки dept == "yana" и ветки по умолчанию (detect-dept
         // вернул пусто). "1" — запрос уже ушёл отделу, обычный ответ не слать.
         let del = DispatchYanaDelegationRetry(reply, query, chat_id)
-        if to_string(del) == "()" then {
-          let _ = TryVal(try AuditLog("yana_dispatch_fail", "yana", "reply=" + substring(reply, 0.0, 60.0)))
-          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+        if to_string(del) == "()" or starts_with(del, "THROW|") then {
+          let _ = TryVal(try AuditLog("yana_dispatch_fail", "yana", "reply=" + substring(reply, 0.0, 60.0) + " " + substring(del, 0.0, 300.0)))
+          if starts_with(del, "THROW|") then {
+            let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ.\n\nПричина: " + substring(del, 6.0, 240.0) + "\n\nПовтори позже или /yana напрямую.")
+          } else {
+            let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+          }
           let handled = 1.0
         } else {
           if del == "1" then {
@@ -5446,18 +5463,28 @@ return respond("200 ok") }
       // отдела) ронял ВЕСЬ маршрут 500 — «Яна не отвечает». Честный отказ +
       // маркер; пустой ответ — норма (фолбэк/досье [SHOP:] уже ушли).
       let reply = HandleYanaRetry(text, chat_id)
-      if to_string(reply) == "()" then {
-        let _ = TryVal(try AuditLog("yana_empty_reply", "yana", "query=" + substring(text, 0.0, 80.0)))
-        let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+      // #771 G: THROW| несёт причину (TryResult.error.message) — в маркер
+      // и в сообщение владельцу; делегирование на броске не вызываем.
+      if to_string(reply) == "()" or starts_with(reply, "THROW|") then {
+        let _ = TryVal(try AuditLog("yana_empty_reply", "yana", "query=" + substring(text, 0.0, 80.0) + " " + substring(reply, 0.0, 300.0)))
+        if starts_with(reply, "THROW|") then {
+          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ.\n\nПричина: " + substring(reply, 6.0, 240.0) + "\n\nПовтори позже или /yana напрямую.")
+        } else {
+          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+        }
         let handled = 1.0
       } else {
         // №603 C.1: делегирование работает и в ветке по умолчанию — detect-dept
         // вернул пусто, но Яна могла ответить [DELEGATE: dept]. "1" — запрос уже
         // ушёл отделу DispatchYanaDelegation'ом, голый slug в /tg-send не уходит.
         let del = DispatchYanaDelegationRetry(reply, text, chat_id)
-        if to_string(del) == "()" then {
-          let _ = TryVal(try AuditLog("yana_dispatch_fail", "yana", "reply=" + substring(reply, 0.0, 60.0)))
-          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+        if to_string(del) == "()" or starts_with(del, "THROW|") then {
+          let _ = TryVal(try AuditLog("yana_dispatch_fail", "yana", "reply=" + substring(reply, 0.0, 60.0) + " " + substring(del, 0.0, 300.0)))
+          if starts_with(del, "THROW|") then {
+            let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ.\n\nПричина: " + substring(del, 6.0, 240.0) + "\n\nПовтори позже или /yana напрямую.")
+          } else {
+            let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+          }
           let handled = 1.0
         } else {
           if del != "1" then {
@@ -5648,12 +5675,17 @@ pattern DispatchYanaDelegation(reply: String, query: String, chat_id: String) ->
 // отдела вместо отказа. Бросок, переживший ретрай, остаётся честным
 // отказом маршрута (yana_dispatch_fail, #771 E).
 pattern DispatchYanaDelegationRetry(reply: String, query: String, chat_id: String) -> String {
-  let del = TryVal(try DispatchYanaDelegation(reply, query, chat_id))
+  // #771 G: причина броска — TryResult.error.message (см. HandleYanaRetry).
+  let tr = try DispatchYanaDelegation(reply, query, chat_id)
+  let del = TryVal(tr)
   if to_string(del) != "()" then { return del }
+  let err = redact(substring(TryVal(try to_string(tr.error.message)), 0.0, 160.0), "all")
   sleep(8.0)
-  let del2 = TryVal(try DispatchYanaDelegation(reply, query, chat_id))
+  let tr2 = try DispatchYanaDelegation(reply, query, chat_id)
+  let del2 = TryVal(tr2)
   if to_string(del2) != "()" then { return del2 }
-  return "()"
+  let err2 = redact(substring(TryVal(try to_string(tr2.error.message)), 0.0, 160.0), "all")
+  return "THROW|" + err + " || retry: " + err2
 }
 
 // ── #669 A.4: шов карточки — хелперы команд владельца и слот замера ────────

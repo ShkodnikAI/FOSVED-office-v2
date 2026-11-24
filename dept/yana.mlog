@@ -433,12 +433,20 @@ pattern HandleYana(query: String, chat_id: String) -> String {
 // Возврат: обычный ответ | "" (норма: фолбэк/досье уже ушли) | "()"
 // (бросок пережил ретрай — маршрут отвечает честным отказом).
 pattern HandleYanaRetry(query: String, chat_id: String) -> String {
-  let reply = TryVal(try HandleYana(query, chat_id))
+  // #771 G: TryResult — Struct{ok, value, error} (ADR-0142). TryVal достаёт
+  // .value; причина броска живёт в .error.message (идиом admin.mlog:491) —
+  // теперь она попадает в маркер audit_log и в сообщение владельцу, а не
+  // только в stderr («[try] caught error»), который владельцу недоступен.
+  let tr = try HandleYana(query, chat_id)
+  let reply = TryVal(tr)
   if to_string(reply) != "()" then { return reply }
+  let err = redact(substring(TryVal(try to_string(tr.error.message)), 0.0, 160.0), "all")
   sleep(8.0)
-  let reply2 = TryVal(try HandleYana(query, chat_id))
+  let tr2 = try HandleYana(query, chat_id)
+  let reply2 = TryVal(tr2)
   if to_string(reply2) != "()" then { return reply2 }
-  return "()"
+  let err2 = redact(substring(TryVal(try to_string(tr2.error.message)), 0.0, 160.0), "all")
+  return "THROW|" + err + " || retry: " + err2
 }
 pattern YanaNowInfo() -> String {
   // №422: try при сбое даёт Struct — redact() принимает только String/Secret,
