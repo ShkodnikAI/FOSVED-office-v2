@@ -323,12 +323,21 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let _ = TraceLog("yana", "step_10_before_CallLLMProxy")
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then {
+  // #771 E: CallLLMProxy при мёртвом прокси возвращает "" (а не "()") —
+  // прежняя проверка проходила мимо, parse_json("") БРОСАЛ (№514) и ронял
+  // весь маршрут: «Яна не отвечает» без единого следа. Проверяем оба
+  // маркера недоступности + guard парсера (битый/пустой body прокси).
+  if to_string(proxy_result) == "()" or proxy_result == "" then {
     let fallback = "Сервис временно недоступен. Попробуйте позже."
     let _ = SendTelegramReply(chat_id, fallback)
     return ""
   }
-  let parsed = parse_json(proxy_result)
+  let parsed = TryVal(try parse_json(proxy_result))
+  if to_string(parsed) == "()" then {
+    let fallback = "Сервис временно недоступен. Попробуйте позже."
+    let _ = SendTelegramReply(chat_id, fallback)
+    return ""
+  }
   let reply = redact(to_string(json_get(parsed, "reply", "")), "all")
   let used_model = redact(to_string(json_get(parsed, "model", "")), "all")
   let tokens_in = redact(to_string(json_get(parsed, "tokens_in", "0")), "all")
