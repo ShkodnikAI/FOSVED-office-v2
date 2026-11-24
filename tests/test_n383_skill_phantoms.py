@@ -84,9 +84,11 @@ def test_marketing_accumulation_bug_fixed():
 
 def test_manifest_backed_reads_untouched():
     """36 чтений из манифеста не тронуты (контент не дублируется в код).
-    Форма — read_file_or (№563, ADR-0015)."""
+    Форма — SkillFileRead (#771 H: try-грейс поверх read_file_or — гейт
+    serve-чтений №455 при чужом DATA_DIR ронял чтение целиком; контракт
+    №563/ADR-0015 сохранён: путь в коде, контент — из снапшота)."""
     ctx = DEPT.get("context.mlog", "")
-    assert 'read_file_or("skills/deconstruct/SKILL.md", "")' in ctx
+    assert 'SkillFileRead("skills/deconstruct/SKILL.md")' in ctx
     assert "deconstruct" in MANIFEST_KEYS
     # Счётчик манифеста меняется ТОЛЬКО нарядом (n383: 248, граница «не расширять»;
     # n478: +animated-report (отдел дизайна, паттерны Papermorph) = 249 — снапшот
@@ -100,7 +102,7 @@ def test_snapshot_path_primary():
     fin = DEPT["finance.mlog"]
     seg = fin[fin.index("pattern LoadFinanceSkills"):]
     seg = seg[:seg.index("\npattern ", 10)]
-    # порядок: read_file_or → if s == "" → SkillNote → if s != ""
-    i_read = seg.index('read_file_or("skills/fosved/finance/cashflow-forecasting')
+    # порядок: SkillFileRead (read_file_or под try, #771 H) → if s == "" → SkillNote → if s != ""
+    i_read = seg.index('SkillFileRead("skills/fosved/finance/cashflow-forecasting')
     i_fb = seg.index('FinanceSkillNote("cashflow-forecasting")')
     assert i_read < i_fb
