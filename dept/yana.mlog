@@ -420,6 +420,26 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
   return final_reply
 }
+
+// ── #771 F: ретрай при транзиентном write-локе БД ────────────────────────
+// Инцидент 24.11 13:26: оба отдела ответили «не удалось» в минуту после
+// деплоя. Механизм доказан пробой n771f: движок держит БД в WAL, при
+// чужом BEGIN IMMEDIATE db_execute ждёт busy_timeout ≈5 с и БРОСАЕТ
+// «database is locked»; чтение (query) под write-локом работает. Окно
+// бут-миграций/восстановления WAL после рестарта контейнера перекрыло
+// LLM-ожидание потока — внутренняя db-запись отдела бросила, маршрут
+// честно отказал (гварды #771 E). Один ретрай после паузы: лок снимается
+// (обычные окна — секунды) — владелец получает ответ вместо отказа.
+// Возврат: обычный ответ | "" (норма: фолбэк/досье уже ушли) | "()"
+// (бросок пережил ретрай — маршрут отвечает честным отказом).
+pattern HandleYanaRetry(query: String, chat_id: String) -> String {
+  let reply = TryVal(try HandleYana(query, chat_id))
+  if to_string(reply) != "()" then { return reply }
+  sleep(8.0)
+  let reply2 = TryVal(try HandleYana(query, chat_id))
+  if to_string(reply2) != "()" then { return reply2 }
+  return "()"
+}
 pattern YanaNowInfo() -> String {
   // №422: try при сбое даёт Struct — redact() принимает только String/Secret,
   // поэтому сперва to_string() (успех = String, сбой = "()"), потом мойка.

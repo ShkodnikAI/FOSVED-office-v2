@@ -5071,7 +5071,10 @@ pattern WebhookBody() -> String {
       // гейтов). Было HandleDeptQuery — generic LLM в обход хард-гейтов ОСП;
       // прямые команды отдела не доходили до его диспетчера. HandleOSP ждёт
       // полный текст с префиксом /osp — передаём text, а не strip-нутый query.
-      let mut reply = TryVal(try HandleOSP(text, chat_id))
+      // #771 F: ретрай при транзиентном write-локе (окно бут-миграций
+      // деплоя): db_execute бросает database is locked после busy_timeout
+      // ≈5 с — один ретрай после паузы возвращает ответ вместо отказа.
+      let mut reply = HandleOSPRetry(text, chat_id)
       let seam = TryVal(try CardSeamVerdict("osp", to_string(reply), 0.0))
       // #771 D (корень инцидента 23.11): CardTailStrip отбрасывает всё после
       // ```card — если модель открыла этим забором ВЕСЬ ответ, strip возвращал
@@ -5219,7 +5222,7 @@ return respond("200 ok") }
       // или в делегировании (HandleDeptQuery отдела) ронял ВЕСЬ маршрут 500:
       // владелец получал тишину («Яна не отвечает»). Пустой ответ — норма:
       // фолбэк или досье [SHOP:] уже ушли владельцу.
-      let reply = TryVal(try HandleYana(yana_query, chat_id))
+      let reply = HandleYanaRetry(yana_query, chat_id)
       if to_string(reply) == "()" then {
         let _ = TryVal(try AuditLog("yana_empty_reply", "yana", "query=" + substring(yana_query, 0.0, 80.0)))
         let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
@@ -5228,7 +5231,7 @@ return respond("200 ok") }
         // №603 C.1: делегирование вынесено в DispatchYanaDelegation — одна
         // механика для ветки dept == "yana" и ветки по умолчанию (detect-dept
         // вернул пусто). "1" — запрос уже ушёл отделу, обычный ответ не слать.
-        let del = TryVal(try DispatchYanaDelegation(reply, query, chat_id))
+        let del = DispatchYanaDelegationRetry(reply, query, chat_id)
         if to_string(del) == "()" then {
           let _ = TryVal(try AuditLog("yana_dispatch_fail", "yana", "reply=" + substring(reply, 0.0, 60.0)))
           let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
@@ -5442,7 +5445,7 @@ return respond("200 ok") }
       // "()" проходила мимо) или бросок в делегировании (HandleDeptQuery
       // отдела) ронял ВЕСЬ маршрут 500 — «Яна не отвечает». Честный отказ +
       // маркер; пустой ответ — норма (фолбэк/досье [SHOP:] уже ушли).
-      let reply = TryVal(try HandleYana(text, chat_id))
+      let reply = HandleYanaRetry(text, chat_id)
       if to_string(reply) == "()" then {
         let _ = TryVal(try AuditLog("yana_empty_reply", "yana", "query=" + substring(text, 0.0, 80.0)))
         let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
@@ -5451,7 +5454,7 @@ return respond("200 ok") }
         // №603 C.1: делегирование работает и в ветке по умолчанию — detect-dept
         // вернул пусто, но Яна могла ответить [DELEGATE: dept]. "1" — запрос уже
         // ушёл отделу DispatchYanaDelegation'ом, голый slug в /tg-send не уходит.
-        let del = TryVal(try DispatchYanaDelegation(reply, text, chat_id))
+        let del = DispatchYanaDelegationRetry(reply, text, chat_id)
         if to_string(del) == "()" then {
           let _ = TryVal(try AuditLog("yana_dispatch_fail", "yana", "reply=" + substring(reply, 0.0, 60.0)))
           let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
@@ -5636,6 +5639,21 @@ pattern DispatchYanaDelegation(reply: String, query: String, chat_id: String) ->
     return "1"
   }
   return ""
+}
+
+// ── #771 F: ретрай делегирования при транзиентном write-локе БД ──────────
+// См. HandleYanaRetry/HandleOSPRetry: db_execute бросает «database is
+// locked» после busy_timeout ≈5 с; окно бут-миграций деплоя перекрывает
+// LLM-ожидание — один ретрай после паузы возвращает владельцу ответ
+// отдела вместо отказа. Бросок, переживший ретрай, остаётся честным
+// отказом маршрута (yana_dispatch_fail, #771 E).
+pattern DispatchYanaDelegationRetry(reply: String, query: String, chat_id: String) -> String {
+  let del = TryVal(try DispatchYanaDelegation(reply, query, chat_id))
+  if to_string(del) != "()" then { return del }
+  sleep(8.0)
+  let del2 = TryVal(try DispatchYanaDelegation(reply, query, chat_id))
+  if to_string(del2) != "()" then { return del2 }
+  return "()"
 }
 
 // ── #669 A.4: шов карточки — хелперы команд владельца и слот замера ────────

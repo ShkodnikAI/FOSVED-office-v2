@@ -138,16 +138,16 @@ def test_mlog_test_blocks_n771_utils_pass():
 
 def test_e_yana_route_guarded():
     """#771 E: обе ветки Яны (dept=="yana" и по умолчанию) — HandleYana и
-    DispatchYanaDelegation под try, бросок = честный отказ + маркер, не 500."""
-    anchor = "let reply = TryVal(try HandleYana(yana_query, chat_id))"
-    assert APP.count(anchor) == 1, "HandleYana маршрута (ветка dept==yana) не под гвардом"
-    assert APP.count("let reply = TryVal(try HandleYana(text, chat_id))") == 1, (
-        "HandleYana ветки по умолчанию не под гвардом — тот же вектор тишины")
+    делегирование через ретрай-хварды #771 F, бросок = честный отказ + маркер."""
+    anchor = "let reply = HandleYanaRetry(yana_query, chat_id)"
+    assert APP.count(anchor) == 1, "HandleYanaRetry маршрута (ветка dept==yana) не подключён"
+    assert APP.count("let reply = HandleYanaRetry(text, chat_id)") == 1, (
+        "HandleYanaRetry ветки по умолчанию не подключён — тот же вектор тишины")
     idx = APP.index(anchor)
     block = APP[idx:idx + 2600]
     assert 'AuditLog("yana_empty_reply"' in block, "нет маркера при броске HandleYana"
-    assert "TryVal(try DispatchYanaDelegation(reply, query, chat_id))" in block, (
-        "делегирование не под гвардом — бросок отдела ронял маршрут")
+    assert "DispatchYanaDelegationRetry(reply, query, chat_id)" in block, (
+        "делегирование не под ретрай-гвардом — бросок отдела ронял маршрут")
     assert 'AuditLog("yana_dispatch_fail"' in block, "нет маркера при броске делегирования"
     assert APP.count('"Яна: не удалось получить ответ. Попробуйте позже."') == 4, (
         "честный отказ должен стоять в 4 точках (2 ветки × 2 гварда)")
@@ -164,3 +164,35 @@ def test_e_yana_dead_proxy_check_fixed():
     assert "TryVal(try parse_json(proxy_result))" in seg, "parse_json не под гвардом"
     assert seg.count('"Сервис временно недоступен. Попробуйте позже."') >= 2, (
         "оба отказных пути (пустой ответ прокси, битый JSON) должны давать фолбэк")
+
+
+# ── F: ретрай при транзиентном write-локе БД (инцидент 24.11 13:26) ───────
+
+def test_f_retry_helpers_exist():
+    """#771 F: HandleYanaRetry/HandleOSPRetry/DispatchYanaDelegationRetry —
+    один ретрай после sleep(8) на бросок db_execute «database is locked»
+    (движок: WAL, busy_timeout ≈5 с, доказано пробой n771f)."""
+    for name, src, wrapped in (
+        ("HandleYanaRetry", YANA, "HandleYana(query, chat_id)"),
+        ("HandleOSPRetry", OSP, "HandleOSP(query, chat_id)"),
+        ("DispatchYanaDelegationRetry", APP, "DispatchYanaDelegation(reply, query, chat_id)"),
+    ):
+        idx = src.index(f"pattern {name}(")
+        seg = src[idx:src.index("}", src.index("return \"()\"", idx)) + 1]
+        assert f"TryVal(try {wrapped}" in seg, f"{name} не оборачивает {wrapped.split('(')[0]}"
+        assert "sleep(8.0)" in seg, f"{name} без паузы — ретрай в лоб не покрывает окно лока"
+        assert seg.count(f"TryVal(try {wrapped}") == 2, f"{name}: ровно один ретрай"
+        assert 'return "()"' in seg, f"{name}: двойной бросок должен возвращать маркер \"()\""
+
+
+def test_f_route_call_sites_use_retry():
+    """Все 5 точек маршрута зовут ретрай-хелперы: прямой /osp, обе ветки
+    Яны (HandleYana + делегирование)."""
+    assert APP.count("let mut reply = HandleOSPRetry(text, chat_id)") == 1
+    assert APP.count("let reply = HandleYanaRetry(yana_query, chat_id)") == 1
+    assert APP.count("let reply = HandleYanaRetry(text, chat_id)") == 1
+    assert APP.count("DispatchYanaDelegationRetry(reply, query, chat_id)") == 1
+    assert APP.count("DispatchYanaDelegationRetry(reply, text, chat_id)") == 1
+    # прямые (безретрайные) вызовы в маршруте больше не живут
+    assert "TryVal(try HandleOSP(text, chat_id))" not in APP
+    assert "TryVal(try HandleYana(" not in APP
