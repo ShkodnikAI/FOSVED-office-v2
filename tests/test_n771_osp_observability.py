@@ -178,11 +178,15 @@ def test_f_retry_helpers_exist():
         ("DispatchYanaDelegationRetry", APP, "DispatchYanaDelegation(reply, query, chat_id)"),
     ):
         idx = src.index(f"pattern {name}(")
-        seg = src[idx:src.index("}", src.index("return \"()\"", idx)) + 1]
-        assert f"TryVal(try {wrapped}" in seg, f"{name} не оборачивает {wrapped.split('(')[0]}"
+        seg = src[idx:src.index("}", src.index("return \"THROW|", idx)) + 1]
+        # #771 G: сырой try-результат (Struct{ok, value, error}), TryVal достаёт
+        # .value, причина — .error.message (идиом admin.mlog:491)
+        assert seg.count(f"try {wrapped}") == 2, f"{name}: ровно один ретрай"
+        assert seg.count("= TryVal(tr") == 2, f"{name}: значение через TryVal(tr)"
+        assert seg.count("to_string(tr.error.message)") == 1 and seg.count("to_string(tr2.error.message)") == 1, \
+            f"{name}: обе причины броска должны захватываться"
         assert "sleep(8.0)" in seg, f"{name} без паузы — ретрай в лоб не покрывает окно лока"
-        assert seg.count(f"TryVal(try {wrapped}") == 2, f"{name}: ровно один ретрай"
-        assert 'return "()"' in seg, f"{name}: двойной бросок должен возвращать маркер \"()\""
+        assert 'return "THROW|' in seg, f"{name}: двойной бросок возвращает THROW| с причиной"
 
 
 def test_f_route_call_sites_use_retry():
@@ -196,3 +200,28 @@ def test_f_route_call_sites_use_retry():
     # прямые (безретрайные) вызовы в маршруте больше не живут
     assert "TryVal(try HandleOSP(text, chat_id))" not in APP
     assert "TryVal(try HandleYana(" not in APP
+
+
+# ── G: отказ само-диагностирующийся — причина владельцу и в маркер ────────
+
+def test_g_throw_causes_reach_owner_and_audit():
+    """#771 G: THROW| от ретрай-хелпера → причина (TryResult.error.message)
+    попадает и в сообщение владельцу («Причина: …»), и в маркер audit_log.
+    Третий повтор инцидента показал: без причины в сообщении владелец
+    не может передать диагностику, а stderr прода недоступен."""
+    # каждая точка различает THROW| дважды: в условии гварда и при выборе
+    # текста отказа (с причиной / общий)
+    assert APP.count('starts_with(reply, "THROW|")') == 6, "3 точки × (гвард + выбор сообщения)"
+    assert APP.count('starts_with(del, "THROW|")') == 4, "2 гварда делегирования × (гвард + выбор)"
+    idx = APP.index("let mut reply = HandleOSPRetry(text, chat_id)")
+    osp_block = APP[idx:idx + 2200]
+    assert 'starts_with(reply, "THROW|")' in osp_block, "прямой /osp не различает THROW|"
+    assert osp_block.count('Причина: ') == 1, "прямой /osp: причина должна быть в сообщении владельцу"
+    assert 'substring(reply, 6.0, 240.0)' in osp_block, "причина должна вырезаться из THROW|"
+    # маркеры несут причину (детали = query + substring(reply/del))
+    assert 'AuditLog("osp_empty_reply", "osp", "query=" + substring(text, 0.0, 80.0) + " seam=" + substring(seam, 0.0, 40.0) + " len=" + to_string(length(to_string(reply))) + " " + cause)' in APP
+    assert APP.count('substring(reply, 0.0, 300.0)') == 2, "оба маркера yana_empty_reply несут причину"
+    assert APP.count('substring(del, 0.0, 300.0)') == 2, "оба маркера yana_dispatch_fail несут причину"
+    # plain-отказы остаются для пустого ответа (не броска)
+    assert APP.count('"Яна: не удалось получить ответ. Попробуйте позже."') == 4
+    assert APP.count('"ОСП: не удалось получить ответ. Попробуйте позже."') == 2
