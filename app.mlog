@@ -1750,8 +1750,7 @@ pattern call_python(module: String, function: String, args_json: String) -> Stri
 // /diag/bridges — тонкий диспетчер. Пинги с коротким таймаутом (3с):
 // llm_proxy/health, news-кэш /news/fresh, ключ Tavily. Auth — CRON_SECRET,
 // hash-форма (№376/№318 — SecretMatches, конвенция файла).
-pattern DiagBridgesCheck(secret: String) -> String {
-  if SecretMatches(secret, "CRON_SECRET") == false then { return "403 Forbidden" }
+pattern DiagBridgesCheck() -> String {
   // Category A: ответ http_get/http_post — untrusted; if по нему решает
   // только ПОСЛЕ redact(x, "all") — идиома admin.mlog:491 (односторонняя
   // маскировка перед ветвлением; значение для сравнения — "()"-маркер).
@@ -2270,7 +2269,12 @@ mlogserver {
   // нельзя. Маршрут пингует каждый мост с коротким таймаутом и возвращает
   // ok/причину. Auth — CRON_SECRET (конвенция №376, hash-форма).
   route "/diag/bridges" method=GET {
-    return respond(DiagBridgesCheck(redact(query_param("secret"), "hash_only")))
+    // route-guards-контракт: гвард и 403 — в теле route (как /lz/telegram);
+    // категория-A if здесь по Bool от SecretMatches (шов паттерна), не по
+    // untrusted-данным — UNTRUSTED_DECISION не срабатывает (проба бута).
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
+    return respond(DiagBridgesCheck())
   }
 
   // ── №376: REST /api/expert/* — восстановление обёрток (TODO dept/expert.mlog:804) ──

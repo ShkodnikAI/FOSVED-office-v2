@@ -299,18 +299,24 @@ def test_i_call_python_carries_cause_and_timeout():
 def test_i_diag_bridges_route_registered():
     # Анти-инъекционный инвариант: логика — в паттерне (label-шов), route —
     # тонкий диспетчер (проба бута 25.11, Category A UNTRUSTED_DECISION).
-    m = re.search(r'route "/diag/bridges" method=GET \{[^}]*\}', APP, re.S)
+    m = re.search(r'route "/diag/bridges" method=GET \{.*?\n  \}', APP, re.S)
     assert m, "маршрут /diag/bridges не найден в app.mlog"
-    assert "DiagBridgesCheck(" in m.group(0), "route не диспетчеризует паттерн"
-    assert "if " not in m.group(0), "в теле route остался if (UNTRUSTED_DECISION)"
-    p = re.search(r"pattern DiagBridgesCheck\(secret: String\) -> String \{.*?\n\}", APP, re.S)
+    body = m.group(0)
+    assert "DiagBridgesCheck()" in body, "route не диспетчеризует паттерн"
+    # route-guards-контракт: гвард и 403 — в теле; UNTRUSTED_DECISION не
+    # срабатывает: if по Bool от SecretMatches (шов паттерна), не по http-данным
+    assert 'SecretMatches(secret, "CRON_SECRET")' in body, "нет секрет-гварда в теле"
+    assert "403 Forbidden" in body, "нет 403-ответа в теле"
+    assert "http_get" not in body and "http_post" not in body, (
+        "пинги мостов обязаны жить в паттерне (Category A)")
+    p = re.search(r"pattern DiagBridgesCheck\(\) -> String \{.*?\n\}", APP, re.S)
     assert p, "паттерн DiagBridgesCheck не найден в app.mlog"
     body = p.group(0)
     for needle, why in (
         ("http://127.0.0.1:4000/health", "нет пинга llm_proxy"),
         ("TavilyKey()", "нет проверки ключа Tavily"),
         ("news/fresh", "нет проверки news-кэша"),
-        ('SecretMatches(secret, "CRON_SECRET")', "нет auth-гварда (№376)"),
+        ('TavilyKey()', "нет проверки ключа Tavily"),
         ("error.message", "мосты не раскрывают причину отказа"),
     ):
         assert needle in body, f"DiagBridgesCheck: {why}"
