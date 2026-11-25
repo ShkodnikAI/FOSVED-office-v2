@@ -33,17 +33,17 @@
 | Метрика | Значение |
 |---|---|
 | Файлов в поверхности | 36 |
-| Паттернов (вхождений) | 1422 |
-| Уникальных имён паттернов | 1338 |
+| Паттернов (вхождений) | 1423 |
+| Уникальных имён паттернов | 1339 |
 | Конфиг-блоков верхнего уровня с env | 6 |
 | Паттернов-источников всего | 215 |
 | env/env_or-читатели (имена) | 36 |
 | Возврат вывода LLM (call_llm) | 177 |
 | Читатели ввода запроса (json_body/query_param) | 3 |
-| Паттернов-стоков (уникальных имён) | 97 |
-| HTTP-маршрутов serve | 71 |
-| Транзитивных потоков источник→сток | 326 |
-| Прямых рёбер «источник→сток» | 122 |
+| Паттернов-стоков (уникальных имён) | 98 |
+| HTTP-маршрутов serve | 72 |
+| Транзитивных потоков источник→сток | 327 |
+| Прямых рёбер «источник→сток» | 123 |
 | Швов — источников, чьё значение достигает стока в ДРУГОМ теле | 187 |
 | Интра-процедурных потоков (источник и сток в одном теле — видит аудит сегодня) | 21 |
 
@@ -121,7 +121,7 @@
 | `ReposTaskPage` | app.mlog:2669 | query_param |
 | `WebhookBody` | app.mlog:2739 | json_body |
 
-### 2.4 Паттерны-стоки (97 уникальных имён)
+### 2.4 Паттерны-стоки (98 уникальных имён)
 
 | Паттерн | Файл:строка | Стоки |
 |---|---|---|
@@ -145,6 +145,7 @@
 | `CallLLMResilient` | app.mlog:899 | http_post |
 | `CallLLMResilient` | dogfood_staging.mlog:688 | http_post |
 | `CollectNewsSlot` | dept/scheduler.mlog:456 | http_get |
+| `DiagBridgesCheck` | app.mlog:1753 | http_get, http_post |
 | `CreateDefect` | dept/qa.mlog:396 | send_message |
 | `DetectDepartment` | app.mlog:1652 | http_post |
 | `DetectDepartment` | dogfood_staging.mlog:1742 | http_post |
@@ -244,10 +245,11 @@
 | `call_python` | app.mlog:1727 | http_post |
 | `call_python` | dogfood_staging.mlog:2451 | http_post |
 
-### 2.5 Прямые рёбра «источник → сток» (122; redact — эвристика той же строки)
+### 2.5 Прямые рёбра «источник → сток» (123; redact — эвристика той же строки)
 
 | Источник | Сток-паттерн | Сток-библиотеки | redact на call-site |
 |---|---|---|---|
+| `TavilyKey` | `DiagBridgesCheck` (app.mlog:1753) | http_get, http_post | да |
 | `AdminUaToken` | `AdminAnalyze` (dept/admin.mlog:682) | http_get | да |
 | `AdminUaToken` | `AdminDocs` (dept/admin.mlog:757) | http_get | да |
 | `AdminUaToken` | `AdminGraph` (dept/admin.mlog:768) | http_get | да |

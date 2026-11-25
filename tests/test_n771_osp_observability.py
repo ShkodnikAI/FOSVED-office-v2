@@ -277,3 +277,85 @@ def test_h_skill_file_read_normalizes():
     ctx = open(os.path.join(REPO_H, "dept", "context.mlog"), encoding="utf-8").read()
     assert ctx.count("SkillFileRead(") == 25, "24 скилла Tier1-3 + ReadDeptProfile"
     assert 'SkillFileRead("library/" + dept + ".md")' in ctx
+
+# ── I (#771): мост call_python несёт причину + /diag/bridges ──────────────
+# Инцидент 25.11 (препарирование OSP-2026-11-25-LUKA-VNS-01): прод
+# показал [TG] {"error": "call_python endpoint unavailable"} — TryVal
+# глотал текст исключения (таймаут/отказ соединения/4xx), при этом
+# llm_proxy на /news/fresh отвечал. Идиома TryResult (admin.mlog:491)
+# раскрывает причину; таймаут 120с — медленные llm_verifier-вызовы
+# (безымянный дефолт рвал мост досрочно).
+
+def test_i_call_python_carries_cause_and_timeout():
+    m = re.search(r"pattern call_python\(module: String, function: String, args_json: String\) -> String \{.*?\n\}", APP, re.S)
+    assert m, "паттерн call_python не найден в app.mlog"
+    body = m.group(0)
+    assert "tr.error.message" in body, "call_python не раскрывает причину отказа (TryResult)"
+    assert "120.0" in body, "call_python без явного таймаута (медленный llm_verifier рвёт мост)"
+    assert "endpoint unavailable" not in body, "старая безымянная формулировка осталась"
+    assert "bridge failed" in body, "новый честный формат отказа не найден"
+
+
+def test_i_diag_bridges_route_registered():
+    # Анти-инъекционный инвариант: логика — в паттерне (label-шов), route —
+    # тонкий диспетчер (проба бута 25.11, Category A UNTRUSTED_DECISION).
+    m = re.search(r'route "/diag/bridges" method=GET \{.*?\n  \}', APP, re.S)
+    assert m, "маршрут /diag/bridges не найден в app.mlog"
+    body = m.group(0)
+    assert "DiagBridgesCheck()" in body, "route не диспетчеризует паттерн"
+    # route-guards-контракт: гвард и 403 — в теле; UNTRUSTED_DECISION не
+    # срабатывает: if по Bool от SecretMatches (шов паттерна), не по http-данным
+    assert 'SecretMatches(secret, "CRON_SECRET")' in body, "нет секрет-гварда в теле"
+    assert "403 Forbidden" in body, "нет 403-ответа в теле"
+    assert "http_get" not in body and "http_post" not in body, (
+        "пинги мостов обязаны жить в паттерне (Category A)")
+    p = re.search(r"pattern DiagBridgesCheck\(\) -> String \{.*?\n\}", APP, re.S)
+    assert p, "паттерн DiagBridgesCheck не найден в app.mlog"
+    body = p.group(0)
+    for needle, why in (
+        ("http://127.0.0.1:4000/health", "нет пинга llm_proxy"),
+        ("TavilyKey()", "нет проверки ключа Tavily"),
+        ("news/fresh", "нет проверки news-кэша"),
+        ('TavilyKey()', "нет проверки ключа Tavily"),
+        ("error.message", "мосты не раскрывают причину отказа"),
+    ):
+        assert needle in body, f"DiagBridgesCheck: {why}"
+
+
+def test_i_call_python_live_scenario_carries_cause():
+    """Нарезка паттерна из app.mlog + import dept/utils → живой вызов.
+
+    Средонезависимо: если :4000 отвечает (стенд с llm_proxy) — ожидаем
+    успех ("result"); если мёртв (pytest-CI без стека) — ожидаем
+    "bridge failed" с НЕПУСТОЙ причиной (не голое unavailable).
+    """
+    m = re.search(r"pattern call_python\(module: String, function: String, args_json: String\) -> String \{.*?\n\}", APP, re.S)
+    assert m
+    src = (
+        "import dept/utils  // #771 I: TryVal/нарезка call_python\n"
+        "import dept/skills  // #771 H: dept/utils зовёт SkillFileRead\n"
+        + m.group(0)
+        + "\npattern IProbe(x: String) -> String {\n"
+        '  let r = call_python("statistics", "mean", "[[1,2,3,4,5]]")\n'
+        "  return \"IPROBE=\" + to_string(r)\n"
+        "}\n"
+        "flow Main {\n  input: String = \"\" -> IProbe -> output\n}\n"
+    )
+    scen = os.path.join(REPO_ROOT, "test_n771i_bridge.mlog")
+    with open(scen, "w", encoding="utf-8") as f:
+        f.write(src)
+    try:
+        proc = subprocess.run([os.path.join(REPO_ROOT, "bin", "mlog"), "run", scen],
+                              capture_output=True, text=True, timeout=180, cwd=REPO_ROOT)
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 0, f"rc={proc.returncode}: {out[-600:]}"
+        assert "IPROBE=" in out, f"нет результата пробы: {out[-600:]}"
+        if "bridge failed" in out:
+            m_cause = re.search(r'"cause": "([^"]+)"', out)
+            assert m_cause and m_cause.group(1).strip(), (
+                f"отказ без причины: {out[-600:]}")
+        else:
+            assert '"result"' in out, f"не успех и не честный отказ: {out[-600:]}"
+    finally:
+        if os.path.exists(scen):
+            os.unlink(scen)

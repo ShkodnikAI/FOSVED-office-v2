@@ -1732,9 +1732,44 @@ pattern DetectDepartment(text: String) -> String {
 // ============================================================
 pattern call_python(module: String, function: String, args_json: String) -> String {
   let body = json_encode({module: module, function: function, args: parse_json(args_json)})
-  let resp = TryVal(try http_post("http://127.0.0.1:4000/call-python", body, "application/json"))
-  if to_string(resp) == "()" then { return "{\"error\": \"call_python endpoint unavailable\"}" }
-  return resp
+  // #771 I: таймаут явный (медленные Python-функции — llm_verifier со
+  // внешним LLM тянет десятки секунд; безымянный дефолт рвал мост по
+  // таймауту, а TryVal глотал причину — прод показывал голое «endpoint
+  // unavailable» при живом llm_proxy). TryResult-идиома admin.mlog:491.
+  let tr = try http_post("http://127.0.0.1:4000/call-python", body, "application/json", 120.0)
+  let resp = TryVal(tr)
+  if to_string(resp) != "()" then { return resp }
+  let cause = escape_json(redact(substring(to_string(TryVal(try to_string(tr.error.message))), 0.0, 160.0), "all"))
+  return "{\"error\": \"call_python bridge failed\", \"cause\": \"" + cause + "\", \"module\": \"" + escape_json(module) + "\", \"function\": \"" + escape_json(function) + "\"}"
+}
+
+// ── #771 I: живой статус мостов данных ────────────────────────────────────
+// Логика — В ПАТТЕРНЕ (анти-инъекционный инвариант route-тел: untrusted-
+// данные не решают if в теле route — проба бута 25.11, Category A;
+// label-трекинг не идёт сквозь вызов паттерна, №419). Маршрут
+// /diag/bridges — тонкий диспетчер. Пинги с коротким таймаутом (3с):
+// llm_proxy/health, news-кэш /news/fresh, ключ Tavily. Auth — CRON_SECRET,
+// hash-форма (№376/№318 — SecretMatches, конвенция файла).
+pattern DiagBridgesCheck() -> String {
+  // Category A: ответ http_get/http_post — untrusted; if по нему решает
+  // только ПОСЛЕ redact(x, "all") — идиома admin.mlog:491 (односторонняя
+  // маскировка перед ветвлением; значение для сравнения — "()"-маркер).
+  let tr_proxy = try http_get("http://127.0.0.1:4000/health", 3.0)
+  let proxy_ok = redact(to_string(TryVal(tr_proxy)), "all")
+  let proxy_status = "ok"
+  if proxy_ok == "()" then {
+    let proxy_status = "unreachable: " + redact(substring(to_string(TryVal(try to_string(tr_proxy.error.message))), 0.0, 160.0), "all")
+  }
+  let tavily_status = "key empty"
+  if redact(trim(TavilyKey()), "all") != "" then { let tavily_status = "key set" }
+  let tr_news = try http_post("http://127.0.0.1:4000/news/fresh", json_encode({query: "ping", dept: "diag", limit: 1}), "application/json", 3.0)
+  let news_ok = redact(to_string(TryVal(tr_news)), "all")
+  let news_status = "ok"
+  if news_ok == "()" then {
+    let news_status = "unreachable: " + redact(substring(to_string(TryVal(try to_string(tr_news.error.message))), 0.0, 160.0), "all")
+  }
+  let _ = AuditLog("diag_bridges", "admin", "proxy=" + substring(proxy_status, 0.0, 40.0) + " news=" + substring(news_status, 0.0, 40.0))
+  return json_encode({llm_proxy: proxy_status, tavily: tavily_status, news_cache: news_status})
 }
 
 // ============================================================
@@ -2225,6 +2260,21 @@ mlogserver {
     let _ = AuditLog("lz_telegram_bridge", "lz", "osp tg-search bridge (naryad #446 A.1)")
     let result = LZTelegramSearch(q, chat_id)
     return respond(json_encode({response: result}))
+  }
+
+  // ── #771 I: GET /diag/bridges — статус мостов данных ─────────────────
+  // Инцидент 25.11 (препарирование OSP-2026-11-25-LUKA-VNS-01): прод
+  // показал «call_python endpoint unavailable» БЕЗ причины, при этом
+  // llm_proxy отвечал на /news/fresh — STDERR прода недоступен, гадать
+  // нельзя. Маршрут пингует каждый мост с коротким таймаутом и возвращает
+  // ok/причину. Auth — CRON_SECRET (конвенция №376, hash-форма).
+  route "/diag/bridges" method=GET {
+    // route-guards-контракт: гвард и 403 — в теле route (как /lz/telegram);
+    // категория-A if здесь по Bool от SecretMatches (шов паттерна), не по
+    // untrusted-данным — UNTRUSTED_DECISION не срабатывает (проба бута).
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
+    return respond(DiagBridgesCheck())
   }
 
   // ── №376: REST /api/expert/* — восстановление обёрток (TODO dept/expert.mlog:804) ──
