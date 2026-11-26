@@ -19,6 +19,18 @@
 //      (`skills_undeployed`); отсутствующий файл индекса — `skill_missing`.
 // Замер лестницы (11 ядер Tier-1 ОСП, snapshot 2026-10-05): L2=20 656,
 // L3=32 759, L4=83 146 символов (`docs/office/probes/probe_d3_ladder.mlog`).
+// ── #771 H: безопасное чтение файла корпуса для флоу отделов ───────────────
+// Гейт serve-чтений (№455) при внешнем METALOGOS_DATA_DIR != корню приложения
+// бросает SANDBOX_* на каждом чтении skills//library (прод 24.11: оба отдела
+// «не удалось получить ответ», причина в сообщении владельца — G). Замысел
+// #623 W0 — «громкий пропуск» (skill_skipped/WARN), поэтому чтение под try
+// с нормализацией: бросок/пустота → "" (флоу живёт, скилл не грузится).
+pattern SkillFileRead(path: String) -> String {
+  let raw = to_string(TryVal(try read_file_or(path, "")))
+  if raw == "()" or raw == "" then { return "" }
+  return redact(raw, "all")
+}
+
 // app-зависимости (read_file_or, redact, AuditLog) резолвятся глобально
 // в serve-неймспейсе — как у всех dept-модулей.
 
@@ -36,7 +48,7 @@ pattern SkillsLevelByDepth(depth: Int) -> Int {
 // step)» и др.) терялись бы при точном совпадении — мутация «точное
 // совпадение заголовка» ловится тестом 24×4.
 pattern SkillCoreSliced(name: String, level: Int) -> String {
-  let raw = redact(read_file_or("skills/" + name + "/SKILL.md", ""), "all")
+  let raw = SkillFileRead("skills/" + name + "/SKILL.md")
   if raw == "" then { return "" }
   let chunks = split(raw, "\n## ")
   let mut out = ""
@@ -98,7 +110,7 @@ pattern SkillsAppend(result: String, name: String, level: Int, budget: Float, de
 // Общий загрузчик по индексу отдела: skills_index/<dept>.txt → содержимое.
 // Бюджет и depth передаёт вызывающий; порядок — порядок индекса.
 pattern LoadDeptSkills(dept: String, depth: Int, budget: Float, query: String) -> String {
-  let index_content = redact(read_file_or("skills_index/" + dept + ".txt", ""), "all")
+  let index_content = SkillFileRead("skills_index/" + dept + ".txt")
   if index_content == "" then {
     let _ = AuditLog("skills_index_missing", dept, "нет skills_index/" + dept + ".txt — скиллы не загружены")
     return ""
@@ -130,7 +142,7 @@ pattern LoadDeptSkills(dept: String, depth: Int, budget: Float, query: String) -
 // («The procedure (step by step)», второй «Output template» в calibration)
 // префикс ловит, точный матч — нет (мутация B).
 test "n623: 24/24 скиллов ОСП — 4 секции по префиксу на L4" {
-  let index_content = redact(read_file_or("skills_index/osp.txt", ""), "all")
+  let index_content = SkillFileRead("skills_index/osp.txt")
   if index_content == "" then {
     // гвард от ложнозелёного: индекс обязан существовать (в CI — bootstrap
     // снапшота шагом раньше); без него измерять нечего — тест красный.

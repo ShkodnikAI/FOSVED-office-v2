@@ -1732,9 +1732,44 @@ pattern DetectDepartment(text: String) -> String {
 // ============================================================
 pattern call_python(module: String, function: String, args_json: String) -> String {
   let body = json_encode({module: module, function: function, args: parse_json(args_json)})
-  let resp = TryVal(try http_post("http://127.0.0.1:4000/call-python", body, "application/json"))
-  if to_string(resp) == "()" then { return "{\"error\": \"call_python endpoint unavailable\"}" }
-  return resp
+  // #771 I: таймаут явный (медленные Python-функции — llm_verifier со
+  // внешним LLM тянет десятки секунд; безымянный дефолт рвал мост по
+  // таймауту, а TryVal глотал причину — прод показывал голое «endpoint
+  // unavailable» при живом llm_proxy). TryResult-идиома admin.mlog:491.
+  let tr = try http_post("http://127.0.0.1:4000/call-python", body, "application/json", 120.0)
+  let resp = TryVal(tr)
+  if to_string(resp) != "()" then { return resp }
+  let cause = escape_json(redact(substring(to_string(TryVal(try to_string(tr.error.message))), 0.0, 160.0), "all"))
+  return "{\"error\": \"call_python bridge failed\", \"cause\": \"" + cause + "\", \"module\": \"" + escape_json(module) + "\", \"function\": \"" + escape_json(function) + "\"}"
+}
+
+// ── #771 I: живой статус мостов данных ────────────────────────────────────
+// Логика — В ПАТТЕРНЕ (анти-инъекционный инвариант route-тел: untrusted-
+// данные не решают if в теле route — проба бута 25.11, Category A;
+// label-трекинг не идёт сквозь вызов паттерна, №419). Маршрут
+// /diag/bridges — тонкий диспетчер. Пинги с коротким таймаутом (3с):
+// llm_proxy/health, news-кэш /news/fresh, ключ Tavily. Auth — CRON_SECRET,
+// hash-форма (№376/№318 — SecretMatches, конвенция файла).
+pattern DiagBridgesCheck() -> String {
+  // Category A: ответ http_get/http_post — untrusted; if по нему решает
+  // только ПОСЛЕ redact(x, "all") — идиома admin.mlog:491 (односторонняя
+  // маскировка перед ветвлением; значение для сравнения — "()"-маркер).
+  let tr_proxy = try http_get("http://127.0.0.1:4000/health", 3.0)
+  let proxy_ok = redact(to_string(TryVal(tr_proxy)), "all")
+  let proxy_status = "ok"
+  if proxy_ok == "()" then {
+    let proxy_status = "unreachable: " + redact(substring(to_string(TryVal(try to_string(tr_proxy.error.message))), 0.0, 160.0), "all")
+  }
+  let tavily_status = "key empty"
+  if redact(trim(TavilyKey()), "all") != "" then { let tavily_status = "key set" }
+  let tr_news = try http_post("http://127.0.0.1:4000/news/fresh", json_encode({query: "ping", dept: "diag", limit: 1}), "application/json", 3.0)
+  let news_ok = redact(to_string(TryVal(tr_news)), "all")
+  let news_status = "ok"
+  if news_ok == "()" then {
+    let news_status = "unreachable: " + redact(substring(to_string(TryVal(try to_string(tr_news.error.message))), 0.0, 160.0), "all")
+  }
+  let _ = AuditLog("diag_bridges", "admin", "proxy=" + substring(proxy_status, 0.0, 40.0) + " news=" + substring(news_status, 0.0, 40.0))
+  return json_encode({llm_proxy: proxy_status, tavily: tavily_status, news_cache: news_status})
 }
 
 // ============================================================
@@ -2225,6 +2260,21 @@ mlogserver {
     let _ = AuditLog("lz_telegram_bridge", "lz", "osp tg-search bridge (naryad #446 A.1)")
     let result = LZTelegramSearch(q, chat_id)
     return respond(json_encode({response: result}))
+  }
+
+  // ── #771 I: GET /diag/bridges — статус мостов данных ─────────────────
+  // Инцидент 25.11 (препарирование OSP-2026-11-25-LUKA-VNS-01): прод
+  // показал «call_python endpoint unavailable» БЕЗ причины, при этом
+  // llm_proxy отвечал на /news/fresh — STDERR прода недоступен, гадать
+  // нельзя. Маршрут пингует каждый мост с коротким таймаутом и возвращает
+  // ok/причину. Auth — CRON_SECRET (конвенция №376, hash-форма).
+  route "/diag/bridges" method=GET {
+    // route-guards-контракт: гвард и 403 — в теле route (как /lz/telegram);
+    // категория-A if здесь по Bool от SecretMatches (шов паттерна), не по
+    // untrusted-данным — UNTRUSTED_DECISION не срабатывает (проба бута).
+    let secret = redact(query_param("secret"), "hash_only")
+    if SecretMatches(secret, "CRON_SECRET") == false then { return respond("403 Forbidden") }
+    return respond(DiagBridgesCheck())
   }
 
   // ── №376: REST /api/expert/* — восстановление обёрток (TODO dept/expert.mlog:804) ──
@@ -5071,7 +5121,10 @@ pattern WebhookBody() -> String {
       // гейтов). Было HandleDeptQuery — generic LLM в обход хард-гейтов ОСП;
       // прямые команды отдела не доходили до его диспетчера. HandleOSP ждёт
       // полный текст с префиксом /osp — передаём text, а не strip-нутый query.
-      let mut reply = TryVal(try HandleOSP(text, chat_id))
+      // #771 F: ретрай при транзиентном write-локе (окно бут-миграций
+      // деплоя): db_execute бросает database is locked после busy_timeout
+      // ≈5 с — один ретрай после паузы возвращает ответ вместо отказа.
+      let mut reply = HandleOSPRetry(text, chat_id)
       let seam = TryVal(try CardSeamVerdict("osp", to_string(reply), 0.0))
       // #771 D (корень инцидента 23.11): CardTailStrip отбрасывает всё после
       // ```card — если модель открыла этим забором ВЕСЬ ответ, strip возвращал
@@ -5081,12 +5134,19 @@ pattern WebhookBody() -> String {
         let stripped = CardTailStrip(to_string(reply))
         if stripped != "" then { reply = stripped }
       }
-      if to_string(reply) == "()" or reply == "" then {
+      if to_string(reply) == "()" or reply == "" or starts_with(reply, "THROW|") then {
         // #771 A: причина тихого отказа глотается try — маркер в audit_log
         // для корреляции со stderr-строкой «[try] caught error» этого запроса
         // (инцидент 23.11: «ОСП: не удалось получить ответ» без следов в БД).
-        let _ = TryVal(try AuditLog("osp_empty_reply", "osp", "query=" + substring(text, 0.0, 80.0) + " seam=" + substring(seam, 0.0, 40.0) + " len=" + to_string(length(to_string(reply)))))
-        let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
+        // #771 G: THROW| несёт причину (TryResult.error.message) — она идёт
+        // в маркер и в сообщение владельцу: отказ само-диагностирующийся.
+        let cause = substring(reply, 6.0, 240.0)
+        let _ = TryVal(try AuditLog("osp_empty_reply", "osp", "query=" + substring(text, 0.0, 80.0) + " seam=" + substring(seam, 0.0, 40.0) + " len=" + to_string(length(to_string(reply))) + " " + cause))
+        if starts_with(reply, "THROW|") then {
+          let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ.\n\nПричина: " + cause + "\n\nПовтори позже или /osp напрямую.")
+        } else {
+          let _ = SendTelegramReply(chat_id, "ОСП: не удалось получить ответ. Попробуйте позже.")
+        }
       } else {
         let _ = SendReport(reply, "osp", "OSP: " + substring(query, 0.0, 50.0), "3.0", chat_id)
       }
@@ -5214,31 +5274,58 @@ return respond("200 ok") }
       // Fall back to full text so recall and LLM get a usable query.
       let mut yana_query = query
       if yana_query == "" then { yana_query = text }
-      let reply = HandleYana(yana_query, chat_id)
-      // №603 C.1: делегирование вынесено в DispatchYanaDelegation — одна
-      // механика для ветки dept == "yana" и ветки по умолчанию (detect-dept
-      // вернул пусто). "1" — запрос уже ушёл отделу, обычный ответ не слать.
-      let del = DispatchYanaDelegation(reply, query, chat_id)
-      if del == "1" then {
-        let handled = 1.0
-      } else {
-        // Normal Yana reply — voice + text, no restrictions
-        // #409: пустой ответ не отправляется (после [SHOP:]-обработки досье
-        // уже ушло карточкой, текст Яны был бы дублем подтверждения)
-        if length(reply) > 0.0 then {
-          let voice_on = redact(kv_get("voice_enabled"), "all")
-          if voice_on == "true" then {
-            let voice_name = redact(kv_get("tts_voice"), "all")
-            if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
-            // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
-            let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
-            let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
-          }
-          // Text: send via proxy (handles 4096 limit with splitting)
-          let text_body = json_encode({chat_id: chat_id, text: "Яна\n\n" + reply})
-          let _ = TryVal(try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json"))
+      // #771 E: гварды — бросок в HandleYana (например parse_json пустого
+      // ответа мёртвого прокси: CallLLMProxy возвращает "", проверка "()" мимо)
+      // или в делегировании (HandleDeptQuery отдела) ронял ВЕСЬ маршрут 500:
+      // владелец получал тишину («Яна не отвечает»). Пустой ответ — норма:
+      // фолбэк или досье [SHOP:] уже ушли владельцу.
+      let reply = HandleYanaRetry(yana_query, chat_id)
+      // #771 G: THROW| несёт причину (TryResult.error.message) — в маркер
+      // и в сообщение владельцу; делегирование на броске не вызываем.
+      if to_string(reply) == "()" or starts_with(reply, "THROW|") then {
+        let _ = TryVal(try AuditLog("yana_empty_reply", "yana", "query=" + substring(yana_query, 0.0, 80.0) + " " + substring(reply, 0.0, 300.0)))
+        if starts_with(reply, "THROW|") then {
+          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ.\n\nПричина: " + substring(reply, 6.0, 240.0) + "\n\nПовтори позже или /yana напрямую.")
+        } else {
+          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
         }
         let handled = 1.0
+      } else {
+        // №603 C.1: делегирование вынесено в DispatchYanaDelegation — одна
+        // механика для ветки dept == "yana" и ветки по умолчанию (detect-dept
+        // вернул пусто). "1" — запрос уже ушёл отделу, обычный ответ не слать.
+        let del = DispatchYanaDelegationRetry(reply, query, chat_id)
+        if to_string(del) == "()" or starts_with(del, "THROW|") then {
+          let _ = TryVal(try AuditLog("yana_dispatch_fail", "yana", "reply=" + substring(reply, 0.0, 60.0) + " " + substring(del, 0.0, 300.0)))
+          if starts_with(del, "THROW|") then {
+            let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ.\n\nПричина: " + substring(del, 6.0, 240.0) + "\n\nПовтори позже или /yana напрямую.")
+          } else {
+            let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+          }
+          let handled = 1.0
+        } else {
+          if del == "1" then {
+            let handled = 1.0
+          } else {
+            // Normal Yana reply — voice + text, no restrictions
+            // #409: пустой ответ не отправляется (после [SHOP:]-обработки досье
+            // уже ушло карточкой, текст Яны был бы дублем подтверждения)
+            if length(reply) > 0.0 then {
+              let voice_on = redact(kv_get("voice_enabled"), "all")
+              if voice_on == "true" then {
+                let voice_name = redact(kv_get("tts_voice"), "all")
+                if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
+                // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
+                let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
+                let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
+              }
+              // Text: send via proxy (handles 4096 limit with splitting)
+              let text_body = json_encode({chat_id: chat_id, text: "Яна\n\n" + reply})
+              let _ = TryVal(try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json"))
+            }
+            let handled = 1.0
+          }
+        }
       }
     }
     if dept == "osp" then {
@@ -5420,25 +5507,53 @@ return respond("200 ok") }
     // Default: route to Yana with voice + text, no restrictions
     if handled == 0.0 then {
       let _ = RecordUserMessage(chat_id, "yana", text)
-      let reply = HandleYana(text, chat_id)
-      // №603 C.1: делегирование работает и в ветке по умолчанию — detect-dept
-      // вернул пусто, но Яна могла ответить [DELEGATE: dept]. "1" — запрос уже
-      // ушёл отделу DispatchYanaDelegation'ом, голый slug в /tg-send не уходит.
-      let del = DispatchYanaDelegation(reply, text, chat_id)
-      if del != "1" then {
-        // #409: пустой ответ не отправляется (после [SHOP:]-обработки досье
-        // уже ушло карточкой, текст Яны был бы дублем подтверждения)
-        if length(reply) > 0.0 then {
-          let voice_on = redact(kv_get("voice_enabled"), "all")
-          if voice_on == "true" then {
-            let voice_name = redact(kv_get("tts_voice"), "all")
-            if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
-            // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
-            let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
-            let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
+      // #771 E: гварды — как в ветке dept == "yana": бросок HandleYana
+      // (parse_json("") мёртвого прокси — CallLLMProxy возвращает "", проверка
+      // "()" проходила мимо) или бросок в делегировании (HandleDeptQuery
+      // отдела) ронял ВЕСЬ маршрут 500 — «Яна не отвечает». Честный отказ +
+      // маркер; пустой ответ — норма (фолбэк/досье [SHOP:] уже ушли).
+      let reply = HandleYanaRetry(text, chat_id)
+      // #771 G: THROW| несёт причину (TryResult.error.message) — в маркер
+      // и в сообщение владельцу; делегирование на броске не вызываем.
+      if to_string(reply) == "()" or starts_with(reply, "THROW|") then {
+        let _ = TryVal(try AuditLog("yana_empty_reply", "yana", "query=" + substring(text, 0.0, 80.0) + " " + substring(reply, 0.0, 300.0)))
+        if starts_with(reply, "THROW|") then {
+          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ.\n\nПричина: " + substring(reply, 6.0, 240.0) + "\n\nПовтори позже или /yana напрямую.")
+        } else {
+          let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
+        }
+        let handled = 1.0
+      } else {
+        // №603 C.1: делегирование работает и в ветке по умолчанию — detect-dept
+        // вернул пусто, но Яна могла ответить [DELEGATE: dept]. "1" — запрос уже
+        // ушёл отделу DispatchYanaDelegation'ом, голый slug в /tg-send не уходит.
+        let del = DispatchYanaDelegationRetry(reply, text, chat_id)
+        if to_string(del) == "()" or starts_with(del, "THROW|") then {
+          let _ = TryVal(try AuditLog("yana_dispatch_fail", "yana", "reply=" + substring(reply, 0.0, 60.0) + " " + substring(del, 0.0, 300.0)))
+          if starts_with(del, "THROW|") then {
+            let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ.\n\nПричина: " + substring(del, 6.0, 240.0) + "\n\nПовтори позже или /yana напрямую.")
+          } else {
+            let _ = SendTelegramReply(chat_id, "Яна: не удалось получить ответ. Попробуйте позже.")
           }
-          let text_body = json_encode({chat_id: chat_id, text: reply})
-          let _ = TryVal(try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json"))
+          let handled = 1.0
+        } else {
+          if del != "1" then {
+            // #409: пустой ответ не отправляется (после [SHOP:]-обработки досье
+            // уже ушло карточкой, текст Яны был бы дублем подтверждения)
+            if length(reply) > 0.0 then {
+              let voice_on = redact(kv_get("voice_enabled"), "all")
+              if voice_on == "true" then {
+                let voice_name = redact(kv_get("tts_voice"), "all")
+                if length(voice_name) < 3.0 then { let voice_name = "ru-RU-SvetlanaNeural" }
+                // MINIAPP-3 (#290): параметры голоса из kv; пустые kv → прежнее поведение (defaults /tts)
+                let tts_body = json_encode({text: reply, voice: voice_name, chat_id: chat_id, speed: kv_get("voice_speed"), volume: kv_get("voice_volume"), pitch: kv_get("voice_pitch")})
+                let _ = TryVal(try http_post("http://127.0.0.1:4000/tts", tts_body, "application/json"))
+              }
+              let text_body = json_encode({chat_id: chat_id, text: reply})
+              let _ = TryVal(try http_post("http://127.0.0.1:4000/tg-send", text_body, "application/json"))
+            }
+            let handled = 1.0
+          }
         }
       }
     }
@@ -5601,6 +5716,26 @@ pattern DispatchYanaDelegation(reply: String, query: String, chat_id: String) ->
     return "1"
   }
   return ""
+}
+
+// ── #771 F: ретрай делегирования при транзиентном write-локе БД ──────────
+// См. HandleYanaRetry/HandleOSPRetry: db_execute бросает «database is
+// locked» после busy_timeout ≈5 с; окно бут-миграций деплоя перекрывает
+// LLM-ожидание — один ретрай после паузы возвращает владельцу ответ
+// отдела вместо отказа. Бросок, переживший ретрай, остаётся честным
+// отказом маршрута (yana_dispatch_fail, #771 E).
+pattern DispatchYanaDelegationRetry(reply: String, query: String, chat_id: String) -> String {
+  // #771 G: причина броска — TryResult.error.message (см. HandleYanaRetry).
+  let tr = try DispatchYanaDelegation(reply, query, chat_id)
+  let del = TryVal(tr)
+  if to_string(del) != "()" then { return del }
+  let err = redact(substring(TryVal(try to_string(tr.error.message)), 0.0, 160.0), "all")
+  sleep(8.0)
+  let tr2 = try DispatchYanaDelegation(reply, query, chat_id)
+  let del2 = TryVal(tr2)
+  if to_string(del2) != "()" then { return del2 }
+  let err2 = redact(substring(TryVal(try to_string(tr2.error.message)), 0.0, 160.0), "all")
+  return "THROW|" + err + " || retry: " + err2
 }
 
 // ── #669 A.4: шов карточки — хелперы команд владельца и слот замера ────────

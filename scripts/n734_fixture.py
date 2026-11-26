@@ -38,6 +38,7 @@ def main(out_path: str) -> None:
 profile legacy {{ egress: permissive_with_audit }}
 db {{ url: env("DATABASE_URL") }}
 import dept/utils
+import dept/skills  // #771 H: SkillFileRead
 
 // ── заглушки транспорта ─────────────────────────────────────────────────
 pattern SendTelegramReply(chat_id: String, text: String) -> String {{

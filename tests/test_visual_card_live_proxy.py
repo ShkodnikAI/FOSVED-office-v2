@@ -101,7 +101,7 @@ def test_live_mlog_to_proxy_render_full_card_cyrillic(tmp_path, stub_server):
     (tmp_path / "visuals").mkdir()
     dept_dir = tmp_path / "dept"
     dept_dir.mkdir()
-    for f in ("utils.mlog", "visual.mlog"):
+    for f in ("utils.mlog", "visual.mlog", "skills.mlog"):  # #771 H: +skills (SkillFileRead в dept/utils)
         shutil.copy(ROOT / "dept" / f, dept_dir / f)
     probe = tmp_path / "probe.mlog"
     probe.write_text(
@@ -138,7 +138,7 @@ def test_live_mlog_without_proxy_honest_no_card(tmp_path):
     (tmp_path / "visuals").mkdir()
     dept_dir = tmp_path / "dept"
     dept_dir.mkdir()
-    for f in ("utils.mlog", "visual.mlog"):
+    for f in ("utils.mlog", "visual.mlog", "skills.mlog"):  # #771 H: +skills (SkillFileRead в dept/utils)
         shutil.copy(ROOT / "dept" / f, dept_dir / f)
     probe = tmp_path / "probe.mlog"
     probe.write_text(

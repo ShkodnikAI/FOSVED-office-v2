@@ -323,12 +323,21 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let _ = TraceLog("yana", "step_10_before_CallLLMProxy")
   let messages = json_encode([{role: "system", content: context}, {role: "user", content: query}])
   let proxy_result = CallLLMProxy(dept, messages)
-  if to_string(proxy_result) == "()" then {
+  // #771 E: CallLLMProxy при мёртвом прокси возвращает "" (а не "()") —
+  // прежняя проверка проходила мимо, parse_json("") БРОСАЛ (№514) и ронял
+  // весь маршрут: «Яна не отвечает» без единого следа. Проверяем оба
+  // маркера недоступности + guard парсера (битый/пустой body прокси).
+  if to_string(proxy_result) == "()" or proxy_result == "" then {
     let fallback = "Сервис временно недоступен. Попробуйте позже."
     let _ = SendTelegramReply(chat_id, fallback)
     return ""
   }
-  let parsed = parse_json(proxy_result)
+  let parsed = TryVal(try parse_json(proxy_result))
+  if to_string(parsed) == "()" then {
+    let fallback = "Сервис временно недоступен. Попробуйте позже."
+    let _ = SendTelegramReply(chat_id, fallback)
+    return ""
+  }
   let reply = redact(to_string(json_get(parsed, "reply", "")), "all")
   let used_model = redact(to_string(json_get(parsed, "model", "")), "all")
   let tokens_in = redact(to_string(json_get(parsed, "tokens_in", "0")), "all")
@@ -410,6 +419,34 @@ pattern HandleYana(query: String, chat_id: String) -> String {
   let _ = YanaAutoMemorize(query, reply, chat_id)
   let _ = AuditLog("dept_query", dept, "query: " + substring(query, 0.0, 100.0))
   return final_reply
+}
+
+// ── #771 F: ретрай при транзиентном write-локе БД ────────────────────────
+// Инцидент 24.11 13:26: оба отдела ответили «не удалось» в минуту после
+// деплоя. Механизм доказан пробой n771f: движок держит БД в WAL, при
+// чужом BEGIN IMMEDIATE db_execute ждёт busy_timeout ≈5 с и БРОСАЕТ
+// «database is locked»; чтение (query) под write-локом работает. Окно
+// бут-миграций/восстановления WAL после рестарта контейнера перекрыло
+// LLM-ожидание потока — внутренняя db-запись отдела бросила, маршрут
+// честно отказал (гварды #771 E). Один ретрай после паузы: лок снимается
+// (обычные окна — секунды) — владелец получает ответ вместо отказа.
+// Возврат: обычный ответ | "" (норма: фолбэк/досье уже ушли) | "()"
+// (бросок пережил ретрай — маршрут отвечает честным отказом).
+pattern HandleYanaRetry(query: String, chat_id: String) -> String {
+  // #771 G: TryResult — Struct{ok, value, error} (ADR-0142). TryVal достаёт
+  // .value; причина броска живёт в .error.message (идиом admin.mlog:491) —
+  // теперь она попадает в маркер audit_log и в сообщение владельцу, а не
+  // только в stderr («[try] caught error»), который владельцу недоступен.
+  let tr = try HandleYana(query, chat_id)
+  let reply = TryVal(tr)
+  if to_string(reply) != "()" then { return reply }
+  let err = redact(substring(TryVal(try to_string(tr.error.message)), 0.0, 160.0), "all")
+  sleep(8.0)
+  let tr2 = try HandleYana(query, chat_id)
+  let reply2 = TryVal(tr2)
+  if to_string(reply2) != "()" then { return reply2 }
+  let err2 = redact(substring(TryVal(try to_string(tr2.error.message)), 0.0, 160.0), "all")
+  return "THROW|" + err + " || retry: " + err2
 }
 pattern YanaNowInfo() -> String {
   // №422: try при сбое даёт Struct — redact() принимает только String/Secret,

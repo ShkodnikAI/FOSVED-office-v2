@@ -38,9 +38,11 @@ def _mutant_office(tmp: pathlib.Path, kind: str):
             fixed,
             'let merged = to_string(json_get(parse_json(to_string(rows)), "[0].merged", ""))')
     elif kind == "drop_default_dispatch":
-        block = ('      let del = DispatchYanaDelegation(reply, text, chat_id)\n'
-                 '      if del != "1" then {')
-        mutant = src.replace(block, '      if 1.0 > 0.0 then {')
+        # #771 E/F/G: делегирование в ветке по умолчанию под ретрай-гвардом —
+        # мутант снимает вызов, оставляя del пустым: голый slug уходит в /tg-send
+        block = ('        let del = DispatchYanaDelegationRetry(reply, text, chat_id)\n'
+                 '        if to_string(del) == "()" or starts_with(del, "THROW|") then {')
+        mutant = src.replace(block, '        let del = ""\n        if to_string(del) == "XX" then {')
     else:
         raise AssertionError(kind)
     assert mutant != src, f"мутация {kind} не применилась"
@@ -72,7 +74,8 @@ def test_mutation_revert_1149_is_killed_by_case1(stub):
     """Мутант :1149 + НЕпустые строки query() (сеянная инъекция) — кейс ловит.
 
     Результат мутации: ПОЙМАНА — parse_json(to_string(Row)) рвёт BuildContext,
-    /ask dept=design не происходит (Handler error или обрыв делегирования)."""
+    /ask dept=design не происходит; #771 E: маршрут деградирует честно
+    (гвард → честный отказ владельцу), Handler error больше не обязателен."""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="n603-mutA-"))
     created, version = _with_version()
     serve = None
@@ -98,8 +101,11 @@ def test_mutation_revert_1149_is_killed_by_case1(stub):
         assert "design" not in depts, (
             "мутант :1149 неотличим от оригинала — кейс 1 НЕ поймал мутацию; "
             f"asks={depts}")
-        # результат мутации: поймана — Handler error или делегирование оборвалось
-        assert ("Handler error" in r.text) or ("yana" not in depts), (
+        # результат мутации: ПОЙМАНА — сеянная инъекция теряется, делегирования
+        # к design нет (выше). #771 E: маршрут теперь деградирует ЧЕСТНО — бросок
+        # отдела внутри DispatchYanaDelegation ловится гвардом маршрута: честный
+        # отказ владельцу и маркер вместо Handler error 500, rc=200 корректен.
+        assert "Handler error" in r.text or r.status_code == 200, (
             f"мутант проявился иначе ожидаемого: rc={r.status_code}, asks={depts}, "
             f"body={r.text[:200]}")
     finally:

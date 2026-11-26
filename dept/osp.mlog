@@ -384,8 +384,33 @@ pattern HandleOSP(query: String, chat_id: String) -> String {
   }
   let reply = reply + "\n\n" + OSPDisclaimerBottom() + OSPSourcesFooter(context)
   let _ = RecordAssistantMessage(chat_id, dept, reply)
-  let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=" + to_string(depth) + " safety=" + safety + " verify=" + to_string(ov_score))
+  let _ = AuditLog("dept_query", dept, "domain=" + domain + " depth=" + to_string(depth) + " safety=" + to_string(safety) + " verify=" + to_string(ov_score))
   return reply
+}
+
+// ── #771 F: ретрай при транзиентном write-локе БД (см. HandleYanaRetry) ──
+// Инцидент 24.11 13:26: оба отдела в минуту после деплоя ответили
+// «не удалось» — db_execute бросает «database is locked» после busy_timeout
+// ≈5 с (механизм доказан пробой n771f: WAL, внешнее BEGIN IMMEDIATE).
+// Один ретрай после паузы 8 с покрывает окно бут-миграций/восстановления
+// WAL; переживший ретрай бросок остаётся честным отказом маршрута (#771 A).
+// Возврат: обычный ответ | "" (пустой — ветка #771 A/D) | "THROW|<причина>"
+// (бросок пережил ретрай; причина — TryResult.error.message, #771 G).
+pattern HandleOSPRetry(query: String, chat_id: String) -> String {
+  // #771 G: TryResult — Struct{ok, value, error} (ADR-0142); причина броска
+  // живёт в .error.message (идиом admin.mlog:491) — теперь она попадает
+  // в маркер audit_log и в сообщение владельцу, а не только в stderr
+  // («[try] caught error»), который владельцу недоступен.
+  let tr = try HandleOSP(query, chat_id)
+  let reply = TryVal(tr)
+  if to_string(reply) != "()" then { return reply }
+  let err = redact(substring(TryVal(try to_string(tr.error.message)), 0.0, 160.0), "all")
+  sleep(8.0)
+  let tr2 = try HandleOSP(query, chat_id)
+  let reply2 = TryVal(tr2)
+  if to_string(reply2) != "()" then { return reply2 }
+  let err2 = redact(substring(TryVal(try to_string(tr2.error.message)), 0.0, 160.0), "all")
+  return "THROW|" + err + " || retry: " + err2
 }
 
 // Подвал со списком реально использованных источников — построен по

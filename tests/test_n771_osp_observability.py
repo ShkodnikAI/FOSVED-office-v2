@@ -28,6 +28,7 @@ UTILS_MLOG = os.path.join(REPO_ROOT, "dept", "utils.mlog")
 APP = open(APP_MLOG, encoding="utf-8").read()
 OSP = open(OSP_MLOG, encoding="utf-8").read()
 UTILS = open(UTILS_MLOG, encoding="utf-8").read()
+YANA = open(os.path.join(REPO_ROOT, "dept", "yana.mlog"), encoding="utf-8").read()
 
 
 # ── A: наблюдаемость тихого отказа ────────────────────────────────────────
@@ -131,3 +132,230 @@ def test_mlog_test_blocks_n771_utils_pass():
     assert proc.returncode == 0, combined
     assert "❌" not in combined, combined
     assert "n771 RenderUrl: env не задан — фолбэк reverse-proxy, не ENV_NOT_FOUND" in combined
+
+
+# ── E: Яна молчала при мёртвом llm_proxy (воспроизведено на живом стеке) ──
+
+def test_e_yana_route_guarded():
+    """#771 E: обе ветки Яны (dept=="yana" и по умолчанию) — HandleYana и
+    делегирование через ретрай-хварды #771 F, бросок = честный отказ + маркер."""
+    anchor = "let reply = HandleYanaRetry(yana_query, chat_id)"
+    assert APP.count(anchor) == 1, "HandleYanaRetry маршрута (ветка dept==yana) не подключён"
+    assert APP.count("let reply = HandleYanaRetry(text, chat_id)") == 1, (
+        "HandleYanaRetry ветки по умолчанию не подключён — тот же вектор тишины")
+    idx = APP.index(anchor)
+    block = APP[idx:idx + 2600]
+    assert 'AuditLog("yana_empty_reply"' in block, "нет маркера при броске HandleYana"
+    assert "DispatchYanaDelegationRetry(reply, query, chat_id)" in block, (
+        "делегирование не под ретрай-гвардом — бросок отдела ронял маршрут")
+    assert 'AuditLog("yana_dispatch_fail"' in block, "нет маркера при броске делегирования"
+    assert APP.count('"Яна: не удалось получить ответ. Попробуйте позже."') == 4, (
+        "честный отказ должен стоять в 4 точках (2 ветки × 2 гварда)")
+
+
+def test_e_yana_dead_proxy_check_fixed():
+    """CallLLMProxy при мёртвом прокси возвращает \"\" — HandleYana теперь
+    проверяет ОБА маркера (было только \"()\" — проверка проходила мимо),
+    parse_json под гвардом: пустой/битый body → фолбэк, не краш маршрута."""
+    start = YANA.index("let proxy_result = CallLLMProxy(dept, messages)")
+    seg = YANA[start:start + 1200]
+    assert 'proxy_result == ""' in seg, (
+        "проверка мёртвого прокси не дополнена — parse_json(\"\") ронял маршрут")
+    assert "TryVal(try parse_json(proxy_result))" in seg, "parse_json не под гвардом"
+    assert seg.count('"Сервис временно недоступен. Попробуйте позже."') >= 2, (
+        "оба отказных пути (пустой ответ прокси, битый JSON) должны давать фолбэк")
+
+
+# ── F: ретрай при транзиентном write-локе БД (инцидент 24.11 13:26) ───────
+
+def test_f_retry_helpers_exist():
+    """#771 F: HandleYanaRetry/HandleOSPRetry/DispatchYanaDelegationRetry —
+    один ретрай после sleep(8) на бросок db_execute «database is locked»
+    (движок: WAL, busy_timeout ≈5 с, доказано пробой n771f)."""
+    for name, src, wrapped in (
+        ("HandleYanaRetry", YANA, "HandleYana(query, chat_id)"),
+        ("HandleOSPRetry", OSP, "HandleOSP(query, chat_id)"),
+        ("DispatchYanaDelegationRetry", APP, "DispatchYanaDelegation(reply, query, chat_id)"),
+    ):
+        idx = src.index(f"pattern {name}(")
+        seg = src[idx:src.index("}", src.index("return \"THROW|", idx)) + 1]
+        # #771 G: сырой try-результат (Struct{ok, value, error}), TryVal достаёт
+        # .value, причина — .error.message (идиом admin.mlog:491)
+        assert seg.count(f"try {wrapped}") == 2, f"{name}: ровно один ретрай"
+        assert seg.count("= TryVal(tr") == 2, f"{name}: значение через TryVal(tr)"
+        assert seg.count("to_string(tr.error.message)") == 1 and seg.count("to_string(tr2.error.message)") == 1, \
+            f"{name}: обе причины броска должны захватываться"
+        assert "sleep(8.0)" in seg, f"{name} без паузы — ретрай в лоб не покрывает окно лока"
+        assert 'return "THROW|' in seg, f"{name}: двойной бросок возвращает THROW| с причиной"
+
+
+def test_f_route_call_sites_use_retry():
+    """Все 5 точек маршрута зовут ретрай-хелперы: прямой /osp, обе ветки
+    Яны (HandleYana + делегирование)."""
+    assert APP.count("let mut reply = HandleOSPRetry(text, chat_id)") == 1
+    assert APP.count("let reply = HandleYanaRetry(yana_query, chat_id)") == 1
+    assert APP.count("let reply = HandleYanaRetry(text, chat_id)") == 1
+    assert APP.count("DispatchYanaDelegationRetry(reply, query, chat_id)") == 1
+    assert APP.count("DispatchYanaDelegationRetry(reply, text, chat_id)") == 1
+    # прямые (безретрайные) вызовы в маршруте больше не живут
+    assert "TryVal(try HandleOSP(text, chat_id))" not in APP
+    assert "TryVal(try HandleYana(" not in APP
+
+
+# ── G: отказ само-диагностирующийся — причина владельцу и в маркер ────────
+
+def test_g_throw_causes_reach_owner_and_audit():
+    """#771 G: THROW| от ретрай-хелпера → причина (TryResult.error.message)
+    попадает и в сообщение владельцу («Причина: …»), и в маркер audit_log.
+    Третий повтор инцидента показал: без причины в сообщении владелец
+    не может передать диагностику, а stderr прода недоступен."""
+    # каждая точка различает THROW| дважды: в условии гварда и при выборе
+    # текста отказа (с причиной / общий)
+    assert APP.count('starts_with(reply, "THROW|")') == 6, "3 точки × (гвард + выбор сообщения)"
+    assert APP.count('starts_with(del, "THROW|")') == 4, "2 гварда делегирования × (гвард + выбор)"
+    idx = APP.index("let mut reply = HandleOSPRetry(text, chat_id)")
+    osp_block = APP[idx:idx + 2200]
+    assert 'starts_with(reply, "THROW|")' in osp_block, "прямой /osp не различает THROW|"
+    assert osp_block.count('Причина: ') == 1, "прямой /osp: причина должна быть в сообщении владельцу"
+    assert 'substring(reply, 6.0, 240.0)' in osp_block, "причина должна вырезаться из THROW|"
+    # маркеры несут причину (детали = query + substring(reply/del))
+    assert 'AuditLog("osp_empty_reply", "osp", "query=" + substring(text, 0.0, 80.0) + " seam=" + substring(seam, 0.0, 40.0) + " len=" + to_string(length(to_string(reply))) + " " + cause)' in APP
+    assert APP.count('substring(reply, 0.0, 300.0)') == 2, "оба маркера yana_empty_reply несут причину"
+    assert APP.count('substring(del, 0.0, 300.0)') == 2, "оба маркера yana_dispatch_fail несут причину"
+    # plain-отказы остаются для пустого ответа (не броска)
+    assert APP.count('"Яна: не удалось получить ответ. Попробуйте позже."') == 4
+    assert APP.count('"ОСП: не удалось получить ответ. Попробуйте позже."') == 2
+
+
+# ── H: корень инцидентов 23-24.11 — гейт serve-чтений vs внешний DATA_DIR ──
+
+REPO_H = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_h_entrypoint_forces_data_dir_to_app_root():
+    """Корень трёх отказов (23.11, 24.11 ×2): гейт serve-чтений (№455)
+    ограничивает пути METALOGOS_DATA_DIR; дефолт entrypoint '.' перебивался
+    внешним env Render — корпус (skills/, library/, config/) оказывался вне
+    сандбокса, каждый запрос отдела падал с SANDBOX_VIOLATION. ADR-0009:
+    корень containment = корень приложения — entrypoint форсирует его
+    АБСОЛЮТНЫМ значением с громким бут-логом. БД не подчинена DATA_DIR
+    (db { url: env(DATABASE_URL) }); kv-кэш (data/metalogos_kv.db) при смене
+    локации пересобирается сам — это кэш."""
+    ep = open(os.path.join(REPO_H, "entrypoint.sh"), encoding="utf-8").read()
+    assert 'export METALOGOS_DATA_DIR="$(pwd)"' in ep, "DATA_DIR не форсируется в корень приложения"
+    assert "№771H" in ep, "нет громкого бут-лога с прежним значением env"
+    # мягкий дефолт, который молча перебивался снаружи, не должен жить
+    assert 'METALOGOS_DATA_DIR="${METALOGOS_DATA_DIR:-.}"' not in ep
+
+
+def test_h_no_ungated_corpus_reads_in_dept():
+    """Все чтения корпуса в dept/*.mlog — через SkillFileRead (try-грейс,
+    «громкий пропуск» #623 W0) или явный try. Голый read_file/read_file_or —
+    красный: одно чтение роняет весь запрос/слот (класс 24.11)."""
+    import re
+    bad = []
+    import glob
+    for f in sorted(glob.glob(os.path.join(REPO_H, "dept", "*.mlog"))):
+        src = open(f, encoding="utf-8").read()
+        for m in re.finditer(r"read_file(?:_or)?\(", src):
+            pre = src[max(0, m.start() - 80):m.start()]
+            if "try " in pre or "SkillFileRead" in pre:
+                continue
+            line = src[:m.start()].count("\n") + 1
+            bad.append(f"{os.path.basename(f)}:{line}")
+    assert not bad, f"незащищённые чтения корпуса: {bad}"
+
+
+def test_h_skill_file_read_normalizes():
+    """SkillFileRead — единая точка чтений корпуса: try + нормализация
+    «()»/пустоты + redact внутри; бросок гейта превращается в «громкий
+    пропуск», ответ уходит без скилла (доказано пробой n771h V3)."""
+    skills = open(os.path.join(REPO_H, "dept", "skills.mlog"), encoding="utf-8").read()
+    assert "pattern SkillFileRead(path: String) -> String" in skills
+    assert 'TryVal(try read_file_or(path, ""))' in skills
+    assert 'if raw == "()" or raw == "" then' in skills
+    ctx = open(os.path.join(REPO_H, "dept", "context.mlog"), encoding="utf-8").read()
+    assert ctx.count("SkillFileRead(") == 25, "24 скилла Tier1-3 + ReadDeptProfile"
+    assert 'SkillFileRead("library/" + dept + ".md")' in ctx
+
+# ── I (#771): мост call_python несёт причину + /diag/bridges ──────────────
+# Инцидент 25.11 (препарирование OSP-2026-11-25-LUKA-VNS-01): прод
+# показал [TG] {"error": "call_python endpoint unavailable"} — TryVal
+# глотал текст исключения (таймаут/отказ соединения/4xx), при этом
+# llm_proxy на /news/fresh отвечал. Идиома TryResult (admin.mlog:491)
+# раскрывает причину; таймаут 120с — медленные llm_verifier-вызовы
+# (безымянный дефолт рвал мост досрочно).
+
+def test_i_call_python_carries_cause_and_timeout():
+    m = re.search(r"pattern call_python\(module: String, function: String, args_json: String\) -> String \{.*?\n\}", APP, re.S)
+    assert m, "паттерн call_python не найден в app.mlog"
+    body = m.group(0)
+    assert "tr.error.message" in body, "call_python не раскрывает причину отказа (TryResult)"
+    assert "120.0" in body, "call_python без явного таймаута (медленный llm_verifier рвёт мост)"
+    assert "endpoint unavailable" not in body, "старая безымянная формулировка осталась"
+    assert "bridge failed" in body, "новый честный формат отказа не найден"
+
+
+def test_i_diag_bridges_route_registered():
+    # Анти-инъекционный инвариант: логика — в паттерне (label-шов), route —
+    # тонкий диспетчер (проба бута 25.11, Category A UNTRUSTED_DECISION).
+    m = re.search(r'route "/diag/bridges" method=GET \{.*?\n  \}', APP, re.S)
+    assert m, "маршрут /diag/bridges не найден в app.mlog"
+    body = m.group(0)
+    assert "DiagBridgesCheck()" in body, "route не диспетчеризует паттерн"
+    # route-guards-контракт: гвард и 403 — в теле; UNTRUSTED_DECISION не
+    # срабатывает: if по Bool от SecretMatches (шов паттерна), не по http-данным
+    assert 'SecretMatches(secret, "CRON_SECRET")' in body, "нет секрет-гварда в теле"
+    assert "403 Forbidden" in body, "нет 403-ответа в теле"
+    assert "http_get" not in body and "http_post" not in body, (
+        "пинги мостов обязаны жить в паттерне (Category A)")
+    p = re.search(r"pattern DiagBridgesCheck\(\) -> String \{.*?\n\}", APP, re.S)
+    assert p, "паттерн DiagBridgesCheck не найден в app.mlog"
+    body = p.group(0)
+    for needle, why in (
+        ("http://127.0.0.1:4000/health", "нет пинга llm_proxy"),
+        ("TavilyKey()", "нет проверки ключа Tavily"),
+        ("news/fresh", "нет проверки news-кэша"),
+        ('TavilyKey()', "нет проверки ключа Tavily"),
+        ("error.message", "мосты не раскрывают причину отказа"),
+    ):
+        assert needle in body, f"DiagBridgesCheck: {why}"
+
+
+def test_i_call_python_live_scenario_carries_cause():
+    """Нарезка паттерна из app.mlog + import dept/utils → живой вызов.
+
+    Средонезависимо: если :4000 отвечает (стенд с llm_proxy) — ожидаем
+    успех ("result"); если мёртв (pytest-CI без стека) — ожидаем
+    "bridge failed" с НЕПУСТОЙ причиной (не голое unavailable).
+    """
+    m = re.search(r"pattern call_python\(module: String, function: String, args_json: String\) -> String \{.*?\n\}", APP, re.S)
+    assert m
+    src = (
+        "import dept/utils  // #771 I: TryVal/нарезка call_python\n"
+        "import dept/skills  // #771 H: dept/utils зовёт SkillFileRead\n"
+        + m.group(0)
+        + "\npattern IProbe(x: String) -> String {\n"
+        '  let r = call_python("statistics", "mean", "[[1,2,3,4,5]]")\n'
+        "  return \"IPROBE=\" + to_string(r)\n"
+        "}\n"
+        "flow Main {\n  input: String = \"\" -> IProbe -> output\n}\n"
+    )
+    scen = os.path.join(REPO_ROOT, "test_n771i_bridge.mlog")
+    with open(scen, "w", encoding="utf-8") as f:
+        f.write(src)
+    try:
+        proc = subprocess.run([os.path.join(REPO_ROOT, "bin", "mlog"), "run", scen],
+                              capture_output=True, text=True, timeout=180, cwd=REPO_ROOT)
+        out = proc.stdout + proc.stderr
+        assert proc.returncode == 0, f"rc={proc.returncode}: {out[-600:]}"
+        assert "IPROBE=" in out, f"нет результата пробы: {out[-600:]}"
+        if "bridge failed" in out:
+            m_cause = re.search(r'"cause": "([^"]+)"', out)
+            assert m_cause and m_cause.group(1).strip(), (
+                f"отказ без причины: {out[-600:]}")
+        else:
+            assert '"result"' in out, f"не успех и не честный отказ: {out[-600:]}"
+    finally:
+        if os.path.exists(scen):
+            os.unlink(scen)
