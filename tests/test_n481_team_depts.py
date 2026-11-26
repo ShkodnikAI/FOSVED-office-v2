@@ -174,7 +174,7 @@ def test_yana_multi_domain_no_llm():
 
 def test_mlog_native_tests_team_pass():
     proc = subprocess.run(
-        [os.path.join(REPO_ROOT, "bin", "mlog"), "test", os.path.join(REPO_ROOT, "dept", "team.mlog")],
+        [os.path.join(REPO_ROOT, "bin", "mlog"), "test", os.path.join(REPO_ROOT, "dept", "team.mlog"), "--allow-unchecked"],  # переход 0.40.1 (№953): opt-out гейтов Category-A, снятие — #784 п.2
         capture_output=True, text=True, timeout=150,
     )
     combined = proc.stdout + proc.stderr

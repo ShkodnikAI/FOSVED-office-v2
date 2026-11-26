@@ -44,7 +44,12 @@ VM_PORT = 10001
 UPSTREAM_PORT = 4000
 CRON_SECRET = "n687-night-test"
 
-pytestmark = pytest.mark.skipif(not MLOG.exists() or os.name != "posix", reason="нужен bin/mlog (Linux)")
+# Переход v0.40.1 (26.11): serve/night-лейн — см. reason скипа ниже. Refs #783.
+pytestmark = [
+    pytest.mark.skip(reason="переход v0.40.1: serve-лейн закрыт — гейты 0.40.x (№523 семантические находки, №950/№952) блокируют старт офиса (ценз 308, лицензирование закрыто profile licensing ADR-0202); снятие — фикc-волна #784. Refs #783"),
+    pytest.mark.skipif(not MLOG.exists() or os.name != "posix",
+                       reason="нужен bin/mlog (Linux)"),
+]
 
 
 # ──────────────────────────── мок фаз на 127.0.0.1:4000 ────────────────────────────

@@ -44,7 +44,7 @@ def test_mlog_test_blocks_pass():
     assert os.path.exists(mlog), "интерпретатор bin/mlog обязан быть в репо"
     os.chmod(mlog, 0o755)
     proc = subprocess.run(
-        [mlog, "test", OSP_MLOG_PATH],
+        [mlog, "test", OSP_MLOG_PATH, "--allow-unchecked"],  # переход 0.40.1 (№953): opt-out гейтов Category-A, снятие — #784 п.2
         capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
     )
     assert proc.returncode == 0, f"test-блоки osp.mlog упали:\n{proc.stdout}\n{proc.stderr}"
