@@ -52,7 +52,7 @@ def _pattern_body(source: str, name: str) -> str:
 
 def test_mlog_test_blocks_n474_pass():
     proc = subprocess.run(
-        ["./bin/mlog", "test", "dept/osp.mlog"],
+        ["./bin/mlog", "test", "dept/osp.mlog", "--allow-unchecked"],  # переход 0.40.1 (№953): opt-out гейтов Category-A, снятие — #784 п.2
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
     combined = (proc.stdout + proc.stderr)
     assert proc.returncode == 0, combined
@@ -68,7 +68,7 @@ def test_mlog_test_blocks_n474_pass():
 
 def test_mlog_test_blocks_utils_budget_defaults():
     proc = subprocess.run(
-        ["./bin/mlog", "test", "dept/utils.mlog"],
+        ["./bin/mlog", "test", "dept/utils.mlog", "--allow-unchecked"],  # переход 0.40.1 (№953): opt-out гейтов Category-A, снятие — #784 п.2
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
     combined = (proc.stdout + proc.stderr)
     assert proc.returncode == 0, combined

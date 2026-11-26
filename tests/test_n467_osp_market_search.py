@@ -50,7 +50,7 @@ def test_mlog_test_blocks_pass():
     mlog = os.path.join(REPO_ROOT, "bin", "mlog")
     os.chmod(mlog, 0o755)
     proc = subprocess.run(
-        [mlog, "test", OSP_MLOG_PATH],
+        [mlog, "test", OSP_MLOG_PATH, "--allow-unchecked"],  # переход 0.40.1 (№953): opt-out гейтов Category-A, снятие — #784 п.2
         capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
     )
     combined = proc.stdout + proc.stderr

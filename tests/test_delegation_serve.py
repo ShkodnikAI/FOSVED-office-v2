@@ -58,8 +58,13 @@ _m = re.search(r"mlogserver\s*\{[^}]*?port:\s*(\d+)",
 PORT_MLOG = int(_m.group(1)) if _m else 10001
 PROXY_PORT = 4000  # app.mlog жёстко постит на 127.0.0.1:4000
 
-pytestmark = pytest.mark.skipif(not MLOG.exists() or os.name != "posix",
-                                reason="нужен bin/mlog (Linux)")
+# Переход v0.40.1 (26.11): все 4 теста — serve-лейн; старт офиса на 0.40.1
+# блокирован гейтами 0.40.x — см. reason. Refs #783.
+pytestmark = [
+    pytest.mark.skip(reason="переход v0.40.1: serve-лейн закрыт — гейты 0.40.x (№523 семантические находки, №950/№952) блокируют старт офиса (ценз 308, лицензирование закрыто profile licensing ADR-0202); снятие — фикc-волна #784. Refs #783"),
+    pytest.mark.skipif(not MLOG.exists() or os.name != "posix",
+                       reason="нужен bin/mlog (Linux)"),
+]
 
 
 # ── Заглушка прокси ────────────────────────────────────────────────────────
