@@ -119,4 +119,7 @@ def test_battery_in_ci_loop():
     # батарея #556 не копит долг молча (конвенция #519)
     assert "test_n556v3.mlog" in CI
     # #553: цикл расширен test_n553v3.mlog
-    assert "for f in test_forge{1..9}v3.mlog test_narad{1..3}v3.mlog test_n550v3.mlog test_n553v3.mlog test_n556v3.mlog test_n565v3.mlog test_n566v3.mlog test_n559v3.mlog" in CI
+    assert "for f in test_forge{1..9}v3.mlog test_n550v3.mlog test_n553v3.mlog test_n556v3.mlog test_n565v3.mlog test_n566v3.mlog test_n559v3.mlog" in CI
+    # Переход v0.40.1 (26.11): narad1-3 закрыты (№951/№952, Telegram-паблиш) —
+    # состав батареи без них задокументирован в ci.yml; снятие — #784.
+    assert "narad1-3 закрыты" in CI
