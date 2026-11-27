@@ -169,3 +169,85 @@ def test_wrong_hash_form_rejected(monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "Shkodnik+vto")
     with _ctx("?secret=%5BHASH%3Adeadbeefdeadbeef%5D%20hex"):
         assert cron_secret_ok() is False
+
+
+# ── #788: полный digest redact hash_only (Metalogos 0.32.0+) ─────────────────
+# Живая проба 27.11 (scripts/probe_hashform2.mlog в песочнице агента): 0.39.x
+# (прод) и 0.40.1 (main) ОБЕ выдают [HASH:<sha256 hex>] hex — полную
+# 64-символьную форму. Приём только [:16] (№443, верификация 0.27.1/0.28.0)
+# = ночной 403 всех mlog-слотов cron_secret_ok: evals «старт не удался
+# (нет job_id)» каждую ночь с эры 0.32.0, деплой это не чинит.
+
+
+def test_mlog_hash_form_full_digest_matches(monkeypatch):
+    from proxy.routes_tail import cron_secret_ok
+    secret = "cron-secret-full-digest-12345"
+    monkeypatch.setenv("CRON_SECRET", secret)
+    import hashlib
+    full_form = f"[HASH:{hashlib.sha256(secret.encode()).hexdigest()}] hex"
+    with _ctx("?secret=" + full_form.replace(" ", "%20")):
+        assert cron_secret_ok() is True
+
+
+def test_mlog_hash_form_16_still_matches(monkeypatch):
+    """№443-форма (0.27.1–0.31.x) остаётся принятой — обратная совместимость."""
+    from proxy.routes_tail import cron_secret_ok
+    secret = "cron-secret-legacy-16-12345"
+    monkeypatch.setenv("CRON_SECRET", secret)
+    import hashlib
+    form16 = f"[HASH:{hashlib.sha256(secret.encode()).hexdigest()[:16]}] hex"
+    with _ctx("?secret=" + form16.replace(" ", "%20")):
+        assert cron_secret_ok() is True
+
+
+def test_binary_hash_form_live_probe(monkeypatch, tmp_path):
+    """#788 дрейф-гвард: форма redact(x, "hash_only") ЖИВОГО bin/mlog обязана
+    попадать в множество форм, принимаемых cron_secret_ok. Проба печатает
+    только номер совпавшей формы (само значение — label private, №952:
+    печать redact-значения гейтится runtime-гвардом); «unknown» = формат
+    снова дрейфанул — тест красный ДО продовой батареи ночных 403."""
+    import hashlib
+    import subprocess
+    binpath = os.path.join(REPO_ROOT, "bin", "mlog")
+    if not (os.path.isfile(binpath) and os.access(binpath, os.X_OK)):
+        pytest.skip("bin/mlog недоступен — живая проба невозможна")
+    secret = "cron-secret-live-probe-123456"
+    digest = hashlib.sha256(secret.encode()).hexdigest()
+    forms = (
+        f"[HASH:{digest[:16]}] hex",   # №443 (0.27.1–0.31.x)
+        f"[HASH:{digest}] hex",        # 0.32.0+ — текущая
+    )
+    lines = [
+        "pattern Run(x: String) -> String {",
+        f'  let h = redact("{secret}", "hash_only")',
+        '  let mut verdict = "unknown"',
+    ]
+    for i, form in enumerate(forms):
+        lines.append(f'  if h == "{form}" then {{ verdict = "form{i}" }}')
+    lines += [
+        "  print(verdict)",
+        '  return "done"',
+        "}",
+        "",
+        "flow Main {",
+        '  input: String = "" -> Run -> output',
+        "}",
+    ]
+    probe = tmp_path / "probe_redact_hashform.mlog"
+    probe.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    r = subprocess.run([binpath, "run", str(probe)], capture_output=True,
+                       text=True, timeout=60, cwd=REPO_ROOT)
+    out = r.stdout + r.stderr
+    matched = [i for i in range(len(forms)) if f"form{i}" in out]
+    assert matched, (
+        "форма redact hash_only ЖИВОГО бинаря не распознана среди принимаемых "
+        f"cron_secret_ok ({len(forms)} формы) — формат дрейфанул, обнови "
+        f"accepted_hash_forms. Выхлоп пробы: {out[:400]!r}"
+    )
+    idx = matched[0]
+    monkeypatch.setenv("CRON_SECRET", secret)
+    with _ctx("?secret=" + forms[idx].replace(" ", "%20")):
+        from proxy.routes_tail import cron_secret_ok
+        assert cron_secret_ok() is True, (
+            "живой бинарь выдал форму, которую cron_secret_ok НЕ принимает"
+        )
