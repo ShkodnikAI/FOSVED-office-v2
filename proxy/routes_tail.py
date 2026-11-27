@@ -1256,6 +1256,13 @@ def cron_secret_ok() -> bool:
     пробой bin/mlog (0.27.1 при внедрении; пере-пробован живым /repos-гитом
     на 0.28.0 — ADR-0015): `[HASH:<sha256(secret)[:16]>] hex`. Принимаем
     hash-form встречно; raw остаётся для внешних кронов (cron-job.org).
+
+    #788 (живая проба 27.11): redact(x, "hash_only") с Metalogos 0.32.0
+    выдаёт ПОЛНЫЙ digest — `[HASH:<sha256 hex>] hex` (пробы на 0.39.x (прод)
+    и 0.40.1 (main): обе версии; то же документировано в core.py #550 A.2
+    с 18.10). Приём только [:16] = ночной 403 всех mlog-слотов cron_secret_ok
+    (evals «нет job_id», onliner-warm) с эры 0.32.0. Принимаем ОБЕ формы;
+    дрейф-гвард — живая проба бинаря (test_binary_hash_form_live_probe).
     """
 
     expected = os.environ.get("CRON_SECRET", "")
@@ -1264,8 +1271,14 @@ def cron_secret_ok() -> bool:
         return True
     if not expected:
         return False
-    hash_form = f"[HASH:{hashlib.sha256(expected.encode()).hexdigest()[:16]}] hex"
-    if provided == hash_form:
+    # #788: обе формы digest (см. докстринг) — [:16] (№443, 0.27.1–0.31.x)
+    # и полный digest (0.32.0+, текущая форма redact hash_only).
+    digest = hashlib.sha256(expected.encode()).hexdigest()
+    accepted_hash_forms = (
+        f"[HASH:{digest[:16]}] hex",
+        f"[HASH:{digest}] hex",
+    )
+    if provided in accepted_hash_forms:
         return True
     for part in request.query_string.decode("utf-8", "replace").split("&"):
         if part.startswith("secret=") and part[len("secret="):] == expected:
