@@ -150,6 +150,34 @@ jobs:
           done
           exit $FAIL
 
+      # ── #788 фикс-волна: гейт наряда №523 — serve-бут аугментированного
+      # кандидата (та же конструкция моста, что entrypoint). Семантические
+      # находки 0.40.x (UNTRUSTED_DECISION при interproc-проходе) блокировали
+      # старт офиса, оставаясь невидимыми для parse-only check — переход
+      # 0.40.1 прошёл CI зелёным, а прод не бутнулся (#788 п.1). Критерий:
+      # ошибок компиляции нет и загрузка дошла до серверной фазы ("[server]").
+      # БД/ключи в CI не нужны: падение бутстрапа БД происходит ПОСЛЕ
+      # семантического гейта и критерием не является.
+      - name: Naryad #523 semantic gate — serve-boot of the augmented candidate
+        run: |
+          { printf '%s\n' "profile legacy { egress: permissive_with_audit }"; cat app.mlog; } > /tmp/app_serve_candidate.mlog
+          set +e
+          timeout 90 ./bin/mlog serve /tmp/app_serve_candidate.mlog > /tmp/serve_gate.txt 2>&1
+          RC=$?
+          set -e
+          tail -3 /tmp/serve_gate.txt || true
+          if grep -qE "Compilation error|UNTRUSTED_DECISION|Category A security invariant" /tmp/serve_gate.txt; then
+            echo "FAIL: semantic gate blocks serve startup (Naryad #523)"
+            grep -m5 -E "UNTRUSTED_DECISION|error:" /tmp/serve_gate.txt
+            exit 1
+          fi
+          if grep -q "\[server\]" /tmp/serve_gate.txt; then
+            echo "OK: semantic gate clean — compilation reached the server phase (rc=$RC)"
+            exit 0
+          fi
+          echo "FAIL: serve did not reach the server phase (rc=$RC)"
+          exit 1
+
       # ── #604 (задача 2): гвард замкнутости точек входа (класс UNDEFINED_FUNCTION) ──
       # check с --root резолвит импорты: модуль может звать паттерн, определённый
       # только в одной из точек входа (класс #604: dept/lz зовёт LZLlm, шов жил

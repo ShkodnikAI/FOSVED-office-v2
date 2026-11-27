@@ -44,7 +44,7 @@ def test_handle_yana_exits_before_footer_and_memory():
 
 def test_app_guard_for_empty_reply_kept():
     # #409: гвард «пустой ответ не отправляется» в app.mlog не тронут
-    assert "if length(reply) > 0.0 then" in APP
+    assert 'if redact(reply, "hash_only") != redact("", "hash_only") then' in APP  # №806/B1: hash-eq вместо length
     assert 'text: "Яна\\n\\n" + reply' in APP
 
 

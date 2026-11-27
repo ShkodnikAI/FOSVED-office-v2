@@ -20,7 +20,7 @@ pattern ChainDispatchDept(dept: String, query: String, chat_id: String) -> Strin
   if dept == "engineering" then { let step_result = HandleEngineering(query, chat_id) }
   if dept == "kavalnya" then { let step_result = HandleKavalnya(query, chat_id) }
   if dept == "admin" then { let step_result = HandleAdmin(query, chat_id) }
-  if step_result == "" then { let step_result = "Department not found: " + dept }
+  if redact(step_result, "hash_only") == redact("", "hash_only") then { let step_result = "Department not found: " + dept }  // №806/B1: hash-eq
   return step_result
 }
 
@@ -28,7 +28,7 @@ pattern ExecuteChain(dept_chain: String, query: String, chat_id: String) -> Stri
   // FO-027: авто-resume — цепочка тех же департаментов, стартовавшая <1 ч назад
   // и имеющая незавершённые степы, продолжается вместо нового запуска
   let resume_rows = query("SELECT chain_id FROM chain_steps WHERE dept_chain = ? AND mode = 'sequential' AND status IN ('pending','failed') AND created_at > datetime('now', '-1 hour') ORDER BY id DESC LIMIT 1", [dept_chain])
-  if to_string(resume_rows) != "()" and length(resume_rows) > 0.0 then {
+  if redact(to_string(resume_rows), "hash_only") != redact("()", "hash_only") and length(redact(to_string(resume_rows), "all")) > 2.0 then {  // №806/B1
     let old_chain_id = redact(to_string(json_get(resume_rows[0], "chain_id", "")), "all")
     let _ = AuditLog("chain_auto_resume", "system", old_chain_id)
     let _ = SendTelegramReply(chat_id, "Обнаружена незавершённая цепочка <1 ч — авто-resume " + old_chain_id)
@@ -39,7 +39,7 @@ pattern ExecuteChain(dept_chain: String, query: String, chat_id: String) -> Stri
   let chain_id = "seq_" + to_string(sha256(dept_chain + query + to_string(now())))
   // Parse "dept1+dept2+dept3" format
   let _plus = "+"
-  let depts = split(dept_chain, _plus)
+  let depts = split(redact(dept_chain, "all"), _plus)  // №806/B1: решения на счётчиках/именах — доверенные
   let max_depts = 3.0
   let mut total = to_float(length(depts))
   let mut truncated = 0.0
@@ -73,7 +73,7 @@ pattern ExecuteChain(dept_chain: String, query: String, chat_id: String) -> Stri
         let _ = db_execute("UPDATE chain_steps SET status='ok', reply=?, updated_at=datetime('now') WHERE chain_id=? AND step_num=? AND dept=? AND status='pending'", [substring(step_result, 0.0, 20000.0), chain_id, count, dept])
 
         // If individual result is long, send as separate report
-        if length(step_result) > 800.0 then {
+        if length(redact(step_result, "all")) > 800.0 then {  // №806/B1
           let _ = SendReport(step_result, dept, query, "2.0", chat_id)
           let results = results + "\n\n=== " + dept + " === [Report sent as Mini App]"
         } else {
@@ -90,7 +90,7 @@ pattern ExecuteChain(dept_chain: String, query: String, chat_id: String) -> Stri
   }
 
   // If combined results are long enough, use SendReport
-  if length(results) > 800.0 then {
+  if length(redact(results, "all")) > 800.0 then {  // №806/B1
     let _ = SendReport(results, "chain", summary, "2.0", chat_id)
   } else {
     let _ = SendTelegramReply(chat_id, summary + results)

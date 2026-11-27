@@ -62,7 +62,7 @@ def test_a_auto_route_osp_guarded():
     assert 'SendTelegramReply(chat_id, "ОСП: не удалось получить ответ' in block, (
         "у авто-маршрута нет честного отказа владельцу при пустом ответе")
     # SendVoiceReply/SendReport — только в непустой ветке
-    empty_branch = block[block.index('if to_string(reply) == "()" or reply == ""'):]
+    empty_branch = block[block.index('if redact(to_string(reply), "hash_only") == redact("()", "hash_only") or redact(reply, "hash_only") == redact("", "hash_only")'):]
     empty_branch = empty_branch[:empty_branch.index("} else {")]
     assert "SendVoiceReply" not in empty_branch and "SendReport" not in empty_branch, (
         "пустой ответ не должен уходить в голосовой канал/отчёт")
@@ -161,7 +161,7 @@ def test_e_yana_dead_proxy_check_fixed():
     parse_json под гвардом: пустой/битый body → фолбэк, не краш маршрута."""
     start = YANA.index("let proxy_result = CallLLMProxy(dept, messages)")
     seg = YANA[start:start + 1200]
-    assert 'proxy_result == ""' in seg, (
+    assert 'redact(proxy_result, "hash_only") == redact("", "hash_only")' in seg, (  # №806/B1: hash-eq
         "проверка мёртвого прокси не дополнена — parse_json(\"\") ронял маршрут")
     assert "TryVal(try parse_json(proxy_result))" in seg, "parse_json не под гвардом"
     assert seg.count('"Сервис временно недоступен. Попробуйте позже."') >= 2, (
@@ -213,11 +213,11 @@ def test_g_throw_causes_reach_owner_and_audit():
     не может передать диагностику, а stderr прода недоступен."""
     # каждая точка различает THROW| дважды: в условии гварда и при выборе
     # текста отказа (с причиной / общий)
-    assert APP.count('starts_with(reply, "THROW|")') == 6, "3 точки × (гвард + выбор сообщения)"
-    assert APP.count('starts_with(del, "THROW|")') == 4, "2 гварда делегирования × (гвард + выбор)"
+    assert APP.count('starts_with(redact(reply, "all"), "THROW|")') == 6, "3 точки × (гвард + выбор сообщения) — №806/B1: решение на вымытой копии"
+    assert APP.count('starts_with(redact(del, "all"), "THROW|")') == 4, "2 гварда делегирования × (гвард + выбор) — №806/B1: вымытая копия"
     idx = APP.index("let mut reply = HandleOSPRetry(text, chat_id)")
     osp_block = APP[idx:idx + 2200]
-    assert 'starts_with(reply, "THROW|")' in osp_block, "прямой /osp не различает THROW|"
+    assert 'starts_with(redact(reply, "all"), "THROW|")' in osp_block, "прямой /osp не различает THROW|"
     assert osp_block.count('Причина: ') == 1, "прямой /osp: причина должна быть в сообщении владельцу"
     assert 'substring(reply, 6.0, 240.0)' in osp_block, "причина должна вырезаться из THROW|"
     # маркеры несут причину (детали = query + substring(reply/del))
