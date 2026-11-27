@@ -45,7 +45,7 @@ def _mutant_office(tmp: pathlib.Path, kind: str):
         # #771 E/F/G: делегирование в ветке по умолчанию под ретрай-гвардом —
         # мутант снимает вызов, оставляя del пустым: голый slug уходит в /tg-send
         block = ('        let del = DispatchYanaDelegationRetry(reply, text, chat_id)\n'
-                 '        if to_string(del) == "()" or starts_with(del, "THROW|") then {')
+                 '        if redact(to_string(del), "hash_only") == redact("()", "hash_only") or starts_with(redact(del, "all"), "THROW|") then {')  # №806/B1
         mutant = src.replace(block, '        let del = ""\n        if to_string(del) == "XX" then {')
     else:
         raise AssertionError(kind)
